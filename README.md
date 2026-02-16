@@ -6,21 +6,22 @@ This repository is part of the larger Synapse Bridge ecosystem. It is designed t
 
 ## 🧱 Project Structure
 
+```
 synapse-core/
 ├── Cargo.toml # Rust dependencies and workspace config
 ├── .env.example # Example environment variables
 ├── migrations/ # SQL migrations (sqlx)
 │ └── 20250216000000_init.sql
-├── src/
-│ ├── main.rs # Entry point, server setup, migrations
-│ ├── config.rs # Configuration from environment
-│ ├── db/ # Database module
-│ │ ├── mod.rs # Connection pool creation
-│ │ └── models.rs # Transaction struct and tests
-│ ├── handlers/ # HTTP handlers (e.g., /health, /callback)
-│ │ └── mod.rs
-│ └── error.rs # (Planned) Custom error types
-└── tests/ # Integration tests (future)
+└── src/
+├── main.rs # Entry point, server setup, migrations
+├── config.rs # Configuration from environment
+├── error.rs # (Planned) Custom error types
+├── db/ # Database module
+│ ├── mod.rs # Connection pool creation
+│ └── models.rs # Transaction struct and tests
+└── handlers/ # HTTP handlers (e.g. /health, /callback)
+└── mod.rs
+```
 
 ## 🚀 Getting Started
 
@@ -70,40 +71,39 @@ cargo run
 
 You should see logs indicating the server started and migrations completed.
 
-Testing
+### Testing
+
 Create a test database
 
-bash
+```bash
 docker exec -it synapse-postgres psql -U synapse -c "CREATE DATABASE synapse_test;"
+```
+
 Run tests
 
-bash
+```bash
 DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
-Note: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
+```
 
-📡 Webhook Endpoint (Under Development)
+NOTE: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
+
+#### 📡 Webhook Endpoint (Under Development)
+
 The main purpose of this service is to receive callbacks from the Stellar Anchor Platform. The endpoint will be:
 
-text
+```text
 POST /callback/transaction
+```
+
 It expects a JSON payload as described in the Anchor Platform callbacks documentation. When implemented, it will store the transaction in the database with status pending.
 
 🤝 Contributing
 We welcome contributions! Please see the open issues for tasks labeled phase-1. Each issue includes a description and acceptance criteria.
-
 When contributing:
-
 Fork the repository and create a branch from main.
-
 Write clear, tested code.
-
 Ensure cargo fmt and cargo clippy pass.
-
 Open a pull request with a description of your changes.
 
 📄 License
 This project is licensed under the MIT License. See the LICENSE file for details.
-
-```
-
-```
