@@ -16,6 +16,8 @@ sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "c
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"
+arc-swap = "1.6"
+serde_json = "1"
 [dev-dependencies]
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "migrate"] }
 

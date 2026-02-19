@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod handlers;
+mod services;
 
 use axum::{Router, extract::State, routing::get};
 use sqlx::migrate::Migrator; // for Migrator
@@ -13,6 +14,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for 
 #[derive(Clone)] // <-- Add Clone
 pub struct AppState {
     db: sqlx::PgPool,
+    asset_cache: std::sync::Arc<config::assets::AssetCache>,
 }
 
 #[tokio::main]
@@ -30,13 +32,19 @@ async fn main() -> anyhow::Result<()> {
     // Database pool
     let pool = db::create_pool(&config).await?;
 
+    // Start asset cache (refresh from DB periodically)
+    let asset_cache = config::assets::AssetCache::start(pool.clone(), std::time::Duration::from_secs(30)).await;
+
+    // Create transaction processor (holds pool + asset cache)
+    let _processor = services::transaction_processor::TransactionProcessor::new(pool.clone(), asset_cache.clone());
+
     // Run migrations
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
 
     // Build router with state
-    let app_state = AppState { db: pool };
+    let app_state = AppState { db: pool, asset_cache };
     let app = Router::new()
         .route("/health", get(handlers::health))
         .with_state(app_state);

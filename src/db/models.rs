@@ -40,6 +40,33 @@ impl Transaction {
         }
     }
 }
+
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
+use sqlx::PgPool;
+
+#[derive(Debug, Clone, Deserialize, sqlx::FromRow)]
+pub struct Asset {
+    pub id: uuid::Uuid,
+    pub asset_code: String,
+    pub asset_issuer: Option<String>,
+    pub metadata: JsonValue,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Asset {
+    pub async fn fetch_all(pool: &PgPool) -> anyhow::Result<Vec<Asset>> {
+        let rows = sqlx::query_as::<_, Asset>(
+            r#"SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets WHERE enabled = true"#,
+        )
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
