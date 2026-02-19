@@ -1,19 +1,30 @@
 use sqlx::{PgPool, Result};
+use uuid::Uuid;
 use crate::db::models::Transaction;
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
     sqlx::query_as!(
         Transaction,
-        "INSERT INTO transactions (id, amount, created_at) VALUES ($1, $2, $3) RETURNING *",
+        r#"INSERT INTO transactions (
+            id, stellar_account, amount, asset_code, status,
+            created_at, updated_at, anchor_transaction_id, callback_type, callback_status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *"#,
         tx.id,
+        tx.stellar_account,
         tx.amount,
-        tx.created_at
+        tx.asset_code,
+        tx.status,
+        tx.created_at,
+        tx.updated_at,
+        tx.anchor_transaction_id,
+        tx.callback_type,
+        tx.callback_status
     )
     .fetch_one(pool)
     .await
 }
 
-pub async fn get_transaction(pool: &PgPool, id: i32) -> Result<Transaction> {
+pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     sqlx::query_as!(
         Transaction,
         "SELECT * FROM transactions WHERE id = $1",
