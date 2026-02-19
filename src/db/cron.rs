@@ -238,7 +238,6 @@ impl PartitionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_partition_name_format() {
