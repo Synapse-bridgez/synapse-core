@@ -79,8 +79,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_account_with_mock() {
-        use mockito::Mock;
-
         let mut server = mockito::Server::new();
 
         let mock_response = r#"{

@@ -1,6 +1,7 @@
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use crate::config::Config;
 
+pub mod cron;
 pub mod models;
 pub mod queries;
 

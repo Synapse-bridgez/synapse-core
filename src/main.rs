@@ -4,12 +4,11 @@ mod error;
 mod handlers;
 mod stellar;
 
-use axum::{Router, extract::State, routing::get};
+use axum::{Router, routing::get};
 use sqlx::migrate::Migrator; // for Migrator
 use std::net::SocketAddr; // for SocketAddr
 use std::path::Path; // for Path
 use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
 use stellar::HorizonClient;
 
@@ -38,6 +37,20 @@ async fn main() -> anyhow::Result<()> {
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
+
+    // Initialize partition management background job
+    let partition_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400)); // Run daily
+        loop {
+            interval.tick().await;
+            tracing::info!("Running partition maintenance job");
+            match db::cron::PartitionManager::run_maintenance(&partition_pool).await {
+                Ok(_) => tracing::info!("Partition maintenance job completed successfully"),
+                Err(e) => tracing::error!("Partition maintenance job failed: {}", e),
+            }
+        }
+    });
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
