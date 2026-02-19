@@ -146,5 +146,54 @@ mod tests {
         assert_eq!(fetched.callback_type, callback_type);
         assert_eq!(fetched.callback_status, callback_status);
     }
+
+    #[tokio::test]
+    async fn test_insert_transaction() {
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db").await.unwrap();
+        let tx = Transaction::new(
+            "GABCDEF".to_string(),
+            BigDecimal::from(100),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+        );
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
+        assert_eq!(inserted.stellar_account, tx.stellar_account);
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction() {
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db").await.unwrap();
+        let tx = Transaction::new(
+            "GABCDEF".to_string(),
+            BigDecimal::from(100),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+        );
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
+        let fetched = crate::db::queries::get_transaction(&pool, inserted.id).await.unwrap();
+        assert_eq!(fetched.id, inserted.id);
+    }
+
+    #[tokio::test]
+    async fn test_list_transactions() {
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db").await.unwrap();
+        for i in 0..5 {
+            let tx = Transaction::new(
+                format!("GABCDEF_{}", i),
+                BigDecimal::from(100 + i),
+                "USD".to_string(),
+                None,
+                None,
+                None,
+            );
+            crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
+        }
+        let transactions = crate::db::queries::list_transactions(&pool, 5, 0).await.unwrap();
+        assert_eq!(transactions.len(), 5);
+    }
 }
 
