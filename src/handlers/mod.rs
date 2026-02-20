@@ -7,6 +7,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod webhook;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthStatus {
     status: String,
@@ -39,4 +41,8 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     (status_code, Json(health_response))
+}
+
+pub async fn callback_transaction(State(_state): State<AppState>) -> impl IntoResponse {
+    StatusCode::NOT_IMPLEMENTED
 }

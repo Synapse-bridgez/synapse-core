@@ -50,6 +50,7 @@ The required variables are:
 DATABASE_URL – PostgresSQL connection string (e.g., postgres://synapse:synapse@localhost:5432/synapse)
 SERVER_PORT – Port for the web server (default 3000)
 STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.stellar.org)
+REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
 ```
 
 3. Start PostgresSQL Using Docker (recommended for development):
@@ -59,6 +60,12 @@ Docker run --name synapse-postgres -e POSTGRES_USER=synapse -e POSTGRES_PASSWORD
 ```
 
 Or install PostgreSQL natively and create a database named synapse.
+
+Alternatively, use docker-compose to start all services (PostgreSQL + Redis):
+
+```bash
+docker-compose up -d
+```
 
 4. Run database migrations
    The app will automatically run migrations on startup, but you can also run them manually with sqlx:
@@ -97,10 +104,18 @@ NOTE: Some warnings about unused imports or dead code are expected – they corr
 The main purpose of this service is to receive callbacks from the Stellar Anchor Platform. The endpoint will be:
 
 ```text
-POST /callback/transaction
+POST /webhook
 ```
 
-It expects a JSON payload as described in the Anchor Platform callbacks documentation. When implemented, it will store the transaction in the database with status pending.
+It expects a JSON payload with an `X-Idempotency-Key` header (typically the `anchor_transaction_id`) to prevent duplicate processing. When implemented, it will store the transaction in the database with status pending.
+
+##### Idempotency Protection
+
+Webhooks are protected against duplicate delivery using Redis-based idempotency:
+- Each webhook must include an `X-Idempotency-Key` header
+- Duplicate requests within 24 hours return cached responses
+- Concurrent requests for the same key return `429 Too Many Requests`
+- See [docs/idempotency.md](docs/idempotency.md) for detailed documentation
 
 🤝 Contributing
 We welcome contributions! Please see the open issues for tasks labeled phase-1. Each issue includes a description and acceptance criteria.

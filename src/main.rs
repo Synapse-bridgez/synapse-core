@@ -3,17 +3,18 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod middleware;
 mod stellar;
 
-use axum::{Router, routing::get};
-use clap::Parser;
-use cli::{Cli, Commands, TxCommands, DbCommands};
-use sqlx::migrate::Migrator;
-use std::net::SocketAddr;
-use std::path::Path;
-use tokio::net::TcpListener;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
+use sqlx::migrate::Migrator; // for Migrator
+use std::net::SocketAddr; // for SocketAddr
+use std::path::Path; // for Path
+use tokio::net::TcpListener; // for TcpListener
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
 use stellar::HorizonClient;
+use middleware::idempotency::IdempotencyService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -61,20 +62,35 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
     tracing::info!("Stellar Horizon client initialized with URL: {}", config.stellar_horizon_url);
 
+    // Initialize Redis idempotency service
+    let idempotency_service = IdempotencyService::new(&config.redis_url)?;
+    tracing::info!("Redis idempotency service initialized");
+
     // Build router with state
     let app_state = AppState { 
         db: pool,
         horizon_client,
     };
+    
+    // Create webhook routes with idempotency middleware
+    let webhook_routes = Router::new()
+        .route("/webhook", post(handlers::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn_with_state(
+            idempotency_service.clone(),
+            middleware::idempotency::idempotency_middleware,
+        ))
+        .with_state(app_state.clone());
+    
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .merge(webhook_routes)
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

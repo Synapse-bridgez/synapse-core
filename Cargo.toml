@@ -18,7 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json"] }
-clap = { version = "4", features = ["derive"] }
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 mockito = "1"
