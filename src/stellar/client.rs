@@ -1,10 +1,5 @@
-<<<<<<< HEAD
 use failsafe::futures::CircuitBreaker as FuturesCircuitBreaker;
-||||||| 2822865
-=======
-use failsafe::futures::CircuitBreaker;
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
-use failsafe::{Config, Error as FailsafeError, StateMachine, backoff, failure_policy};
+use failsafe::{backoff, failure_policy, Config, Error as FailsafeError, StateMachine};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -18,14 +13,8 @@ pub enum HorizonError {
     AccountNotFound(String),
     #[error("Invalid response from Horizon: {0}")]
     InvalidResponse(String),
-<<<<<<< HEAD
     #[error("Circuit breaker open: {0}")]
     CircuitBreakerOpen(String),
-||||||| 2822865
-=======
-    #[error("Circuit breaker open - Horizon API unavailable")]
-    CircuitBreakerOpen,
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
 }
 
 /// Response from Horizon /accounts endpoint
@@ -51,35 +40,21 @@ pub struct Balance {
 }
 
 /// HTTP client for interacting with the Stellar Horizon API
+#[derive(Clone)]
 pub struct HorizonClient {
     client: Client,
     base_url: String,
-<<<<<<< HEAD
     circuit_breaker: StateMachine<failure_policy::ConsecutiveFailures<backoff::EqualJittered>, ()>,
-||||||| 2822865
-=======
-    circuit_breaker: StateMachine<failure_policy::ConsecutiveFailures<backoff::Exponential>, ()>,
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
 }
 
 impl HorizonClient {
     /// Creates a new HorizonClient with the specified base URL
     pub fn new(base_url: String) -> Self {
-        Self::with_circuit_breaker_config(base_url, 5, Duration::from_secs(60))
-    }
-
-    /// Creates a new HorizonClient with custom circuit breaker configuration
-    pub fn with_circuit_breaker_config(
-        base_url: String,
-        failure_threshold: u32,
-        reset_timeout: Duration,
-    ) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 
-<<<<<<< HEAD
         let backoff = backoff::equal_jittered(Duration::from_secs(60), Duration::from_secs(120));
         let policy = failure_policy::consecutive_failures(3, backoff);
         let circuit_breaker = Config::new().failure_policy(policy).build();
@@ -122,18 +97,6 @@ impl HorizonClient {
             "closed".to_string()
         } else {
             "open".to_string()
-||||||| 2822865
-        HorizonClient { client, base_url }
-=======
-        let backoff = backoff::exponential(Duration::from_secs(10), reset_timeout);
-        let policy = failure_policy::consecutive_failures(failure_threshold, backoff);
-        let circuit_breaker = Config::new().failure_policy(policy).build();
-
-        HorizonClient {
-            client,
-            base_url,
-            circuit_breaker,
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
         }
     }
 
@@ -163,35 +126,11 @@ impl HorizonClient {
 
         match result {
             Ok(account) => Ok(account),
-<<<<<<< HEAD
             Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
                 "Horizon API circuit breaker is open".to_string(),
             )),
-||||||| 2822865
-        if response.status() == 404 {
-            return Err(HorizonError::AccountNotFound(address.to_string()));
-=======
-            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen),
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
             Err(FailsafeError::Inner(e)) => Err(e),
         }
-<<<<<<< HEAD
-||||||| 2822865
-
-        let account = response.json::<AccountResponse>().await?;
-        Ok(account)
-=======
-    }
-}
-
-impl Clone for HorizonClient {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            base_url: self.base_url.clone(),
-            circuit_breaker: self.circuit_breaker.clone(),
-        }
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
     }
 }
 
