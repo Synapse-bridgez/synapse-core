@@ -42,3 +42,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
     (status_code, Json(health_response))
 }
+
+pub async fn callback_transaction(State(_state): State<AppState>) -> impl IntoResponse {
+    StatusCode::NOT_IMPLEMENTED
+}

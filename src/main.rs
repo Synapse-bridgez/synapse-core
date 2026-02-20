@@ -244,6 +244,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Rate limiting configured: {} req/sec (default), {} req/sec (whitelisted)", 
                    config.default_rate_limit, config.whitelist_rate_limit);
 
+    // Initialize Redis idempotency service
+    let idempotency_service = IdempotencyService::new(&config.redis_url)?;
+    tracing::info!("Redis idempotency service initialized");
+
     // Build router with state
     let app_state = AppState {
         db: pool,
@@ -278,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }
