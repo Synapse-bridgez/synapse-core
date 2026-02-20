@@ -1,19 +1,21 @@
+mod cli;
 mod config;
 mod db;
 mod error;
 mod handlers;
 mod stellar;
 
-use axum::{Router, extract::State, routing::get};
-use sqlx::migrate::Migrator; // for Migrator
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
+use axum::{Router, routing::get};
+use clap::Parser;
+use cli::{Cli, Commands, TxCommands, DbCommands};
+use sqlx::migrate::Migrator;
+use std::net::SocketAddr;
+use std::path::Path;
+use tokio::net::TcpListener;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use stellar::HorizonClient;
 
-#[derive(Clone)] // <-- Add Clone
+#[derive(Clone)]
 pub struct AppState {
     db: sqlx::PgPool,
     pub horizon_client: HorizonClient,
@@ -21,6 +23,7 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     let config = config::Config::from_env()?;
 
     // Setup logging
@@ -31,7 +34,22 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Database pool
+    match cli.command {
+        Some(Commands::Serve) | None => serve(config).await,
+        Some(Commands::Tx(tx_cmd)) => match tx_cmd {
+            TxCommands::ForceComplete { tx_id } => {
+                let pool = db::create_pool(&config).await?;
+                cli::handle_tx_force_complete(&pool, tx_id).await
+            }
+        },
+        Some(Commands::Db(db_cmd)) => match db_cmd {
+            DbCommands::Migrate => cli::handle_db_migrate(&config).await,
+        },
+        Some(Commands::Config) => cli::handle_config_validate(&config),
+    }
+}
+
+async fn serve(config: config::Config) -> anyhow::Result<()> {
     let pool = db::create_pool(&config).await?;
 
     // Run migrations

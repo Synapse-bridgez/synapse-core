@@ -13,7 +13,7 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .await
 }
 
-pub async fn get_transaction(pool: &PgPool, id: i32) -> Result<Transaction> {
+pub async fn get_transaction(pool: &PgPool, id: uuid::Uuid) -> Result<Transaction> {
     sqlx::query_as!(
         Transaction,
         "SELECT * FROM transactions WHERE id = $1",
