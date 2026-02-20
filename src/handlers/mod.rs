@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod settlements;
 pub mod webhook;
+pub mod settlements;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthStatus {

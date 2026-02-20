@@ -23,13 +23,17 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
 
 use sqlx::{PgPool, Result, Postgres, Transaction as SqlxTransaction};
 use crate::db::models::{Transaction, Settlement};
+use crate::db::audit::{AuditLog, ENTITY_TRANSACTION, ENTITY_SETTLEMENT};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use serde_json::json;
 
 // --- Transaction Queries ---
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+    let mut transaction = pool.begin().await?;
+    
+    let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
@@ -115,6 +119,20 @@ pub async fn update_transactions_settlement(
     .execute(&mut **executor)
     .await?;
     
+    // Audit log: record settlement_id update for each transaction
+    for tx_id in tx_ids {
+        AuditLog::log_field_update(
+            executor,
+            *tx_id,
+            ENTITY_TRANSACTION,
+            "settlement_id",
+            json!(null),
+            json!(settlement_id.to_string()),
+            "system",
+        )
+        .await?;
+    }
+    
     Ok(())
 }
 
@@ -124,7 +142,7 @@ pub async fn insert_settlement(
     executor: &mut SqlxTransaction<'_, Postgres>,
     settlement: &Settlement,
 ) -> Result<Settlement> {
-    sqlx::query_as::<_, Settlement>(
+    let result = sqlx::query_as::<_, Settlement>(
         r#"
         INSERT INTO settlements (
             id, asset_code, total_amount, tx_count, period_start, period_end, status, created_at, updated_at

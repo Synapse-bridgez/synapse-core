@@ -246,3 +246,21 @@ mod tests {
         assert!(validate_webhook_payload(payload).is_err());
     }
 }
+
+/// Callback endpoint for transactions (placeholder)
+pub async fn callback(State(_state): State<AppState>) -> impl IntoResponse {
+    StatusCode::NOT_IMPLEMENTED
+}
+
+/// Get a specific transaction
+pub async fn get_transaction(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let transaction = queries::get_transaction(&state.db, id).await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
+            _ => AppError::DatabaseError(e.to_string()),
+        })?;
+
+    Ok(Json(transaction))}
