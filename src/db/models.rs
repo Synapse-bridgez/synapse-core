@@ -4,7 +4,7 @@ use sqlx::FromRow;
 use sqlx::types::BigDecimal;
 use uuid::Uuid;
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
+#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
@@ -44,7 +44,7 @@ impl Transaction {
     }
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
+#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct Settlement {
     pub id: Uuid,
     pub asset_code: String,
