@@ -1,5 +1,8 @@
+use failsafe::{backoff, failure_policy, Config, Error as FailsafeError, StateMachine};
+use failsafe::futures::CircuitBreaker;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -10,6 +13,8 @@ pub enum HorizonError {
     AccountNotFound(String),
     #[error("Invalid response from Horizon: {0}")]
     InvalidResponse(String),
+    #[error("Circuit breaker open - Horizon API unavailable")]
+    CircuitBreakerOpen,
 }
 
 /// Response from Horizon /accounts endpoint
@@ -35,35 +40,78 @@ pub struct Balance {
 }
 
 /// HTTP client for interacting with the Stellar Horizon API
-#[derive(Clone)]
 pub struct HorizonClient {
     client: Client,
     base_url: String,
+    circuit_breaker: StateMachine<
+        failure_policy::ConsecutiveFailures<backoff::Exponential>,
+        (),
+    >,
 }
 
 impl HorizonClient {
     /// Creates a new HorizonClient with the specified base URL
     pub fn new(base_url: String) -> Self {
+        Self::with_circuit_breaker_config(base_url, 5, Duration::from_secs(60))
+    }
+
+    /// Creates a new HorizonClient with custom circuit breaker configuration
+    pub fn with_circuit_breaker_config(
+        base_url: String,
+        failure_threshold: u32,
+        reset_timeout: Duration,
+    ) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 
-        HorizonClient { client, base_url }
+        let backoff = backoff::exponential(Duration::from_secs(10), reset_timeout);
+        let policy = failure_policy::consecutive_failures(failure_threshold, backoff);
+        let circuit_breaker = Config::new().failure_policy(policy).build();
+
+        HorizonClient {
+            client,
+            base_url,
+            circuit_breaker,
+        }
     }
 
     /// Fetches account details from the Horizon API
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
         let url = format!("{}/accounts/{}", self.base_url.trim_end_matches('/'), address);
+        let client = self.client.clone();
+        let addr = address.to_string();
 
-        let response = self.client.get(&url).send().await?;
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let response = client.get(&url).send().await?;
 
-        if response.status() == 404 {
-            return Err(HorizonError::AccountNotFound(address.to_string()));
+                if response.status() == 404 {
+                    return Err(HorizonError::AccountNotFound(addr));
+                }
+
+                let account = response.json::<AccountResponse>().await?;
+                Ok(account)
+            })
+            .await;
+
+        match result {
+            Ok(account) => Ok(account),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen),
+            Err(FailsafeError::Inner(e)) => Err(e),
         }
+    }
+}
 
-        let account = response.json::<AccountResponse>().await?;
-        Ok(account)
+impl Clone for HorizonClient {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            circuit_breaker: self.circuit_breaker.clone(),
+        }
     }
 }
 
