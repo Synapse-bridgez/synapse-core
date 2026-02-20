@@ -11,6 +11,9 @@ pub enum AppError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -30,7 +33,7 @@ pub enum AppError {
 impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
-            AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Database(_) | AppError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

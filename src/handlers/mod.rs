@@ -2,6 +2,7 @@ use crate::AppState;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
+pub mod settlements;
 pub mod webhook;
 
 #[derive(Debug, Serialize, Deserialize)]

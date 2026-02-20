@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::types::BigDecimal;
 use uuid::Uuid;
@@ -15,6 +16,7 @@ pub struct Transaction {
     pub anchor_transaction_id: Option<String>,
     pub callback_type: Option<String>,
     pub callback_status: Option<String>,
+    pub settlement_id: Option<Uuid>,
 }
 
 impl Transaction {
@@ -37,8 +39,22 @@ impl Transaction {
             anchor_transaction_id,
             callback_type,
             callback_status,
+            settlement_id: None,
         }
     }
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct Settlement {
+    pub id: Uuid,
+    pub asset_code: String,
+    pub total_amount: BigDecimal,
+    pub tx_count: i32,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 #[cfg(test)]
 mod tests {
