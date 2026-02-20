@@ -1,41 +1,40 @@
-pub mod auth;
-pub mod webhook;
+pub mod export;
 
 use crate::AppState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
+
+pub mod settlements;
+pub mod webhook;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthStatus {
     status: String,
     version: String,
-    db: String,
+    db_primary: String,
+    db_replica: Option<String>,
 }
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    // Check database connectivity with SELECT 1 query
-    let db_status = match sqlx::query("SELECT 1").execute(&state.db).await {
-        Ok(_) => "connected",
-        Err(_) => "disconnected",
+    let health_check = state.pool_manager.health_check().await;
+    
+    let db_primary_status = if health_check.primary { "connected" } else { "disconnected" };
+    let db_replica_status = if state.pool_manager.replica().is_some() {
+        Some(if health_check.replica { "connected" } else { "disconnected" }.to_string())
+    } else {
+        None
     };
+
+    let overall_healthy = health_check.primary && health_check.replica;
 
     let health_response = HealthStatus {
-        status: if db_status == "connected" {
-            "healthy".to_string()
-        } else {
-            "unhealthy".to_string()
-        },
+        status: if overall_healthy { "healthy" } else { "unhealthy" }.to_string(),
         version: "0.1.0".to_string(),
-        db: db_status.to_string(),
+        db_primary: db_primary_status.to_string(),
+        db_replica: db_replica_status,
     };
 
-    // Return 503 if database is down, 200 otherwise
-    let status_code = if db_status == "connected" {
+    let status_code = if overall_healthy {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

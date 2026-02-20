@@ -54,7 +54,11 @@ impl HorizonClient {
 
     /// Fetches account details from the Horizon API
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
-        let url = format!("{}/accounts/{}", self.base_url.trim_end_matches('/'), address);
+        let url = format!(
+            "{}/accounts/{}",
+            self.base_url.trim_end_matches('/'),
+            address
+        );
 
         let response = self.client.get(&url).send().await?;
 

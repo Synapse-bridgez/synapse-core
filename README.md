@@ -11,14 +11,20 @@ synapse-core/
 ├── Cargo.toml # Rust dependencies and workspace config
 ├── .env.example # Example environment variables
 ├── migrations/ # SQL migrations (sqlx)
-│ └── 20250216000000_init.sql
+│ ├── 20250216000000_init.sql
+│ ├── 20250217000000_partition_transactions.sql
+│ └── partition_utils.sql # Manual partition management
+├── docs/ # Documentation
+│ └── partitioning.md # Database partitioning guide
 └── src/
 ├── main.rs # Entry point, server setup, migrations
 ├── config.rs # Configuration from environment
 ├── error.rs # (Planned) Custom error types
 ├── db/ # Database module
 │ ├── mod.rs # Connection pool creation
-│ └── models.rs # Transaction struct and tests
+│ ├── models.rs # Transaction struct and tests
+│ ├── queries.rs # Database queries
+│ └── partition.rs # Partition management
 └── handlers/ # HTTP handlers (e.g. /health, /callback)
 └── mod.rs
 ```
@@ -28,7 +34,7 @@ synapse-core/
 ### Prerequisites
 
 - **Rust** (latest stable, 1.84+ recommended) – [Install](https://rustup.rs/)
-- **PostgreSQL** 14+ – can be run locally or via Docker
+- **PostgreSQL** 14+ – can be run locally or via Docker (required for native partitioning)
 - **Stellar Anchor Platform** (optional for development) – see [anchor platform docs](https://github.com/stellar/anchor-platform)
 
 ### Setup
@@ -91,6 +97,32 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 ```
 
 NOTE: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
+
+## 📊 Database Partitioning
+
+The `transactions` table uses time-based partitioning for high-volume scaling:
+
+- **Monthly partitions** by `created_at` timestamp
+- **Automatic partition creation** for upcoming months
+- **Retention policy** detaches partitions older than 12 months
+- **Background maintenance** runs every 24 hours
+
+See [docs/partitioning.md](docs/partitioning.md) for detailed documentation.
+
+### Manual Partition Operations
+
+```sql
+-- Create next month's partition
+SELECT create_monthly_partition();
+
+-- Detach old partitions (12 months retention)
+SELECT detach_old_partitions(12);
+
+-- Run full maintenance
+SELECT maintain_partitions();
+```
+
+More utilities available in `migrations/partition_utils.sql`.
 
 #### 📡 Webhook Endpoint (Under Development)
 
