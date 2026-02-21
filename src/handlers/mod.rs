@@ -1,10 +1,5 @@
 use crate::AppState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
 pub mod webhook;
@@ -43,6 +38,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     (status_code, Json(health_response))
 }
 
+#[allow(dead_code)]
 pub async fn callback_transaction(State(_state): State<AppState>) -> impl IntoResponse {
     StatusCode::NOT_IMPLEMENTED
 }

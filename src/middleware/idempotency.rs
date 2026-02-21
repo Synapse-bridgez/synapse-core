@@ -1,5 +1,4 @@
 use axum::{
-    body::Body,
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
@@ -8,7 +7,6 @@ use axum::{
 };
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 const IDEMPOTENCY_TTL: u64 = 86400; // 24 hours in seconds
 const IDEMPOTENCY_PREFIX: &str = "idempotency:";
@@ -19,9 +17,9 @@ pub struct IdempotencyService {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CachedResponse {
-    status: u16,
-    body: String,
+pub(crate) struct CachedResponse {
+    pub(crate) status: u16,
+    pub(crate) body: String,
 }
 
 impl IdempotencyService {
@@ -31,7 +29,10 @@ impl IdempotencyService {
     }
 
     /// Check if a request with this ID is already being processed or was completed
-    pub async fn check_idempotency(&self, idempotency_key: &str) -> anyhow::Result<IdempotencyStatus> {
+    pub async fn check_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> anyhow::Result<IdempotencyStatus> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
         let key = format!("{}{}", IDEMPOTENCY_PREFIX, idempotency_key);
 
@@ -97,8 +98,6 @@ pub async fn idempotency_middleware(
     next: Next,
 ) -> Response {
     // Extract idempotency key from request
-    // This could be from headers, query params, or body
-    // For now, we'll extract from a custom header
     let idempotency_key = match request.headers().get("x-idempotency-key") {
         Some(key) => match key.to_str() {
             Ok(k) => k.to_string(),
@@ -126,13 +125,9 @@ pub async fn idempotency_middleware(
 
             // If successful (2xx), cache the response
             if response.status().is_success() {
-                // Extract response body and status
                 let status = response.status().as_u16();
-                
-                // For simplicity, we'll store a success marker
-                // In production, you might want to capture the actual response body
                 let body = serde_json::json!({"status": "success"}).to_string();
-                
+
                 if let Err(e) = service.store_response(&idempotency_key, status, body).await {
                     tracing::error!("Failed to store idempotency response: {}", e);
                 }
@@ -146,7 +141,6 @@ pub async fn idempotency_middleware(
             response
         }
         Ok(IdempotencyStatus::Processing) => {
-            // Request is currently being processed
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({
@@ -157,7 +151,6 @@ pub async fn idempotency_middleware(
                 .into_response()
         }
         Ok(IdempotencyStatus::Completed(cached)) => {
-            // Return cached response
             let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
             (
                 status,

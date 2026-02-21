@@ -172,6 +172,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -2255,10 +2256,13 @@ name = "synapse-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "bigdecimal",
  "chrono",
  "dotenvy",
  "home",
+ "ipnet",
  "mockito",
  "redis",
  "reqwest",

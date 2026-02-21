@@ -1,17 +1,12 @@
+use crate::use_cases::DepositInput;
 use crate::AppState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct WebhookPayload {
     pub id: String,
     pub anchor_transaction_id: String,
-    // Add other webhook fields as needed
 }
 
 #[derive(Debug, Serialize)]
@@ -20,21 +15,45 @@ pub struct WebhookResponse {
     pub message: String,
 }
 
-/// Handle incoming webhook callbacks
-/// The idempotency middleware should be applied to this handler
+/// Handle incoming webhook callbacks.
+/// The idempotency middleware should be applied to this handler.
 pub async fn handle_webhook(
     State(state): State<AppState>,
     Json(payload): Json<WebhookPayload>,
 ) -> impl IntoResponse {
     tracing::info!("Processing webhook with id: {}", payload.id);
 
-    // Process the webhook (e.g., create transaction, update database)
-    // This is where your business logic goes
-    
-    let response = WebhookResponse {
-        success: true,
-        message: format!("Webhook {} processed successfully", payload.id),
+    let input = DepositInput {
+        id: payload.id,
+        anchor_transaction_id: payload.anchor_transaction_id,
+        stellar_account: None,
+        amount: None,
+        asset_code: None,
     };
 
-    (StatusCode::OK, Json(response))
+    match state.process_deposit.execute(input).await {
+        Ok(output) => (
+            StatusCode::OK,
+            Json(WebhookResponse {
+                success: output.success,
+                message: output.message,
+            }),
+        ),
+        Err(e) => {
+            tracing::error!("Webhook processing failed: {}", e);
+            let (status, msg) = match e {
+                crate::ports::RepositoryError::Database(_) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+                }
+                crate::ports::RepositoryError::NotFound(_) => (StatusCode::NOT_FOUND, "Not found"),
+            };
+            (
+                status,
+                Json(WebhookResponse {
+                    success: false,
+                    message: msg.to_string(),
+                }),
+            )
+        }
+    }
 }
