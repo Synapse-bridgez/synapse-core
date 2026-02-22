@@ -1,5 +1,5 @@
 use sqlx::{PgPool, Result, Postgres, Transaction as SqlxTransaction};
-use crate::db::models::{Transaction, Settlement};
+use crate::db::models::{Transaction, Settlement, TransactionDlq};
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION, ENTITY_SETTLEMENT};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -216,6 +216,24 @@ pub async fn get_audit_logs(
     .bind(entity_id)
     .bind(limit)
     .bind(offset)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get_queue_status(pool: &PgPool) -> Result<std::collections::HashMap<String, i64>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM transactions GROUP BY status"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().collect())
+}
+
+pub async fn get_failed_transactions(pool: &PgPool) -> Result<Vec<TransactionDlq>> {
+    sqlx::query_as::<_, TransactionDlq>(
+        "SELECT * FROM transaction_dlq ORDER BY moved_to_dlq_at DESC LIMIT 50"
+    )
     .fetch_all(pool)
     .await
 }
