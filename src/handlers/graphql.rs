@@ -10,7 +10,7 @@ pub async fn graphql_handler(
     State(state): State<ApiState>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
-    state.graphql_schema.execute(req.into_inner()).await.into()
+    GraphQLResponse(async_graphql::BatchResponse::Single(state.graphql_schema.execute(req.into_inner()).await))
 }
 
 pub async fn subscription_handler(
