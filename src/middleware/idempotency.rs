@@ -1,14 +1,12 @@
 use axum::{
-    body::Body,
+    Json,
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 const IDEMPOTENCY_TTL: u64 = 86400; // 24 hours in seconds
 const IDEMPOTENCY_PREFIX: &str = "idempotency:";
@@ -31,7 +29,10 @@ impl IdempotencyService {
     }
 
     /// Check if a request with this ID is already being processed or was completed
-    pub async fn check_idempotency(&self, idempotency_key: &str) -> anyhow::Result<IdempotencyStatus> {
+    pub async fn check_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> anyhow::Result<IdempotencyStatus> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
         let key = format!("{}{}", IDEMPOTENCY_PREFIX, idempotency_key);
 
@@ -128,11 +129,11 @@ pub async fn idempotency_middleware(
             if response.status().is_success() {
                 // Extract response body and status
                 let status = response.status().as_u16();
-                
+
                 // For simplicity, we'll store a success marker
                 // In production, you might want to capture the actual response body
                 let body = serde_json::json!({"status": "success"}).to_string();
-                
+
                 if let Err(e) = service.store_response(&idempotency_key, status, body).await {
                     tracing::error!("Failed to store idempotency response: {}", e);
                 }

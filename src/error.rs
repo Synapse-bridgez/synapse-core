@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 use thiserror::Error;
@@ -58,8 +58,6 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
 
     #[test]
     fn test_validation_error_status_code() {
@@ -101,7 +99,7 @@ mod tests {
     async fn test_validation_error_response() {
         let error = AppError::Validation("Invalid email format".to_string());
         let response = error.into_response();
-        
+
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -109,7 +107,7 @@ mod tests {
     async fn test_not_found_error_response() {
         let error = AppError::NotFound("User not found".to_string());
         let response = error.into_response();
-        
+
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -117,7 +115,7 @@ mod tests {
     async fn test_database_error_response() {
         let error = AppError::Database(sqlx::Error::RowNotFound);
         let response = error.into_response();
-        
+
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

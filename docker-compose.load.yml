@@ -1,0 +1,108 @@
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: synapse-load-postgres
+    environment:
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: synapse
+      POSTGRES_DB: synapse
+    ports:
+      - "5433:5432"
+    volumes:
+      - load_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Optimize for load testing
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "default_statistics_target=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+
+  redis:
+    image: redis:7-alpine
+    container_name: synapse-load-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - load_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Optimize for load testing
+    command:
+      - "redis-server"
+      - "--maxmemory"
+      - "512mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--save"
+      - ""  # Disable persistence for performance
+
+  app:
+    build: .
+    container_name: synapse-load-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 3000
+      DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: info
+    ports:
+      - "3001:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+    command: ["/app/synapse-core"]
+
+  k6:
+    image: grafana/k6:latest
+    container_name: synapse-k6
+    depends_on:
+      - app
+    environment:
+      BASE_URL: http://app:3000
+    volumes:
+      - ./tests/load:/scripts
+      - ./docs:/results
+    networks:
+      - default
+    profiles:
+      - load-test
+    # Run specific test by overriding command
+    # docker-compose -f docker-compose.load.yml run k6 run /scripts/callback_load.js
+
+volumes:
+  load_postgres_data:
+  load_redis_data:
+
+networks:
+  default:
+    driver: bridge

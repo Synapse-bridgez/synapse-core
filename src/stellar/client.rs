@@ -1,5 +1,8 @@
+use failsafe::futures::CircuitBreaker as FuturesCircuitBreaker;
+use failsafe::{backoff, failure_policy, Config, Error as FailsafeError, StateMachine};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -10,6 +13,8 @@ pub enum HorizonError {
     AccountNotFound(String),
     #[error("Invalid response from Horizon: {0}")]
     InvalidResponse(String),
+    #[error("Circuit breaker open: {0}")]
+    CircuitBreakerOpen(String),
 }
 
 /// Response from Horizon /accounts endpoint
@@ -39,6 +44,7 @@ pub struct Balance {
 pub struct HorizonClient {
     client: Client,
     base_url: String,
+    circuit_breaker: StateMachine<failure_policy::ConsecutiveFailures<backoff::EqualJittered>, ()>,
 }
 
 impl HorizonClient {
@@ -49,21 +55,80 @@ impl HorizonClient {
             .build()
             .unwrap_or_default();
 
-        HorizonClient { client, base_url }
+        let backoff = backoff::equal_jittered(Duration::from_secs(60), Duration::from_secs(120));
+        let policy = failure_policy::consecutive_failures(3, backoff);
+        let circuit_breaker = Config::new().failure_policy(policy).build();
+
+        HorizonClient {
+            client,
+            base_url,
+            circuit_breaker,
+        }
+    }
+
+    /// Creates a new HorizonClient with custom circuit breaker configuration
+    pub fn with_circuit_breaker(
+        base_url: String,
+        failure_threshold: u32,
+        reset_timeout_secs: u64,
+    ) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
+        let backoff = backoff::equal_jittered(
+            Duration::from_secs(reset_timeout_secs),
+            Duration::from_secs(reset_timeout_secs * 2),
+        );
+        let policy = failure_policy::consecutive_failures(failure_threshold, backoff);
+        let circuit_breaker = Config::new().failure_policy(policy).build();
+
+        HorizonClient {
+            client,
+            base_url,
+            circuit_breaker,
+        }
+    }
+
+    /// Returns the current state of the circuit breaker
+    pub fn circuit_state(&self) -> String {
+        if self.circuit_breaker.is_call_permitted() {
+            "closed".to_string()
+        } else {
+            "open".to_string()
+        }
     }
 
     /// Fetches account details from the Horizon API
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
-        let url = format!("{}/accounts/{}", self.base_url.trim_end_matches('/'), address);
+        let url = format!(
+            "{}/accounts/{}",
+            self.base_url.trim_end_matches('/'),
+            address
+        );
 
-        let response = self.client.get(&url).send().await?;
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let response = client.get(&url).send().await?;
 
-        if response.status() == 404 {
-            return Err(HorizonError::AccountNotFound(address.to_string()));
+                if response.status() == 404 {
+                    return Err(HorizonError::AccountNotFound(addr));
+                }
+
+                let account = response.json::<AccountResponse>().await?;
+                Ok(account)
+            })
+            .await;
+
+        match result {
+            Ok(account) => Ok(account),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
         }
-
-        let account = response.json::<AccountResponse>().await?;
-        Ok(account)
     }
 }
 
@@ -79,8 +144,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_account_with_mock() {
-        use mockito::Mock;
-
         let mut server = mockito::Server::new();
 
         let mock_response = r#"{
@@ -138,5 +201,45 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(HorizonError::AccountNotFound(_))));
+    }
+
+    #[test]
+    fn test_circuit_breaker_state() {
+        let client = HorizonClient::new("https://horizon-testnet.stellar.org".to_string());
+        let state = client.circuit_state();
+        assert_eq!(state, "closed");
+    }
+
+    #[test]
+    fn test_custom_circuit_breaker_config() {
+        let client = HorizonClient::with_circuit_breaker(
+            "https://horizon-testnet.stellar.org".to_string(),
+            5,
+            30,
+        );
+        let state = client.circuit_state();
+        assert_eq!(state, "closed");
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_opens_after_failures() {
+        let mut server = mockito::Server::new();
+
+        let _mock = server
+            .mock("GET", mockito::Matcher::Regex(r".*/accounts/.*".into()))
+            .with_status(500)
+            .expect_at_least(3)
+            .create();
+
+        let client = HorizonClient::with_circuit_breaker(server.url(), 3, 1);
+
+        // Make 3 failing requests to trip the circuit breaker
+        for _ in 0..3 {
+            let _ = client.get_account("TEST_ACCOUNT").await;
+        }
+
+        // The next request should be rejected by the circuit breaker
+        let result = client.get_account("TEST_ACCOUNT").await;
+        assert!(matches!(result, Err(HorizonError::CircuitBreakerOpen(_))));
     }
 }
