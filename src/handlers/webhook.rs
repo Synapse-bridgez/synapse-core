@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::ApiState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -43,7 +43,7 @@ pub struct WebhookResponse {
     tag = "Webhooks"
 )]
 pub async fn handle_webhook(
-    State(_state): State<AppState>,
+    State(_state): State<ApiState>,
     Json(payload): Json<WebhookPayload>,
 ) -> impl IntoResponse {
     tracing::info!("Processing webhook with id: {}", payload.id);
@@ -60,7 +60,7 @@ pub async fn handle_webhook(
 }
 
 /// Callback endpoint for transactions (placeholder)
-pub async fn callback(State(_state): State<AppState>) -> impl IntoResponse {
+pub async fn callback(State(_state): State<ApiState>) -> impl IntoResponse {
     StatusCode::NOT_IMPLEMENTED
 }
 
@@ -81,10 +81,10 @@ pub async fn callback(State(_state): State<AppState>) -> impl IntoResponse {
     tag = "Transactions"
 )]
 pub async fn get_transaction(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let transaction = queries::get_transaction(&state.db, id).await
+    let transaction = queries::get_transaction(&state.app_state.db, id).await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
             _ => AppError::DatabaseError(e.to_string()),

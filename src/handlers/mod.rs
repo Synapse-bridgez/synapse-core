@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 pub mod webhook;
+pub mod settlements;
 pub mod graphql;
 pub mod settlements;
 pub mod dlq;

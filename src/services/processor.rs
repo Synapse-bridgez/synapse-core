@@ -27,7 +27,7 @@ pub async fn run_processor(pool: PgPool, horizon_client: HorizonClient) {
     }
 }
 
-async fn process_batch(pool: &PgPool, horizon_client: &HorizonClient) -> anyhow::Result<()> {
+pub async fn process_batch(pool: &PgPool, horizon_client: &HorizonClient) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
 
     // Fetch pending transactions with row locking. SKIP LOCKED ensures we don't

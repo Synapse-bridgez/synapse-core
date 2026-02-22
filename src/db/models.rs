@@ -5,7 +5,7 @@ use sqlx::types::BigDecimal;
 use uuid::Uuid;
 use utoipa::ToSchema;
 
-#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
@@ -46,7 +46,7 @@ impl Transaction {
     }
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Settlement {
     pub id: Uuid,
     pub asset_code: String,
