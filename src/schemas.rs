@@ -28,6 +28,9 @@ pub struct TransactionSchema {
     pub callback_status: Option<String>,
     /// Associated settlement ID
     pub settlement_id: Option<String>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Settlement schema for OpenAPI documentation
