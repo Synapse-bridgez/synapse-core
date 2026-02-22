@@ -33,3 +33,9 @@ impl Config {
         })
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum AllowedIps {
+    Any,
+    Cidrs(Vec<ipnet::IpNet>),
+}
