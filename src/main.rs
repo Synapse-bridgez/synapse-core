@@ -1,26 +1,18 @@
-mod config;
-mod db;
-mod error;
-mod handlers;
-mod middleware;
-mod stellar;
-mod services;
-mod utils;
-mod startup;
-
-use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
-use http::header::HeaderValue;
-use sqlx::migrate::Migrator; // for Migrator
+use synapse_core::{
+    config, db, handlers, middleware, schemas, startup,
+    AppState, ApiState,
+    graphql::schema::build_schema,
+    stellar::HorizonClient,
+    middleware::idempotency::IdempotencyService,
+};
+use axum::{Router, routing::{get, post}, middleware as axum_middleware};
+use axum::http::header::HeaderValue;
+use sqlx::migrate::Migrator;
 use tower_http::cors::{CorsLayer, AllowOrigin};
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
-use stellar::HorizonClient;
-use middleware::idempotency::IdempotencyService;
+use std::net::SocketAddr;
+use std::path::Path;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -30,10 +22,8 @@ use utoipa_swagger_ui::SwaggerUi;
         handlers::settlements::list_settlements,
         handlers::settlements::get_settlement,
         handlers::webhook::handle_webhook,
+        handlers::webhook::callback,
         handlers::webhook::get_transaction,
-        handlers::admin::get_queue_status,
-        handlers::admin::get_failed_transactions,
-        handlers::admin::retry_transaction,
     ),
     components(
         schemas(
@@ -43,6 +33,7 @@ use utoipa_swagger_ui::SwaggerUi;
             handlers::settlements::SettlementListResponse,
             handlers::webhook::WebhookPayload,
             handlers::webhook::WebhookResponse,
+            handlers::webhook::CallbackPayload,
             schemas::TransactionSchema,
             schemas::SettlementSchema,
         )
@@ -61,12 +52,6 @@ use utoipa_swagger_ui::SwaggerUi;
     )
 )]
 pub struct ApiDoc;
-
-#[derive(Clone)] // <-- Add Clone
-pub struct AppState {
-    db: sqlx::PgPool,
-    pub horizon_client: HorizonClient,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -127,51 +112,62 @@ async fn main() -> anyhow::Result<()> {
         None => CorsLayer::permissive(), // Allow any origin when not configured (dev default)
     };
 
-    // Build router with state
+    let monitor_pool = pool.clone();
     let app_state = AppState {
         db: pool,
         horizon_client,
     };
-    
-    // Start background pool monitoring task
-    let monitor_pool = pool.clone();
+
+    let graphql_schema = build_schema(app_state.clone());
+    let api_state = ApiState {
+        app_state,
+        graphql_schema,
+    };
+
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
     });
-    
-    // Create webhook routes with idempotency middleware
+
+    let api_routes = Router::new()
+        .route("/health", get(handlers::health))
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route("/settlements/:id", get(handlers::settlements::get_settlement))
+        .route("/callback", post(handlers::webhook::callback))
+        .route("/transactions/:id", get(handlers::webhook::get_transaction))
+        .route("/graphql", post(handlers::graphql::graphql_handler)
+            .get(handlers::graphql::subscription_handler))
+        .route("/graphql/playground", get(handlers::graphql::graphql_playground))
+        .with_state(api_state.clone());
+
     let webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
         .layer(axum_middleware::from_fn_with_state(
             idempotency_service.clone(),
             middleware::idempotency::idempotency_middleware,
         ))
-        .with_state(app_state.clone());
-    
-    // Create DLQ routes
+        .with_state(api_state.clone());
+
     let dlq_routes = handlers::dlq::dlq_routes()
-        .with_state(app_state.db.clone());
-    
-    // Create Admin routes with auth middleware
+        .with_state(api_state.app_state.db.clone());
+
     let admin_routes = Router::new()
         .nest("/admin/queue", handlers::admin::admin_routes())
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
-        .with_state(app_state.db.clone());
+        .with_state(api_state.app_state.db.clone());
 
     let app = Router::new()
-        .route("/health", get(handlers::health))
+        .merge(api_routes)
         .merge(webhook_routes)
         .merge(dlq_routes)
         .merge(admin_routes)
-        .layer(cors_layer)
-        .with_state(app_state);
+        .layer(cors_layer);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
-    tracing::info!("Swagger UI available at http://localhost:{}/swagger-ui/", config.server_port);
 
-    let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
 
     Ok(())
 }
