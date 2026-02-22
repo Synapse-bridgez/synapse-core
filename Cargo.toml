@@ -31,9 +31,12 @@ ipnet = "2.9"
 utoipa = { version = "4", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
 tower-http = { version = "0.5", features = ["cors"] }
-async-graphql = { version = "0.9", features = ["chrono", "uuid"] }
+async-graphql = { version = "7", features = ["chrono", "uuid", "bigdecimal"] }
 tokio-stream = "0.1"
 base64 = "0.21"
+async-graphql-axum = "7"
+async-trait = "0.1"
+futures = "0.3"
 
 [dev-dependencies]
 mockito = "1"
@@ -42,6 +45,6 @@ sqlx = { version = "0.7", features = [
     "postgres",
     "migrate",
 ] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = "0.20"
+testcontainers-modules = { version = "0.8", features = ["postgres"] }
 reqwest = { version = "0.11", features = ["json"] }

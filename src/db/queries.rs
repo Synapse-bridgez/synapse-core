@@ -182,7 +182,7 @@ pub async fn insert_settlement(
     let result = sqlx::query_as::<_, Settlement>(
         r#"
         INSERT INTO settlements (
-            id, asset_code, total_amount, tx_count, period_start, period_end, status, created_at, updated_at
+            id, asset_code, total_amount, transaction_count, period_start, period_end, status, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
         "#
@@ -190,7 +190,7 @@ pub async fn insert_settlement(
     .bind(settlement.id)
     .bind(&settlement.asset_code)
     .bind(&settlement.total_amount)
-    .bind(settlement.tx_count)
+    .bind(settlement.transaction_count)
     .bind(settlement.period_start)
     .bind(settlement.period_end)
     .bind(&settlement.status)
@@ -207,7 +207,7 @@ pub async fn insert_settlement(
         json!({
             "asset_code": result.asset_code,
             "total_amount": result.total_amount.to_string(),
-            "tx_count": result.tx_count,
+            "tx_count": result.transaction_count,
             "period_start": result.period_start.to_rfc3339(),
             "period_end": result.period_end.to_rfc3339(),
             "status": result.status,

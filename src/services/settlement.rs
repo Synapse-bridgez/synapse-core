@@ -22,7 +22,7 @@ impl SettlementService {
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
         
         let mut results = Vec::new();
-        for asset in assets {
+        for asset in &assets {
             match self.settle_asset(&asset).await {
                 Ok(Some(settlement)) => results.push(settlement),
                 Ok(None) => tracing::info!("No transactions to settle for asset {}", asset),
@@ -46,7 +46,7 @@ impl SettlementService {
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         if unsettled.is_empty() {
-            tx.rollback().await.map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            tx.rollback().await.map_err(|e: sqlx::Error| AppError::DatabaseError(e.to_string()))?;
             return Ok(None);
         }
 
@@ -61,7 +61,7 @@ impl SettlementService {
             id: Uuid::new_v4(),
             asset_code: asset_code.to_string(),
             total_amount,
-            tx_count,
+            transaction_count: tx_count,
             period_start,
             period_end,
             status: "completed".to_string(),
@@ -78,7 +78,7 @@ impl SettlementService {
         queries::update_transactions_settlement(&mut tx, &tx_ids, saved_settlement.id).await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        tx.commit().await.map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        tx.commit().await.map_err(|e: sqlx::Error| AppError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
             "Settled {} transactions for asset {} (ID: {})",

@@ -1,54 +1,23 @@
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
-use uuid::Uuid;
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
-/// Transaction schema for OpenAPI documentation
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TransactionSchema {
-    /// Unique transaction identifier
-    pub id: String,
-    /// Stellar account address
-    pub stellar_account: String,
-    /// Transaction amount as string to preserve precision
-    pub amount: String,
-    /// Asset code (e.g., USD)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SettlementSchema {
+    pub id: Uuid,
     pub asset_code: String,
-    /// Current transaction status
+    pub total_amount: BigDecimal,
+    pub transaction_count: i64,
     pub status: String,
-    /// Timestamp when transaction was created
     pub created_at: DateTime<Utc>,
-    /// Timestamp when transaction was last updated
     pub updated_at: DateTime<Utc>,
-    /// Associated anchor transaction ID
-    pub anchor_transaction_id: Option<String>,
-    /// Type of callback
-    pub callback_type: Option<String>,
-    /// Status from callback
-    pub callback_status: Option<String>,
-    /// Associated settlement ID
-    pub settlement_id: Option<String>,
 }
 
-/// Settlement schema for OpenAPI documentation
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct SettlementSchema {
-    /// Unique settlement identifier
-    pub id: String,
-    /// Asset code for settlement
-    pub asset_code: String,
-    /// Total settlement amount as string
-    pub total_amount: String,
-    /// Number of transactions in settlement
-    pub tx_count: i32,
-    /// Settlement period start
-    pub period_start: DateTime<Utc>,
-    /// Settlement period end
-    pub period_end: DateTime<Utc>,
-    /// Current settlement status
-    pub status: String,
-    /// Timestamp when settlement was created
-    pub created_at: DateTime<Utc>,
-    /// Timestamp when settlement was last updated
-    pub updated_at: DateTime<Utc>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SettlementListResponse {
+    pub settlements: Vec<SettlementSchema>,
+    pub total: i64,
+    pub page: i32,
+    pub per_page: i32,
 }

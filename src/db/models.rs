@@ -3,14 +3,13 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::types::BigDecimal;
 use uuid::Uuid;
-use utoipa::ToSchema;
 
-#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
     #[serde(with = "bigdecimal_serde")]
-    pub amount: BigDecimal, // now available
+    pub amount: BigDecimal,
     pub asset_code: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -46,13 +45,13 @@ impl Transaction {
     }
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Settlement {
     pub id: Uuid,
     pub asset_code: String,
     #[serde(with = "bigdecimal_serde")]
     pub total_amount: BigDecimal,
-    pub tx_count: i32,
+    pub transaction_count: i32,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
     pub status: String,

@@ -62,7 +62,7 @@ pub async fn handle_webhook(
 }
 
 /// Callback endpoint for transactions (placeholder)
-pub async fn callback(State(_state): State<AppState>) -> impl IntoResponse {
+pub async fn callback(State(_state): State<crate::AppState>) -> impl IntoResponse {
     StatusCode::NOT_IMPLEMENTED
 }
 
@@ -83,16 +83,17 @@ pub async fn callback(State(_state): State<AppState>) -> impl IntoResponse {
     tag = "Transactions"
 )]
 pub async fn get_transaction(
-    State(state): State<AppState>,
+    State(state): State<crate::AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let transaction = queries::get_transaction(&state.db, id).await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
-            _ => AppError::DatabaseError(e.to_string()),
+            _ => AppError::Database(e),
         })?;
 
-    Ok(Json(transaction))}
+    Ok(Json(transaction))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -159,11 +160,10 @@ pub async fn list_transactions(
 
 /// Wrapper to accept the router's ApiState without forcing all handlers to change.
 pub async fn list_transactions_api(
-    State(api_state): State<crate::ApiState>,
+    State(state): State<crate::AppState>,
     Query(params): Query<ListQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     // forward to the AppState-based handler
-    let app_state = api_state.app_state;
     // call the inner logic directly to avoid extractor conflicts
     let limit = params.limit.unwrap_or(25).min(100);
     let backward = params.direction.as_deref() == Some("backward");
@@ -178,7 +178,7 @@ pub async fn list_transactions_api(
     };
 
     let fetch_limit = limit + 1;
-    let mut rows = queries::list_transactions(&app_state.db, fetch_limit, decoded_cursor, backward)
+    let mut rows = queries::list_transactions(&state.db, fetch_limit, decoded_cursor, backward)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 

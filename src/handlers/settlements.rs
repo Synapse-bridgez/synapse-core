@@ -6,8 +6,10 @@ use axum::{
 use uuid::Uuid;
 use crate::db::queries;
 use crate::error::AppError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use utoipa::{ToSchema, IntoParams};
+use bigdecimal::BigDecimal as ExternalBigDecimal;
+use std::str::FromStr;
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct Pagination {
@@ -15,27 +17,25 @@ pub struct Pagination {
     pub offset: Option<i64>,
 }
 
-use crate::ApiState;
+use crate::AppState;
+use crate::schemas::SettlementListResponse;
 
 pub async fn list_settlements(
-    State(state): State<ApiState>,
+    State(state): State<AppState>,
     Query(pagination): Query<Pagination>,
 ) -> Result<impl IntoResponse, AppError> {
     let limit = pagination.limit.unwrap_or(20);
     let offset = pagination.offset.unwrap_or(0);
 
-    let settlements = queries::list_settlements(&state.app_state.db, limit, offset).await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    let settlements = queries::list_settlements(&state.db, limit, offset).await?;
 
     let settlement_schemas = settlements
         .into_iter()
         .map(|s| crate::schemas::SettlementSchema {
-            id: s.id.to_string(),
+            id: s.id,
             asset_code: s.asset_code,
-            total_amount: s.total_amount.to_string(),
-            tx_count: s.tx_count,
-            period_start: s.period_start,
-            period_end: s.period_end,
+            total_amount: ExternalBigDecimal::from_str(&s.total_amount.to_string()).unwrap_or_default(),
+            transaction_count: s.transaction_count as i64,
             status: s.status,
             created_at: s.created_at,
             updated_at: s.updated_at,
@@ -45,6 +45,8 @@ pub async fn list_settlements(
     Ok(Json(SettlementListResponse {
         settlements: settlement_schemas,
         total: limit,
+        page: 1,
+        per_page: limit as i32,
     }))
 }
 
@@ -65,13 +67,13 @@ pub async fn list_settlements(
     tag = "Settlements"
 )]
 pub async fn get_settlement(
-    State(state): State<ApiState>,
+    State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let settlement = queries::get_settlement(&state.app_state.db, id).await
+    let settlement = queries::get_settlement(&state.db, id).await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => AppError::NotFound(format!("Settlement {} not found", id)),
-            _ => AppError::DatabaseError(e.to_string()),
+            _ => AppError::Database(e),
         })?;
 
     Ok(Json(settlement))
