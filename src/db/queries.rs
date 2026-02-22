@@ -14,8 +14,9 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
-            created_at, updated_at, anchor_transaction_id, callback_type, callback_status, settlement_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+            settlement_id, memo, memo_type, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING *
         "#
     )
@@ -30,6 +31,9 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .bind(&tx.callback_type)
     .bind(&tx.callback_status)
     .bind(tx.settlement_id)
+    .bind(&tx.memo)
+    .bind(&tx.memo_type)
+    .bind(&tx.metadata)
     .fetch_one(&mut *transaction)
     .await?;
 
@@ -46,6 +50,9 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
             "anchor_transaction_id": result.anchor_transaction_id,
             "callback_type": result.callback_type,
             "callback_status": result.callback_status,
+            "memo": result.memo,
+            "memo_type": result.memo_type,
+            "metadata": result.metadata,
         }),
         "system",
     )
