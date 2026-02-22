@@ -1,55 +1,32 @@
 pub mod export;
+pub mod settlements;
+pub mod webhook;
+pub mod dlq;
+pub mod admin;
 
 use crate::AppState;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-pub mod settlements;
-pub mod webhook;
-pub mod settlements;
-pub mod graphql;
-pub mod settlements;
-pub mod dlq;
-pub mod admin;
-
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthStatus {
-    status: String,
-    version: String,
-    db_primary: String,
-    db_replica: Option<String>,
-}
-
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let health_check = state.pool_manager.health_check().await;
-    
-    let db_primary_status = if health_check.primary { "connected" } else { "disconnected" };
-    let db_replica_status = if state.pool_manager.replica().is_some() {
-        Some(if health_check.replica { "connected" } else { "disconnected" }.to_string())
-    } else {
-        None
-    };
+    let postgres_checker = crate::health::PostgresChecker::new(state.db.clone());
+    let redis_checker = crate::health::RedisChecker::new(state.redis_url.clone());
+    let horizon_checker = crate::health::HorizonChecker::new(state.horizon_client.clone());
 
-    let overall_healthy = health_check.primary && health_check.replica;
+    let health_response = crate::health::check_health(
+        postgres_checker,
+        redis_checker,
+        horizon_checker,
+        state.start_time,
+    )
+    .await;
 
-    let health_response = HealthStatus {
-        status: if overall_healthy { "healthy" } else { "unhealthy" }.to_string(),
-        version: "0.1.0".to_string(),
-        db_primary: db_primary_status.to_string(),
-        db_replica: db_replica_status,
-    };
-
-    let status_code = if overall_healthy {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
+    let status_code = match health_response.status.as_str() {
+        "healthy" => StatusCode::OK,
+        "degraded" => StatusCode::OK,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
     };
 
     (status_code, Json(health_response))
-}
-
-pub async fn callback_transaction(State(_state): State<ApiState>) -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
 }

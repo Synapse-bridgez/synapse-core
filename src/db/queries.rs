@@ -1,26 +1,3 @@
-
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    sqlx::query_as!(
-        Transaction,
-        r#"
-        INSERT INTO transactions (
-            id, stellar_account, amount, asset_code, status,
-            created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING id, stellar_account, amount, asset_code, status,
-                  created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-        "#,
-        tx.id,
-        tx.stellar_account,
-        tx.amount,
-        tx.asset_code,
-        tx.status,
-        tx.created_at,
-        tx.updated_at,
-        tx.anchor_transaction_id,
-        tx.callback_type,
-        tx.callback_status
-
 use sqlx::{PgPool, Result, Postgres, Transaction as SqlxTransaction};
 use crate::db::models::{Transaction, Settlement, TransactionDlq};
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION, ENTITY_SETTLEMENT};
@@ -31,8 +8,6 @@ use serde_json::json;
 // --- Transaction Queries ---
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    let mut transaction = pool.begin().await?;
-    
     let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
@@ -56,18 +31,7 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .fetch_one(pool)
     .await?;
 
-    Ok(Transaction {
-        id: row.get("id"),
-        stellar_account: row.get("stellar_account"),
-        amount: row.get("amount"),
-        asset_code: row.get("asset_code"),
-        status: row.get("status"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        anchor_transaction_id: row.get("anchor_transaction_id"),
-        callback_type: row.get("callback_type"),
-        callback_status: row.get("callback_status"),
-    })
+    Ok(result)
 }
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
@@ -212,12 +176,9 @@ pub async fn insert_settlement(
     .bind(settlement.created_at)
     .bind(settlement.updated_at)
     .fetch_one(&mut **executor)
-    .await
+    .await?;
 
-pub async fn get_transaction(pool: &PgPool, id: i32) -> Result<Transaction> {
-    sqlx::query_as!(Transaction, "SELECT * FROM transactions WHERE id = $1", id)
-        .fetch_one(pool)
-        .await
+    Ok(result)
 }
 
 pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
@@ -244,6 +205,6 @@ pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
     
     Ok(rows.into_iter().map(|r| {
         use sqlx::Row;
-        r.get:: <String, _>("asset_code")
+        r.get::<String, _>("asset_code")
     }).collect())
 }

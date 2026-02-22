@@ -3,20 +3,45 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod health;
+mod metrics;
+mod middleware;
 mod services;
 mod stellar;
 mod validation;
 
-use axum::{Router, routing::get};
-use sqlx::migrate::Migrator; // for Migrator
+use axum::{
+    Router, 
+    routing::get,
+    middleware as axum_middleware,
+    middleware::Next,
+    extract::Request,
+    response::Response,
+    http::HeaderMap,
+    http::StatusCode,
+    response::IntoResponse,
+    extract::ConnectInfo,
+};
+use sqlx::migrate::Migrator;
 use tower_http::cors::{CorsLayer, AllowOrigin};
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use stellar::HorizonClient;
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
-use stellar::HorizonClient;
-use services::SettlementService;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tower::{ServiceBuilder, ServiceExt};
+use tower_governor::{governor::middleware::NoOpMiddleware, GovernorLayer, key_extractor::KeyExtractor};
+use governor::{Quota, RateLimiter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use clap::Parser;
+
+use crate::cli::{Cli, Commands, TxCommands, DbCommands};
+use crate::db::pool_manager::PoolManager;
+use crate::services::{SettlementService, feature_flags::FeatureFlagService};
+use crate::stellar::HorizonClient;
+use crate::middleware::idempotency::IdempotencyService;
+use crate::schemas::TransactionStatusUpdate;
+use crate::metrics::MetricsState;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +49,8 @@ pub struct AppState {
     pub pool_manager: PoolManager,
     pub horizon_client: HorizonClient,
     pub feature_flags: FeatureFlagService,
+    pub redis_url: String,
+    pub start_time: std::time::Instant,
 }
 
 // Custom key extractor for rate limiting
@@ -281,12 +308,24 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
     tracing::info!("WebSocket broadcast channel initialized");
 
+    // Initialize feature flags service
+    let feature_flags = FeatureFlagService::new(pool.clone());
+    tracing::info!("Feature flags service initialized");
+
     // Build router with state
     let app_state = AppState {
-        db: pool,
+        db: pool.clone(),
         pool_manager,
         horizon_client,
         feature_flags,
+        redis_url: config.redis_url.clone(),
+        start_time: std::time::Instant::now(),
+    };
+    
+    // Create metrics state
+    let metrics_state = MetricsState {
+        handle: metrics_handle,
+        pool: pool.clone(),
     };
     
     // Create metrics route with authentication middleware
@@ -299,7 +338,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
                 axum::extract::State(state.pool),
             ).await
         }))
-        .layer(middleware::from_fn_with_state(
+        .layer(axum_middleware::from_fn_with_state(
             config.clone(),
             metrics::metrics_auth_middleware,
         ))

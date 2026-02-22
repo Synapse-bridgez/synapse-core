@@ -2,6 +2,19 @@ use anyhow::Result;
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::env;
+use ipnet::IpNet;
+
+#[derive(Debug, Clone)]
+pub enum AllowedIps {
+    Any,
+    Cidrs(Vec<IpNet>),
+}
+
+#[derive(Debug, Clone)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -10,6 +23,12 @@ pub struct Config {
     pub database_replica_url: Option<String>,
     pub stellar_horizon_url: String,
     pub anchor_webhook_secret: String,
+    pub redis_url: String,
+    pub default_rate_limit: u32,
+    pub whitelist_rate_limit: u32,
+    pub whitelisted_ips: String,
+    pub log_format: LogFormat,
+    pub allowed_ips: AllowedIps,
 }
 
 pub mod assets;
@@ -17,7 +36,7 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         dotenv().ok(); // Load .env file if present
 
-        let _allowed_ips =
+        let allowed_ips =
             parse_allowed_ips(&env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()))?;
 
         let log_format = parse_log_format(
@@ -32,6 +51,16 @@ impl Config {
             database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
             anchor_webhook_secret: env::var("ANCHOR_WEBHOOK_SECRET")?,
+            redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            default_rate_limit: env::var("DEFAULT_RATE_LIMIT")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()?,
+            whitelist_rate_limit: env::var("WHITELIST_RATE_LIMIT")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
+            whitelisted_ips: env::var("WHITELISTED_IPS").unwrap_or_default(),
+            log_format,
+            allowed_ips,
         })
     }
 }

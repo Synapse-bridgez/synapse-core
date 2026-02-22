@@ -107,6 +107,8 @@ impl HorizonClient {
             self.base_url.trim_end_matches('/'),
             address
         );
+        let client = self.client.clone();
+        let addr = address.to_string();
 
         let result = self
             .circuit_breaker
