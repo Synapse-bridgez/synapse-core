@@ -201,7 +201,7 @@ mod tests {
             );
             crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
         }
-        let transactions = crate::db::queries::list_transactions(&pool, 5, 0).await.unwrap();
+    let transactions = crate::db::queries::list_transactions(&pool, 5, None, false).await.unwrap();
         assert_eq!(transactions.len(), 5);
     }
 }

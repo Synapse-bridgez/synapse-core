@@ -62,12 +62,64 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
         .await
 }
 
-pub async fn list_transactions(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Transaction>> {
-    sqlx::query_as::<_, Transaction>("SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2")
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
+pub async fn list_transactions(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+) -> Result<Vec<Transaction>> {
+    // We implement cursor-based pagination on (created_at, id).
+    // Default ordering for the API is newest-first (created_at DESC, id DESC).
+    // For forward pagination (older items) we query WHERE (created_at, id) < (cursor)
+    // For backward pagination (newer items) we query WHERE (created_at, id) > (cursor)
+
+    if let Some((ts, id)) = cursor {
+        if !backward {
+            // forward page: older records than cursor
+            let q = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT $3",
+            )
+            .bind(ts)
+            .bind(id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            Ok(q)
+        } else {
+            // backward page: newer records than cursor; fetch asc then reverse to keep newest-first
+            let mut rows = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE (created_at, id) > ($1, $2) ORDER BY created_at ASC, id ASC LIMIT $3",
+            )
+            .bind(ts)
+            .bind(id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            rows.reverse();
+            Ok(rows)
+        }
+    } else {
+        if !backward {
+            // first page, newest first
+            let q = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions ORDER BY created_at DESC, id DESC LIMIT $1",
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            Ok(q)
+        } else {
+            // backward without cursor -> return last page (oldest first reversed)
+            let mut rows = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions ORDER BY created_at ASC, id ASC LIMIT $1",
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?;
+            rows.reverse();
+            Ok(rows)
+        }
+    }
 }
 
 pub async fn get_unsettled_transactions(

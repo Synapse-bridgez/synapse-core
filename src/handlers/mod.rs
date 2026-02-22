@@ -50,6 +50,6 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     (status_code, Json(health_response))
 }
 
-pub async fn callback_transaction(State(_state): State<AppState>) -> impl IntoResponse {
+pub async fn callback_transaction(State(_state): State<ApiState>) -> impl IntoResponse {
     StatusCode::NOT_IMPLEMENTED
 }

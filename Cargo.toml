@@ -31,6 +31,9 @@ ipnet = "2.9"
 utoipa = { version = "4", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
 tower-http = { version = "0.5", features = ["cors"] }
+async-graphql = { version = "0.9", features = ["chrono", "uuid"] }
+tokio-stream = "0.1"
+base64 = "0.21"
 
 [dev-dependencies]
 mockito = "1"
