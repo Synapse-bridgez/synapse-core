@@ -315,8 +315,14 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
         .with_state(app_state.db.clone());
 
+    // Create search route with pool_manager state
+    let search_routes = Router::new()
+        .route("/transactions/search", get(handlers::search::search_transactions))
+        .with_state(app_state.pool_manager.clone());
+    
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .merge(search_routes)
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route("/settlements/:id", get(handlers::settlements::get_settlement))
         .with_state(app_state);

@@ -1,38 +1,14 @@
-
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    sqlx::query_as!(
-        Transaction,
-        r#"
-        INSERT INTO transactions (
-            id, stellar_account, amount, asset_code, status,
-            created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING id, stellar_account, amount, asset_code, status,
-                  created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-        "#,
-        tx.id,
-        tx.stellar_account,
-        tx.amount,
-        tx.asset_code,
-        tx.status,
-        tx.created_at,
-        tx.updated_at,
-        tx.anchor_transaction_id,
-        tx.callback_type,
-        tx.callback_status
-
-use sqlx::{PgPool, Result, Postgres, Transaction as SqlxTransaction};
+use sqlx::{PgPool, Result, Postgres, Transaction as SqlxTransaction, Row};
 use crate::db::models::{Transaction, Settlement, TransactionDlq};
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION, ENTITY_SETTLEMENT};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use sqlx::types::BigDecimal;
 
 // --- Transaction Queries ---
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    let mut transaction = pool.begin().await?;
-    
     let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
@@ -56,18 +32,7 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .fetch_one(pool)
     .await?;
 
-    Ok(Transaction {
-        id: row.get("id"),
-        stellar_account: row.get("stellar_account"),
-        amount: row.get("amount"),
-        asset_code: row.get("asset_code"),
-        status: row.get("status"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        anchor_transaction_id: row.get("anchor_transaction_id"),
-        callback_type: row.get("callback_type"),
-        callback_status: row.get("callback_status"),
-    })
+    Ok(result)
 }
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
@@ -212,12 +177,9 @@ pub async fn insert_settlement(
     .bind(settlement.created_at)
     .bind(settlement.updated_at)
     .fetch_one(&mut **executor)
-    .await
-
-pub async fn get_transaction(pool: &PgPool, id: i32) -> Result<Transaction> {
-    sqlx::query_as!(Transaction, "SELECT * FROM transactions WHERE id = $1", id)
-        .fetch_one(pool)
-        .await
+    .await?;
+    
+    Ok(result)
 }
 
 pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
@@ -243,7 +205,145 @@ pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
     .await?;
     
     Ok(rows.into_iter().map(|r| {
-        use sqlx::Row;
-        r.get:: <String, _>("asset_code")
+        r.get::<String, _>("asset_code")
     }).collect())
+}
+
+// --- Transaction Search ---
+
+pub async fn search_transactions(
+    pool: &PgPool,
+    status: Option<&str>,
+    asset_code: Option<&str>,
+    min_amount: Option<&BigDecimal>,
+    max_amount: Option<&BigDecimal>,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+    stellar_account: Option<&str>,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+) -> Result<(i64, Vec<Transaction>)> {
+    // Build dynamic WHERE clause
+    let mut conditions = Vec::new();
+    let mut param_count = 1;
+    
+    if status.is_some() {
+        conditions.push(format!("status = ${}", param_count));
+        param_count += 1;
+    }
+    
+    if asset_code.is_some() {
+        conditions.push(format!("asset_code = ${}", param_count));
+        param_count += 1;
+    }
+    
+    if min_amount.is_some() {
+        conditions.push(format!("amount >= ${}", param_count));
+        param_count += 1;
+    }
+    
+    if max_amount.is_some() {
+        conditions.push(format!("amount <= ${}", param_count));
+        param_count += 1;
+    }
+    
+    if from_date.is_some() {
+        conditions.push(format!("created_at >= ${}", param_count));
+        param_count += 1;
+    }
+    
+    if to_date.is_some() {
+        conditions.push(format!("created_at <= ${}", param_count));
+        param_count += 1;
+    }
+    
+    if stellar_account.is_some() {
+        conditions.push(format!("stellar_account = ${}", param_count));
+        param_count += 1;
+    }
+    
+    // Add cursor condition
+    if cursor.is_some() {
+        conditions.push(format!("(created_at, id) < (${}, ${})", param_count, param_count + 1));
+        param_count += 2;
+    }
+    
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    
+    // Build count query
+    let count_query = format!("SELECT COUNT(*) as count FROM transactions {}", where_clause);
+    
+    // Build data query with pagination
+    let data_query = format!(
+        "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
+        where_clause, param_count
+    );
+    
+    // Execute count query
+    let mut count_query_builder = sqlx::query(&count_query);
+    
+    if let Some(s) = status {
+        count_query_builder = count_query_builder.bind(s);
+    }
+    if let Some(a) = asset_code {
+        count_query_builder = count_query_builder.bind(a);
+    }
+    if let Some(min) = min_amount {
+        count_query_builder = count_query_builder.bind(min);
+    }
+    if let Some(max) = max_amount {
+        count_query_builder = count_query_builder.bind(max);
+    }
+    if let Some(from) = from_date {
+        count_query_builder = count_query_builder.bind(from);
+    }
+    if let Some(to) = to_date {
+        count_query_builder = count_query_builder.bind(to);
+    }
+    if let Some(acc) = stellar_account {
+        count_query_builder = count_query_builder.bind(acc);
+    }
+    if let Some((ts, id)) = cursor {
+        count_query_builder = count_query_builder.bind(ts).bind(id);
+    }
+    
+    let count_row = count_query_builder.fetch_one(pool).await?;
+    let total: i64 = count_row.try_get("count")?;
+    
+    // Execute data query
+    let mut data_query_builder = sqlx::query_as::<_, Transaction>(&data_query);
+    
+    if let Some(s) = status {
+        data_query_builder = data_query_builder.bind(s);
+    }
+    if let Some(a) = asset_code {
+        data_query_builder = data_query_builder.bind(a);
+    }
+    if let Some(min) = min_amount {
+        data_query_builder = data_query_builder.bind(min);
+    }
+    if let Some(max) = max_amount {
+        data_query_builder = data_query_builder.bind(max);
+    }
+    if let Some(from) = from_date {
+        data_query_builder = data_query_builder.bind(from);
+    }
+    if let Some(to) = to_date {
+        data_query_builder = data_query_builder.bind(to);
+    }
+    if let Some(acc) = stellar_account {
+        data_query_builder = data_query_builder.bind(acc);
+    }
+    if let Some((ts, id)) = cursor {
+        data_query_builder = data_query_builder.bind(ts).bind(id);
+    }
+    data_query_builder = data_query_builder.bind(limit);
+    
+    let transactions = data_query_builder.fetch_all(pool).await?;
+    
+    Ok((total, transactions))
 }

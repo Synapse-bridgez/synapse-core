@@ -7,11 +7,10 @@ use utoipa::ToSchema;
 
 pub mod settlements;
 pub mod webhook;
-pub mod settlements;
 pub mod graphql;
-pub mod settlements;
 pub mod dlq;
 pub mod admin;
+pub mod search;
 
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

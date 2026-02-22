@@ -1,21 +1,12 @@
 pub mod config;
 pub mod db;
-pub     Router::new()
-        .route("/health", get(handlers::health))
-        .route("/settlements", get(handlers::settlements::list_settlements))
-        .route("/settlements/:id", get(handlers::settlements::get_settlement))
-        .route("/callback", post(handlers::webhook::callback))
-        .route("/transactions", get(handlers::webhook::list_transactions_api))
-        .route("/transactions/:id", get(handlers::webhook::get_transaction))
-        // .route("/graphql", post(handlers::graphql::graphql_handler).get(handlers::graphql::subscription_handler))
-        // .route("/graphql/playground", get(handlers::graphql::graphql_playground))
-        .with_state(state)
 pub mod handlers;
 pub mod services;
 pub mod stellar;
 pub mod graphql;
 pub mod schemas;
 pub mod middleware;
+pub mod utils;
 
 use axum::{Router, routing::{get, post}};
 use crate::stellar::HorizonClient;
