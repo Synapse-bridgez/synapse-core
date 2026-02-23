@@ -9,23 +9,52 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let postgres_checker = crate::health::PostgresChecker::new(state.db.clone());
-    let redis_checker = crate::health::RedisChecker::new(state.redis_url.clone());
-    let horizon_checker = crate::health::HorizonChecker::new(state.horizon_client.clone());
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthStatus),
+        (status = 503, description = "Service is unhealthy", body = HealthStatus)
+    ),
+    tag = "Health"
+)]
+pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
+    // Check database connectivity with SELECT 1 query
+    let db_status = match sqlx::query("SELECT 1").execute(&state.app_state.db).await {
+        Ok(_) => "connected",
+        Err(_) => "disconnected",
+    };
 
-    let health_response = crate::health::check_health(
-        postgres_checker,
-        redis_checker,
-        horizon_checker,
-        state.start_time,
-    )
-    .await;
+    // Gather pool statistics
+    let pool = &state.app_state.db;
+    let active_connections = pool.size();
+    let idle_connections = pool.num_idle();
+    let max_connections = pool.options().get_max_connections();
+    let usage_percent = (active_connections as f32 / max_connections as f32) * 100.0;
 
-    let status_code = match health_response.status.as_str() {
-        "healthy" => StatusCode::OK,
-        "degraded" => StatusCode::OK,
-        _ => StatusCode::SERVICE_UNAVAILABLE,
+    let pool_stats = DbPoolStats {
+        active_connections,
+        idle_connections: idle_connections as u32,
+        max_connections,
+        usage_percent,
+    };
+
+    let health_response = HealthStatus {
+        status: if db_status == "connected" {
+            "healthy".to_string()
+        } else {
+            "unhealthy".to_string()
+        },
+        version: "0.1.0".to_string(),
+        db: db_status.to_string(),
+        db_pool: pool_stats,
+    };
+
+    // Return 503 if database is down, 200 otherwise
+    let status_code = if db_status == "connected" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
     };
 
     (status_code, Json(health_response))

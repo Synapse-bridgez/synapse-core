@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.6", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
@@ -21,6 +21,7 @@ sqlx = { version = "0.7", features = [
     "uuid",
     "migrate",
     "bigdecimal",
+    "json",
 ] }
 bigdecimal = { version = "0.4", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -37,7 +38,13 @@ redis = { version = "0.24", features = ["tokio-comp"] }
 ipnet = "2.9"
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
-async-trait = "0.1"
+tower-http = { version = "0.4", features = ["cors"] }
+url = "2.5"
+tower = { version = "0.4", features = ["util"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+async-graphql = { version = "6", features = ["chrono", "uuid", "bigdecimal"] }
+async-graphql-axum = "6"
 
 [dev-dependencies]
 mockito = "1"
@@ -46,3 +53,6 @@ sqlx = { version = "0.7", features = [
     "postgres",
     "migrate",
 ] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+reqwest = { version = "0.11", features = ["json"] }

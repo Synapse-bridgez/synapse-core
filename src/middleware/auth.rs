@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 
-pub async fn admin_auth(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
+pub async fn admin_auth(req: Request<Body>, next: Next<Body>) -> Result<Response, StatusCode> {
     let auth_header = req
         .headers()
         .get("Authorization")

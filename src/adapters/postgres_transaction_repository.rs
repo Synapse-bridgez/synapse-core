@@ -26,10 +26,12 @@ impl TransactionRepository for PostgresTransactionRepository {
             r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                memo, memo_type, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status
+                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                memo, memo_type, metadata
             "#,
         )
         .bind(tx.id)
@@ -42,6 +44,9 @@ impl TransactionRepository for PostgresTransactionRepository {
         .bind(&tx.anchor_transaction_id)
         .bind(&tx.callback_type)
         .bind(&tx.callback_status)
+        .bind(&tx.memo)
+        .bind(&tx.memo_type)
+        .bind(&tx.metadata)
         .fetch_one(&self.pool)
         .await
         .map_err(RepositoryError::from)?;
@@ -87,6 +92,9 @@ struct TransactionRow {
     anchor_transaction_id: Option<String>,
     callback_type: Option<String>,
     callback_status: Option<String>,
+    memo: Option<String>,
+    memo_type: Option<String>,
+    metadata: Option<serde_json::Value>,
 }
 
 impl TransactionRow {
@@ -102,6 +110,9 @@ impl TransactionRow {
             anchor_transaction_id: self.anchor_transaction_id,
             callback_type: self.callback_type,
             callback_status: self.callback_status,
+            memo: self.memo,
+            memo_type: self.memo_type,
+            metadata: self.metadata,
         }
     }
 }

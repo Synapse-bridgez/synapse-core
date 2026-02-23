@@ -92,3 +92,9 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
     }
 }
+
+#[derive(Clone, Debug)]
+pub enum AllowedIps {
+    Any,
+    Cidrs(Vec<ipnet::IpNet>),
+}

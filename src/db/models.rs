@@ -18,6 +18,9 @@ pub struct Transaction {
     pub callback_type: Option<String>,
     pub callback_status: Option<String>,
     pub settlement_id: Option<Uuid>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl Transaction {
@@ -28,6 +31,9 @@ impl Transaction {
         anchor_transaction_id: Option<String>,
         callback_type: Option<String>,
         callback_status: Option<String>,
+        memo: Option<String>,
+        memo_type: Option<String>,
+        metadata: Option<serde_json::Value>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -41,6 +47,9 @@ impl Transaction {
             callback_type,
             callback_status,
             settlement_id: None,
+            memo,
+            memo_type,
+            metadata,
         }
     }
 }
@@ -117,14 +126,18 @@ mod tests {
             anchor_tx_id.clone(),
             callback_type.clone(),
             callback_status.clone(),
+            Some("test memo".to_string()),
+            Some("text".to_string()),
+            Some(serde_json::json!({"ref": "ABC-123"})),
         );
 
         sqlx::query!(
             r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                memo, memo_type, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
             tx.id,
             tx.stellar_account,
@@ -136,6 +149,9 @@ mod tests {
             tx.anchor_transaction_id,
             tx.callback_type,
             tx.callback_status,
+            tx.memo,
+            tx.memo_type,
+            tx.metadata,
         )
         .execute(&pool)
         .await
@@ -167,6 +183,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
         let inserted = crate::db::queries::insert_transaction(&pool, &tx)
             .await
@@ -183,6 +202,9 @@ mod tests {
             "GABCDEF".to_string(),
             BigDecimal::from(100),
             "USD".to_string(),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -206,6 +228,9 @@ mod tests {
                 format!("GABCDEF_{}", i),
                 BigDecimal::from(100 + i),
                 "USD".to_string(),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,

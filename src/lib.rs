@@ -7,6 +7,8 @@ pub mod stellar;
 pub mod graphql;
 pub mod schemas;
 pub mod middleware;
+pub mod startup;
+pub mod utils;
 pub mod health;
 pub mod metrics;
 pub mod validation;

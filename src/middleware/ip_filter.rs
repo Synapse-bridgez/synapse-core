@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::task::{Context, Poll};
 
 use axum::extract::connect_info::ConnectInfo;
-use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use tower::{Layer, Service};
 
@@ -47,6 +47,7 @@ impl<S, B> Service<Request<B>> for IpFilterService<S>
 where
     S: Service<Request<B>, Response = Response> + Clone + Send + 'static,
     S::Future: Send + 'static,
+    B: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -98,7 +99,7 @@ fn extract_client_ip(
 }
 
 fn extract_from_x_forwarded_for(headers: &HeaderMap, trusted_proxy_depth: usize) -> Option<IpAddr> {
-    let raw = headers.get(header::X_FORWARDED_FOR)?.to_str().ok()?;
+    let raw = headers.get("x-forwarded-for")?.to_str().ok()?;
 
     let chain: Vec<IpAddr> = raw
         .split(',')
@@ -146,7 +147,7 @@ mod tests {
     fn xff_uses_client_ip_with_single_trusted_proxy() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            header::X_FORWARDED_FOR,
+            "x-forwarded-for",
             HeaderValue::from_static("203.0.113.10, 198.51.100.7"),
         );
 
@@ -158,7 +159,7 @@ mod tests {
     fn xff_returns_none_when_depth_exceeds_chain() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            header::X_FORWARDED_FOR,
+            "x-forwarded-for",
             HeaderValue::from_static("203.0.113.10"),
         );
 
@@ -191,7 +192,7 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         req.headers_mut().insert(
-            header::X_FORWARDED_FOR,
+            "x-forwarded-for",
             HeaderValue::from_static("203.0.113.55, 198.51.100.7"),
         );
 
@@ -214,7 +215,7 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         req.headers_mut().insert(
-            header::X_FORWARDED_FOR,
+            "x-forwarded-for",
             HeaderValue::from_static("198.51.100.55, 198.51.100.7"),
         );
 
@@ -234,7 +235,7 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         req.headers_mut().insert(
-            header::X_FORWARDED_FOR,
+            "x-forwarded-for",
             HeaderValue::from_static("198.51.100.55, 198.51.100.7"),
         );
 
@@ -286,7 +287,7 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         req.headers_mut().insert(
-            header::X_FORWARDED_FOR,
+            "x-forwarded-for",
             HeaderValue::from_static("198.51.100.55, 198.51.100.7"),
         );
 

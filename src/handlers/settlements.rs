@@ -6,6 +6,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SettlementListResponse {
+    pub settlements: Vec<crate::schemas::SettlementSchema>,
+    pub total: i64,
+}
+
 use crate::ApiState;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -24,6 +30,16 @@ pub struct SettlementListResponse {
     pub limit: u32,
 }
 
+#[utoipa::path(
+    get,
+    path = "/settlements",
+    params(Pagination),
+    responses(
+        (status = 200, description = "List of settlements", body = SettlementListResponse),
+        (status = 500, description = "Database error")
+    ),
+    tag = "Settlements"
+)]
 pub async fn list_settlements(
     State(_state): State<ApiState>,
     _query: Query<Pagination>,
