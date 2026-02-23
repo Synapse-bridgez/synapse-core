@@ -1,13 +1,15 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::types::BigDecimal;
 use uuid::Uuid;
+use utoipa::ToSchema;
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
-    pub amount: BigDecimal, // now available
+    pub amount: BigDecimal,
     pub asset_code: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -15,6 +17,10 @@ pub struct Transaction {
     pub anchor_transaction_id: Option<String>,
     pub callback_type: Option<String>,
     pub callback_status: Option<String>,
+    pub settlement_id: Option<Uuid>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl Transaction {
@@ -25,6 +31,9 @@ impl Transaction {
         anchor_transaction_id: Option<String>,
         callback_type: Option<String>,
         callback_status: Option<String>,
+        memo: Option<String>,
+        memo_type: Option<String>,
+        metadata: Option<serde_json::Value>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -37,8 +46,43 @@ impl Transaction {
             anchor_transaction_id,
             callback_type,
             callback_status,
+            settlement_id: None,
+            memo,
+            memo_type,
+            metadata,
         }
     }
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct Settlement {
+    pub id: Uuid,
+    pub asset_code: String,
+    #[serde(with = "bigdecimal_serde")]
+    pub total_amount: BigDecimal,
+    pub tx_count: i32,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct TransactionDlq {
+    pub id: Uuid,
+    pub transaction_id: Uuid,
+    pub stellar_account: String,
+    #[serde(with = "bigdecimal_serde")]
+    pub amount: BigDecimal,
+    pub asset_code: String,
+    pub anchor_transaction_id: Option<String>,
+    pub error_reason: String,
+    pub stack_trace: Option<String>,
+    pub retry_count: i32,
+    pub original_created_at: DateTime<Utc>,
+    pub moved_to_dlq_at: DateTime<Utc>,
+    pub last_retry_at: Option<DateTime<Utc>>,
 }
 #[cfg(test)]
 mod tests {
@@ -82,14 +126,18 @@ mod tests {
             anchor_tx_id.clone(),
             callback_type.clone(),
             callback_status.clone(),
+            Some("test memo".to_string()),
+            Some("text".to_string()),
+            Some(serde_json::json!({"ref": "ABC-123"})),
         );
 
         sqlx::query!(
             r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                memo, memo_type, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
             tx.id,
             tx.stellar_account,
@@ -101,6 +149,9 @@ mod tests {
             tx.anchor_transaction_id,
             tx.callback_type,
             tx.callback_status,
+            tx.memo,
+            tx.memo_type,
+            tx.metadata,
         )
         .execute(&pool)
         .await
@@ -119,5 +170,78 @@ mod tests {
         assert_eq!(fetched.callback_type, callback_type);
         assert_eq!(fetched.callback_status, callback_status);
     }
-}
 
+    #[tokio::test]
+    async fn test_insert_transaction() {
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db")
+            .await
+            .unwrap();
+        let tx = Transaction::new(
+            "GABCDEF".to_string(),
+            BigDecimal::from(100),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+            .await
+            .unwrap();
+        assert_eq!(inserted.stellar_account, tx.stellar_account);
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction() {
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db")
+            .await
+            .unwrap();
+        let tx = Transaction::new(
+            "GABCDEF".to_string(),
+            BigDecimal::from(100),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+            .await
+            .unwrap();
+        let fetched = crate::db::queries::get_transaction(&pool, inserted.id)
+            .await
+            .unwrap();
+        assert_eq!(fetched.id, inserted.id);
+    }
+
+    #[tokio::test]
+    async fn test_list_transactions() {
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db")
+            .await
+            .unwrap();
+        for i in 0..5 {
+            let tx = Transaction::new(
+                format!("GABCDEF_{}", i),
+                BigDecimal::from(100 + i),
+                "USD".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            crate::db::queries::insert_transaction(&pool, &tx)
+                .await
+                .unwrap();
+        }
+        let transactions = crate::db::queries::list_transactions(&pool, 5, 0)
+            .await
+            .unwrap();
+        assert_eq!(transactions.len(), 5);
+    }
+}
