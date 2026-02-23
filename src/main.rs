@@ -9,6 +9,7 @@ mod middleware;
 mod services;
 mod stellar;
 mod validation;
+mod readiness;
 
 use axum::{
     Router, 
@@ -42,6 +43,8 @@ use crate::stellar::HorizonClient;
 use crate::middleware::idempotency::IdempotencyService;
 use crate::schemas::TransactionStatusUpdate;
 use crate::metrics::MetricsState;
+use crate::readiness::ReadinessState;
+use tokio::signal;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -51,6 +54,7 @@ pub struct AppState {
     pub feature_flags: FeatureFlagService,
     pub redis_url: String,
     pub start_time: std::time::Instant,
+    pub readiness: ReadinessState,
 }
 
 // Custom key extractor for rate limiting
@@ -312,6 +316,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let feature_flags = FeatureFlagService::new(pool.clone());
     tracing::info!("Feature flags service initialized");
 
+    // Initialize readiness state with configurable drain timeout
+    let readiness = ReadinessState::with_drain_timeout(config.drain_timeout_secs);
+    tracing::info!("Readiness state initialized with drain timeout of {} seconds", config.drain_timeout_secs);
+
     // Build router with state
     let app_state = AppState {
         db: pool.clone(),
@@ -320,6 +328,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         feature_flags,
         redis_url: config.redis_url.clone(),
         start_time: std::time::Instant::now(),
+        readiness,
     };
     
     // Create metrics state
@@ -361,6 +370,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
         .merge(search_routes)
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route("/settlements/:id", get(handlers::settlements::get_settlement))
@@ -371,6 +381,47 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     // Handle graceful shutdown
     let listener = TcpListener::bind(addr).await?;
+    
+    // Clone readiness for shutdown handler
+    let readiness_clone = app_state.readiness.clone();
+    
+    // Spawn shutdown signal handler
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let term = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let term = std::future::pending::<()>();
+
+        match tokio::select! {
+            _ = ctrl_c => {
+                tracing::info!("Received Ctrl+C, starting graceful shutdown...");
+            }
+            _ = term => {
+                tracing::info!("Received SIGTERM, starting graceful shutdown...");
+            }
+        }
+
+        // Start draining - stop accepting new connections
+        let drain_timeout = readiness_clone.start_drain();
+        
+        // Wait for in-flight requests to complete
+        readiness_clone.wait_for_drain().await;
+        
+        tracing::info!("Graceful shutdown complete after {} seconds", drain_timeout.as_secs());
+    });
+    
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

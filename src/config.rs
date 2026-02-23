@@ -29,6 +29,8 @@ pub struct Config {
     pub whitelisted_ips: String,
     pub log_format: LogFormat,
     pub allowed_ips: AllowedIps,
+    /// Drain timeout in seconds for connection draining (default: 30s)
+    pub drain_timeout_secs: u64,
 }
 
 pub mod assets;
@@ -61,6 +63,10 @@ impl Config {
             whitelisted_ips: env::var("WHITELISTED_IPS").unwrap_or_default(),
             log_format,
             allowed_ips,
+            drain_timeout_secs: env::var("DRAIN_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .unwrap_or(30),
         })
     }
 }

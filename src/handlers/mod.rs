@@ -3,7 +3,7 @@ pub mod settlements;
 pub mod webhook;
 pub mod dlq;
 pub mod admin;
-pub mod graphql;
+// pub mod graphql;  // Temporarily disabled - backup file exists
 pub mod search;
 
 use crate::AppState;
@@ -31,4 +31,28 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     (status_code, Json(health_response))
+}
+
+/// Readiness probe endpoint for Kubernetes
+/// Returns 200 when ready to accept traffic, 503 when draining or not ready
+pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    if state.readiness.is_ready() {
+        let response = ReadinessResponse {
+            status: "ready".to_string(),
+            draining: state.readiness.is_draining(),
+        };
+        (StatusCode::OK, Json(response))
+    } else {
+        let response = ReadinessResponse {
+            status: "not_ready".to_string(),
+            draining: state.readiness.is_draining(),
+        };
+        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub draining: bool,
 }
