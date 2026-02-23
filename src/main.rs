@@ -19,6 +19,7 @@ mod middleware;
 mod services;
 mod stellar;
 mod validation;
+mod readiness;
 
 use axum::{
     Router, 
@@ -111,6 +112,16 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
+        },
+        Some(Commands::Backup(backup_cmd)) => match backup_cmd {
+            BackupCommands::Run { backup_type } => {
+                cli::handle_backup_run(&config, &backup_type).await
+            }
+            BackupCommands::List => cli::handle_backup_list(&config).await,
+            BackupCommands::Restore { filename } => {
+                cli::handle_backup_restore(&config, &filename).await
+            }
+            BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
     }
@@ -244,12 +255,17 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
         .with_state(api_state.app_state.db.clone());
 
+    // Create search route with pool_manager state
+    let search_routes = Router::new()
+        .route("/transactions/search", get(handlers::search::search_transactions))
+        .with_state(app_state.pool_manager.clone());
+    
     let app = Router::new()
-        .merge(api_routes)
-        .merge(webhook_routes)
-        .merge(dlq_routes)
-        .merge(admin_routes)
-        .layer(cors_layer);
+        // Unversioned routes - default to latest (V2) or specific base routes
+        .route("/health", get(handlers::health))
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route("/settlements/:id", get(handlers::settlements::get_settlement))
+        .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);

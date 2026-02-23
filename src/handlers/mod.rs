@@ -3,6 +3,8 @@ pub mod settlements;
 pub mod webhook;
 pub mod dlq;
 pub mod admin;
+pub mod v1;
+pub mod v2;
 
 use crate::AppState;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -58,4 +60,40 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     };
 
     (status_code, Json(health_response))
+}
+
+/// Readiness probe endpoint for Kubernetes
+/// Returns 200 when ready to accept traffic, 503 when draining or not ready
+pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    if state.readiness.is_ready() {
+        let response = ReadinessResponse {
+            status: "ready".to_string(),
+            draining: state.readiness.is_draining(),
+        };
+        (StatusCode::OK, Json(response))
+    } else {
+        let response = ReadinessResponse {
+            status: "not_ready".to_string(),
+            draining: state.readiness.is_draining(),
+        };
+        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub draining: bool,
+}
+
+/// Error catalog endpoint
+/// Returns all available error codes and their descriptions
+pub async fn error_catalog() -> impl IntoResponse {
+    let errors = crate::error::get_all_error_codes();
+    let catalog = crate::error::ErrorCatalogResponse {
+        errors,
+        version: "1.0.0".to_string(),
+    };
+    
+    (StatusCode::OK, Json(catalog))
 }
