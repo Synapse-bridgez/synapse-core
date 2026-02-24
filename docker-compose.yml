@@ -29,6 +29,18 @@ services:
       timeout: 5s
       retries: 5
 
+  vault:
+    image: hashicorp/vault:latest
+    container_name: synapse-vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: server -dev
+
   app:
     build: .
     container_name: synapse-app
@@ -40,7 +52,11 @@ services:
     environment:
       SERVER_PORT: 3000
       DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      DATABASE_URL_TEMPLATE: postgres://synapse:{password}@postgres:5432/synapse
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      VAULT_ADDR: http://vault:8200
+      VAULT_ROLE_ID: ""
+      VAULT_SECRET_ID: ""
       REDIS_URL: redis://redis:6379
     ports:
       - "3000:3000"

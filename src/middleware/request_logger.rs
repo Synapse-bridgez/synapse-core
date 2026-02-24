@@ -102,7 +102,7 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
 mod tests {
     use super::*;
     use axum::{body::Body, routing::post, Router};
-    use http::Request;
+    use axum::http::Request;
     use tower::ServiceExt;
 
     #[tokio::test]

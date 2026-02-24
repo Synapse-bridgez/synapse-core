@@ -37,7 +37,10 @@ async fn requeue_dlq(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
     let processor = TransactionProcessor::new(pool);
-    processor.requeue_dlq(id).await?;
+    processor
+        .requeue_dlq(id)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
     Ok(Json(json!({
         "message": "DLQ entry requeued successfully",

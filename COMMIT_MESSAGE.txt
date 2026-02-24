@@ -1,0 +1,55 @@
+feat: implement database partitioning for high-volume scaling
+
+Implement time-based partitioning for the transactions table to handle
+millions of records efficiently using PostgreSQL 14+ native range partitioning.
+
+Changes:
+- Convert transactions table to partitioned table (monthly by created_at)
+- Add PartitionManager with automated maintenance (24-hour interval)
+- Create partition management functions (create/detach/maintain)
+- Implement 12-month retention policy with automatic detachment
+- Add comprehensive documentation and SQL utilities
+- Include monitoring queries and archival strategies
+
+Technical Details:
+- Partitioning: Range by created_at (monthly intervals)
+- Naming: transactions_y{YYYY}m{MM} (e.g., transactions_y2025m02)
+- Retention: 12 months (configurable)
+- Maintenance: Automated background task every 24 hours
+- Primary Key: Changed to composite (id, created_at)
+- Migration: Non-destructive (preserves transactions_old)
+
+Files Added:
+- migrations/20250217000000_partition_transactions.sql
+- migrations/partition_utils.sql
+- src/db/partition.rs
+- docs/partitioning.md
+- PR_DESCRIPTION.md
+- IMPLEMENTATION_SUMMARY.md
+- PARTITION_QUICK_REF.md
+
+Files Modified:
+- src/main.rs (initialize partition manager)
+- src/db/mod.rs (export partition module)
+- README.md (add partitioning section)
+- Cargo.toml (fix duplicate dependency)
+
+Benefits:
+- Improved query performance via partition pruning
+- Faster VACUUM and maintenance operations
+- Easy archival of old data by detaching partitions
+- Scalable to millions of records without degradation
+- Zero downtime partition management
+
+Requirements:
+- PostgreSQL 14+ (native declarative partitioning)
+- No external dependencies (pg_partman not required)
+
+Testing:
+- Verified migration creates 3 initial partitions
+- Tested partition functions (create/detach/maintain)
+- Confirmed background task initialization
+- Validated data insertion to correct partitions
+- Tested rollback procedure
+
+Resolves #16

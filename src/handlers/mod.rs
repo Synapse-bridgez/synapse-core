@@ -1,39 +1,26 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
-
-pub mod webhook;
+pub mod export;
 pub mod graphql;
 pub mod settlements;
+pub mod webhook;
 pub mod dlq;
 pub mod admin;
 pub mod v1;
 pub mod v2;
 
+use crate::AppState;
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthStatus {
-    status: String,
-    version: String,
-    db: String,
-    db_pool: DbPoolStats,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DbPoolStats {
-    active_connections: u32,
-    idle_connections: u32,
-    max_connections: u32,
-    usage_percent: f32,
-}
-
-use crate::ApiState;
-
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthStatus),
+        (status = 503, description = "Service is unhealthy", body = HealthStatus)
+    ),
+    tag = "Health"
+)]
 pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     // Check database connectivity with SELECT 1 query
     let db_status = match sqlx::query("SELECT 1").execute(&state.app_state.db).await {
@@ -50,7 +37,7 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
 
     let pool_stats = DbPoolStats {
         active_connections,
-        idle_connections,
+        idle_connections: idle_connections as u32,
         max_connections,
         usage_percent,
     };
@@ -76,6 +63,38 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     (status_code, Json(health_response))
 }
 
-pub async fn callback_transaction(State(_state): State<ApiState>) -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
+/// Readiness probe endpoint for Kubernetes
+/// Returns 200 when ready to accept traffic, 503 when draining or not ready
+pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    if state.readiness.is_ready() {
+        let response = ReadinessResponse {
+            status: "ready".to_string(),
+            draining: state.readiness.is_draining(),
+        };
+        (StatusCode::OK, Json(response))
+    } else {
+        let response = ReadinessResponse {
+            status: "not_ready".to_string(),
+            draining: state.readiness.is_draining(),
+        };
+        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub draining: bool,
+}
+
+/// Error catalog endpoint
+/// Returns all available error codes and their descriptions
+pub async fn error_catalog() -> impl IntoResponse {
+    let errors = crate::error::get_all_error_codes();
+    let catalog = crate::error::ErrorCatalogResponse {
+        errors,
+        version: "1.0.0".to_string(),
+    };
+    
+    (StatusCode::OK, Json(catalog))
 }

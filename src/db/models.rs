@@ -5,12 +5,11 @@ use sqlx::types::BigDecimal;
 use uuid::Uuid;
 use utoipa::ToSchema;
 
-#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Uuid,
     pub stellar_account: String,
-    #[serde(with = "bigdecimal_serde")]
-    pub amount: BigDecimal, // now available
+    pub amount: BigDecimal,
     pub asset_code: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -19,6 +18,9 @@ pub struct Transaction {
     pub callback_type: Option<String>,
     pub callback_status: Option<String>,
     pub settlement_id: Option<Uuid>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl Transaction {
@@ -29,6 +31,9 @@ impl Transaction {
         anchor_transaction_id: Option<String>,
         callback_type: Option<String>,
         callback_status: Option<String>,
+        memo: Option<String>,
+        memo_type: Option<String>,
+        metadata: Option<serde_json::Value>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -42,11 +47,14 @@ impl Transaction {
             callback_type,
             callback_status,
             settlement_id: None,
+            memo,
+            memo_type,
+            metadata,
         }
     }
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Settlement {
     pub id: Uuid,
     pub asset_code: String,
@@ -118,14 +126,18 @@ mod tests {
             anchor_tx_id.clone(),
             callback_type.clone(),
             callback_status.clone(),
+            Some("test memo".to_string()),
+            Some("text".to_string()),
+            Some(serde_json::json!({"ref": "ABC-123"})),
         );
 
         sqlx::query!(
             r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                memo, memo_type, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
             tx.id,
             tx.stellar_account,
@@ -137,6 +149,9 @@ mod tests {
             tx.anchor_transaction_id,
             tx.callback_type,
             tx.callback_status,
+            tx.memo,
+            tx.memo_type,
+            tx.metadata,
         )
         .execute(&pool)
         .await
@@ -158,7 +173,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_transaction() {
-        let pool = PgPool::connect("postgres://user:password@localhost/test_db").await.unwrap();
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db")
+            .await
+            .unwrap();
         let tx = Transaction::new(
             "GABCDEF".to_string(),
             BigDecimal::from(100),
@@ -166,14 +183,21 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
-        let inserted = crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+            .await
+            .unwrap();
         assert_eq!(inserted.stellar_account, tx.stellar_account);
     }
 
     #[tokio::test]
     async fn test_get_transaction() {
-        let pool = PgPool::connect("postgres://user:password@localhost/test_db").await.unwrap();
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db")
+            .await
+            .unwrap();
         let tx = Transaction::new(
             "GABCDEF".to_string(),
             BigDecimal::from(100),
@@ -181,15 +205,24 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
-        let inserted = crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
-        let fetched = crate::db::queries::get_transaction(&pool, inserted.id).await.unwrap();
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+            .await
+            .unwrap();
+        let fetched = crate::db::queries::get_transaction(&pool, inserted.id)
+            .await
+            .unwrap();
         assert_eq!(fetched.id, inserted.id);
     }
 
     #[tokio::test]
     async fn test_list_transactions() {
-        let pool = PgPool::connect("postgres://user:password@localhost/test_db").await.unwrap();
+        let pool = PgPool::connect("postgres://user:password@localhost/test_db")
+            .await
+            .unwrap();
         for i in 0..5 {
             let tx = Transaction::new(
                 format!("GABCDEF_{}", i),
@@ -198,32 +231,17 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             );
-            crate::db::queries::insert_transaction(&pool, &tx).await.unwrap();
+            crate::db::queries::insert_transaction(&pool, &tx)
+                .await
+                .unwrap();
         }
-        let transactions = crate::db::queries::list_transactions(&pool, 5, 0).await.unwrap();
+        let transactions = crate::db::queries::list_transactions(&pool, 5, 0)
+            .await
+            .unwrap();
         assert_eq!(transactions.len(), 5);
     }
 }
-
-mod bigdecimal_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use sqlx::types::BigDecimal;
-    use std::str::FromStr;
-
-    pub fn serialize<S>(value: &BigDecimal, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<BigDecimal, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        BigDecimal::from_str(&s).map_err(serde::de::Error::custom)
-    }
-}
-

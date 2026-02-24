@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
-    extract::{Request, State},
-    http::StatusCode,
+    extract::State,
+    http::{Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -10,76 +10,27 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const IDEMPOTENCY_TTL: u64 = 86400; // 24 hours in seconds
-const IDEMPOTENCY_PREFIX: &str = "idempotency:";
-
 #[derive(Clone)]
 pub struct IdempotencyService {
-    redis_client: redis::Client,
+    client: Client,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CachedResponse {
-    status: u16,
-    body: String,
+pub struct IdempotencyKey {
+    pub key: String,
+    pub ttl_seconds: u64,
 }
 
 impl IdempotencyService {
-    pub fn new(redis_url: &str) -> anyhow::Result<Self> {
-        let redis_client = redis::Client::open(redis_url)?;
-        Ok(Self { redis_client })
+    pub fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
+        let client = Client::open(redis_url)?;
+        Ok(Self { client })
     }
 
-    /// Check if a request with this ID is already being processed or was completed
-    pub async fn check_idempotency(&self, idempotency_key: &str) -> anyhow::Result<IdempotencyStatus> {
-        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
-        let key = format!("{}{}", IDEMPOTENCY_PREFIX, idempotency_key);
-
-        // Try to get existing value
-        let existing: Option<String> = conn.get(&key).await?;
-
-        match existing {
-            Some(value) => {
-                if value == "PROCESSING" {
-                    Ok(IdempotencyStatus::Processing)
-                } else {
-                    // Deserialize cached response
-                    let cached: CachedResponse = serde_json::from_str(&value)?;
-                    Ok(IdempotencyStatus::Completed(cached))
-                }
-            }
-            None => {
-                // Set PROCESSING lock with shorter TTL (5 minutes)
-                let _: () = conn.set_ex(&key, "PROCESSING", 300).await?;
-                Ok(IdempotencyStatus::New)
-            }
-        }
-    }
-
-    /// Store the successful response for future duplicate requests
-    pub async fn store_response(
-        &self,
-        idempotency_key: &str,
-        status: u16,
-        body: String,
-    ) -> anyhow::Result<()> {
-        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
-        let key = format!("{}{}", IDEMPOTENCY_PREFIX, idempotency_key);
-
-        let cached = CachedResponse { status, body };
-        let serialized = serde_json::to_string(&cached)?;
-
-        // Store with 24-hour TTL
-        let _: () = conn.set_ex(&key, serialized, IDEMPOTENCY_TTL).await?;
-        Ok(())
-    }
-
-    /// Release the processing lock if an error occurs
-    pub async fn release_lock(&self, idempotency_key: &str) -> anyhow::Result<()> {
-        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
-        let key = format!("{}{}", IDEMPOTENCY_PREFIX, idempotency_key);
-        let _: () = conn.del(&key).await?;
-        Ok(())
+    pub async fn check_and_set(&self, key: &str, value: &str, ttl: Duration) -> Result<bool, redis::RedisError> {
+        let mut conn = self.client.get_connection()?;
+        let result: Option<String> = conn.set_nx_ex(key, value, ttl.as_secs())?;
+        Ok(result.is_some())
     }
 }
 
@@ -93,8 +44,8 @@ pub enum IdempotencyStatus {
 /// Middleware to handle idempotency for webhook requests
 pub async fn idempotency_middleware(
     State(service): State<IdempotencyService>,
-    request: Request,
-    next: Next,
+    request: Request<Body>,
+    next: Next<Body>,
 ) -> Response {
     // Extract idempotency key from request
     // This could be from headers, query params, or body
@@ -122,7 +73,7 @@ pub async fn idempotency_middleware(
     match service.check_idempotency(&idempotency_key).await {
         Ok(IdempotencyStatus::New) => {
             // Process the request
-            let response = next.run(request).await;
+            let response: Response = next.run(request).await;
 
             // If successful (2xx), cache the response
             if response.status().is_success() {

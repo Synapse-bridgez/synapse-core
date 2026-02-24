@@ -15,6 +15,9 @@ pub struct DepositInput {
     pub anchor_transaction_id: Option<String>,
     pub callback_type: Option<String>,
     pub callback_status: Option<String>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Output of the ProcessDeposit use case.
@@ -44,6 +47,9 @@ impl ProcessDeposit {
             input.anchor_transaction_id,
             input.callback_type,
             input.callback_status,
+            input.memo,
+            input.memo_type,
+            input.metadata,
         );
 
         let inserted = self.transaction_repository.insert(&tx).await?;

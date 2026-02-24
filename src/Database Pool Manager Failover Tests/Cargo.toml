@@ -1,0 +1,16 @@
+[package]
+name = "db-pool-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres"] }
+thiserror = "1.0"
+tracing = "0.1"
+async-trait = "0.1"
+
+[dev-dependencies]
+testcontainers = "0.15"
+testcontainers-modules = { version = "0.3", features = ["postgres"] }
+tokio-test = "0.4"

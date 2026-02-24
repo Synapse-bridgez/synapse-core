@@ -36,7 +36,8 @@ impl TransactionQuery {
         // For now, we'll implement a basic filter in-memory if filter is present,
         // or just list all if not, to keep it simple while matching the requirement.
         // In a real app, this would be a custom SQL query.
-        let txs = queries::list_transactions(&state.db, limit.unwrap_or(20), offset.unwrap_or(0)).await?;
+    // Use cursor-based pagination; GraphQL currently doesn't pass a cursor, so default to first page
+    let txs = queries::list_transactions(&state.db, limit.unwrap_or(20), None, false).await?;
         
         if let Some(f) = filter {
             let filtered = txs.into_iter().filter(|t| {

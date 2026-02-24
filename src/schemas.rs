@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
@@ -28,6 +27,9 @@ pub struct TransactionSchema {
     pub callback_status: Option<String>,
     /// Associated settlement ID
     pub settlement_id: Option<String>,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Settlement schema for OpenAPI documentation
@@ -47,8 +49,5 @@ pub struct SettlementSchema {
     pub period_end: DateTime<Utc>,
     /// Current settlement status
     pub status: String,
-    /// Timestamp when settlement was created
-    pub created_at: DateTime<Utc>,
-    /// Timestamp when settlement was last updated
     pub updated_at: DateTime<Utc>,
 }

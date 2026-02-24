@@ -1,16 +1,24 @@
 [package]
 name = "synapse-core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "synapse_core"
+path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.6", features = ["ws"] }
+vaultrs = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.21"
+futures = "0.3"
+futures-util = "0.3"
 dotenvy = "0.15"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "1"
 sqlx = { version = "0.7", features = [
@@ -20,21 +28,38 @@ sqlx = { version = "0.7", features = [
     "uuid",
     "migrate",
     "bigdecimal",
+    "json",
 ] }
 bigdecimal = { version = "0.4", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json"] }
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+failsafe = "1"
+clap = { version = "4", features = ["derive"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.4", features = ["cors"] }
+arc-swap = "1"
+csv = "1"
+cron = "0.12"
+async-graphql = { version = "6", features = ["chrono", "uuid", "bigdecimal"] }
+async-graphql-axum = "6"
+tokio-stream = "0.1"
+async-stream = "0.3"
+governor = "0.6"
+redis = { version = "0.24", features = ["tokio-comp"] }
 ipnet = "2.9"
-utoipa = { version = "4", features = ["chrono", "uuid"] }
+utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
-tower-http = { version = "0.5", features = ["cors"] }
 url = "2.5"
+async-trait = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 mockito = "1"
+tempfile = "3"
 sqlx = { version = "0.7", features = [
     "runtime-tokio-native-tls",
     "postgres",
@@ -43,4 +68,3 @@ sqlx = { version = "0.7", features = [
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 reqwest = { version = "0.11", features = ["json"] }
-cargo-audit = "0.20"

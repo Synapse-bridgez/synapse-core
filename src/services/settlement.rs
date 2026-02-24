@@ -5,7 +5,7 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use crate::error::AppError;
-use sqlx::types::BigDecimal;
+use bigdecimal::BigDecimal;
 
 pub struct SettlementService {
     pool: PgPool,

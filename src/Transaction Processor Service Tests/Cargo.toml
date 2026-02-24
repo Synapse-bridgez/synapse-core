@@ -1,0 +1,15 @@
+[package]
+name = "transaction-processor-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+mockall = "0.12"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[test]]
+name = "transaction_processor_test"
+path = "tests/transaction_processor_test.rs"
