@@ -94,7 +94,7 @@ async fn test_graphql_queries() {
 
     let callback_url = format!("http://{}/callback", addr);
     let payload = json!({
-        "stellar_address": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "amount": "100.50",
         "asset_code": "USD",
         "callback_type": "deposit",
