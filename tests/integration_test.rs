@@ -5,7 +5,6 @@ use std::path::Path;
 use synapse_core::{create_app, AppState};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
-use tokio::net::TcpListener;
 
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
@@ -24,22 +23,31 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
+    let (tx, _rx) = tokio::sync::broadcast::channel(100);
+    
     let app_state = AppState {
         db: pool.clone(),
+        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None).await.unwrap(),
         horizon_client: synapse_core::stellar::HorizonClient::new(
             "https://horizon-testnet.stellar.org".to_string(),
         ),
+        feature_flags: synapse_core::services::feature_flags::FeatureFlagService::new(pool.clone()),
+        redis_url: "redis://localhost:6379".to_string(),
+        start_time: std::time::Instant::now(),
+        readiness: synapse_core::ReadinessState::new(),
+        tx_broadcast: tx,
     };
     let app = create_app(app_state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let server = axum::Server::bind(&addr).serve(app.into_make_service());
+    let actual_addr = server.local_addr();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        server.await.unwrap();
     });
 
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{}", actual_addr);
     (base_url, pool, container)
 }
 

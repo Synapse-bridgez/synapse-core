@@ -30,7 +30,7 @@ async fn test_graphql_queries() {
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();
-    
+
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -47,7 +47,7 @@ async fn test_graphql_queries() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    
+
     tokio::spawn(async move {
         axum::Server::from_tcp(listener.into_std().unwrap())
             .unwrap()

@@ -5,10 +5,7 @@
 //! 2. /ready returns 503 when draining
 //! 3. In-flight requests complete while new ones get 503 during drain
 
-use axum::{body::Body, extract::State, routing::get, Router};
-use hyper::{Request, StatusCode};
-use std::sync::Arc;
-use tower::ServiceExt;
+use synapse_core::ReadinessState;
 
 mod test_readiness {
     use super::*;
@@ -16,7 +13,7 @@ mod test_readiness {
     #[tokio::test]
     async fn test_ready_endpoint_returns_200_when_ready() {
         // Create readiness state that is ready
-        let readiness = crate::readiness::ReadinessState::new();
+        let readiness = ReadinessState::new();
         assert!(readiness.is_ready());
 
         // The readiness should return true when checked
@@ -27,7 +24,7 @@ mod test_readiness {
     #[tokio::test]
     async fn test_ready_endpoint_returns_503_when_not_ready() {
         // Create readiness state and set it to not ready
-        let readiness = crate::readiness::ReadinessState::new();
+        let readiness = ReadinessState::new();
         readiness.set_not_ready();
 
         // The readiness should return false
@@ -42,7 +39,7 @@ mod test_readiness {
     #[tokio::test]
     async fn test_readiness_reset() {
         // Create readiness state, drain it, then reset
-        let readiness = crate::readiness::ReadinessState::new();
+        let readiness = ReadinessState::new();
 
         readiness.set_not_ready();
         assert!(!readiness.is_ready());
@@ -55,17 +52,17 @@ mod test_readiness {
     #[tokio::test]
     async fn test_drain_timeout() {
         // Test custom drain timeout
-        let readiness = crate::readiness::ReadinessState::with_drain_timeout(60);
+        let readiness = ReadinessState::with_drain_timeout(60);
         assert_eq!(readiness.drain_timeout().as_secs(), 60);
 
         // Test default drain timeout (30s)
-        let readiness_default = crate::readiness::ReadinessState::new();
+        let readiness_default = ReadinessState::new();
         assert_eq!(readiness_default.drain_timeout().as_secs(), 30);
     }
 
     #[tokio::test]
     async fn test_start_drain() {
-        let readiness = crate::readiness::ReadinessState::with_drain_timeout(1);
+        let readiness = ReadinessState::with_drain_timeout(1);
 
         // Start drain should set not ready and return timeout
         let timeout = readiness.start_drain();
@@ -80,9 +77,6 @@ mod test_readiness {
 // Unit tests for the readiness handler
 mod test_handlers {
     use super::*;
-    use crate::handlers::ready;
-    use crate::readiness::ReadinessState;
-    use crate::AppState;
 
     #[tokio::test]
     async fn test_ready_handler_returns_200_when_ready() {

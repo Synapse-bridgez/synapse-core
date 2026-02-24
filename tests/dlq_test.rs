@@ -3,7 +3,7 @@ use sqlx::migrate::Migrator;
 use sqlx::PgPool;
 use std::path::Path;
 use std::str::FromStr;
-use synapse_core::db::models::{Transaction, TransactionDlq};
+use synapse_core::db::models::Transaction;
 use synapse_core::services::TransactionProcessor;
 
 async fn setup_db(pool: &PgPool) {
