@@ -94,7 +94,6 @@ async fn test_backup_restore() -> Result<()> {
     match result {
         Ok(_) => {
             // Restoration successful
-            assert!(true);
         }
         Err(e) => {
             // Expected in test environment without proper permissions
