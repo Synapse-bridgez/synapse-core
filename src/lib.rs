@@ -18,6 +18,8 @@ use axum::{Router, routing::{get, post}};
 use crate::stellar::HorizonClient;
 use crate::services::feature_flags::FeatureFlagService;
 use crate::db::pool_manager::PoolManager;
+use tokio::sync::broadcast;
+use crate::handlers::ws::TransactionStatusUpdate;
 pub use crate::readiness::ReadinessState;
 // use crate::graphql::schema::{AppSchema, build_schema};  // Temporarily commented out to resolve compilation issues
 
@@ -30,6 +32,7 @@ pub struct AppState {
     pub redis_url: String,
     pub start_time: std::time::Instant,
     pub readiness: ReadinessState,
+    pub tx_broadcast: broadcast::Sender<TransactionStatusUpdate>,
 }
 
 #[derive(Clone)]
@@ -40,7 +43,7 @@ pub struct ApiState {
 
 pub fn create_app(app_state: AppState) -> Router {
     let api_state = ApiState {
-        app_state,
+        app_state: app_state.clone(),
     };
     
     Router::new()
@@ -53,6 +56,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/callback/transaction", post(handlers::webhook::callback)) // Backward compatibility
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .route("/transactions/search", get(handlers::search::search_transactions_wrapper))
+        .route("/ws", get(handlers::ws::ws_handler))
         // .route("/graphql", post(handlers::graphql::graphql_handler).get(handlers::graphql::subscription_handler))
         // .route("/graphql/playground", get(handlers::graphql::graphql_playground))
         .with_state(api_state)
