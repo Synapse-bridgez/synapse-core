@@ -19,10 +19,9 @@ CREATE TABLE transactions (
     PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
--- Step 3: Create indexes on partitioned table
-CREATE INDEX idx_transactions_status ON transactions(status);
-CREATE INDEX idx_transactions_stellar_account ON transactions(stellar_account);
-CREATE INDEX idx_transactions_created_at ON transactions(created_at);
+-- Step 3: Create indexes on partitioned table (skip status index as it exists from init migration)
+CREATE INDEX IF NOT EXISTS idx_transactions_stellar_account ON transactions(stellar_account);
+CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at);
 
 -- Step 4: Create initial partitions (current month + next 2 months)
 CREATE TABLE transactions_y2025m02 PARTITION OF transactions

@@ -13,9 +13,10 @@ synapse-core/
 ├── migrations/ # SQL migrations (sqlx)
 │ ├── 20250216000000_init.sql
 │ ├── 20250217000000_partition_transactions.sql
-│ └── partition_utils.sql # Manual partition management
+│ └── ... (other migrations)
 ├── docs/ # Documentation
-│ └── partitioning.md # Database partitioning guide
+│ ├── partitioning.md # Database partitioning guide
+│ └── partition_utils.sql # Manual partition management utilities
 └── src/
 ├── main.rs # Entry point, server setup, migrations
 ├── config.rs # Configuration from environment

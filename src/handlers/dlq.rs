@@ -1,6 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
@@ -21,7 +20,7 @@ pub fn dlq_routes() -> Router<PgPool> {
 
 async fn list_dlq(State(pool): State<PgPool>) -> Result<Json<Value>, AppError> {
     let entries = sqlx::query_as::<_, TransactionDlq>(
-        "SELECT * FROM transaction_dlq ORDER BY moved_to_dlq_at DESC LIMIT 100"
+        "SELECT * FROM transaction_dlq ORDER BY moved_to_dlq_at DESC LIMIT 100",
     )
     .fetch_all(&pool)
     .await?;

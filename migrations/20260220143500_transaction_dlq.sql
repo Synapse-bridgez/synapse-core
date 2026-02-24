@@ -11,9 +11,10 @@ CREATE TABLE IF NOT EXISTS transaction_dlq (
     retry_count INTEGER NOT NULL DEFAULT 0,
     original_created_at TIMESTAMPTZ NOT NULL,
     moved_to_dlq_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_retry_at TIMESTAMPTZ,
+    last_retry_at TIMESTAMPTZ
     
-    FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+    -- Note: Foreign key removed due to partitioned table constraints
+    -- Application-level referential integrity should be maintained
 );
 
 CREATE INDEX idx_transaction_dlq_transaction_id ON transaction_dlq(transaction_id);

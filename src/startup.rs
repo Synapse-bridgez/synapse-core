@@ -22,21 +22,32 @@ impl ValidationReport {
         println!("Database Connectivity: {}", status(self.database));
         println!("Redis Connectivity:    {}", status(self.redis));
         println!("Horizon Connectivity:  {}", status(self.horizon));
-        
+
         if !self.errors.is_empty() {
             println!("\nErrors:");
             for error in &self.errors {
                 println!("  ❌ {}", error);
             }
         }
-        
-        println!("\nOverall Status: {}", if self.is_valid() { "✅ PASS" } else { "❌ FAIL" });
+
+        println!(
+            "\nOverall Status: {}",
+            if self.is_valid() {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            }
+        );
         println!("=================================\n");
     }
 }
 
 fn status(ok: bool) -> &'static str {
-    if ok { "✅ OK" } else { "❌ FAIL" }
+    if ok {
+        "✅ OK"
+    } else {
+        "❌ FAIL"
+    }
 }
 
 pub async fn validate_environment(config: &Config, pool: &PgPool) -> Result<ValidationReport> {
@@ -88,11 +99,11 @@ fn validate_env_vars(config: &Config) -> Result<()> {
     if config.server_port == 0 {
         anyhow::bail!("SERVER_PORT must be greater than 0");
     }
-    
+
     // Validate URL formats
     url::Url::parse(&config.stellar_horizon_url)
         .context("STELLAR_HORIZON_URL is not a valid URL")?;
-    
+
     Ok(())
 }
 
@@ -101,34 +112,33 @@ async fn validate_database(pool: &PgPool) -> Result<()> {
         .fetch_one(pool)
         .await
         .context("Failed to connect to database")?;
-    
+
     // Check if migrations are up to date
     let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(pool)
         .await
         .context("Failed to check migrations table")?;
-    
+
     if applied == 0 {
         anyhow::bail!("No migrations applied");
     }
-    
+
     Ok(())
 }
 
 async fn validate_redis(redis_url: &str) -> Result<()> {
-    let client = redis::Client::open(redis_url)
-        .context("Invalid Redis URL")?;
-    
+    let client = redis::Client::open(redis_url).context("Invalid Redis URL")?;
+
     let mut conn = client
         .get_multiplexed_tokio_connection()
         .await
         .context("Failed to connect to Redis")?;
-    
+
     redis::cmd("PING")
         .query_async::<_, String>(&mut conn)
         .await
         .context("Redis PING failed")?;
-    
+
     Ok(())
 }
 
@@ -136,17 +146,17 @@ async fn validate_horizon(horizon_url: &str) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
-    
+
     let response = client
         .get(horizon_url)
         .send()
         .await
         .context("Failed to connect to Horizon")?;
-    
+
     if !response.status().is_success() {
         anyhow::bail!("Horizon returned status: {}", response.status());
     }
-    
+
     Ok(())
 }
 
@@ -159,12 +169,19 @@ mod tests {
         let config = Config {
             server_port: 3000,
             database_url: String::new(),
+            database_replica_url: None,
             stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
+            anchor_webhook_secret: "test".to_string(),
             redis_url: "redis://localhost:6379".to_string(),
-            cors_allowed_origins: None,
-            log_request_body: false,
+            default_rate_limit: 100,
+            whitelist_rate_limit: 1000,
+            whitelisted_ips: String::new(),
+            log_format: crate::config::LogFormat::Text,
+            allowed_ips: crate::config::AllowedIps::Any,
+            backup_dir: "/tmp".to_string(),
+            backup_encryption_key: None,
         };
-        
+
         assert!(validate_env_vars(&config).is_err());
     }
 
@@ -173,12 +190,19 @@ mod tests {
         let config = Config {
             server_port: 3000,
             database_url: "postgres://localhost:5432/test".to_string(),
+            database_replica_url: None,
             stellar_horizon_url: "not-a-url".to_string(),
+            anchor_webhook_secret: "test".to_string(),
             redis_url: "redis://localhost:6379".to_string(),
-            cors_allowed_origins: None,
-            log_request_body: false,
+            default_rate_limit: 100,
+            whitelist_rate_limit: 1000,
+            whitelisted_ips: String::new(),
+            log_format: crate::config::LogFormat::Text,
+            allowed_ips: crate::config::AllowedIps::Any,
+            backup_dir: "/tmp".to_string(),
+            backup_encryption_key: None,
         };
-        
+
         assert!(validate_env_vars(&config).is_err());
     }
 }

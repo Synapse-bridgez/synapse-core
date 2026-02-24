@@ -20,10 +20,9 @@ async fn test_pool_manager_primary_only() {
     // Verify read queries use primary
     let read_pool = pool_manager.get_read_pool().await;
     let write_pool = pool_manager.get_write_pool().await;
-    
+
     // Both should point to same pool (primary)
     assert!(std::ptr::eq(read_pool, write_pool));
-
 }
 
 #[tokio::test]
@@ -35,7 +34,7 @@ async fn test_pool_manager_with_replica() {
             return;
         }
     };
-    
+
     let replica_url = std::env::var("DATABASE_REPLICA_URL").ok();
 
     if replica_url.is_none() {
@@ -53,9 +52,8 @@ async fn test_pool_manager_with_replica() {
     // Verify read and write use different pools
     let read_pool = pool_manager.get_read_pool().await;
     let write_pool = pool_manager.get_write_pool().await;
-    
-    assert!(!std::ptr::eq(read_pool, write_pool));
 
+    assert!(!std::ptr::eq(read_pool, write_pool));
 }
 
 #[tokio::test]
@@ -74,16 +72,14 @@ async fn test_query_routing() {
 
     // Test read query
     let read_pool = pool_manager.get_read_pool().await;
-    let result: Result<sqlx::postgres::PgRow, sqlx::Error> = sqlx::query("SELECT 1 as value")
-        .fetch_one(read_pool)
-        .await;
+    let result: Result<sqlx::postgres::PgRow, sqlx::Error> =
+        sqlx::query("SELECT 1 as value").fetch_one(read_pool).await;
     assert!(result.is_ok());
 
     // Test write query
     let write_pool = pool_manager.get_write_pool().await;
-    let result: Result<sqlx::postgres::PgRow, sqlx::Error> = sqlx::query("SELECT 1 as value")
-        .fetch_one(write_pool)
-        .await;
+    let result: Result<sqlx::postgres::PgRow, sqlx::Error> =
+        sqlx::query("SELECT 1 as value").fetch_one(write_pool).await;
     assert!(result.is_ok());
 }
 

@@ -1,10 +1,10 @@
 use crate::services::scheduler::Job;
-use sqlx::PgPool;
 use crate::stellar::HorizonClient;
 use async_trait::async_trait;
+use sqlx::PgPool;
 use std::error::Error;
-use tracing::info;
 use std::io;
+use tracing::info;
 
 /// Wrapper for the TransactionProcessor to make it compatible with the Job trait
 pub struct TransactionProcessorJob {
@@ -33,13 +33,11 @@ impl Job for TransactionProcessorJob {
 
     async fn execute(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         info!("Running scheduled transaction processor job");
-        
+
         // Process a single batch of transactions instead of running continuously
-        let result = crate::services::processor::process_batch(
-            &self.pool,
-            &self.horizon_client
-        ).await;
-        
+        let result =
+            crate::services::processor::process_batch(&self.pool, &self.horizon_client).await;
+
         match result {
             Ok(()) => {
                 info!("Transaction processor job completed successfully");
@@ -48,7 +46,7 @@ impl Job for TransactionProcessorJob {
             Err(e) => {
                 tracing::error!("Transaction processor job failed: {}", e);
                 // Convert anyhow::Error to a standard error type
-                Err(Box::new(io::Error::new(io::ErrorKind::Other, e.to_string())))
+                Err(Box::new(io::Error::other(e.to_string())))
             }
         }
     }

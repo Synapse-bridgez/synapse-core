@@ -76,7 +76,7 @@ impl ReadinessState {
     /// Wait for the drain to complete (used in shutdown)
     pub async fn wait_for_drain(&self) {
         let timeout = self.drain_timeout();
-        
+
         // If already not ready (draining), wait for the timeout
         if !self.is_ready() {
             tracing::info!(
