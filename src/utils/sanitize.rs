@@ -23,7 +23,13 @@ pub fn sanitize_json(value: &Value) -> Value {
 fn is_sensitive_field(key: &str) -> bool {
     matches!(
         key.to_lowercase().as_str(),
-        "stellar_account" | "account" | "password" | "secret" | "token" | "api_key" | "authorization"
+        "stellar_account"
+            | "account"
+            | "password"
+            | "secret"
+            | "token"
+            | "api_key"
+            | "authorization"
     )
 }
 
@@ -35,7 +41,7 @@ fn mask_value(value: &Value) -> Value {
             let end = &s[s.len() - 4..];
             Value::String(format!("{}{}{}", visible, masked, end))
         }
-        Value::String(s) => Value::String("****".to_string()),
+        Value::String(_s) => Value::String("****".to_string()),
         _ => Value::String("****".to_string()),
     }
 }
@@ -51,10 +57,10 @@ mod tests {
             "stellar_account": "GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
             "amount": "100.00"
         });
-        
+
         let sanitized = sanitize_json(&input);
         let account = sanitized["stellar_account"].as_str().unwrap();
-        
+
         assert!(account.contains("****"));
         assert_eq!(sanitized["amount"], "100.00");
     }
@@ -67,9 +73,12 @@ mod tests {
                 "name": "John"
             }
         });
-        
+
         let sanitized = sanitize_json(&input);
-        assert!(sanitized["user"]["account"].as_str().unwrap().contains("****"));
+        assert!(sanitized["user"]["account"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert_eq!(sanitized["user"]["name"], "John");
     }
 }

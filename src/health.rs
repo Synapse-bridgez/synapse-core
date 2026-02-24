@@ -68,10 +68,7 @@ impl DependencyChecker for RedisChecker {
         match redis::Client::open(self.url.as_str()) {
             Ok(client) => match client.get_multiplexed_async_connection().await {
                 Ok(mut conn) => {
-                    match redis::cmd("PING")
-                        .query_async::<_, String>(&mut conn)
-                        .await
-                    {
+                    match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
                         Ok(_) => DependencyStatus::Healthy {
                             status: "healthy".to_string(),
                             latency_ms: start.elapsed().as_millis() as u64,

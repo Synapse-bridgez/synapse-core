@@ -30,7 +30,7 @@ sqlx = { version = "0.7", features = [
     "bigdecimal",
     "json",
 ] }
-bigdecimal = { version = "0.4", features = ["serde"] }
+bigdecimal = { version = "0.3", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"

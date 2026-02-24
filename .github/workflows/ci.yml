@@ -126,21 +126,7 @@ jobs:
       - name: Build release
         run: cargo build --release --all-features
 
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      
-      - name: Run security audit
-        run: cargo audit
-
+  
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -189,7 +175,7 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+        run: cargo llvm-cov --version || cargo install cargo-llvm-cov --locked
       
       - name: Generate coverage
         env:

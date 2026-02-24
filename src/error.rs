@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -16,64 +16,174 @@ pub struct ErrorCode {
     pub description: &'static str,
 }
 
-/// Error code constants
 pub mod codes {
+    //! Error code constants
     //! Stable error codes for the API
     //! Format: ERR_<CATEGORY>_<NNN>
-    
-    pub const DATABASE_001: (&str, u16, &str) = ("ERR_DATABASE_001", 500, "Database connection error");
-    pub const DATABASE_002: (&str, u16, &str) = ("ERR_DATABASE_002", 500, "Database query execution error");
-    pub const VALIDATION_001: (&str, u16, &str) = ("ERR_VALIDATION_001", 400, "Validation error - invalid input");
+
+    pub const DATABASE_001: (&str, u16, &str) =
+        ("ERR_DATABASE_001", 500, "Database connection error");
+    pub const DATABASE_002: (&str, u16, &str) =
+        ("ERR_DATABASE_002", 500, "Database query execution error");
+    pub const VALIDATION_001: (&str, u16, &str) = (
+        "ERR_VALIDATION_001",
+        400,
+        "Validation error - invalid input",
+    );
     pub const NOT_FOUND_001: (&str, u16, &str) = ("ERR_NOT_FOUND_001", 404, "Resource not found");
     pub const INTERNAL_001: (&str, u16, &str) = ("ERR_INTERNAL_001", 500, "Internal server error");
-    pub const BAD_REQUEST_001: (&str, u16, &str) = ("ERR_BAD_REQUEST_001", 400, "Bad request - invalid parameters");
-    pub const UNAUTHORIZED_001: (&str, u16, &str) = ("ERR_UNAUTHORIZED_001", 401, "Unauthorized - authentication required");
-    
+    pub const BAD_REQUEST_001: (&str, u16, &str) = (
+        "ERR_BAD_REQUEST_001",
+        400,
+        "Bad request - invalid parameters",
+    );
+    pub const UNAUTHORIZED_001: (&str, u16, &str) = (
+        "ERR_UNAUTHORIZED_001",
+        401,
+        "Unauthorized - authentication required",
+    );
+
     // Authentication specific errors
-    pub const AUTH_001: (&str, u16, &str) = ("ERR_AUTH_001", 401, "Invalid authentication credentials");
+    pub const AUTH_001: (&str, u16, &str) =
+        ("ERR_AUTH_001", 401, "Invalid authentication credentials");
     pub const AUTH_002: (&str, u16, &str) = ("ERR_AUTH_002", 403, "Insufficient permissions");
-    
+
     // Transaction specific errors
-    pub const TRANSACTION_001: (&str, u16, &str) = ("ERR_TRANSACTION_001", 400, "Invalid transaction amount");
-    pub const TRANSACTION_002: (&str, u16, &str) = ("ERR_TRANSACTION_002", 400, "Transaction amount below minimum");
-    pub const TRANSACTION_003: (&str, u16, &str) = ("ERR_TRANSACTION_003", 400, "Invalid Stellar address");
-    pub const TRANSACTION_004: (&str, u16, &str) = ("ERR_TRANSACTION_004", 409, "Transaction already processed (idempotency)");
-    pub const TRANSACTION_005: (&str, u16, &str) = ("ERR_TRANSACTION_005", 400, "Invalid transaction status transition");
-    
-    // Webhook specific errors  
-    pub const WEBHOOK_001: (&str, u16, &str) = ("ERR_WEBHOOK_001", 401, "Invalid webhook signature");
-    pub const WEBHOOK_002: (&str, u16, &str) = ("ERR_WEBHOOK_002", 400, "Malformed webhook payload");
-    
+    pub const TRANSACTION_001: (&str, u16, &str) =
+        ("ERR_TRANSACTION_001", 400, "Invalid transaction amount");
+    pub const TRANSACTION_002: (&str, u16, &str) = (
+        "ERR_TRANSACTION_002",
+        400,
+        "Transaction amount below minimum",
+    );
+    pub const TRANSACTION_003: (&str, u16, &str) =
+        ("ERR_TRANSACTION_003", 400, "Invalid Stellar address");
+    pub const TRANSACTION_004: (&str, u16, &str) = (
+        "ERR_TRANSACTION_004",
+        409,
+        "Transaction already processed (idempotency)",
+    );
+    pub const TRANSACTION_005: (&str, u16, &str) = (
+        "ERR_TRANSACTION_005",
+        400,
+        "Invalid transaction status transition",
+    );
+
+    // Webhook specific errors
+    pub const WEBHOOK_001: (&str, u16, &str) =
+        ("ERR_WEBHOOK_001", 401, "Invalid webhook signature");
+    pub const WEBHOOK_002: (&str, u16, &str) =
+        ("ERR_WEBHOOK_002", 400, "Malformed webhook payload");
+
     // Settlement specific errors
-    pub const SETTLEMENT_001: (&str, u16, &str) = ("ERR_SETTLEMENT_001", 400, "Invalid settlement amount");
-    pub const SETTLEMENT_002: (&str, u16, &str) = ("ERR_SETTLEMENT_002", 409, "Settlement already exists");
-    
+    pub const SETTLEMENT_001: (&str, u16, &str) =
+        ("ERR_SETTLEMENT_001", 400, "Invalid settlement amount");
+    pub const SETTLEMENT_002: (&str, u16, &str) =
+        ("ERR_SETTLEMENT_002", 409, "Settlement already exists");
+
     // Rate limiting
-    pub const RATE_LIMIT_001: (&str, u16, &str) = ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
+    pub const RATE_LIMIT_001: (&str, u16, &str) =
+        ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
 }
 
 /// Get all error codes as a vector for catalog generation
 pub fn get_all_error_codes() -> Vec<ErrorCode> {
     vec![
-        ErrorCode { code: codes::DATABASE_001.0, http_status: codes::DATABASE_001.1, description: codes::DATABASE_001.2 },
-        ErrorCode { code: codes::DATABASE_002.0, http_status: codes::DATABASE_002.1, description: codes::DATABASE_002.2 },
-        ErrorCode { code: codes::VALIDATION_001.0, http_status: codes::VALIDATION_001.1, description: codes::VALIDATION_001.2 },
-        ErrorCode { code: codes::NOT_FOUND_001.0, http_status: codes::NOT_FOUND_001.1, description: codes::NOT_FOUND_001.2 },
-        ErrorCode { code: codes::INTERNAL_001.0, http_status: codes::INTERNAL_001.1, description: codes::INTERNAL_001.2 },
-        ErrorCode { code: codes::BAD_REQUEST_001.0, http_status: codes::BAD_REQUEST_001.1, description: codes::BAD_REQUEST_001.2 },
-        ErrorCode { code: codes::UNAUTHORIZED_001.0, http_status: codes::UNAUTHORIZED_001.1, description: codes::UNAUTHORIZED_001.2 },
-        ErrorCode { code: codes::AUTH_001.0, http_status: codes::AUTH_001.1, description: codes::AUTH_001.2 },
-        ErrorCode { code: codes::AUTH_002.0, http_status: codes::AUTH_002.1, description: codes::AUTH_002.2 },
-        ErrorCode { code: codes::TRANSACTION_001.0, http_status: codes::TRANSACTION_001.1, description: codes::TRANSACTION_001.2 },
-        ErrorCode { code: codes::TRANSACTION_002.0, http_status: codes::TRANSACTION_002.1, description: codes::TRANSACTION_002.2 },
-        ErrorCode { code: codes::TRANSACTION_003.0, http_status: codes::TRANSACTION_003.1, description: codes::TRANSACTION_003.2 },
-        ErrorCode { code: codes::TRANSACTION_004.0, http_status: codes::TRANSACTION_004.1, description: codes::TRANSACTION_004.2 },
-        ErrorCode { code: codes::TRANSACTION_005.0, http_status: codes::TRANSACTION_005.1, description: codes::TRANSACTION_005.2 },
-        ErrorCode { code: codes::WEBHOOK_001.0, http_status: codes::WEBHOOK_001.1, description: codes::WEBHOOK_001.2 },
-        ErrorCode { code: codes::WEBHOOK_002.0, http_status: codes::WEBHOOK_002.1, description: codes::WEBHOOK_002.2 },
-        ErrorCode { code: codes::SETTLEMENT_001.0, http_status: codes::SETTLEMENT_001.1, description: codes::SETTLEMENT_001.2 },
-        ErrorCode { code: codes::SETTLEMENT_002.0, http_status: codes::SETTLEMENT_002.1, description: codes::SETTLEMENT_002.2 },
-        ErrorCode { code: codes::RATE_LIMIT_001.0, http_status: codes::RATE_LIMIT_001.1, description: codes::RATE_LIMIT_001.2 },
+        ErrorCode {
+            code: codes::DATABASE_001.0,
+            http_status: codes::DATABASE_001.1,
+            description: codes::DATABASE_001.2,
+        },
+        ErrorCode {
+            code: codes::DATABASE_002.0,
+            http_status: codes::DATABASE_002.1,
+            description: codes::DATABASE_002.2,
+        },
+        ErrorCode {
+            code: codes::VALIDATION_001.0,
+            http_status: codes::VALIDATION_001.1,
+            description: codes::VALIDATION_001.2,
+        },
+        ErrorCode {
+            code: codes::NOT_FOUND_001.0,
+            http_status: codes::NOT_FOUND_001.1,
+            description: codes::NOT_FOUND_001.2,
+        },
+        ErrorCode {
+            code: codes::INTERNAL_001.0,
+            http_status: codes::INTERNAL_001.1,
+            description: codes::INTERNAL_001.2,
+        },
+        ErrorCode {
+            code: codes::BAD_REQUEST_001.0,
+            http_status: codes::BAD_REQUEST_001.1,
+            description: codes::BAD_REQUEST_001.2,
+        },
+        ErrorCode {
+            code: codes::UNAUTHORIZED_001.0,
+            http_status: codes::UNAUTHORIZED_001.1,
+            description: codes::UNAUTHORIZED_001.2,
+        },
+        ErrorCode {
+            code: codes::AUTH_001.0,
+            http_status: codes::AUTH_001.1,
+            description: codes::AUTH_001.2,
+        },
+        ErrorCode {
+            code: codes::AUTH_002.0,
+            http_status: codes::AUTH_002.1,
+            description: codes::AUTH_002.2,
+        },
+        ErrorCode {
+            code: codes::TRANSACTION_001.0,
+            http_status: codes::TRANSACTION_001.1,
+            description: codes::TRANSACTION_001.2,
+        },
+        ErrorCode {
+            code: codes::TRANSACTION_002.0,
+            http_status: codes::TRANSACTION_002.1,
+            description: codes::TRANSACTION_002.2,
+        },
+        ErrorCode {
+            code: codes::TRANSACTION_003.0,
+            http_status: codes::TRANSACTION_003.1,
+            description: codes::TRANSACTION_003.2,
+        },
+        ErrorCode {
+            code: codes::TRANSACTION_004.0,
+            http_status: codes::TRANSACTION_004.1,
+            description: codes::TRANSACTION_004.2,
+        },
+        ErrorCode {
+            code: codes::TRANSACTION_005.0,
+            http_status: codes::TRANSACTION_005.1,
+            description: codes::TRANSACTION_005.2,
+        },
+        ErrorCode {
+            code: codes::WEBHOOK_001.0,
+            http_status: codes::WEBHOOK_001.1,
+            description: codes::WEBHOOK_001.2,
+        },
+        ErrorCode {
+            code: codes::WEBHOOK_002.0,
+            http_status: codes::WEBHOOK_002.1,
+            description: codes::WEBHOOK_002.2,
+        },
+        ErrorCode {
+            code: codes::SETTLEMENT_001.0,
+            http_status: codes::SETTLEMENT_001.1,
+            description: codes::SETTLEMENT_001.2,
+        },
+        ErrorCode {
+            code: codes::SETTLEMENT_002.0,
+            http_status: codes::SETTLEMENT_002.1,
+            description: codes::SETTLEMENT_002.2,
+        },
+        ErrorCode {
+            code: codes::RATE_LIMIT_001.0,
+            http_status: codes::RATE_LIMIT_001.1,
+            description: codes::RATE_LIMIT_001.2,
+        },
     ]
 }
 
@@ -99,41 +209,41 @@ pub enum AppError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
-    
+
     // Custom errors with specific codes
     #[error("Invalid transaction amount: {0}")]
     InvalidTransactionAmount(String),
-    
+
     #[error("Amount below minimum: {0}")]
     AmountBelowMinimum(String),
-    
+
     #[error("Invalid Stellar address: {0}")]
     InvalidStellarAddress(String),
-    
+
     #[error("Transaction already processed: {0}")]
     TransactionAlreadyProcessed(String),
-    
+
     #[error("Invalid status transition: {0}")]
     InvalidStatusTransition(String),
-    
+
     #[error("Invalid webhook signature")]
     InvalidWebhookSignature,
-    
+
     #[error("Malformed webhook payload: {0}")]
     MalformedWebhookPayload(String),
-    
+
     #[error("Invalid settlement amount: {0}")]
     InvalidSettlementAmount(String),
-    
+
     #[error("Settlement already exists: {0}")]
     SettlementAlreadyExists(String),
-    
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
-    
+
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
-    
+
     #[error("Insufficient permissions: {0}")]
     InsufficientPermissions(String),
 }
@@ -162,7 +272,7 @@ impl AppError {
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
         }
     }
-    
+
     /// Get the stable error code for this error
     /// These codes are stable and should never be renamed or reused
     pub fn code(&self) -> &'static str {
@@ -213,6 +323,7 @@ pub struct ErrorResponse {
 
 /// Catalog response structure
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(bound(deserialize = "'de: 'static"))]
 pub struct ErrorCatalogResponse {
     pub errors: Vec<ErrorCode>,
     pub version: String,
@@ -281,37 +392,94 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
-    
+
     #[test]
     fn test_error_codes() {
         // Test that all error types return correct codes
-        assert_eq!(AppError::Validation("test".to_string()).code(), codes::VALIDATION_001.0);
-        assert_eq!(AppError::NotFound("test".to_string()).code(), codes::NOT_FOUND_001.0);
-        assert_eq!(AppError::BadRequest("test".to_string()).code(), codes::BAD_REQUEST_001.0);
-        assert_eq!(AppError::Unauthorized("test".to_string()).code(), codes::UNAUTHORIZED_001.0);
-        assert_eq!(AppError::Internal("test".to_string()).code(), codes::INTERNAL_001.0);
-        assert_eq!(AppError::Database(sqlx::Error::RowNotFound).code(), codes::DATABASE_001.0);
-        assert_eq!(AppError::DatabaseError("test".to_string()).code(), codes::DATABASE_002.0);
-        
+        assert_eq!(
+            AppError::Validation("test".to_string()).code(),
+            codes::VALIDATION_001.0
+        );
+        assert_eq!(
+            AppError::NotFound("test".to_string()).code(),
+            codes::NOT_FOUND_001.0
+        );
+        assert_eq!(
+            AppError::BadRequest("test".to_string()).code(),
+            codes::BAD_REQUEST_001.0
+        );
+        assert_eq!(
+            AppError::Unauthorized("test".to_string()).code(),
+            codes::UNAUTHORIZED_001.0
+        );
+        assert_eq!(
+            AppError::Internal("test".to_string()).code(),
+            codes::INTERNAL_001.0
+        );
+        assert_eq!(
+            AppError::Database(sqlx::Error::RowNotFound).code(),
+            codes::DATABASE_001.0
+        );
+        assert_eq!(
+            AppError::DatabaseError("test".to_string()).code(),
+            codes::DATABASE_002.0
+        );
+
         // Custom errors
-        assert_eq!(AppError::InvalidTransactionAmount("test".to_string()).code(), codes::TRANSACTION_001.0);
-        assert_eq!(AppError::AmountBelowMinimum("test".to_string()).code(), codes::TRANSACTION_002.0);
-        assert_eq!(AppError::InvalidStellarAddress("test".to_string()).code(), codes::TRANSACTION_003.0);
-        assert_eq!(AppError::TransactionAlreadyProcessed("test".to_string()).code(), codes::TRANSACTION_004.0);
-        assert_eq!(AppError::InvalidStatusTransition("test".to_string()).code(), codes::TRANSACTION_005.0);
-        assert_eq!(AppError::InvalidWebhookSignature.code(), codes::WEBHOOK_001.0);
-        assert_eq!(AppError::MalformedWebhookPayload("test".to_string()).code(), codes::WEBHOOK_002.0);
-        assert_eq!(AppError::InvalidSettlementAmount("test".to_string()).code(), codes::SETTLEMENT_001.0);
-        assert_eq!(AppError::SettlementAlreadyExists("test".to_string()).code(), codes::SETTLEMENT_002.0);
+        assert_eq!(
+            AppError::InvalidTransactionAmount("test".to_string()).code(),
+            codes::TRANSACTION_001.0
+        );
+        assert_eq!(
+            AppError::AmountBelowMinimum("test".to_string()).code(),
+            codes::TRANSACTION_002.0
+        );
+        assert_eq!(
+            AppError::InvalidStellarAddress("test".to_string()).code(),
+            codes::TRANSACTION_003.0
+        );
+        assert_eq!(
+            AppError::TransactionAlreadyProcessed("test".to_string()).code(),
+            codes::TRANSACTION_004.0
+        );
+        assert_eq!(
+            AppError::InvalidStatusTransition("test".to_string()).code(),
+            codes::TRANSACTION_005.0
+        );
+        assert_eq!(
+            AppError::InvalidWebhookSignature.code(),
+            codes::WEBHOOK_001.0
+        );
+        assert_eq!(
+            AppError::MalformedWebhookPayload("test".to_string()).code(),
+            codes::WEBHOOK_002.0
+        );
+        assert_eq!(
+            AppError::InvalidSettlementAmount("test".to_string()).code(),
+            codes::SETTLEMENT_001.0
+        );
+        assert_eq!(
+            AppError::SettlementAlreadyExists("test".to_string()).code(),
+            codes::SETTLEMENT_002.0
+        );
         assert_eq!(AppError::RateLimitExceeded.code(), codes::RATE_LIMIT_001.0);
-        assert_eq!(AppError::AuthenticationFailed("test".to_string()).code(), codes::AUTH_001.0);
-        assert_eq!(AppError::InsufficientPermissions("test".to_string()).code(), codes::AUTH_002.0);
+        assert_eq!(
+            AppError::AuthenticationFailed("test".to_string()).code(),
+            codes::AUTH_001.0
+        );
+        assert_eq!(
+            AppError::InsufficientPermissions("test".to_string()).code(),
+            codes::AUTH_002.0
+        );
     }
-    
+
     #[test]
     fn test_error_catalog_size() {
         let catalog = get_all_error_codes();
         // Verify we have all expected error codes
-        assert!(catalog.len() >= 19, "Error catalog should have at least 19 codes");
+        assert!(
+            catalog.len() >= 19,
+            "Error catalog should have at least 19 codes"
+        );
     }
 }

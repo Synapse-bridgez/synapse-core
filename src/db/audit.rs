@@ -1,7 +1,7 @@
+use chrono::{DateTime, Utc};
+use serde_json::{json, Value as JsonValue};
 use sqlx::{Postgres, Transaction as SqlxTransaction};
 use uuid::Uuid;
-use serde_json::{json, Value as JsonValue};
-use chrono::{DateTime, Utc};
 
 /// Entity type constants for audit logs
 pub const ENTITY_TRANSACTION: &str = "transaction";
@@ -54,7 +54,7 @@ impl AuditLog {
             r#"
             INSERT INTO audit_logs (entity_id, entity_type, action, old_val, new_val, actor)
             VALUES ($1, $2, $3, $4, $5, $6)
-            "#
+            "#,
         )
         .bind(entity_id)
         .bind(entity_type)
