@@ -1,16 +1,34 @@
+pub mod admin;
+pub mod dlq;
 pub mod export;
 pub mod graphql;
+pub mod search;
 pub mod settlements;
-pub mod webhook;
-pub mod dlq;
-pub mod admin;
 pub mod v1;
 pub mod v2;
+pub mod webhook;
+pub mod ws;
 
-use crate::AppState;
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use crate::ApiState;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HealthStatus {
+    pub status: String,
+    pub version: String,
+    pub db: String,
+    pub db_pool: DbPoolStats,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DbPoolStats {
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
+    pub usage_percent: f32,
+}
 
 #[utoipa::path(
     get,
@@ -65,17 +83,17 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
 
 /// Readiness probe endpoint for Kubernetes
 /// Returns 200 when ready to accept traffic, 503 when draining or not ready
-pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    if state.readiness.is_ready() {
+pub async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
+    if state.app_state.readiness.is_ready() {
         let response = ReadinessResponse {
             status: "ready".to_string(),
-            draining: state.readiness.is_draining(),
+            draining: state.app_state.readiness.is_draining(),
         };
         (StatusCode::OK, Json(response))
     } else {
         let response = ReadinessResponse {
             status: "not_ready".to_string(),
-            draining: state.readiness.is_draining(),
+            draining: state.app_state.readiness.is_draining(),
         };
         (StatusCode::SERVICE_UNAVAILABLE, Json(response))
     }
@@ -95,6 +113,6 @@ pub async fn error_catalog() -> impl IntoResponse {
         errors,
         version: "1.0.0".to_string(),
     };
-    
+
     (StatusCode::OK, Json(catalog))
 }

@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use bigdecimal::BigDecimal;
+use serde::Deserialize;
 use std::fmt;
 
 pub const STELLAR_ACCOUNT_LEN: usize = 56;
@@ -245,6 +245,7 @@ mod tests {
     #[test]
     fn strict_payload_rejects_unknown_fields() {
         #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
         struct Payload {
             id: String,
         }

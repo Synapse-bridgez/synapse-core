@@ -1,7 +1,6 @@
 use axum::{
-    extract::Request,
     extract::State,
-    http::StatusCode,
+    http::{Request, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -27,10 +26,10 @@ pub async fn metrics_handler(
     Ok("# Metrics placeholder\n".to_string())
 }
 
-pub async fn metrics_auth_middleware(
+pub async fn metrics_auth_middleware<B>(
     State(_config): State<crate::config::Config>,
-    request: Request,
-    next: Next,
+    request: Request<B>,
+    next: Next<B>,
 ) -> Result<Response, StatusCode> {
     // Simple auth check - in production, implement proper authentication
     Ok(next.run(request).await)

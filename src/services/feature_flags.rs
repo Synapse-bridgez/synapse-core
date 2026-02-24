@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct FeatureFlagService {
@@ -20,12 +20,11 @@ impl FeatureFlagService {
     }
 
     pub async fn is_enabled(&self, flag_name: &str) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query_scalar::<_, bool>(
-            "SELECT enabled FROM feature_flags WHERE name = $1",
-        )
-        .bind(flag_name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let result =
+            sqlx::query_scalar::<_, bool>("SELECT enabled FROM feature_flags WHERE name = $1")
+                .bind(flag_name)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(result.unwrap_or(false))
     }

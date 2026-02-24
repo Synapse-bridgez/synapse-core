@@ -434,8 +434,8 @@ impl BackupService {
             .join(&metadata.filename)
             .with_extension("meta");
 
-        let json = serde_json::to_string_pretty(metadata)
-            .context("Failed to serialize metadata")?;
+        let json =
+            serde_json::to_string_pretty(metadata).context("Failed to serialize metadata")?;
 
         fs::write(&meta_path, json)
             .await

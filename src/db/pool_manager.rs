@@ -1,4 +1,4 @@
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -10,16 +10,14 @@ pub struct PoolManager {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct FailoverState {
     primary_healthy: bool,
     replica_healthy: bool,
 }
 
 impl PoolManager {
-    pub async fn new(
-        primary_url: &str,
-        replica_url: Option<&str>,
-    ) -> Result<Self, sqlx::Error> {
+    pub async fn new(primary_url: &str, replica_url: Option<&str>) -> Result<Self, sqlx::Error> {
         let primary = PgPoolOptions::new()
             .max_connections(10)
             .connect(primary_url)
@@ -56,13 +54,13 @@ impl PoolManager {
 
     pub async fn get_read_pool(&self) -> &PgPool {
         let state = self.failover_state.read().await;
-        
+
         if let Some(replica) = &self.replica {
             if state.replica_healthy {
                 return replica;
             }
         }
-        
+
         &self.primary
     }
 

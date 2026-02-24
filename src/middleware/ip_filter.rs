@@ -136,10 +136,10 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{HeaderValue, Request};
-    use tower::Layer as TowerLayer;
     use ipnet::IpNet;
-    use tower::ServiceExt;
     use tower::service_fn;
+    use tower::Layer as TowerLayer;
+    use tower::ServiceExt;
     use tracing::Subscriber;
     use tracing_subscriber::layer::{Context as LayerContext, Layer as TracingLayer};
     use tracing_subscriber::prelude::*;
@@ -160,10 +160,7 @@ mod tests {
     #[test]
     fn xff_returns_none_when_depth_exceeds_chain() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.10"),
-        );
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.10"));
 
         let ip = extract_from_x_forwarded_for(&headers, 1);
         assert_eq!(ip, None);
@@ -171,12 +168,14 @@ mod tests {
 
     #[test]
     fn cidr_allowlist_matches_ip() {
-        let allowed = AllowedIps::Cidrs(vec![
-            "203.0.113.0/24".parse::<IpNet>().expect("valid cidr"),
-        ]);
+        let allowed =
+            AllowedIps::Cidrs(vec!["203.0.113.0/24".parse::<IpNet>().expect("valid cidr")]);
 
         assert!(is_allowed(Some(IpAddr::from([203, 0, 113, 10])), &allowed));
-        assert!(!is_allowed(Some(IpAddr::from([198, 51, 100, 10])), &allowed));
+        assert!(!is_allowed(
+            Some(IpAddr::from([198, 51, 100, 10])),
+            &allowed
+        ));
     }
 
     #[tokio::test]
@@ -259,10 +258,8 @@ mod tests {
             .uri("/callback/transaction")
             .body(Body::empty())
             .expect("request");
-        req.extensions_mut().insert(ConnectInfo(SocketAddr::from((
-            [203, 0, 113, 44],
-            8080,
-        ))));
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 44], 8080))));
 
         let res = service.oneshot(req).await.expect("response");
         assert_eq!(res.status(), StatusCode::OK);
@@ -320,11 +317,10 @@ mod tests {
 
             let mut visitor = MessageVisitor::default();
             event.record(&mut visitor);
-            let message = visitor.message.unwrap_or_else(|| event.metadata().name().to_string());
-            self.events
-                .lock()
-                .expect("poisoned mutex")
-                .push(message);
+            let message = visitor
+                .message
+                .unwrap_or_else(|| event.metadata().name().to_string());
+            self.events.lock().expect("poisoned mutex").push(message);
         }
     }
 

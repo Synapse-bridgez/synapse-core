@@ -1,15 +1,10 @@
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
-};
 use serde_json::json;
-use tower::ServiceExt;
 
 #[tokio::test]
 async fn test_callback_transaction_success() {
     // This test validates the callback endpoint logic
     // In a real environment, you would set up a test database
-    
+
     let valid_stellar_account = format!("G{}", "A".repeat(55));
     let payload = json!({
         "id": "anchor-tx-123",
@@ -25,16 +20,16 @@ async fn test_callback_transaction_success() {
     assert!(payload["amount_in"].is_string());
     assert!(payload["stellar_account"].is_string());
     assert!(payload["asset_code"].is_string());
-    
+
     // Validate amount is positive
     let amount: f64 = payload["amount_in"].as_str().unwrap().parse().unwrap();
     assert!(amount > 0.0);
-    
+
     // Validate Stellar account length
     let stellar_account = payload["stellar_account"].as_str().unwrap();
     assert_eq!(stellar_account.len(), 56);
     assert!(stellar_account.starts_with('G'));
-    
+
     // Validate asset code length
     let asset_code = payload["asset_code"].as_str().unwrap();
     assert!(!asset_code.is_empty());
@@ -65,7 +60,11 @@ async fn test_callback_validation_invalid_stellar_account() {
     });
 
     let stellar_account = payload["stellar_account"].as_str().unwrap();
-    assert_ne!(stellar_account.len(), 56, "Stellar account length should be invalid");
+    assert_ne!(
+        stellar_account.len(),
+        56,
+        "Stellar account length should be invalid"
+    );
 }
 
 #[tokio::test]

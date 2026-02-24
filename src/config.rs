@@ -1,8 +1,8 @@
+use crate::secrets::SecretsManager;
 use anyhow::Result;
 use dotenvy::dotenv;
-use std::env;
 use ipnet::IpNet;
-use crate::secrets::SecretsManager;
+use std::env;
 
 #[derive(Debug, Clone)]
 pub enum AllowedIps {
@@ -41,9 +41,8 @@ impl Config {
         let allowed_ips =
             parse_allowed_ips(&env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()))?;
 
-        let log_format = parse_log_format(
-            &env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()),
-        )?;
+        let log_format =
+            parse_log_format(&env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()))?;
 
         let use_vault = env::var("VAULT_ROLE_ID").is_ok() && env::var("VAULT_SECRET_ID").is_ok();
 
@@ -72,8 +71,9 @@ impl Config {
             database_url,
             database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
-            anchor_webhook_secret: anchor_webhook_secret,
-            redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            anchor_webhook_secret,
+            redis_url: env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
             default_rate_limit: env::var("DEFAULT_RATE_LIMIT")
                 .unwrap_or_else(|_| "100".to_string())
                 .parse()?,
@@ -115,10 +115,4 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
         "json" => Ok(LogFormat::Json),
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
     }
-}
-
-#[derive(Clone, Debug)]
-pub enum AllowedIps {
-    Any,
-    Cidrs(Vec<ipnet::IpNet>),
 }

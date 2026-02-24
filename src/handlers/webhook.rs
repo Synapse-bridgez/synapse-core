@@ -1,19 +1,24 @@
-use crate::ApiState;
+use crate::db::models::Transaction as TxModel;
 use crate::db::{models::Transaction, queries};
 use crate::error::AppError;
+use crate::utils::cursor as cursor_util;
 use crate::validation::{
-    AMOUNT_INPUT_MAX_LEN, ANCHOR_TRANSACTION_ID_MAX_LEN, CALLBACK_STATUS_MAX_LEN,
-    CALLBACK_TYPE_MAX_LEN, sanitize_string, validate_asset_code, validate_max_len,
-    validate_positive_amount, validate_stellar_address,
+    sanitize_string, validate_asset_code, validate_max_len, validate_positive_amount,
+    validate_stellar_address, AMOUNT_INPUT_MAX_LEN, ANCHOR_TRANSACTION_ID_MAX_LEN,
+    CALLBACK_STATUS_MAX_LEN, CALLBACK_TYPE_MAX_LEN,
 };
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use crate::{ApiState, AppState};
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use crate::db::queries;
-use crate::db::models::Transaction;
-use crate::error::AppError;
-use utoipa::ToSchema;
+use sqlx::types::BigDecimal;
 use std::str::FromStr;
+use utoipa::ToSchema;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct CallbackPayload {
@@ -30,7 +35,8 @@ pub struct CallbackPayload {
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct WebhookPayload {
-use sqlx::types::BigDecimal;
+    pub id: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +131,9 @@ pub async fn transaction_callback(
         payload.anchor_transaction_id,
         payload.callback_type,
         payload.callback_status,
+        None, // memo
+        None, // memo_type
+        None, // metadata
     );
 
     let inserted = queries::insert_transaction(&state.db, &tx).await?;
@@ -267,6 +276,8 @@ mod tests {
         payload.callback_status = Some("a".repeat(21));
         assert!(validate_webhook_payload(payload).is_err());
     }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WebhookResponse {
     pub success: bool,
@@ -319,7 +330,8 @@ pub async fn callback(
         payload.metadata,
     );
 
-    let inserted = queries::insert_transaction(&state.app_state.db, &tx).await
+    let inserted = queries::insert_transaction(&state.app_state.db, &tx)
+        .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
     Ok((StatusCode::CREATED, Json(inserted)))
@@ -350,13 +362,8 @@ pub async fn handle_webhook(
     (StatusCode::OK, Json(response))
 }
 
-/// Callback endpoint for transactions (placeholder)
-pub async fn callback(State(_state): State<ApiState>) -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
-}
-
 /// Get a specific transaction
-/// 
+///
 /// Returns details for a specific transaction by ID
 #[utoipa::path(
     get,
@@ -375,7 +382,8 @@ pub async fn get_transaction(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let transaction = queries::get_transaction(&state.app_state.db, id).await
+    let transaction = queries::get_transaction(&state.app_state.db, id)
+        .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
             _ => AppError::DatabaseError(e.to_string()),
@@ -434,7 +442,9 @@ pub async fn list_transactions(
     }
 
     // next cursor is the last item in the returned rows
-    let next_cursor = rows.last().map(|r: &TxModel| cursor_util::encode(r.created_at, r.id));
+    let next_cursor = rows
+        .last()
+        .map(|r: &TxModel| cursor_util::encode(r.created_at, r.id));
 
     let resp = serde_json::json!({
         "data": rows,
@@ -477,7 +487,9 @@ pub async fn list_transactions_api(
         rows.truncate(limit as usize);
     }
 
-    let next_cursor = rows.last().map(|r: &TxModel| cursor_util::encode(r.created_at, r.id));
+    let next_cursor = rows
+        .last()
+        .map(|r: &TxModel| cursor_util::encode(r.created_at, r.id));
 
     let resp = serde_json::json!({
         "data": rows,

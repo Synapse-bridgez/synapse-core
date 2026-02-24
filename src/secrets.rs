@@ -17,7 +17,8 @@ impl SecretsManager {
             env::var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_string());
         let role_id = env::var("VAULT_ROLE_ID").context("VAULT_ROLE_ID is required")?;
         let secret_id = env::var("VAULT_SECRET_ID").context("VAULT_SECRET_ID is required")?;
-        let auth_mount = env::var("VAULT_AUTH_MOUNT").unwrap_or_else(|_| "auth/approle".to_string());
+        let auth_mount =
+            env::var("VAULT_AUTH_MOUNT").unwrap_or_else(|_| "auth/approle".to_string());
         let kv_mount = env::var("VAULT_KV_MOUNT").unwrap_or_else(|_| "secret".to_string());
 
         let mut client = VaultClient::new(
@@ -28,7 +29,7 @@ impl SecretsManager {
         )
         .context("failed to create Vault client")?;
 
-        let auth = approle::login(&mut client, &auth_mount, &role_id, &secret_id)
+        let auth = approle::login(&client, &auth_mount, &role_id, &secret_id)
             .await
             .context("failed to authenticate to Vault with AppRole")?;
         client.set_token(&auth.client_token);

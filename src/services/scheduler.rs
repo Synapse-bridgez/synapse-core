@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use std::collections::HashMap;
@@ -5,13 +6,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
-use async_trait::async_trait;
 
 /// Represents a scheduled job that can be executed at specific intervals
 #[async_trait]
 pub trait Job: Send + Sync {
     /// Unique name of the job
-    fn name(&self) -> &str;    
+    fn name(&self) -> &str;
 
     /// Cron expression defining when the job should run
     fn schedule(&self) -> &str;
@@ -27,6 +27,12 @@ pub struct JobScheduler {
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
+impl Default for JobScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JobScheduler {
     /// Create a new job scheduler instance
     pub fn new() -> Self {
@@ -39,9 +45,12 @@ impl JobScheduler {
     }
 
     /// Register a new job with the scheduler
-    pub async fn register_job(&self, job: Box<dyn Job>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn register_job(
+        &self,
+        job: Box<dyn Job>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let name = job.name().to_string();
-        
+
         // Validate the cron expression
         Schedule::from_str(job.schedule())
             .map_err(|e| format!("Invalid cron expression '{}': {}", job.schedule(), e))?;
@@ -61,7 +70,7 @@ impl JobScheduler {
             let name_clone = name.clone();
             let shutdown_rx = self.shutdown_tx.subscribe();
             let active_handles_clone = Arc::clone(&active_handles);
-            
+
             let handle = tokio::spawn(Self::run_job_loop(
                 name_clone,
                 job_clone,
@@ -69,7 +78,7 @@ impl JobScheduler {
                 shutdown_rx,
                 active_handles_clone,
             ));
-            
+
             active_handles.lock().await.insert(name.clone(), handle);
         }
 
@@ -80,10 +89,10 @@ impl JobScheduler {
     /// Stop the scheduler and all running jobs gracefully
     pub async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Sync>> {
         info!("Stopping job scheduler...");
-        
+
         // Signal all jobs to shut down
         let _ = self.shutdown_tx.send(());
-        
+
         // Wait for all active handles to finish
         let handles: Vec<_> = {
             let mut active_handles = self.active_handles.lock().await;
@@ -110,7 +119,7 @@ impl JobScheduler {
         for (name, job) in jobs.iter() {
             // Parse the schedule to get the next run time
             let next_run = Self::get_next_run_time(job.schedule());
-            
+
             status.insert(
                 name.clone(),
                 JobStatus {
@@ -147,10 +156,12 @@ impl JobScheduler {
             // Calculate next run time
             let now = Utc::now();
             let next_run = schedule.after(&now).next();
-            
+
             let next_run_time = match next_run {
                 Some(next_time) => {
-                    let duration = (next_time - now).to_std().unwrap_or_else(|_| std::time::Duration::from_secs(1));
+                    let duration = (next_time - now)
+                        .to_std()
+                        .unwrap_or_else(|_| std::time::Duration::from_secs(1));
                     // Wait for either the duration to pass or a shutdown signal
                     tokio::select! {
                         _ = tokio::time::sleep(duration) => {
@@ -174,10 +185,19 @@ impl JobScheduler {
             // Execute the job
             match job.execute().await {
                 Ok(()) => {
-                    info!("Job '{}' executed successfully at {}", name, next_run_time.format("%Y-%m-%d %H:%M:%S"));
+                    info!(
+                        "Job '{}' executed successfully at {}",
+                        name,
+                        next_run_time.format("%Y-%m-%d %H:%M:%S")
+                    );
                 }
                 Err(e) => {
-                    error!("Job '{}' failed at {}: {}", name, next_run_time.format("%Y-%m-%d %H:%M:%S"), e);
+                    error!(
+                        "Job '{}' failed at {}: {}",
+                        name,
+                        next_run_time.format("%Y-%m-%d %H:%M:%S"),
+                        e
+                    );
                 }
             }
         }
@@ -207,7 +227,6 @@ pub struct JobStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, Duration};
 
     #[derive(Clone)]
     struct TestJob {
@@ -243,10 +262,10 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_basic() {
         let scheduler = JobScheduler::new();
-        
+
         let test_job = TestJob::new("test_job", "*/1 * * * * *"); // Every second
         scheduler.register_job(Box::new(test_job)).await.unwrap();
-        
+
         assert_eq!(scheduler.jobs.lock().await.len(), 1);
     }
 }

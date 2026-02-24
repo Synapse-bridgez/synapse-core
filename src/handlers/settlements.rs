@@ -1,20 +1,14 @@
+use crate::ApiState;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::IntoParams;
 use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SettlementListResponse {
-    pub settlements: Vec<crate::schemas::SettlementSchema>,
-    pub total: i64,
-}
-
-use crate::ApiState;
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, IntoParams)]
 pub struct Pagination {
     #[serde(default)]
     pub page: Option<u32>,
@@ -53,6 +47,19 @@ pub async fn list_settlements(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/settlements/{id}",
+    params(
+        ("id" = String, Path, description = "Settlement ID")
+    ),
+    responses(
+        (status = 200, description = "Settlement found", body = crate::db::models::Settlement),
+        (status = 404, description = "Settlement not found"),
+        (status = 501, description = "Not implemented")
+    ),
+    tag = "Settlements"
+)]
 pub async fn get_settlement(
     State(_state): State<ApiState>,
     Path(_id): Path<String>,
