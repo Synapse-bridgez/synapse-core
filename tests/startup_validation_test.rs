@@ -1,7 +1,7 @@
 use sqlx::{migrate::Migrator, ConnectOptions, PgPool};
 use std::path::Path;
 use synapse_core::config::{AllowedIps, Config, LogFormat};
-use synapse_core::startup::{validate_environment, ValidationReport};
+use synapse_core::startup::validate_environment;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
