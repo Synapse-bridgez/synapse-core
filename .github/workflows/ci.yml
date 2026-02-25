@@ -122,9 +122,11 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
       
       - name: Build release
-        run: cargo build --release --all-features
+        run: cargo build --release --all-features --locked
 
   
   coverage:
