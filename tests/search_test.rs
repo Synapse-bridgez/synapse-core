@@ -175,7 +175,7 @@ async fn test_search_by_status() {
 
     // Search for completed transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("status", "completed")])
         .send()
         .await
@@ -202,7 +202,7 @@ async fn test_search_by_asset_code() {
 
     // Search for USD transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("asset_code", "USD")])
         .send()
         .await
@@ -232,7 +232,7 @@ async fn test_search_by_date_range() {
     let to = now.to_rfc3339();
 
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("from", &from), ("to", &to)])
         .send()
         .await
@@ -254,7 +254,7 @@ async fn test_search_pagination() {
 
     // First page with limit 2
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "2")])
         .send()
         .await
@@ -270,7 +270,7 @@ async fn test_search_pagination() {
 
     // Second page using cursor
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "2"), ("cursor", cursor)])
         .send()
         .await
@@ -310,7 +310,7 @@ async fn test_search_empty_results() {
 
     // Search for non-existent asset code
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("asset_code", "XYZ")])
         .send()
         .await
@@ -333,7 +333,7 @@ async fn test_search_invalid_parameters() {
 
     // Invalid date format
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("from", "invalid-date")])
         .send()
         .await
@@ -345,7 +345,7 @@ async fn test_search_invalid_parameters() {
 
     // Invalid cursor
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("cursor", "invalid-cursor")])
         .send()
         .await
@@ -357,7 +357,7 @@ async fn test_search_invalid_parameters() {
 
     // Invalid min_amount
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("min_amount", "not-a-number")])
         .send()
         .await
@@ -377,7 +377,7 @@ async fn test_search_combined_filters() {
 
     // Search for completed USD transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("status", "completed"), ("asset_code", "USD")])
         .send()
         .await
@@ -404,7 +404,7 @@ async fn test_search_by_stellar_account() {
 
     // Search for specific stellar account
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("stellar_account", "GABC1111111111")])
         .send()
         .await
@@ -426,7 +426,7 @@ async fn test_search_with_amount_range() {
 
     // Search for transactions between 100 and 500
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("min_amount", "100"), ("max_amount", "500")])
         .send()
         .await
@@ -440,7 +440,7 @@ async fn test_search_with_amount_range() {
 
     for tx in response["results"].as_array().unwrap() {
         let amount: f64 = tx["amount"].as_str().unwrap().parse().unwrap();
-        assert!(amount >= 100.0 && amount <= 500.0);
+        assert!((100.0..=500.0).contains(&amount));
     }
 }
 
@@ -453,7 +453,7 @@ async fn test_search_limit_boundaries() {
 
     // Test with limit 1
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "1")])
         .send()
         .await
@@ -466,7 +466,7 @@ async fn test_search_limit_boundaries() {
 
     // Test with limit exceeding max (should cap at 100)
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "200")])
         .send()
         .await
@@ -487,7 +487,7 @@ async fn test_search_no_next_cursor_on_last_page() {
 
     // Request all results with high limit
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "100")])
         .send()
         .await
@@ -509,7 +509,7 @@ async fn test_search_ordering() {
 
     // Get all transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "100")])
         .send()
         .await
