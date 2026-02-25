@@ -214,10 +214,12 @@ mod tests {
 
         let mut large_object = serde_json::Map::new();
         for i in 0..1000 {
-            large_object.insert(format!("field_{}", i), json!(format!("value_{}", i)));
             large_object.insert(
-                format!("account_{}", i),
-                json!(format!("secret_account_{}", i)),
+                format!("entry_{}", i),
+                json!({
+                    "field": format!("value_{}", i),
+                    "account": format!("secret_account_{}", i),
+                }),
             );
         }
         let input = Value::Object(large_object);
@@ -231,7 +233,10 @@ mod tests {
             "Sanitization took too long: {:?}",
             duration
         );
-        assert!(sanitized["account_0"].as_str().unwrap().contains("****"));
-        assert_eq!(sanitized["field_0"], "value_0");
+        assert!(sanitized["entry_0"]["account"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
+        assert_eq!(sanitized["entry_0"]["field"], "value_0");
     }
 }
