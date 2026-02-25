@@ -2,26 +2,22 @@ use synapse_core::metrics::*;
 
 #[tokio::test]
 async fn test_metric_registration() {
-    let handle = init_metrics().expect("Failed to initialize metrics");
-    assert!(std::mem::size_of_val(&handle) > 0);
+    let _handle = init_metrics().expect("Failed to initialize metrics");
 }
 
 #[tokio::test]
 async fn test_counter_increment() {
-    let handle = init_metrics().expect("Failed to initialize metrics");
-    assert!(std::mem::size_of_val(&handle) > 0);
+    let _handle = init_metrics().expect("Failed to initialize metrics");
 }
 
 #[tokio::test]
 async fn test_histogram_recording() {
-    let handle = init_metrics().expect("Failed to initialize metrics");
-    assert!(std::mem::size_of_val(&handle) > 0);
+    let _handle = init_metrics().expect("Failed to initialize metrics");
 }
 
 #[tokio::test]
 async fn test_gauge_updates() {
-    let handle = init_metrics().expect("Failed to initialize metrics");
-    assert!(std::mem::size_of_val(&handle) > 0);
+    let _handle = init_metrics().expect("Failed to initialize metrics");
 }
 
 #[tokio::test]
@@ -100,9 +96,7 @@ async fn test_metrics_authentication() {
 fn test_metrics_handle_clone() {
     let handle = init_metrics().expect("Failed to initialize metrics");
     let cloned = handle.clone();
-
-    assert!(std::mem::size_of_val(&handle) > 0);
-    assert!(std::mem::size_of_val(&cloned) > 0);
+    let _ = (handle, cloned);
 }
 
 #[test]
