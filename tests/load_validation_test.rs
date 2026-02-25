@@ -343,10 +343,22 @@ impl ValidationResult {
     }
 }
 
-/// Calculate percentile from sorted data
+/// Calculate percentile from sorted data using linear interpolation
 fn percentile(sorted_data: &[f64], p: f64) -> f64 {
-    let index = (p / 100.0 * (sorted_data.len() - 1) as f64).round() as usize;
-    sorted_data[index.min(sorted_data.len() - 1)]
+    if sorted_data.is_empty() {
+        return 0.0;
+    }
+    if sorted_data.len() == 1 {
+        return sorted_data[0];
+    }
+
+    let n = sorted_data.len() as f64;
+    let rank = p / 100.0 * (n - 1.0);
+    let lower = rank.floor() as usize;
+    let upper = (lower + 1).min(sorted_data.len() - 1);
+    let weight = rank.fract();
+
+    sorted_data[lower] * (1.0 - weight) + sorted_data[upper] * weight
 }
 
 #[cfg(test)]
@@ -356,12 +368,22 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn create_test_k6_output(metrics: Vec<(&str, f64)>) -> NamedTempFile {
+        create_test_k6_output_with_time(metrics, 1000, 100)
+    }
+
+    fn create_test_k6_output_with_time(
+        metrics: Vec<(&str, f64)>,
+        time_interval_ms: i64,
+        total_duration_ms: i64,
+    ) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
+        let num_metrics = metrics.len() as i64;
+        let interval = total_duration_ms / num_metrics.max(1);
 
         for (i, (metric_name, value)) in metrics.iter().enumerate() {
             let json = format!(
                 r#"{{"type":"Point","data":{{"time":"{}","value":{},"tags":{{}}}},"metric":"{}"}}"#,
-                1000000 + i * 1000,
+                time_interval_ms + (i as i64) * interval,
                 value,
                 metric_name
             );
@@ -376,11 +398,13 @@ mod tests {
     fn test_p95_latency_under_threshold() {
         // Create test data with latencies under threshold
         let mut metrics = vec![];
+        // Use smaller time intervals to get realistic throughput (100 requests in ~10 seconds = 10 req/s)
         for i in 0..100 {
             metrics.push(("http_req_duration", (i as f64) * 4.0)); // 0-396ms
+            metrics.push(("http_reqs", 1.0)); // Add http_reqs for throughput calculation
         }
 
-        let file = create_test_k6_output(metrics);
+        let file = create_test_k6_output_with_time(metrics, 10000, 100); // 10 seconds, 100 requests
         let load_metrics = LoadTestMetrics::from_k6_json(file.path()).unwrap();
 
         let thresholds = PerformanceThresholds::sustained_load();
@@ -416,9 +440,11 @@ mod tests {
         let mut metrics = vec![];
         for i in 0..100 {
             metrics.push(("http_req_failed", if i < 3 { 1.0 } else { 0.0 })); // 3% error rate
+            metrics.push(("http_reqs", 1.0)); // Add http_reqs for throughput calculation
+            metrics.push(("http_req_duration", 100.0)); // Add duration for valid request
         }
 
-        let file = create_test_k6_output(metrics);
+        let file = create_test_k6_output_with_time(metrics, 10000, 100); // 10 seconds, 100 requests
         let load_metrics = LoadTestMetrics::from_k6_json(file.path()).unwrap();
 
         let thresholds = PerformanceThresholds::sustained_load();
@@ -453,12 +479,12 @@ mod tests {
         // Create test data with sufficient throughput
         let mut metrics = vec![];
         // Simulate 100 requests over 5 seconds = 20 req/s
-        for i in 0..100 {
+        for _ in 0..100 {
             metrics.push(("http_reqs", 1.0));
             metrics.push(("http_req_duration", 100.0));
         }
 
-        let file = create_test_k6_output(metrics);
+        let file = create_test_k6_output_with_time(metrics, 5000, 5000); // 5 seconds duration
         let load_metrics = LoadTestMetrics::from_k6_json(file.path()).unwrap();
 
         let thresholds = PerformanceThresholds::sustained_load();
@@ -524,9 +550,10 @@ mod tests {
     fn test_percentile_calculation() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
 
-        assert_eq!(percentile(&data, 50.0), 5.0);
-        assert_eq!(percentile(&data, 95.0), 10.0);
-        assert_eq!(percentile(&data, 99.0), 10.0);
+        // Using linear interpolation (more accurate)
+        assert_eq!(percentile(&data, 50.0), 5.5);
+        assert!((percentile(&data, 95.0) - 9.55).abs() < 0.01);
+        assert!((percentile(&data, 99.0) - 9.91).abs() < 0.01);
     }
 
     #[test]
