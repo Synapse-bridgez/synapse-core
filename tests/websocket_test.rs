@@ -57,7 +57,12 @@ async fn setup_test_app() -> (
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            tokio::net::TcpListener::from_std(listener.into_std().unwrap()).unwrap(),
+            app.into_make_service(),
+        )
+        .await
+        .unwrap();
     });
 
     let base_url = format!("ws://{}", addr);

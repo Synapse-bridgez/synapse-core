@@ -1,4 +1,4 @@
-use sqlx::{migrate::Migrator, PgPool};
+use sqlx::{migrate::Migrator, ConnectOptions, PgPool};
 use std::path::Path;
 use synapse_core::config::{AllowedIps, Config, LogFormat};
 use synapse_core::startup::{validate_environment, ValidationReport};
@@ -207,7 +207,7 @@ async fn test_validation_empty_database_url() {
     let (pool, _container) = setup_test_database().await;
 
     // Create config with empty database URL
-    let mut config = create_test_config(
+    let config = create_test_config(
         String::new(),
         "redis://127.0.0.1:6379".to_string(),
         "https://horizon-testnet.stellar.org".to_string(),

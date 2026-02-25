@@ -1,5 +1,5 @@
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     http::{Request, StatusCode},
     middleware,
     response::IntoResponse,
@@ -158,9 +158,7 @@ async fn test_request_logging_query_params() {
     assert!(response.headers().contains_key("x-request-id"));
 
     // Verify the request was processed successfully with query params
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
     assert_eq!(body_str, "query handled");
 }
@@ -187,9 +185,7 @@ async fn test_request_logging_errors() {
     // Verify request ID is still present even on error
     assert!(response.headers().contains_key("x-request-id"));
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
     assert_eq!(body_str, "error occurred");
 }
@@ -424,7 +420,7 @@ async fn test_request_logging_multiple_requests() {
     // Send multiple requests and verify each gets unique request ID
     let mut request_ids = Vec::new();
 
-    for i in 0..5 {
+    for _ in 0..5 {
         let response = app
             .clone()
             .oneshot(
