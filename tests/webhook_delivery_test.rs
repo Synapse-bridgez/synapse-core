@@ -4,7 +4,6 @@ use reqwest::StatusCode;
 use sha2::Sha256;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -170,26 +169,18 @@ async fn test_webhook_delivery_timeout() {
 #[tokio::test]
 async fn test_webhook_delivery_tracking() {
     let mut server = Server::new_async().await;
-    let counter = Arc::new(AtomicUsize::new(0));
-    // mock will increment counter on each call
-    let c = counter.clone();
     let _m = server
         .mock("POST", "/track")
         .with_status(500)
-        .match_body(move |_| {
-            c.fetch_add(1, Ordering::SeqCst);
-            true
-        })
-        .expect_at_least(1)
+        .expect(3)
         .create();
 
     let url = format!("{}/track", server.url());
     let d = TestDispatcher::new("s", Duration::from_secs(2), 2);
 
     let res = d.send(&url, "{}").await.expect("send");
-    // since mock responds 500 and max_retries=2, attempts should be >=1
-    assert!(res.attempts >= 1);
-    assert_eq!(counter.load(Ordering::SeqCst), res.attempts);
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.attempts, 3);
 }
 
 #[tokio::test]
