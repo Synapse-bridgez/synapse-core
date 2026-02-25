@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
 use reqwest::StatusCode;
-use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
+use std::str::FromStr;
 use synapse_core::db::pool_manager::PoolManager;
 use synapse_core::services::feature_flags::FeatureFlagService;
 use synapse_core::{create_app, AppState};
@@ -29,7 +29,8 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
-    let pool_manager = PoolManager::new(pool.clone(), None);
+    let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
+    let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
 
     let app_state = AppState {
         db: pool.clone(),
@@ -37,10 +38,11 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         horizon_client: synapse_core::stellar::HorizonClient::new(
             "https://horizon-testnet.stellar.org".to_string(),
         ),
-        feature_flags: FeatureFlagService::new(false),
+        feature_flags: FeatureFlagService::new(pool.clone()),
         redis_url: "redis://localhost:6379".to_string(),
         start_time: std::time::Instant::now(),
         readiness: synapse_core::ReadinessState::new(),
+        tx_broadcast,
     };
     let app = create_app(app_state);
 
@@ -48,7 +50,11 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
     });
 
     let base_url = format!("http://{}", addr);
@@ -60,101 +66,101 @@ async fn seed_test_data(pool: &PgPool) {
     let now = Utc::now();
 
     // Transaction 1: USD, pending, recent
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GABC1111111111",
-        BigDecimal::from(100),
-        "USD",
-        "pending",
-        now - Duration::hours(1),
-        now - Duration::hours(1),
     )
+    .bind(Uuid::new_v4())
+    .bind("GABC1111111111")
+    .bind(BigDecimal::from_str("100").unwrap())
+    .bind("USD")
+    .bind("pending")
+    .bind(now - Duration::hours(1))
+    .bind(now - Duration::hours(1))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 2: USD, completed, older
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GDEF2222222222",
-        BigDecimal::from(250),
-        "USD",
-        "completed",
-        now - Duration::days(2),
-        now - Duration::days(2),
     )
+    .bind(Uuid::new_v4())
+    .bind("GDEF2222222222")
+    .bind(BigDecimal::from_str("250").unwrap())
+    .bind("USD")
+    .bind("completed")
+    .bind(now - Duration::days(2))
+    .bind(now - Duration::days(2))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 3: EUR, completed, recent
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GHIJ3333333333",
-        BigDecimal::from(500),
-        "EUR",
-        "completed",
-        now - Duration::hours(2),
-        now - Duration::hours(2),
     )
+    .bind(Uuid::new_v4())
+    .bind("GHIJ3333333333")
+    .bind(BigDecimal::from_str("500").unwrap())
+    .bind("EUR")
+    .bind("completed")
+    .bind(now - Duration::hours(2))
+    .bind(now - Duration::hours(2))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 4: USD, failed, older
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GKLM4444444444",
-        BigDecimal::from(75),
-        "USD",
-        "failed",
-        now - Duration::days(5),
-        now - Duration::days(5),
     )
+    .bind(Uuid::new_v4())
+    .bind("GKLM4444444444")
+    .bind(BigDecimal::from_str("75").unwrap())
+    .bind("USD")
+    .bind("failed")
+    .bind(now - Duration::days(5))
+    .bind(now - Duration::days(5))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 5: USDC, completed, mid-range
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GNOP5555555555",
-        BigDecimal::from(1000),
-        "USDC",
-        "completed",
-        now - Duration::days(1),
-        now - Duration::days(1),
     )
+    .bind(Uuid::new_v4())
+    .bind("GNOP5555555555")
+    .bind(BigDecimal::from_str("1000").unwrap())
+    .bind("USDC")
+    .bind("completed")
+    .bind(now - Duration::days(1))
+    .bind(now - Duration::days(1))
     .execute(pool)
     .await
     .unwrap();
