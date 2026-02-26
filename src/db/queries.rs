@@ -384,3 +384,44 @@ pub async fn search_transactions(
 
     Ok((total, transactions))
 }
+
+// --- Audit Log Queries ---
+
+/// Retrieve audit logs for a specific entity
+pub async fn get_audit_logs(
+    pool: &PgPool,
+    entity_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<(Uuid, Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, String, DateTime<Utc>)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+        FROM audit_logs
+        WHERE entity_id = $1
+        ORDER BY timestamp DESC
+        LIMIT $2 OFFSET $3
+        "#
+    )
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get("entity_id"),
+                row.get("entity_type"),
+                row.get("action"),
+                row.get("old_val"),
+                row.get("new_val"),
+                row.get("actor"),
+                row.get("timestamp"),
+            )
+        })
+        .collect())
+}

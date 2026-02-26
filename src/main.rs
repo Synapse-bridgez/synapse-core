@@ -243,6 +243,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     let _admin_routes: Router = Router::new()
         .nest("/admin/queue", handlers::admin::admin_routes())
+        .nest("/admin", handlers::admin::webhook_replay_routes())
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
         .with_state(api_state.app_state.db.clone());
 
