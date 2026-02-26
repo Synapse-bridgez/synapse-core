@@ -31,7 +31,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-clippy-v2-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -93,7 +93,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-v2-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Run tests
         env:
@@ -121,7 +121,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-v2-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Build release
         run: cargo build --release --all-features
@@ -172,7 +172,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-coverage-v2-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Install cargo-llvm-cov
         run: cargo llvm-cov --version || cargo install cargo-llvm-cov --locked

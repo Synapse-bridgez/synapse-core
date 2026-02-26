@@ -20,8 +20,10 @@ use crate::graphql::schema::AppSchema;
 use crate::handlers::ws::TransactionStatusUpdate;
 pub use crate::readiness::ReadinessState;
 use crate::services::feature_flags::FeatureFlagService;
+use crate::services::query_cache::QueryCache;
 use crate::stellar::HorizonClient;
 use axum::{
+    middleware as axum_middleware,
     routing::{get, post},
     Router,
 };
@@ -37,6 +39,7 @@ pub struct AppState {
     pub start_time: std::time::Instant,
     pub readiness: ReadinessState,
     pub tx_broadcast: broadcast::Sender<TransactionStatusUpdate>,
+    pub query_cache: QueryCache,
 }
 
 #[derive(Clone)]
@@ -52,6 +55,21 @@ pub fn create_app(app_state: AppState) -> Router {
         graphql_schema,
     };
 
+    // Callback routes with validation middleware
+    let callback_routes = Router::new()
+        .route("/callback", post(handlers::webhook::callback))
+        .route("/callback/transaction", post(handlers::webhook::callback))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::validate::validate_callback,
+        ));
+
+    // Webhook route with validation middleware
+    let webhook_routes = Router::new()
+        .route("/webhook", post(handlers::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::validate::validate_webhook,
+        ));
+
     Router::new()
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
@@ -61,10 +79,14 @@ pub fn create_app(app_state: AppState) -> Router {
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
         )
-        .route("/callback", post(handlers::webhook::callback))
-        .route("/callback/transaction", post(handlers::webhook::callback)) // Backward compatibility
+        .merge(callback_routes)
+        .merge(webhook_routes)
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
+        .route("/stats/status", get(handlers::stats::status_counts))
+        .route("/stats/daily", get(handlers::stats::daily_totals))
+        .route("/stats/assets", get(handlers::stats::asset_stats))
+        .route("/cache/metrics", get(handlers::stats::cache_metrics))
         .with_state(api_state)
 }

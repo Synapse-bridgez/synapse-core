@@ -7,11 +7,16 @@ pub async fn create_month_partition(
     year: i32,
     month: u32,
 ) -> Result<(), sqlx::Error> {
-    let month = if month == 0 { 1 } else { month };
+    if month == 0 || month > 12 {
+        return Err(sqlx::Error::Protocol(
+            "Invalid month: must be between 1 and 12".into(),
+        ));
+    }
+
     let start = NaiveDate::from_ymd_opt(year, month, 1)
-        .unwrap()
+        .ok_or_else(|| sqlx::Error::Protocol("Invalid date".into()))?
         .and_hms_opt(0, 0, 0)
-        .unwrap();
+        .ok_or_else(|| sqlx::Error::Protocol("Invalid time".into()))?;
     // compute next month
     let (ny, nm) = if month == 12 {
         (year + 1, 1)
@@ -19,16 +24,16 @@ pub async fn create_month_partition(
         (year, month + 1)
     };
     let end = NaiveDate::from_ymd_opt(ny, nm, 1)
-        .unwrap()
+        .ok_or_else(|| sqlx::Error::Protocol("Invalid date".into()))?
         .and_hms_opt(0, 0, 0)
-        .unwrap();
+        .ok_or_else(|| sqlx::Error::Protocol("Invalid time".into()))?;
 
     let part_name = format!("transactions_y{}m{:02}", year, month);
     let start_ts = Utc.from_utc_datetime(&start).to_rfc3339();
     let end_ts = Utc.from_utc_datetime(&end).to_rfc3339();
 
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\" PARTITION OF transactions FOR VALUES FROM (TIMESTAMP WITH TIME ZONE '{}') TO (TIMESTAMP WITH TIME ZONE '{}')",
+        "CREATE TABLE IF NOT EXISTS \"{}\" PARTITION OF transactions FOR VALUES FROM ('{}') TO ('{}')",
         part_name, start_ts, end_ts
     );
 
