@@ -49,6 +49,7 @@ async fn setup_test_app() -> (
         start_time: std::time::Instant::now(),
         readiness: synapse_core::ReadinessState::new(),
         tx_broadcast: tx_broadcast.clone(),
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
     };
 
     let app = create_app(app_state);
