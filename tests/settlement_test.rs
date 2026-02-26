@@ -24,6 +24,32 @@ async fn setup_test_db() -> (PgPool, impl std::any::Any) {
     .await
     .unwrap();
     migrator.run(&pool).await.unwrap();
+    sqlx::query(
+        r#"
+        DO $$
+        DECLARE
+            partition_date DATE;
+            partition_name TEXT;
+            start_date TEXT;
+            end_date TEXT;
+        BEGIN
+            partition_date := DATE_TRUNC('month', NOW());
+            partition_name := 'transactions_y' || TO_CHAR(partition_date, 'YYYY') || 'm' || TO_CHAR(partition_date, 'MM');
+            start_date := TO_CHAR(partition_date, 'YYYY-MM-DD');
+            end_date := TO_CHAR(partition_date + INTERVAL '1 month', 'YYYY-MM-DD');
+
+            IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = partition_name) THEN
+                EXECUTE format(
+                    'CREATE TABLE %I PARTITION OF transactions FOR VALUES FROM (%L) TO (%L)',
+                    partition_name, start_date, end_date
+                );
+            END IF;
+        END $$;
+        "#
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     (pool, container)
 }
@@ -142,8 +168,14 @@ async fn test_settle_multiple_transactions() {
     let settlement = service.settle_asset("EUR").await.unwrap().unwrap();
     assert_eq!(settlement.tx_count, 2);
     assert_eq!(settlement.total_amount, BigDecimal::from(100));
-    assert_eq!(settlement.period_start, earlier);
-    assert_eq!(settlement.period_end, now);
+    assert_eq!(
+        settlement.period_start.timestamp_micros(),
+        earlier.timestamp_micros()
+    );
+    assert_eq!(
+        settlement.period_end.timestamp_micros(),
+        now.timestamp_micros()
+    );
 
     // ensure both transactions were updated
     let u1: Transaction = sqlx::query_as("SELECT * FROM transactions WHERE id=$1")
