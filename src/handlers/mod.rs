@@ -2,6 +2,7 @@ pub mod admin;
 pub mod dlq;
 pub mod export;
 pub mod graphql;
+pub mod profiling;
 pub mod search;
 pub mod settlements;
 pub mod stats;

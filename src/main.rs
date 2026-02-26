@@ -264,6 +264,17 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     //     .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
     //     .with_state(api_state.app_state.db.clone());
 
+    let _admin_profiling_routes: Router = Router::new()
+        .route("/start", post(handlers::profiling::start_profiling))
+        .route("/status", get(handlers::profiling::get_profiling_status))
+        .route("/stop", post(handlers::profiling::stop_profiling))
+        .route(
+            "/flamegraph/:session_id",
+            get(handlers::profiling::get_flamegraph),
+        )
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+        .with_state(api_state.app_state.clone());
+
     let _search_routes: Router = Router::new()
         .route(
             "/transactions/search",

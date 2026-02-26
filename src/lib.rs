@@ -1,5 +1,3 @@
-#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
-pub mod tenant;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -14,11 +12,14 @@ pub mod secrets;
 pub mod services;
 pub mod startup;
 pub mod stellar;
+#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
+pub mod tenant;
 pub mod utils;
 pub mod validation;
 
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
+use crate::handlers::profiling::ProfilingManager;
 use crate::handlers::ws::TransactionStatusUpdate;
 pub use crate::readiness::ReadinessState;
 use crate::services::feature_flags::FeatureFlagService;
