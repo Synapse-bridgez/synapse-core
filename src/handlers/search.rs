@@ -5,11 +5,11 @@ pub async fn search_transactions(State(_pool_manager): State<PoolManager>) -> im
     StatusCode::NOT_IMPLEMENTED
 }
 
-
 /// Wrapper for use with ApiState in create_app
 pub async fn search_transactions_wrapper(
     State(api_state): State<crate::ApiState>,
-    query: Query<SearchParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    search_transactions(State(api_state.app_state.pool_manager), query).await
+    // simply call the underlying stub and pack it in Ok
+    let _ = search_transactions(State(api_state.app_state.pool_manager)).await;
+    Ok(StatusCode::NOT_IMPLEMENTED)
 }

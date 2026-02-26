@@ -210,6 +210,12 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("Tenant not found")]
+    TenantNotFound,
+
+    #[error("Invalid API key or tenant header")]
+    InvalidApiKey,
+
     // Custom errors with specific codes
     #[error("Invalid transaction amount: {0}")]
     InvalidTransactionAmount(String),
@@ -258,6 +264,8 @@ impl AppError {
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::TenantNotFound => StatusCode::NOT_FOUND,
+            AppError::InvalidApiKey => StatusCode::UNAUTHORIZED,
             AppError::InvalidTransactionAmount(_) => StatusCode::BAD_REQUEST,
             AppError::AmountBelowMinimum(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidStellarAddress(_) => StatusCode::BAD_REQUEST,
@@ -284,6 +292,8 @@ impl AppError {
             AppError::Internal(_) => codes::INTERNAL_001.0,
             AppError::BadRequest(_) => codes::BAD_REQUEST_001.0,
             AppError::Unauthorized(_) => codes::UNAUTHORIZED_001.0,
+            AppError::TenantNotFound => codes::NOT_FOUND_001.0,
+            AppError::InvalidApiKey => codes::UNAUTHORIZED_001.0,
             AppError::InvalidTransactionAmount(_) => codes::TRANSACTION_001.0,
             AppError::AmountBelowMinimum(_) => codes::TRANSACTION_002.0,
             AppError::InvalidStellarAddress(_) => codes::TRANSACTION_003.0,

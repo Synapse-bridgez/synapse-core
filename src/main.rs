@@ -206,6 +206,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         start_time: std::time::Instant::now(),
         readiness: ReadinessState::new(),
         tx_broadcast,
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let graphql_schema = build_schema(app_state.clone());
