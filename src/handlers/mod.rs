@@ -89,6 +89,22 @@ pub struct ReadinessResponse {
     pub draining: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HealthStatus {
+    pub status: String,
+    pub version: String,
+    pub db: String,
+    pub db_pool: DbPoolStats,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DbPoolStats {
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
+    pub usage_percent: f32,
+}
+
 /// Error catalog endpoint
 /// Returns all available error codes and their descriptions
 pub async fn error_catalog() -> impl IntoResponse {
