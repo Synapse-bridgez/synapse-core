@@ -31,7 +31,7 @@ pub fn decode(cursor: &str) -> Result<(DateTime<Utc>, Uuid), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
+    use chrono::Utc;
 
     #[test]
     fn test_cursor_encode_decode_roundtrip() {
@@ -63,7 +63,7 @@ mod tests {
     fn test_cursor_decode_invalid_uuid() {
         // Valid timestamp, invalid UUID
         let data = "2023-01-01T00:00:00+00:00|invalid-uuid";
-        let cursor = base64::encode(data);
+        let cursor = general_purpose::STANDARD.encode(data);
         let result = decode(&cursor);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("uuid parse error"));
@@ -73,7 +73,7 @@ mod tests {
     fn test_cursor_decode_invalid_timestamp() {
         // Invalid timestamp, valid UUID
         let data = "invalid-timestamp|12345678-1234-1234-1234-123456789012";
-        let cursor = base64::encode(data);
+        let cursor = general_purpose::STANDARD.encode(data);
         let result = decode(&cursor);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("timestamp parse error"));
