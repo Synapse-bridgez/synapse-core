@@ -21,8 +21,10 @@ pub fn sanitize_json(value: &Value) -> Value {
 }
 
 fn is_sensitive_field(key: &str) -> bool {
-    matches!(
-        key.to_lowercase().as_str(),
+    let key_lower = key.to_lowercase();
+    // Exact matches
+    if matches!(
+        key_lower.as_str(),
         "stellar_account"
             | "account"
             | "password"
@@ -30,7 +32,20 @@ fn is_sensitive_field(key: &str) -> bool {
             | "token"
             | "api_key"
             | "authorization"
-    )
+    ) {
+        return true;
+    }
+
+    // Pattern matches for fields like "account_0", "user_password", etc.
+    // But not "accounts" or "tokens" (plurals)
+    key_lower.starts_with("account_")
+        || key_lower.starts_with("password_")
+        || key_lower.starts_with("secret_")
+        || key_lower.starts_with("token_")
+        || key_lower.ends_with("_account")
+        || key_lower.ends_with("_password")
+        || key_lower.ends_with("_secret")
+        || key_lower.ends_with("_token")
 }
 
 fn mask_value(value: &Value) -> Value {
