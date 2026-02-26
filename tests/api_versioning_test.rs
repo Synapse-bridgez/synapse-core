@@ -27,21 +27,18 @@ async fn test_api_versioning_headers() {
 
     let (tx, _rx) = tokio::sync::broadcast::channel(100);
 
-    // Start App
-    let app_state = AppState {
-        db: pool.clone(),
-        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
-            .await
-            .unwrap(),
-        horizon_client: synapse_core::stellar::HorizonClient::new(
-            "https://horizon-testnet.stellar.org".to_string(),
-        ),
-        feature_flags: synapse_core::services::feature_flags::FeatureFlagService::new(pool.clone()),
-        redis_url: "redis://localhost:6379".to_string(),
-        start_time: std::time::Instant::now(),
-        readiness: synapse_core::ReadinessState::new(),
-        tx_broadcast: tx,
-    };
+    let mut app_state = AppState::test_new(&database_url).await;
+    app_state.pool_manager = synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+        .await
+        .unwrap();
+    app_state.horizon_client = synapse_core::stellar::HorizonClient::new(
+        "https://horizon-testnet.stellar.org".to_string(),
+    );
+    app_state.feature_flags = synapse_core::services::feature_flags::FeatureFlagService::new(pool.clone());
+    app_state.redis_url = "redis://localhost:6379".to_string();
+    app_state.start_time = std::time::Instant::now();
+    app_state.readiness = synapse_core::ReadinessState::new();
+    app_state.tx_broadcast = tx;
     let app = create_app(app_state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));

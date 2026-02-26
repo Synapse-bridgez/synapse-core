@@ -4,13 +4,16 @@ use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
-use synapse_core::db::pool_manager::PoolManager;
 use synapse_core::services::feature_flags::FeatureFlagService;
 use synapse_core::{create_app, AppState};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use synapse_core::handlers::profiling::ProfilingManager;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use tokio::net::TcpListener;
 use uuid::Uuid;
+use axum::Server;
 
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
@@ -29,26 +32,34 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
-    let pool_manager = PoolManager::new(pool.clone(), None);
+    // pool_manager now takes &str urls and returns a future
+    let pool_manager = synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+        .await
+        .unwrap();
 
-    let app_state = AppState {
-        db: pool.clone(),
-        pool_manager,
-        horizon_client: synapse_core::stellar::HorizonClient::new(
-            "https://horizon-testnet.stellar.org".to_string(),
-        ),
-        feature_flags: FeatureFlagService::new(false),
-        redis_url: "redis://localhost:6379".to_string(),
-        start_time: std::time::Instant::now(),
-        readiness: synapse_core::ReadinessState::new(),
-    };
+    // build state via helper and override
+    let mut app_state = AppState::test_new(&database_url).await;
+    app_state.pool_manager = pool_manager;
+    app_state.horizon_client = synapse_core::stellar::HorizonClient::new(
+        "https://horizon-testnet.stellar.org".to_string(),
+    );
+    app_state.feature_flags = FeatureFlagService::new(pool.clone());
+    app_state.redis_url = "redis://localhost:6379".to_string();
+    app_state.start_time = std::time::Instant::now();
+    app_state.readiness = synapse_core::ReadinessState::new();
+
     let app = create_app(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // use Server.bind on listener's local addr
+        axum::Server::from_tcp(listener.into_std().unwrap())
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
     });
 
     let base_url = format!("http://{}", addr);

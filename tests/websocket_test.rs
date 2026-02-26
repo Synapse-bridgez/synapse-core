@@ -35,21 +35,21 @@ async fn setup_test_app() -> (
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
-    let pool_manager = PoolManager::new(pool.clone(), None);
+    let pool_manager = synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+        .await
+        .unwrap();
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
 
-    let app_state = AppState {
-        db: pool.clone(),
-        pool_manager,
-        horizon_client: synapse_core::stellar::HorizonClient::new(
-            "https://horizon-testnet.stellar.org".to_string(),
-        ),
-        feature_flags: FeatureFlagService::new(false),
-        redis_url: "redis://localhost:6379".to_string(),
-        start_time: std::time::Instant::now(),
-        readiness: synapse_core::ReadinessState::new(),
-        tx_broadcast: tx_broadcast.clone(),
-    };
+    let mut app_state = AppState::test_new(&database_url).await;
+    app_state.pool_manager = pool_manager;
+    app_state.horizon_client = synapse_core::stellar::HorizonClient::new(
+        "https://horizon-testnet.stellar.org".to_string(),
+    );
+    app_state.feature_flags = FeatureFlagService::new(pool.clone());
+    app_state.redis_url = "redis://localhost:6379".to_string();
+    app_state.start_time = std::time::Instant::now();
+    app_state.readiness = synapse_core::ReadinessState::new();
+    app_state.tx_broadcast = tx_broadcast.clone();
 
     let app = create_app(app_state);
 
