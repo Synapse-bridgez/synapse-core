@@ -421,6 +421,27 @@ pub async fn search_transactions(
     Ok((total, transactions))
 }
 
+// --- Audit Log Queries ---
+
+/// Retrieve audit logs for a specific entity
+pub async fn get_audit_logs(
+    pool: &PgPool,
+    entity_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<(Uuid, Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, String, DateTime<Utc>)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+        FROM audit_logs
+        WHERE entity_id = $1
+        ORDER BY timestamp DESC
+        LIMIT $2 OFFSET $3
+        "#
+    )
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
 // --- Aggregate Queries (Cacheable) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -484,53 +505,17 @@ pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal
 
     Ok(rows
         .into_iter()
-        .map(|row| DailyTotal {
-            date: row.get("date"),
-            total_amount: row.get("total_amount"),
-            tx_count: row.get("tx_count"),
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get("entity_id"),
+                row.get("entity_type"),
+                row.get("action"),
+                row.get("old_val"),
+                row.get("new_val"),
+                row.get("actor"),
+                row.get("timestamp"),
+            )
         })
         .collect())
-}
-
-pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT 
-            asset_code,
-            SUM(amount) as total_amount,
-            COUNT(*) as tx_count,
-            AVG(amount) as avg_amount
-        FROM transactions
-        WHERE status = 'completed'
-        GROUP BY asset_code
-        ORDER BY total_amount DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| AssetStats {
-            asset_code: row.get("asset_code"),
-            total_amount: row.get("total_amount"),
-            tx_count: row.get("tx_count"),
-            avg_amount: row.get("avg_amount"),
-        })
-        .collect())
-}
-
-pub async fn get_asset_total(pool: &PgPool, asset_code: &str) -> Result<BigDecimal> {
-    let row = sqlx::query(
-        r#"
-        SELECT COALESCE(SUM(amount), 0) as total
-        FROM transactions
-        WHERE asset_code = $1 AND status = 'completed'
-        "#,
-    )
-    .bind(asset_code)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(row.get("total"))
 }
