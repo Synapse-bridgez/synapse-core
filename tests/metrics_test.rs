@@ -27,27 +27,23 @@ async fn test_gauge_updates() {
 #[tokio::test]
 async fn test_prometheus_export_format() {
     use sqlx::postgres::PgPoolOptions;
-    
+
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
-    
+
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
         .await
         .expect("Failed to connect to test database");
-    
+
     let handle = init_metrics().expect("Failed to initialize metrics");
-    
-    let result = metrics_handler(
-        axum::extract::State(handle),
-        axum::extract::State(pool),
-    )
-    .await;
-    
+
+    let result = metrics_handler(axum::extract::State(handle), axum::extract::State(pool)).await;
+
     assert!(result.is_ok());
     let metrics_output = result.unwrap();
-    
+
     assert!(metrics_output.starts_with('#'));
     assert!(metrics_output.contains("Metrics"));
 }
@@ -61,7 +57,7 @@ async fn test_metrics_authentication() {
         response::Response,
     };
     use synapse_core::config::Config;
-    
+
     let config = Config {
         server_port: 3000,
         database_url: "postgres://test".to_string(),
@@ -77,23 +73,18 @@ async fn test_metrics_authentication() {
         backup_dir: "./backups".to_string(),
         backup_encryption_key: None,
     };
-    
+
     let request = Request::builder()
         .uri("/metrics")
         .body(Body::empty())
         .unwrap();
-    
+
     let next = Next::new(|_req: Request| async {
         Ok::<Response, StatusCode>(Response::new(Body::empty()))
     });
-    
-    let result = metrics_auth_middleware(
-        axum::extract::State(config),
-        request,
-        next,
-    )
-    .await;
-    
+
+    let result = metrics_auth_middleware(axum::extract::State(config), request, next).await;
+
     assert!(result.is_ok());
 }
 
@@ -101,7 +92,7 @@ async fn test_metrics_authentication() {
 fn test_metrics_handle_clone() {
     let handle = init_metrics().expect("Failed to initialize metrics");
     let cloned = handle.clone();
-    
+
     assert!(std::mem::size_of_val(&handle) > 0);
     assert!(std::mem::size_of_val(&cloned) > 0);
 }
@@ -109,24 +100,25 @@ fn test_metrics_handle_clone() {
 #[test]
 fn test_metrics_state_creation() {
     use sqlx::postgres::PgPoolOptions;
-    
+
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
-        
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
+        });
+
         let pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&database_url)
             .await
             .expect("Failed to connect to test database");
-        
+
         let handle = init_metrics().expect("Failed to initialize metrics");
-        
+
         let state = MetricsState {
             handle: handle.clone(),
             pool: pool.clone(),
         };
-        
+
         let cloned_state = state.clone();
         assert!(std::mem::size_of_val(&cloned_state) > 0);
     });
