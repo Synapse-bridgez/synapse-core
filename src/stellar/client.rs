@@ -42,8 +42,8 @@ pub struct Balance {
 /// HTTP client for interacting with the Stellar Horizon API
 #[derive(Clone)]
 pub struct HorizonClient {
-    client: Client,
-    base_url: String,
+    pub(crate) client: Client,
+    pub(crate) base_url: String,
     circuit_breaker: StateMachine<failure_policy::ConsecutiveFailures<backoff::EqualJittered>, ()>,
 }
 

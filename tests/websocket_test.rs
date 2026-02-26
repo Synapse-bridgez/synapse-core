@@ -55,9 +55,10 @@ async fn setup_test_app() -> (
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let std_listener = listener.into_std().unwrap();
 
     tokio::spawn(async move {
-        axum::Server::from_tcp(listener.into_std().unwrap())
+        axum::Server::from_tcp(std_listener)
             .unwrap()
             .serve(app.into_make_service())
             .await

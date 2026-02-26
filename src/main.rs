@@ -94,6 +94,12 @@ async fn main() -> anyhow::Result<()> {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
+            TxCommands::Reconcile {
+                account,
+                start,
+                end,
+                format,
+            } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
@@ -187,6 +193,16 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let _idempotency_service = IdempotencyService::new(&config.redis_url)?;
     tracing::info!("Redis idempotency service initialized");
 
+    // Initialize query cache
+    let query_cache = synapse_core::services::QueryCache::new(&config.redis_url)?;
+    tracing::info!("Query cache initialized");
+
+    // Warm cache on startup
+    let cache_config = synapse_core::services::CacheConfig::default();
+    if let Err(e) = query_cache.warm_cache(&pool, &cache_config).await {
+        tracing::warn!("Failed to warm cache on startup: {:?}", e);
+    }
+
     // Create broadcast channel for WebSocket notifications
     // Channel capacity of 100 - slow clients will miss old messages (backpressure handling)
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
@@ -206,6 +222,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         start_time: std::time::Instant::now(),
         readiness: ReadinessState::new(),
         tx_broadcast,
+        query_cache,
     };
 
     let graphql_schema = build_schema(app_state.clone());
