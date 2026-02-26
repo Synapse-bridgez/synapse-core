@@ -5,7 +5,6 @@ pub async fn search_transactions(State(_pool_manager): State<PoolManager>) -> im
     StatusCode::NOT_IMPLEMENTED
 }
 
-
 /// Wrapper for use with ApiState in create_app
 pub async fn search_transactions_wrapper(
     State(api_state): State<crate::ApiState>,

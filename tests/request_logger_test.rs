@@ -27,7 +27,9 @@ fn create_test_app() -> Router {
         .route("/test", post(test_handler))
         .route("/query", get(test_handler_with_query))
         .route("/error", get(test_handler_error))
-        .layer(middleware::from_fn(synapse_core::middleware::request_logger::request_logger_middleware))
+        .layer(middleware::from_fn(
+            synapse_core::middleware::request_logger::request_logger_middleware,
+        ))
 }
 
 #[tokio::test]
@@ -47,10 +49,10 @@ async fn test_request_id_generation() {
 
     // Verify request ID is present in response headers
     assert!(response.headers().contains_key("x-request-id"));
-    
+
     let request_id = response.headers().get("x-request-id").unwrap();
     let request_id_str = request_id.to_str().unwrap();
-    
+
     // Verify it's a valid UUID format
     assert_eq!(request_id_str.len(), 36); // UUID v4 format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
     assert_eq!(request_id_str.chars().filter(|&c| c == '-').count(), 4);
@@ -83,8 +85,18 @@ async fn test_request_id_uniqueness() {
         .await
         .unwrap();
 
-    let request_id1 = response1.headers().get("x-request-id").unwrap().to_str().unwrap();
-    let request_id2 = response2.headers().get("x-request-id").unwrap().to_str().unwrap();
+    let request_id1 = response1
+        .headers()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let request_id2 = response2
+        .headers()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
 
     // Verify each request gets a unique ID
     assert_ne!(request_id1, request_id2);
@@ -144,7 +156,7 @@ async fn test_request_logging_query_params() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().contains_key("x-request-id"));
-    
+
     // Verify the request was processed successfully with query params
     let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -171,10 +183,10 @@ async fn test_request_logging_errors() {
 
     // Verify error status is returned
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    
+
     // Verify request ID is still present even on error
     assert!(response.headers().contains_key("x-request-id"));
-    
+
     let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -426,7 +438,7 @@ async fn test_request_logging_multiple_requests() {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         let request_id = response
             .headers()
             .get("x-request-id")
@@ -434,11 +446,14 @@ async fn test_request_logging_multiple_requests() {
             .to_str()
             .unwrap()
             .to_string();
-        
+
         request_ids.push(request_id);
     }
 
     // Verify all request IDs are unique
-    let unique_count = request_ids.iter().collect::<std::collections::HashSet<_>>().len();
+    let unique_count = request_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     assert_eq!(unique_count, 5);
 }
