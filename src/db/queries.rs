@@ -1,11 +1,23 @@
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
 use uuid::Uuid;
+
+// --- Tenant Queries --------------------------------------------------------
+
+pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
+    let configs = sqlx::query_as::<_, TenantConfig>(
+        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(configs)
+}
 
 // --- Transaction Queries ---
 
