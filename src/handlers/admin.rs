@@ -2,11 +2,11 @@ use crate::middleware::quota::{Quota, QuotaManager, QuotaStatus, ResetSchedule, 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone)]
 pub struct AdminState {
     pub quota_manager: QuotaManager,
 }
@@ -91,4 +91,12 @@ pub async fn reset_quota(
         .await
         .map(|_| StatusCode::OK)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub fn admin_routes() -> axum::Router<AdminState> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/quota/:key", get(get_quota_status))
+        .route("/quota/:key", post(set_quota))
+        .route("/quota/:key/reset", post(reset_quota))
 }

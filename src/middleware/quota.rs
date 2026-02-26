@@ -1,6 +1,5 @@
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Tier {
@@ -43,6 +42,7 @@ impl ResetSchedule {
     }
 }
 
+#[derive(Clone)]
 pub struct QuotaManager {
     redis_client: Client,
 }

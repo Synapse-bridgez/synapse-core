@@ -51,7 +51,6 @@ governor = "0.6"
 redis = { version = "0.24", features = ["tokio-comp"] }
 jsonschema = "0.17"
 once_cell = "1.19"
-hyper = "0.14"
 ipnet = "2.9"
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "6", features = ["axum"] }
