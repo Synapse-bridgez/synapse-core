@@ -94,6 +94,12 @@ async fn main() -> anyhow::Result<()> {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
+            TxCommands::Reconcile {
+                account,
+                start,
+                end,
+                format,
+            } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
