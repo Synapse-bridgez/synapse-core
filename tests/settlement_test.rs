@@ -1,12 +1,12 @@
-use synapse_core::services::SettlementService;
+use bigdecimal::BigDecimal;
+use chrono::{Duration, Utc};
+use sqlx::{migrate::Migrator, PgPool};
+use std::path::Path;
 use synapse_core::db::models::Transaction;
 use synapse_core::error::AppError;
-use testcontainers_modules::postgres::Postgres;
+use synapse_core::services::SettlementService;
 use testcontainers::runners::AsyncRunner;
-use sqlx::{PgPool, migrate::Migrator};
-use std::path::Path;
-use chrono::{Utc, Duration};
-use bigdecimal::BigDecimal;
+use testcontainers_modules::postgres::Postgres;
 
 async fn setup_test_db() -> (PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
@@ -62,6 +62,7 @@ async fn insert_tx(pool: &PgPool, tx: &Transaction) -> Transaction {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_settle_single_asset() {
     let (pool, _container) = setup_test_db().await;
     let service = SettlementService::new(pool.clone());
@@ -96,6 +97,7 @@ async fn test_settle_single_asset() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_settle_multiple_transactions() {
     let (pool, _container) = setup_test_db().await;
     let service = SettlementService::new(pool.clone());
@@ -159,6 +161,7 @@ async fn test_settle_multiple_transactions() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_settle_no_unsettled_transactions() {
     let (pool, _container) = setup_test_db().await;
     let service = SettlementService::new(pool.clone());
@@ -168,18 +171,23 @@ async fn test_settle_no_unsettled_transactions() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_settle_error_handling() {
     let (pool, _container) = setup_test_db().await;
     let service = SettlementService::new(pool.clone());
 
     // cause a database error by dropping the table before the call
-    sqlx::query("DROP TABLE transactions").execute(&pool).await.unwrap();
+    sqlx::query("DROP TABLE transactions")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let err = service.settle_asset("USD").await;
     assert!(matches!(err, Err(AppError::DatabaseError(_))));
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_asset_grouping() {
     let (pool, _container) = setup_test_db().await;
     let service = SettlementService::new(pool.clone());

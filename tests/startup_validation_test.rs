@@ -1,9 +1,9 @@
-use synapse_core::startup::{validate_environment, ValidationReport};
-use synapse_core::config::{Config, AllowedIps, LogFormat};
-use testcontainers_modules::postgres::Postgres;
-use testcontainers::runners::AsyncRunner;
-use sqlx::{PgPool, migrate::Migrator};
+use sqlx::{migrate::Migrator, ConnectOptions, PgPool};
 use std::path::Path;
+use synapse_core::config::{AllowedIps, Config, LogFormat};
+use synapse_core::startup::validate_environment;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres;
 
 /// Helper function to create a test config with valid defaults
 fn create_test_config(database_url: String, redis_url: String, horizon_url: String) -> Config {
@@ -28,12 +28,18 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
 async fn setup_test_database() -> (PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
-    let database_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", host_port);
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        host_port
+    );
 
     let pool = PgPool::connect(&database_url).await.unwrap();
-    let migrator = Migrator::new(Path::join(Path::new(env!("CARGO_MANIFEST_DIR")), "migrations"))
-        .await
-        .unwrap();
+    let migrator = Migrator::new(Path::join(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        "migrations",
+    ))
+    .await
+    .unwrap();
     migrator.run(&pool).await.unwrap();
 
     (pool, container)
@@ -62,10 +68,10 @@ async fn test_validation_all_healthy() {
     assert!(report.environment, "Environment validation should pass");
     assert!(report.database, "Database validation should pass");
     assert!(report.horizon, "Horizon validation should pass");
-    
+
     // Note: Redis might fail if not running locally, which is expected in CI
     // In production tests, you'd use testcontainers for Redis too
-    
+
     report.print();
 }
 
@@ -80,7 +86,7 @@ async fn test_validation_database_unavailable() {
 
     // Create a pool that will fail to connect
     let pool_result = PgPool::connect(&invalid_database_url).await;
-    
+
     // If we can't even create the pool, that's expected
     if pool_result.is_err() {
         // This is the expected behavior - database is unavailable
@@ -94,11 +100,11 @@ async fn test_validation_database_unavailable() {
     assert!(!report.database, "Database validation should fail");
     assert!(!report.is_valid(), "Overall validation should fail");
     assert!(!report.errors.is_empty(), "Should have error messages");
-    
+
     // Check that error message mentions database
     let has_db_error = report.errors.iter().any(|e| e.contains("Database"));
     assert!(has_db_error, "Should have database error in report");
-    
+
     report.print();
 }
 
@@ -122,11 +128,11 @@ async fn test_validation_redis_unavailable() {
     assert!(report.database, "Database validation should pass");
     assert!(!report.redis, "Redis validation should fail");
     assert!(!report.is_valid(), "Overall validation should fail");
-    
+
     // Check that error message mentions Redis
     let has_redis_error = report.errors.iter().any(|e| e.contains("Redis"));
     assert!(has_redis_error, "Should have Redis error in report");
-    
+
     report.print();
 }
 
@@ -137,9 +143,10 @@ async fn test_validation_horizon_unavailable() {
     let database_url = pool.connect_options().to_url_lossy().to_string();
 
     let redis_url = "redis://127.0.0.1:6379".to_string();
-    
+
     // Use invalid Horizon URL
-    let invalid_horizon_url = "https://invalid-horizon-url-that-does-not-exist.stellar.org".to_string();
+    let invalid_horizon_url =
+        "https://invalid-horizon-url-that-does-not-exist.stellar.org".to_string();
 
     let config = create_test_config(database_url, redis_url, invalid_horizon_url);
 
@@ -151,11 +158,11 @@ async fn test_validation_horizon_unavailable() {
     assert!(report.database, "Database validation should pass");
     assert!(!report.horizon, "Horizon validation should fail");
     assert!(!report.is_valid(), "Overall validation should fail");
-    
+
     // Check that error message mentions Horizon
     let has_horizon_error = report.errors.iter().any(|e| e.contains("Horizon"));
     assert!(has_horizon_error, "Should have Horizon error in report");
-    
+
     report.print();
 }
 
@@ -177,16 +184,16 @@ async fn test_validation_report_generation() {
     // Test report structure
     assert!(!report.is_valid(), "Report should indicate failure");
     assert!(!report.errors.is_empty(), "Report should contain errors");
-    
+
     // Verify report contains expected fields
     assert!(report.environment, "Environment should be valid");
     assert!(report.database, "Database should be valid");
     assert!(!report.redis, "Redis should be invalid");
     assert!(report.horizon, "Horizon should be valid");
-    
+
     // Test print functionality (visual verification in test output)
     report.print();
-    
+
     // Verify error messages are descriptive
     for error in &report.errors {
         assert!(!error.is_empty(), "Error messages should not be empty");
@@ -200,7 +207,7 @@ async fn test_validation_empty_database_url() {
     let (pool, _container) = setup_test_database().await;
 
     // Create config with empty database URL
-    let mut config = create_test_config(
+    let config = create_test_config(
         String::new(),
         "redis://127.0.0.1:6379".to_string(),
         "https://horizon-testnet.stellar.org".to_string(),
@@ -210,12 +217,15 @@ async fn test_validation_empty_database_url() {
     let report = validate_environment(&config, &pool).await.unwrap();
 
     // Assertions
-    assert!(!report.environment, "Environment validation should fail with empty database URL");
+    assert!(
+        !report.environment,
+        "Environment validation should fail with empty database URL"
+    );
     assert!(!report.is_valid(), "Overall validation should fail");
-    
+
     let has_env_error = report.errors.iter().any(|e| e.contains("Environment"));
     assert!(has_env_error, "Should have environment error in report");
-    
+
     report.print();
 }
 
@@ -236,9 +246,12 @@ async fn test_validation_invalid_horizon_url_format() {
     let report = validate_environment(&config, &pool).await.unwrap();
 
     // Assertions
-    assert!(!report.environment, "Environment validation should fail with invalid URL format");
+    assert!(
+        !report.environment,
+        "Environment validation should fail with invalid URL format"
+    );
     assert!(!report.is_valid(), "Overall validation should fail");
-    
+
     report.print();
 }
 
@@ -263,12 +276,12 @@ async fn test_validation_multiple_failures() {
     assert!(!report.horizon, "Horizon validation should fail");
     assert!(!report.is_valid(), "Overall validation should fail");
     assert!(report.errors.len() >= 2, "Should have multiple errors");
-    
+
     // Verify both Redis and Horizon errors are present
     let has_redis_error = report.errors.iter().any(|e| e.contains("Redis"));
     let has_horizon_error = report.errors.iter().any(|e| e.contains("Horizon"));
     assert!(has_redis_error, "Should have Redis error");
     assert!(has_horizon_error, "Should have Horizon error");
-    
+
     report.print();
 }
