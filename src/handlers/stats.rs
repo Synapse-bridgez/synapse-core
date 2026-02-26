@@ -22,7 +22,11 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
     let config = CacheConfig::default();
 
     // Try cache first
-    if let Ok(Some(cached)) = state.app_state.query_cache.get::<Vec<StatusCount>>(&cache_key).await
+    if let Ok(Some(cached)) = state
+        .app_state
+        .query_cache
+        .get::<Vec<StatusCount>>(&cache_key)
+        .await
     {
         return (StatusCode::OK, Json(cached));
     }
@@ -61,7 +65,11 @@ pub async fn daily_totals(
     let config = CacheConfig::default();
 
     // Try cache first
-    if let Ok(Some(cached)) = state.app_state.query_cache.get::<Vec<DailyTotal>>(&cache_key).await
+    if let Ok(Some(cached)) = state
+        .app_state
+        .query_cache
+        .get::<Vec<DailyTotal>>(&cache_key)
+        .await
     {
         return (StatusCode::OK, Json(cached));
     }
@@ -97,7 +105,11 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
     let config = CacheConfig::default();
 
     // Try cache first
-    if let Ok(Some(cached)) = state.app_state.query_cache.get::<Vec<AssetStats>>(&cache_key).await
+    if let Ok(Some(cached)) = state
+        .app_state
+        .query_cache
+        .get::<Vec<AssetStats>>(&cache_key)
+        .await
     {
         return (StatusCode::OK, Json(cached));
     }

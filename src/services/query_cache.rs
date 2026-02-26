@@ -21,9 +21,9 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            status_counts_ttl: 300,    // 5 minutes
-            daily_totals_ttl: 3600,    // 1 hour
-            asset_stats_ttl: 600,      // 10 minutes
+            status_counts_ttl: 300, // 5 minutes
+            daily_totals_ttl: 3600, // 1 hour
+            asset_stats_ttl: 600,   // 10 minutes
         }
     }
 }
@@ -52,9 +52,13 @@ impl QueryCache {
         match value {
             Some(v) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                serde_json::from_str(&v)
-                    .map(Some)
-                    .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "deserialization failed", e.to_string())))
+                serde_json::from_str(&v).map(Some).map_err(|e| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::TypeError,
+                        "deserialization failed",
+                        e.to_string(),
+                    ))
+                })
             }
             None => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
@@ -70,16 +74,21 @@ impl QueryCache {
         ttl: Duration,
     ) -> Result<(), redis::RedisError> {
         let mut conn: MultiplexedConnection = self.get_connection().await?;
-        let serialized = serde_json::to_string(value)
-            .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization failed", e.to_string())))?;
-        
+        let serialized = serde_json::to_string(value).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "serialization failed",
+                e.to_string(),
+            ))
+        })?;
+
         conn.set_ex(key, serialized, ttl.as_secs()).await
     }
 
     pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
         let mut conn: MultiplexedConnection = self.get_connection().await?;
         let keys: Vec<String> = conn.keys(pattern).await?;
-        
+
         if !keys.is_empty() {
             conn.del::<_, ()>(keys).await?;
         }

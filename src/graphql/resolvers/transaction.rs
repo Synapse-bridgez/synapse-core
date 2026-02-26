@@ -72,14 +72,13 @@ pub struct TransactionMutation;
 impl TransactionMutation {
     async fn force_complete_transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
-        
+
         // Get asset_code before update for cache invalidation
-        let asset_code: String = sqlx::query_scalar(
-            "SELECT asset_code FROM transactions WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+        let asset_code: String =
+            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await?;
 
         let result = sqlx::query_as::<_, Transaction>(
             "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING *"

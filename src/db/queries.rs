@@ -61,10 +61,10 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .await?;
 
     db_tx.commit().await?;
-    
+
     // Invalidate cache after successful commit
     invalidate_transaction_caches(&result.asset_code).await;
-    
+
     Ok(result)
 }
 
@@ -191,7 +191,9 @@ async fn invalidate_transaction_caches(asset_code: &str) {
             let _ = cache.invalidate("query:status_counts").await;
             let _ = cache.invalidate("query:daily_totals:*").await;
             let _ = cache.invalidate("query:asset_stats").await;
-            let _ = cache.invalidate_exact(&format!("query:asset_total:{}", asset_code)).await;
+            let _ = cache
+                .invalidate_exact(&format!("query:asset_total:{}", asset_code))
+                .await;
         }
     }
 }
@@ -437,7 +439,7 @@ pub async fn get_status_counts(pool: &PgPool) -> Result<Vec<StatusCount>> {
         FROM transactions
         GROUP BY status
         ORDER BY status
-        "#
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -462,7 +464,7 @@ pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal
         WHERE created_at >= NOW() - INTERVAL '1 day' * $1
         GROUP BY DATE(created_at)
         ORDER BY DATE(created_at) DESC
-        "#
+        "#,
     )
     .bind(days)
     .fetch_all(pool)
@@ -490,7 +492,7 @@ pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
         WHERE status = 'completed'
         GROUP BY asset_code
         ORDER BY total_amount DESC
-        "#
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -512,7 +514,7 @@ pub async fn get_asset_total(pool: &PgPool, asset_code: &str) -> Result<BigDecim
         SELECT COALESCE(SUM(amount), 0) as total
         FROM transactions
         WHERE asset_code = $1 AND status = 'completed'
-        "#
+        "#,
     )
     .bind(asset_code)
     .fetch_one(pool)

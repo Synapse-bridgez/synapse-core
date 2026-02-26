@@ -73,12 +73,11 @@ pub enum BackupCommands {
 
 pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Result<()> {
     // Get asset_code before update for cache invalidation
-    let asset_code: Option<String> = sqlx::query_scalar(
-        "SELECT asset_code FROM transactions WHERE id = $1"
-    )
-    .bind(tx_id)
-    .fetch_optional(pool)
-    .await?;
+    let asset_code: Option<String> =
+        sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+            .bind(tx_id)
+            .fetch_optional(pool)
+            .await?;
 
     let result = sqlx::query(
         "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING id"
