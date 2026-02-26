@@ -1,6 +1,7 @@
 pub mod account_monitor;
 pub mod backup;
 pub mod feature_flags;
+pub mod lock_manager;
 pub mod processor;
 pub mod query_cache;
 pub mod reconciliation;

@@ -1,3 +1,5 @@
+#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
+pub mod tenant;
 pub mod config;
 pub mod db;
 pub mod error;
