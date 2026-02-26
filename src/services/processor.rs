@@ -49,11 +49,23 @@ pub async fn process_batch(pool: &PgPool, _horizon_client: &HorizonClient) -> an
 
     debug!("Processing {} pending transaction(s)", pending.len());
 
+    // Collect unique asset codes for cache invalidation
+    let mut asset_codes = std::collections::HashSet::new();
+    for transaction in &pending {
+        asset_codes.insert(transaction.asset_code.clone());
+    }
+
     // Process transactions here
     for _transaction in pending {
         // TODO: Implement transaction processing logic
     }
 
     tx.commit().await?;
+
+    // Invalidate cache for all affected assets
+    for asset_code in asset_codes {
+        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+    }
+
     Ok(())
 }

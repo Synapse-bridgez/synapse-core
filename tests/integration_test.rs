@@ -51,17 +51,23 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .await;
 
     let (tx, _rx) = tokio::sync::broadcast::channel(100);
+    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
-    // use test helper to populate remaining fields
-    let mut app_state = AppState::test_new(&database_url).await;
-    app_state.horizon_client = synapse_core::stellar::HorizonClient::new(
-        "https://horizon-testnet.stellar.org".to_string(),
-    );
-    app_state.redis_url = "redis://localhost:6379".to_string();
-    app_state.start_time = std::time::Instant::now();
-    app_state.readiness = synapse_core::ReadinessState::new();
-    app_state.tx_broadcast = tx;
-    // pool_manager and feature_flags already set by test_new
+    let app_state = AppState {
+        db: pool.clone(),
+        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+            .await
+            .unwrap(),
+        horizon_client: synapse_core::stellar::HorizonClient::new(
+            "https://horizon-testnet.stellar.org".to_string(),
+        ),
+        feature_flags: synapse_core::services::feature_flags::FeatureFlagService::new(pool.clone()),
+        redis_url: "redis://localhost:6379".to_string(),
+        start_time: std::time::Instant::now(),
+        readiness: synapse_core::ReadinessState::new(),
+        tx_broadcast: tx,
+        query_cache,
+    };
     let app = create_app(app_state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
@@ -82,7 +88,7 @@ async fn test_valid_deposit_flow() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GABC1234567890",
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "amount": "100.50",
         "asset_code": "USD",
         "callback_type": "deposit",
@@ -121,7 +127,7 @@ async fn test_callback_with_memo_and_metadata() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GDEF9876543210",
+        "stellar_account": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         "amount": "250.00",
         "asset_code": "USDC",
         "callback_type": "deposit",
@@ -175,7 +181,7 @@ async fn test_callback_with_hash_memo_type() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GHIJ5555555555",
+        "stellar_account": "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
         "amount": "500.00",
         "asset_code": "USD",
         "memo": "abc123def456",
@@ -202,7 +208,7 @@ async fn test_callback_with_invalid_memo_type() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GKLM7777777777",
+        "stellar_account": "GDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
         "amount": "100.00",
         "asset_code": "USD",
         "memo": "some memo",
@@ -226,7 +232,7 @@ async fn test_callback_with_metadata_only() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GNOP3333333333",
+        "stellar_account": "GEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
         "amount": "75.25",
         "asset_code": "EUR",
         "metadata": {
@@ -257,7 +263,7 @@ async fn test_invalid_signature_flow() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GABC1234567890",
+        "stellar_account": "GFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
         "amount": "100.50",
         "asset_code": "USD",
         "callback_type": "deposit",

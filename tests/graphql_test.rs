@@ -57,17 +57,21 @@ async fn test_graphql_queries() {
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();
+    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
-    let mut app_state = AppState::test_new(&database_url).await;
-    app_state.pool_manager = pool_manager;
-    app_state.horizon_client = synapse_core::stellar::HorizonClient::new(
-        "https://horizon-testnet.stellar.org".to_string(),
-    );
-    app_state.feature_flags = feature_flags;
-    app_state.redis_url = "redis://localhost:6379".to_string();
-    app_state.start_time = std::time::Instant::now();
-    app_state.tx_broadcast = tx_broadcast;
-    app_state.readiness = readiness;
+    let app_state = AppState {
+        db: pool.clone(),
+        pool_manager,
+        horizon_client: synapse_core::stellar::HorizonClient::new(
+            "https://horizon-testnet.stellar.org".to_string(),
+        ),
+        feature_flags,
+        redis_url: "redis://localhost:6379".to_string(),
+        start_time: std::time::Instant::now(),
+        tx_broadcast,
+        readiness,
+        query_cache,
+    };
     let app = create_app(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

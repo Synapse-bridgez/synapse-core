@@ -2,6 +2,8 @@ use bigdecimal::BigDecimal;
 use serde::Deserialize;
 use std::fmt;
 
+pub mod schemas;
+
 pub const STELLAR_ACCOUNT_LEN: usize = 56;
 pub const ASSET_CODE_MAX_LEN: usize = 12;
 pub const ANCHOR_TRANSACTION_ID_MAX_LEN: usize = 255;

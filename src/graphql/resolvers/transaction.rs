@@ -72,15 +72,25 @@ pub struct TransactionMutation;
 impl TransactionMutation {
     async fn force_complete_transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
-        // Mocking the update logic as it wasn't explicitly in queries.rs for a generic update
-        // but I can use sqlx directly or add a query.
-        sqlx::query_as::<_, Transaction>(
+
+        // Get asset_code before update for cache invalidation
+        let asset_code: String =
+            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await?;
+
+        let result = sqlx::query_as::<_, Transaction>(
             "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING *"
         )
         .bind(id)
         .fetch_one(&state.db)
-        .await
-        .map_err(|e| e.into())
+        .await?;
+
+        // Invalidate cache after update
+        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+
+        Ok(result)
     }
 
     async fn replay_dlq(&self, _ctx: &Context<'_>, id: Uuid) -> Result<bool> {

@@ -5,6 +5,7 @@ pub mod graphql;
 pub mod profiling;
 pub mod search;
 pub mod settlements;
+pub mod stats;
 pub mod v1;
 pub mod v2;
 pub mod webhook;
@@ -14,22 +15,6 @@ use crate::ApiState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthStatus {
-    pub status: String,
-    pub version: String,
-    pub db: String,
-    pub db_pool: DbPoolStats,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DbPoolStats {
-    pub active_connections: u32,
-    pub idle_connections: u32,
-    pub max_connections: u32,
-    pub usage_percent: f32,
-}
 
 #[utoipa::path(
     get,
@@ -104,6 +89,22 @@ pub async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
 pub struct ReadinessResponse {
     pub status: String,
     pub draining: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HealthStatus {
+    pub status: String,
+    pub version: String,
+    pub db: String,
+    pub db_pool: DbPoolStats,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DbPoolStats {
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
+    pub usage_percent: f32,
 }
 
 /// Error catalog endpoint
