@@ -20,6 +20,7 @@ use crate::graphql::schema::AppSchema;
 use crate::handlers::ws::TransactionStatusUpdate;
 pub use crate::readiness::ReadinessState;
 use crate::services::feature_flags::FeatureFlagService;
+use crate::services::query_cache::QueryCache;
 use crate::stellar::HorizonClient;
 use axum::{
     routing::{get, post},
@@ -37,6 +38,7 @@ pub struct AppState {
     pub start_time: std::time::Instant,
     pub readiness: ReadinessState,
     pub tx_broadcast: broadcast::Sender<TransactionStatusUpdate>,
+    pub query_cache: QueryCache,
 }
 
 #[derive(Clone)]
@@ -66,5 +68,9 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
+        .route("/stats/status", get(handlers::stats::status_counts))
+        .route("/stats/daily", get(handlers::stats::daily_totals))
+        .route("/stats/assets", get(handlers::stats::asset_stats))
+        .route("/cache/metrics", get(handlers::stats::cache_metrics))
         .with_state(api_state)
 }

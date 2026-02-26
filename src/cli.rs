@@ -72,6 +72,13 @@ pub enum BackupCommands {
 }
 
 pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Result<()> {
+    // Get asset_code before update for cache invalidation
+    let asset_code: Option<String> =
+        sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+            .bind(tx_id)
+            .fetch_optional(pool)
+            .await?;
+
     let result = sqlx::query(
         "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING id"
     )
@@ -81,6 +88,11 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
 
     match result {
         Some(_) => {
+            // Invalidate cache after update
+            if let Some(asset) = asset_code {
+                crate::db::queries::invalidate_caches_for_asset(&asset).await;
+            }
+
             tracing::info!("Transaction {} marked as completed", tx_id);
             println!("✓ Transaction {} marked as completed", tx_id);
             Ok(())

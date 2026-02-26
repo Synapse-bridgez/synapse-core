@@ -4,6 +4,7 @@ pub mod export;
 pub mod graphql;
 pub mod search;
 pub mod settlements;
+pub mod stats;
 pub mod v1;
 pub mod v2;
 pub mod webhook;
