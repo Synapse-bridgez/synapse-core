@@ -1,8 +1,7 @@
 use assert_cmd::Command;
-use predicates::prelude::*;
 
 fn synapse_cmd() -> Command {
-    let mut cmd = Command::cargo_bin("synapse-core").unwrap();
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("synapse-core");
     // Provide a full set of "dummy" variables so the binary doesn't crash on startup
     cmd.envs([
         (
