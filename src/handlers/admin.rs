@@ -2,10 +2,15 @@ use crate::middleware::quota::{Quota, QuotaManager, QuotaStatus, ResetSchedule, 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    routing::get,
     Json,
+    Router,
 };
 use serde::{Deserialize, Serialize};
+
+pub fn admin_routes() -> Router<sqlx::PgPool> {
+    Router::new().route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
+}
 
 pub struct AdminState {
     pub quota_manager: QuotaManager,
