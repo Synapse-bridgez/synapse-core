@@ -12,7 +12,7 @@ use testcontainers_modules::postgres::Postgres;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-async fn setup_test_app() -> (String, impl std::any::Any) {
+async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let database_url = format!(
@@ -51,7 +51,7 @@ async fn setup_test_app() -> (String, impl std::any::Any) {
     let std_listener = listener.into_std().unwrap();
 
     tokio::spawn(async move {
-        axum::Server::from_tcp(listener.into_std().unwrap())
+        axum::Server::from_tcp(std_listener)
             .unwrap()
             .serve(app.into_make_service())
             .await

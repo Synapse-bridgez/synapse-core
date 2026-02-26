@@ -58,7 +58,7 @@ async fn setup_test_app() -> (
     let std_listener = listener.into_std().unwrap();
 
     tokio::spawn(async move {
-        axum::Server::from_tcp(listener.into_std().unwrap())
+        axum::Server::from_tcp(std_listener)
             .unwrap()
             .serve(app.into_make_service())
             .await
