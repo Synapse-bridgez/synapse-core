@@ -19,6 +19,7 @@ pub mod validation;
 
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
+use crate::handlers::profiling::ProfilingManager;
 use crate::handlers::ws::TransactionStatusUpdate;
 pub use crate::readiness::ReadinessState;
 use crate::services::feature_flags::FeatureFlagService;
@@ -43,6 +44,8 @@ pub struct AppState {
     pub tenant_configs: std::sync::Arc<
         tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, tenant::TenantConfig>>,
     >,
+    // profiling manager for performance profiling
+    pub profiling_manager: std::sync::Arc<ProfilingManager>,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
         let (tx_broadcast, _) = tokio::sync::broadcast::channel(16);
         let tenant_configs =
             std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let profiling_manager = std::sync::Arc::new(ProfilingManager::new());
 
         AppState {
             db,
@@ -73,6 +77,7 @@ impl AppState {
             readiness,
             tx_broadcast,
             tenant_configs,
+            profiling_manager,
         }
     }
 

@@ -209,6 +209,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        profiling_manager: std::sync::Arc::new(handlers::profiling::ProfilingManager::new()),
     };
 
     let graphql_schema = build_schema(app_state.clone());
@@ -248,6 +249,17 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         .nest("/admin/queue", handlers::admin::admin_routes())
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
         .with_state(api_state.app_state.db.clone());
+
+    let _admin_profiling_routes: Router = Router::new()
+        .route("/start", post(handlers::profiling::start_profiling))
+        .route("/status", get(handlers::profiling::get_profiling_status))
+        .route("/stop", post(handlers::profiling::stop_profiling))
+        .route(
+            "/flamegraph/:session_id",
+            get(handlers::profiling::get_flamegraph),
+        )
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+        .with_state(api_state.app_state.clone());
 
     let _search_routes: Router = Router::new()
         .route(
