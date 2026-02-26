@@ -168,8 +168,14 @@ async fn test_settle_multiple_transactions() {
     let settlement = service.settle_asset("EUR").await.unwrap().unwrap();
     assert_eq!(settlement.tx_count, 2);
     assert_eq!(settlement.total_amount, BigDecimal::from(100));
-    assert_eq!(settlement.period_start, earlier);
-    assert_eq!(settlement.period_end, now);
+    assert_eq!(
+        settlement.period_start.timestamp_micros(),
+        earlier.timestamp_micros()
+    );
+    assert_eq!(
+        settlement.period_end.timestamp_micros(),
+        now.timestamp_micros()
+    );
 
     // ensure both transactions were updated
     let u1: Transaction = sqlx::query_as("SELECT * FROM transactions WHERE id=$1")
