@@ -1,12 +1,12 @@
-use synapse_core::services::SettlementService;
+use bigdecimal::BigDecimal;
+use chrono::{Duration, Utc};
+use sqlx::{migrate::Migrator, PgPool};
+use std::path::Path;
 use synapse_core::db::models::Transaction;
 use synapse_core::error::AppError;
-use testcontainers_modules::postgres::Postgres;
+use synapse_core::services::SettlementService;
 use testcontainers::runners::AsyncRunner;
-use sqlx::{PgPool, migrate::Migrator};
-use std::path::Path;
-use chrono::{Utc, Duration};
-use bigdecimal::BigDecimal;
+use testcontainers_modules::postgres::Postgres;
 
 async fn setup_test_db() -> (PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
@@ -173,7 +173,10 @@ async fn test_settle_error_handling() {
     let service = SettlementService::new(pool.clone());
 
     // cause a database error by dropping the table before the call
-    sqlx::query("DROP TABLE transactions").execute(&pool).await.unwrap();
+    sqlx::query("DROP TABLE transactions")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let err = service.settle_asset("USD").await;
     assert!(matches!(err, Err(AppError::DatabaseError(_))));

@@ -1,5 +1,3 @@
-#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
-pub mod tenant;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -14,6 +12,8 @@ pub mod secrets;
 pub mod services;
 pub mod startup;
 pub mod stellar;
+#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
+pub mod tenant;
 pub mod utils;
 pub mod validation;
 
@@ -40,7 +40,9 @@ pub struct AppState {
     pub readiness: ReadinessState,
     pub tx_broadcast: broadcast::Sender<TransactionStatusUpdate>,
     // multi-tenant cache
-    pub tenant_configs: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, tenant::TenantConfig>>>,
+    pub tenant_configs: std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, tenant::TenantConfig>>,
+    >,
 }
 
 impl AppState {
@@ -58,9 +60,8 @@ impl AppState {
         let start_time = std::time::Instant::now();
         let readiness = crate::readiness::ReadinessState::new();
         let (tx_broadcast, _) = tokio::sync::broadcast::channel(16);
-        let tenant_configs = std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        ));
+        let tenant_configs =
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
         AppState {
             db,

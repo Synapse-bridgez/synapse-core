@@ -1,11 +1,11 @@
+use axum::extract::FromRequestParts;
 use axum::http::{header, Request};
-use axum::extract::{FromRequestParts};
-use sqlx::{PgPool};
-use uuid::Uuid;
+use sqlx::PgPool;
 use std::env;
+use uuid::Uuid;
 
-use synapse_core::tenant::{TenantContext, TenantConfig};
-use synapse_core::{AppState, error::AppError};
+use synapse_core::tenant::{TenantConfig, TenantContext};
+use synapse_core::{error::AppError, AppState};
 
 /// Helper to ensure DATABASE_URL is set to local test database
 fn setup_env() {
@@ -55,8 +55,12 @@ fn make_tenant_config(tenant_id: Uuid, name: &str) -> TenantConfig {
 /// Ensure the database schema required by tests is present
 async fn ensure_schema(pool: &PgPool) {
     // Drop tables to guarantee clean state
-    let _ = sqlx::query("DROP TABLE IF EXISTS transactions").execute(pool).await;
-    let _ = sqlx::query("DROP TABLE IF EXISTS tenants").execute(pool).await;
+    let _ = sqlx::query("DROP TABLE IF EXISTS transactions")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DROP TABLE IF EXISTS tenants")
+        .execute(pool)
+        .await;
 
     // create tenants table similar to migration
     let _ = sqlx::query(
@@ -68,7 +72,7 @@ async fn ensure_schema(pool: &PgPool) {
             stellar_account VARCHAR(56) NOT NULL DEFAULT '',
             rate_limit_per_minute INTEGER NOT NULL DEFAULT 60,
             is_active BOOLEAN NOT NULL DEFAULT true
-        )"
+        )",
     )
     .execute(pool)
     .await;
@@ -79,7 +83,7 @@ async fn ensure_schema(pool: &PgPool) {
             transaction_id UUID PRIMARY KEY,
             tenant_id UUID NOT NULL REFERENCES tenants(tenant_id),
             amount NUMERIC
-        )"
+        )",
     )
     .execute(pool)
     .await;
@@ -101,9 +105,13 @@ async fn test_tenant_resolution_from_api_key() {
 
     let req = Request::builder().body(()).unwrap();
     let (mut parts, _) = req.into_parts();
-    parts.headers.insert("X-API-Key", header::HeaderValue::from_str(api_key).unwrap());
+    parts
+        .headers
+        .insert("X-API-Key", header::HeaderValue::from_str(api_key).unwrap());
 
-    let ctx = TenantContext::from_request_parts(&mut parts, &state).await.unwrap();
+    let ctx = TenantContext::from_request_parts(&mut parts, &state)
+        .await
+        .unwrap();
     assert_eq!(ctx.tenant_id, tenant_id);
 }
 
@@ -128,7 +136,9 @@ async fn test_tenant_resolution_from_header() {
         header::HeaderValue::from_str(&tenant_id.to_string()).unwrap(),
     );
 
-    let ctx = TenantContext::from_request_parts(&mut parts, &state).await.unwrap();
+    let ctx = TenantContext::from_request_parts(&mut parts, &state)
+        .await
+        .unwrap();
     assert_eq!(ctx.tenant_id, tenant_id);
 
     // try with Authorization Bearer style
@@ -176,22 +186,25 @@ async fn test_query_filtering_by_tenant() {
         .await
         .unwrap();
 
-    let list1: Vec<(Uuid,)> = sqlx::query_as("SELECT transaction_id FROM transactions WHERE tenant_id = $1")
-        .bind(t1)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let list1: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT transaction_id FROM transactions WHERE tenant_id = $1")
+            .bind(t1)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
 
     assert_eq!(list1.len(), 1);
     assert_eq!(list1[0].0, tx1);
 
     // wrong tenant should not see tx1
-    let wrong: Option<(Uuid,)> = sqlx::query_as("SELECT transaction_id FROM transactions WHERE transaction_id = $1 AND tenant_id = $2")
-        .bind(tx1)
-        .bind(t2)
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+    let wrong: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT transaction_id FROM transactions WHERE transaction_id = $1 AND tenant_id = $2",
+    )
+    .bind(tx1)
+    .bind(t2)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
     assert!(wrong.is_none());
 }
 
@@ -240,8 +253,13 @@ async fn test_concurrent_multi_tenant_requests() {
         async move {
             let req = Request::builder().body(()).unwrap();
             let (mut parts, _) = req.into_parts();
-            parts.headers.insert("X-API-Key", header::HeaderValue::from_str("ck1").unwrap());
-            TenantContext::from_request_parts(&mut parts, &state).await.unwrap().tenant_id
+            parts
+                .headers
+                .insert("X-API-Key", header::HeaderValue::from_str("ck1").unwrap());
+            TenantContext::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap()
+                .tenant_id
         }
     };
 
@@ -250,8 +268,13 @@ async fn test_concurrent_multi_tenant_requests() {
         async move {
             let req = Request::builder().body(()).unwrap();
             let (mut parts, _) = req.into_parts();
-            parts.headers.insert("X-API-Key", header::HeaderValue::from_str("ck2").unwrap());
-            TenantContext::from_request_parts(&mut parts, &state).await.unwrap().tenant_id
+            parts
+                .headers
+                .insert("X-API-Key", header::HeaderValue::from_str("ck2").unwrap());
+            TenantContext::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap()
+                .tenant_id
         }
     };
 
@@ -267,12 +290,14 @@ async fn test_db_foreign_key_enforces_tenant() {
     let pool = get_pool().await;
     ensure_schema(&pool).await;
 
-    let result = sqlx::query("INSERT INTO transactions (transaction_id, tenant_id, amount) VALUES ($1, $2, $3)")
-        .bind(Uuid::new_v4())
-        .bind(Uuid::new_v4())
-        .bind(5.0)
-        .execute(&pool)
-        .await;
+    let result = sqlx::query(
+        "INSERT INTO transactions (transaction_id, tenant_id, amount) VALUES ($1, $2, $3)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(5.0)
+    .execute(&pool)
+    .await;
 
     assert!(result.is_err());
 }
