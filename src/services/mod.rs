@@ -1,3 +1,4 @@
+pub mod account_monitor;
 pub mod backup;
 pub mod feature_flags;
 pub mod processor;
@@ -6,6 +7,7 @@ pub mod settlement;
 pub mod transaction_processor;
 pub mod transaction_processor_job;
 
+pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
 pub use feature_flags::FeatureFlagService;
 pub use scheduler::{Job, JobScheduler, JobStatus};
