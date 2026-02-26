@@ -88,7 +88,7 @@ async fn test_valid_deposit_flow() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GABC1234567890",
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "amount": "100.50",
         "asset_code": "USD",
         "callback_type": "deposit",
@@ -127,7 +127,7 @@ async fn test_callback_with_memo_and_metadata() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GDEF9876543210",
+        "stellar_account": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
         "amount": "250.00",
         "asset_code": "USDC",
         "callback_type": "deposit",
@@ -181,7 +181,7 @@ async fn test_callback_with_hash_memo_type() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GHIJ5555555555",
+        "stellar_account": "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
         "amount": "500.00",
         "asset_code": "USD",
         "memo": "abc123def456",
@@ -208,7 +208,7 @@ async fn test_callback_with_invalid_memo_type() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GKLM7777777777",
+        "stellar_account": "GDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
         "amount": "100.00",
         "asset_code": "USD",
         "memo": "some memo",
@@ -232,7 +232,7 @@ async fn test_callback_with_metadata_only() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GNOP3333333333",
+        "stellar_account": "GEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
         "amount": "75.25",
         "asset_code": "EUR",
         "metadata": {
@@ -263,7 +263,7 @@ async fn test_invalid_signature_flow() {
     let client = reqwest::Client::new();
 
     let payload = json!({
-        "stellar_account": "GABC1234567890",
+        "stellar_account": "GFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
         "amount": "100.50",
         "asset_code": "USD",
         "callback_type": "deposit",
