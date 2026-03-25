@@ -57,6 +57,7 @@ async fn test_graphql_queries() {
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();
+    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -69,6 +70,7 @@ async fn test_graphql_queries() {
         start_time: std::time::Instant::now(),
         tx_broadcast,
         readiness,
+        query_cache,
     };
     let app = create_app(app_state);
 

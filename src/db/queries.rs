@@ -1,10 +1,23 @@
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
 use uuid::Uuid;
+
+// --- Tenant Queries --------------------------------------------------------
+
+pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
+    let configs = sqlx::query_as::<_, TenantConfig>(
+        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(configs)
+}
 
 // --- Transaction Queries ---
 
@@ -60,6 +73,10 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .await?;
 
     db_tx.commit().await?;
+
+    // Invalidate cache after successful commit
+    invalidate_transaction_caches(&result.asset_code).await;
+
     Ok(result)
 }
 
@@ -177,6 +194,25 @@ pub async fn update_transactions_settlement(
     }
 
     Ok(())
+}
+
+// Cache invalidation helper
+async fn invalidate_transaction_caches(asset_code: &str) {
+    if let Ok(redis_url) = std::env::var("REDIS_URL") {
+        if let Ok(cache) = crate::services::QueryCache::new(&redis_url) {
+            let _ = cache.invalidate("query:status_counts").await;
+            let _ = cache.invalidate("query:daily_totals:*").await;
+            let _ = cache.invalidate("query:asset_stats").await;
+            let _ = cache
+                .invalidate_exact(&format!("query:asset_total:{}", asset_code))
+                .await;
+        }
+    }
+}
+
+/// Public cache invalidation function for use by other modules
+pub async fn invalidate_caches_for_asset(asset_code: &str) {
+    invalidate_transaction_caches(asset_code).await;
 }
 
 // --- Settlement Queries ---
@@ -383,4 +419,103 @@ pub async fn search_transactions(
     let transactions = data_query_builder.fetch_all(pool).await?;
 
     Ok((total, transactions))
+}
+
+// --- Audit Log Queries ---
+
+/// Retrieve audit logs for a specific entity
+pub async fn get_audit_logs(
+    pool: &PgPool,
+    entity_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<(Uuid, Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, String, DateTime<Utc>)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+        FROM audit_logs
+        WHERE entity_id = $1
+        ORDER BY timestamp DESC
+        LIMIT $2 OFFSET $3
+        "#
+    )
+    .bind(entity_id)
+    .bind(limit)
+    .bind(offset)
+// --- Aggregate Queries (Cacheable) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusCount {
+    pub status: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyTotal {
+    pub date: String,
+    pub total_amount: BigDecimal,
+    pub tx_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetStats {
+    pub asset_code: String,
+    pub total_amount: BigDecimal,
+    pub tx_count: i64,
+    pub avg_amount: BigDecimal,
+}
+
+pub async fn get_status_counts(pool: &PgPool) -> Result<Vec<StatusCount>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT status, COUNT(*) as count
+        FROM transactions
+        GROUP BY status
+        ORDER BY status
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| StatusCount {
+            status: row.get("status"),
+            count: row.get("count"),
+        })
+        .collect())
+}
+
+pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            DATE(created_at)::text as date,
+            SUM(amount) as total_amount,
+            COUNT(*) as tx_count
+        FROM transactions
+        WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+        GROUP BY DATE(created_at)
+        ORDER BY DATE(created_at) DESC
+        "#,
+    )
+    .bind(days)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get("entity_id"),
+                row.get("entity_type"),
+                row.get("action"),
+                row.get("old_val"),
+                row.get("new_val"),
+                row.get("actor"),
+                row.get("timestamp"),
+            )
+        })
+        .collect())
 }
