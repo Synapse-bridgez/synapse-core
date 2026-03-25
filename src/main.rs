@@ -17,9 +17,11 @@ use synapse_core::{
     schemas,
     services::{FeatureFlagService, SettlementService},
     stellar::HorizonClient,
+    telemetry,
     ApiState, AppState, ReadinessState,
 };
 use tokio::sync::broadcast;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 mod cli;
@@ -69,20 +71,34 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = config::Config::load().await?;
 
-    // Setup logging
+    // Setup logging + OpenTelemetry tracing layer
     let env_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    // Init OTel tracer early so the tracing layer can reference it.
+    let tracer_provider = telemetry::init_tracer(
+        "synapse-core",
+        config.otlp_endpoint.as_deref(),
+    )
+    .expect("failed to initialise OpenTelemetry tracer");
+
+    let otel_layer = OpenTelemetryLayer::new(
+        tracer_provider.tracer("synapse-core"),
+    );
+
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
+                .with(otel_layer)
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
+                .with(otel_layer)
                 .init();
         }
     }
@@ -269,6 +285,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
+
+    // Flush and shut down the OTel exporter on clean exit.
+    opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
 }

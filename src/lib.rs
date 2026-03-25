@@ -12,6 +12,7 @@ pub mod secrets;
 pub mod services;
 pub mod startup;
 pub mod stellar;
+pub mod telemetry;
 pub mod utils;
 pub mod validation;
 
