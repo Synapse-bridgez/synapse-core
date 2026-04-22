@@ -1,13 +1,24 @@
+use crate::services::webhook_dispatcher::WebhookDispatcher;
 use sqlx::PgPool;
 
 #[derive(Clone)]
 pub struct TransactionProcessor {
     pool: PgPool,
+    webhook_dispatcher: Option<WebhookDispatcher>,
 }
 
 impl TransactionProcessor {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            webhook_dispatcher: None,
+        }
+    }
+
+    /// Attach a WebhookDispatcher so state transitions trigger outgoing webhooks.
+    pub fn with_webhook_dispatcher(mut self, dispatcher: WebhookDispatcher) -> Self {
+        self.webhook_dispatcher = Some(dispatcher);
+        self
     }
 
     pub async fn process_transaction(&self, tx_id: uuid::Uuid) -> anyhow::Result<()> {

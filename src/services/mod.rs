@@ -9,6 +9,7 @@ pub mod scheduler;
 pub mod settlement;
 pub mod transaction_processor;
 pub mod transaction_processor_job;
+pub mod webhook_dispatcher;
 
 pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
@@ -19,3 +20,4 @@ pub use scheduler::{Job, JobScheduler, JobStatus};
 pub use settlement::SettlementService;
 pub use transaction_processor::TransactionProcessor;
 pub use transaction_processor_job::TransactionProcessorJob;
+pub use webhook_dispatcher::WebhookDispatcher;

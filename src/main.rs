@@ -15,7 +15,7 @@ use synapse_core::{
     metrics,
     middleware::idempotency::IdempotencyService,
     schemas,
-    services::{FeatureFlagService, SettlementService},
+    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
     ApiState, AppState, ReadinessState,
 };
@@ -169,6 +169,20 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             }
         }
     });
+
+    // Start background webhook delivery worker (runs every 30 seconds)
+    let webhook_pool = pool.clone();
+    tokio::spawn(async move {
+        let dispatcher = WebhookDispatcher::new(webhook_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = dispatcher.process_pending().await {
+                tracing::error!("Webhook dispatcher error: {e}");
+            }
+        }
+    });
+    tracing::info!("Webhook dispatcher background worker started");
 
     // Initialize metrics
     let _metrics_handle = metrics::init_metrics()
