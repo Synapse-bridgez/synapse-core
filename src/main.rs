@@ -4,7 +4,7 @@ mod error;
 mod handlers;
 mod stellar;
 
-use axum::{Router, extract::State, routing::get};
+use axum::{Router, extract::State, routing::{get, post}};
 use sqlx::migrate::Migrator; // for Migrator
 use std::net::SocketAddr; // for SocketAddr
 use std::path::Path; // for Path
@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/admin/webhook-endpoints/:id/reset-circuit", post(handlers::admin::reset_webhook_circuit))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
