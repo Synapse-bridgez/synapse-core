@@ -13,6 +13,7 @@ use synapse_core::{
     handlers,
     handlers::ws::TransactionStatusUpdate,
     metrics,
+    middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
     services::{FeatureFlagService, SettlementService, WebhookDispatcher},
@@ -20,6 +21,7 @@ use synapse_core::{
     telemetry,
     ApiState, AppState, ReadinessState,
 };
+use opentelemetry::trace::TracerProvider as _;
 use tokio::sync::broadcast;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -82,23 +84,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .expect("failed to initialise OpenTelemetry tracer");
 
-    let otel_layer = OpenTelemetryLayer::new(
-        tracer_provider.tracer("synapse-core"),
-    );
-
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(otel_layer)
+                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(otel_layer)
+                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
                 .init();
         }
     }
@@ -253,6 +251,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         readiness: ReadinessState::new(),
         tx_broadcast,
         query_cache,
+        profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let graphql_schema = build_schema(app_state.clone());

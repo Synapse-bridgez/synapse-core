@@ -61,6 +61,11 @@ sha2 = "0.10"
 hex = "0.4"
 pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 flate2 = "1.0"
+opentelemetry = { version = "0.21", features = ["trace"] }
+opentelemetry_sdk = { version = "0.21", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.14", features = ["tonic", "trace"] }
+opentelemetry-semantic-conventions = "0.13"
+tracing-opentelemetry = "0.22"
 
 [dev-dependencies]
 mockito = "1"
@@ -74,3 +79,4 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 reqwest = { version = "0.11", features = ["json"] }
 tokio-tungstenite = "0.21"
+assert_cmd = "2"

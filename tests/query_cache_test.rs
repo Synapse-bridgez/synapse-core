@@ -1,5 +1,6 @@
 use synapse_core::services::{CacheConfig, QueryCache};
 
+#[ignore = "Requires Redis"]
 #[tokio::test]
 async fn test_query_cache_basic_operations() {
     let cache = QueryCache::new("redis://localhost:6379").unwrap();
@@ -22,6 +23,7 @@ async fn test_query_cache_basic_operations() {
     cache.invalidate_exact("test:key").await.unwrap();
 }
 
+#[ignore = "Requires Redis"]
 #[tokio::test]
 async fn test_cache_metrics() {
     let cache = QueryCache::new("redis://localhost:6379").unwrap();
@@ -39,6 +41,7 @@ async fn test_cache_metrics() {
     assert!(metrics.misses > 0);
 }
 
+#[ignore = "Requires Redis"]
 #[tokio::test]
 async fn test_cache_invalidation() {
     let cache = QueryCache::new("redis://localhost:6379").unwrap();

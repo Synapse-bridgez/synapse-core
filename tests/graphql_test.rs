@@ -7,6 +7,7 @@ use synapse_core::services::feature_flags::FeatureFlagService;
 use synapse_core::{create_app, AppState};
 use tokio::net::TcpListener;
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_graphql_queries() {
     let database_url = match std::env::var("DATABASE_URL") {
@@ -70,7 +71,9 @@ async fn test_graphql_queries() {
         start_time: std::time::Instant::now(),
         tx_broadcast,
         readiness,
-        query_cache,
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+        profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
     let app = create_app(app_state);
 

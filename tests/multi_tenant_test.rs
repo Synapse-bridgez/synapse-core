@@ -90,6 +90,7 @@ async fn ensure_schema(pool: &PgPool) {
 }
 
 /// Ensure that resolving a tenant via an API key header returns the correct ID
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_tenant_resolution_from_api_key() {
     setup_env();
@@ -116,6 +117,7 @@ async fn test_tenant_resolution_from_api_key() {
 }
 
 /// Check that X-Tenant-ID or Authorization headers are respected
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_tenant_resolution_from_header() {
     setup_env();
@@ -156,6 +158,7 @@ async fn test_tenant_resolution_from_header() {
 }
 
 /// Insert transactions for two tenants and verify filtering works
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_query_filtering_by_tenant() {
     setup_env();
@@ -209,6 +212,7 @@ async fn test_query_filtering_by_tenant() {
 }
 
 /// Verify that state configurations are isolated per tenant
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_tenant_config_isolation() {
     setup_env();
@@ -234,6 +238,7 @@ async fn test_tenant_config_isolation() {
 }
 
 /// Run several tenant resolution operations concurrently to make sure there is no shared-mutation bug
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_concurrent_multi_tenant_requests() {
     setup_env();
@@ -284,6 +289,7 @@ async fn test_concurrent_multi_tenant_requests() {
 }
 
 /// Quick sanity check that the database enforces tenant isolation at foreign key level
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_db_foreign_key_enforces_tenant() {
     setup_env();
