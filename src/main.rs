@@ -4,7 +4,7 @@ mod error;
 mod handlers;
 mod stellar;
 
-use axum::{Router, extract::State, routing::get};
+use axum::{Router, extract::State, routing::{get, post}};
 use sqlx::migrate::Migrator; // for Migrator
 use std::net::SocketAddr; // for SocketAddr
 use std::path::Path; // for Path
@@ -17,6 +17,9 @@ use stellar::HorizonClient;
 pub struct AppState {
     db: sqlx::PgPool,
     pub horizon_client: HorizonClient,
+    pub horizon_breaker: CircuitBreaker,
+    pub redis_breaker: CircuitBreaker,
+    pub postgres_breaker: CircuitBreaker,
 }
 
 #[tokio::main]
@@ -39,17 +42,52 @@ async fn main() -> anyhow::Result<()> {
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Redis client
+    let redis_client = redis::Client::open(config.redis_url.clone())?;
+
+    // Circuit breakers
+    let mut horizon_breaker = CircuitBreaker::new(
+        "horizon".to_string(),
+        redis_client.clone(),
+        5,
+        Duration::minutes(10),
+    );
+    horizon_breaker.load_from_redis().await?;
+    tracing::info!("Horizon circuit breaker initialized");
+
+    let mut redis_breaker = CircuitBreaker::new(
+        "redis".to_string(),
+        redis_client.clone(),
+        5,
+        Duration::minutes(10),
+    );
+    redis_breaker.load_from_redis().await?;
+    tracing::info!("Redis circuit breaker initialized");
+
+    let mut postgres_breaker = CircuitBreaker::new(
+        "postgres".to_string(),
+        redis_client.clone(),
+        5,
+        Duration::minutes(10),
+    );
+    postgres_breaker.load_from_redis().await?;
+    tracing::info!("Postgres circuit breaker initialized");
+
     // Initialize Stellar Horizon client
-    let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
+    let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone(), horizon_breaker.clone());
     tracing::info!("Stellar Horizon client initialized with URL: {}", config.stellar_horizon_url);
 
     // Build router with state
-    let app_state = AppState { 
+    let app_state = AppState {
         db: pool,
         horizon_client,
+        horizon_breaker,
+        redis_breaker,
+        postgres_breaker,
     };
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/admin/circuit-breakers", get(handlers::admin::get_circuit_breakers))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));

@@ -1,3 +1,5 @@
+pub mod admin;
+
 use crate::AppState;
 use axum::{
     extract::State,

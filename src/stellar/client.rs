@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use crate::services::circuit_breaker::{CircuitBreaker, CircuitBreakerError};
 
 #[derive(Error, Debug)]
 pub enum HorizonError {
@@ -10,6 +11,8 @@ pub enum HorizonError {
     AccountNotFound(String),
     #[error("Invalid response from Horizon: {0}")]
     InvalidResponse(String),
+    #[error("Circuit breaker is open")]
+    CircuitBreakerOpen,
 }
 
 /// Response from Horizon /accounts endpoint
@@ -39,31 +42,46 @@ pub struct Balance {
 pub struct HorizonClient {
     client: Client,
     base_url: String,
+    circuit_breaker: CircuitBreaker,
 }
 
 impl HorizonClient {
-    /// Creates a new HorizonClient with the specified base URL
-    pub fn new(base_url: String) -> Self {
+    /// Creates a new HorizonClient with the specified base URL and circuit breaker
+    pub fn new(base_url: String, circuit_breaker: CircuitBreaker) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 
-        HorizonClient { client, base_url }
+        HorizonClient { client, base_url, circuit_breaker }
     }
 
     /// Fetches account details from the Horizon API
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
-        let url = format!("{}/accounts/{}", self.base_url.trim_end_matches('/'), address);
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+        self.circuit_breaker.call(|| async move {
+            let url = format!("{}/accounts/{}", base_url.trim_end_matches('/'), address);
 
-        let response = self.client.get(&url).send().await?;
+            let response = client.get(&url).send().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-        if response.status() == 404 {
-            return Err(HorizonError::AccountNotFound(address.to_string()));
-        }
+            if response.status() == 404 {
+                return Err(Box::new(HorizonError::AccountNotFound(address.to_string())) as Box<dyn std::error::Error + Send + Sync>);
+            }
 
-        let account = response.json::<AccountResponse>().await?;
-        Ok(account)
+            let account = response.json::<AccountResponse>().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            Ok(account)
+        }).await.map_err(|e| {
+            if let Ok(cbe) = e.downcast::<CircuitBreakerError>() {
+                match *cbe {
+                    CircuitBreakerError::Open => HorizonError::CircuitBreakerOpen,
+                }
+            } else if let Ok(he) = e.downcast::<HorizonError>() {
+                *he
+            } else {
+                HorizonError::RequestError(reqwest::Error::from(e))
+            }
+        })
     }
 }
 
