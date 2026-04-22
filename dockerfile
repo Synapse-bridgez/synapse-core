@@ -9,8 +9,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 
-# Build with locked dependencies to respect the lockfile
-RUN cargo build --locked --release
+# Build the application
+RUN cargo build --release
 
 # Runtime stage (unchanged)
 FROM debian:bookworm-slim

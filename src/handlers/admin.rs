@@ -1,23 +1,103 @@
-use axum::{extract::Path, http::StatusCode, response::Json, extract::State};
-use serde_json::json;
-use crate::AppState;
-use uuid::Uuid;
+use crate::middleware::quota::{Quota, QuotaManager, QuotaStatus, ResetSchedule, Tier};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+    Router,
+};
+use serde::{Deserialize, Serialize};
 
-pub async fn reset_webhook_circuit(
-    Path(endpoint_id): Path<Uuid>,
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // TODO: Add admin authentication check
+#[derive(Clone)]
+pub struct AdminState {
+    pub quota_manager: QuotaManager,
+}
 
-    let result = sqlx::query(
-        "UPDATE webhook_endpoints SET circuit_state = 'closed', circuit_failure_count = 0, circuit_opened_at = NULL WHERE id = $1"
-    )
-    .bind(endpoint_id)
-    .execute(&state.db)
-    .await;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SetQuotaRequest {
+    pub tier: String,
+    pub custom_limit: Option<u32>,
+    pub reset_schedule: String,
+}
 
-    match result {
-        Ok(_) => Ok(Json(json!({ "message": "Circuit breaker reset successfully" }))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
+#[derive(Debug, Serialize)]
+pub struct QuotaResponse {
+    pub key: String,
+    pub tier: String,
+    pub limit: u32,
+    pub used: u32,
+    pub remaining: u32,
+    pub reset_in_seconds: u64,
+}
+
+/// Get quota status for a key
+pub async fn get_quota_status(
+    State(state): State<AdminState>,
+    Path(key): Path<String>,
+) -> Result<Json<QuotaStatus>, (StatusCode, String)> {
+    state
+        .quota_manager
+        .check_quota(&key)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Set quota configuration for a key
+pub async fn set_quota(
+    State(state): State<AdminState>,
+    Path(key): Path<String>,
+    Json(req): Json<SetQuotaRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let tier = match req.tier.to_lowercase().as_str() {
+        "free" => Tier::Free,
+        "standard" => Tier::Standard,
+        "premium" => Tier::Premium,
+        _ => return Err((StatusCode::BAD_REQUEST, "Invalid tier".to_string())),
+    };
+
+    let reset_schedule = match req.reset_schedule.to_lowercase().as_str() {
+        "hourly" => ResetSchedule::Hourly,
+        "daily" => ResetSchedule::Daily,
+        "monthly" => ResetSchedule::Monthly,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid reset schedule".to_string(),
+            ))
+        }
+    };
+
+    let quota = Quota {
+        tier,
+        custom_limit: req.custom_limit,
+        reset_schedule,
+    };
+
+    state
+        .quota_manager
+        .set_quota_config(&key, &quota)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Reset quota usage for a key
+pub async fn reset_quota(
+    State(state): State<AdminState>,
+    Path(key): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .quota_manager
+        .reset_quota(&key)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub fn admin_routes() -> axum::Router<AdminState> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/quota/:key", get(get_quota_status))
+        .route("/quota/:key", post(set_quota))
+        .route("/quota/:key/reset", post(reset_quota))
 }

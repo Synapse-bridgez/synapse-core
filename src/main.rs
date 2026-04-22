@@ -1,64 +1,374 @@
-mod config;
-mod db;
-mod error;
-mod handlers;
-mod stellar;
+use axum::{
+    middleware as axum_middleware,
+    routing::{get, post},
+    Router,
+};
+use clap::Parser;
+use sqlx::migrate::Migrator;
+use std::{net::SocketAddr, path::Path};
+use synapse_core::{
+    config, db,
+    db::pool_manager::PoolManager,
+    graphql::schema::build_schema,
+    handlers,
+    handlers::ws::TransactionStatusUpdate,
+    metrics,
+    middleware::idempotency::IdempotencyService,
+    schemas,
+    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
+    stellar::HorizonClient,
+    telemetry,
+    ApiState, AppState, ReadinessState,
+};
+use tokio::sync::broadcast;
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::OpenApi;
+mod cli;
+use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
 
-use axum::{Router, extract::State, routing::{get, post}};
-use sqlx::migrate::Migrator; // for Migrator
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
-use stellar::HorizonClient;
-
-#[derive(Clone)] // <-- Add Clone
-pub struct AppState {
-    db: sqlx::PgPool,
-    pub horizon_client: HorizonClient,
-}
+/// OpenAPI Schema for the Synapse Core API
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handlers::health,
+        handlers::settlements::list_settlements,
+        handlers::settlements::get_settlement,
+        handlers::webhook::handle_webhook,
+        handlers::webhook::callback,
+        handlers::webhook::get_transaction,
+    ),
+    components(
+        schemas(
+            handlers::HealthStatus,
+            handlers::DbPoolStats,
+            handlers::settlements::Pagination,
+            handlers::settlements::SettlementListResponse,
+            handlers::webhook::WebhookPayload,
+            handlers::webhook::WebhookResponse,
+            handlers::webhook::CallbackPayload,
+            schemas::TransactionSchema,
+            schemas::SettlementSchema,
+        )
+    ),
+    info(
+        title = "Synapse Core API",
+        version = "0.1.0",
+        description = "Settlement and transaction management API for the Stellar network",
+        contact(name = "Synapse Team")
+    ),
+    tags(
+        (name = "Health", description = "Health check endpoints"),
+        (name = "Settlements", description = "Settlement management endpoints"),
+        (name = "Transactions", description = "Transaction management endpoints"),
+        (name = "Webhooks", description = "Webhook callback endpoints"),
+    )
+)]
+pub struct ApiDoc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = config::Config::from_env()?;
+    let cli = Cli::parse();
+    let config = config::Config::load().await?;
 
-    // Setup logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Setup logging + OpenTelemetry tracing layer
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
-    // Database pool
+    // Init OTel tracer early so the tracing layer can reference it.
+    let tracer_provider = telemetry::init_tracer(
+        "synapse-core",
+        config.otlp_endpoint.as_deref(),
+    )
+    .expect("failed to initialise OpenTelemetry tracer");
+
+    let otel_layer = OpenTelemetryLayer::new(
+        tracer_provider.tracer("synapse-core"),
+    );
+
+    match config.log_format {
+        config::LogFormat::Json => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer().json())
+                .with(otel_layer)
+                .init();
+        }
+        config::LogFormat::Text => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .with(otel_layer)
+                .init();
+        }
+    }
+
+    match cli.command {
+        Some(Commands::Serve) | None => serve(config).await,
+        Some(Commands::Tx(tx_cmd)) => match tx_cmd {
+            TxCommands::ForceComplete { tx_id } => {
+                let pool = db::create_pool(&config).await?;
+                cli::handle_tx_force_complete(&pool, tx_id).await
+            }
+            TxCommands::Reconcile {
+                account,
+                start,
+                end,
+                format,
+            } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
+        },
+        Some(Commands::Db(db_cmd)) => match db_cmd {
+            DbCommands::Migrate => cli::handle_db_migrate(&config).await,
+        },
+        Some(Commands::Backup(backup_cmd)) => match backup_cmd {
+            BackupCommands::Run { backup_type } => {
+                cli::handle_backup_run(&config, &backup_type).await
+            }
+            BackupCommands::List => cli::handle_backup_list(&config).await,
+            BackupCommands::Restore { filename } => {
+                cli::handle_backup_restore(&config, &filename).await
+            }
+            BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
+        },
+        Some(Commands::Config) => cli::handle_config_validate(&config),
+    }
+}
+
+async fn serve(config: config::Config) -> anyhow::Result<()> {
     let pool = db::create_pool(&config).await?;
+
+    // Initialize pool manager for multi-region failover
+    let pool_manager =
+        PoolManager::new(&config.database_url, config.database_replica_url.as_deref()).await?;
+
+    if pool_manager.replica().is_some() {
+        tracing::info!("Database replica configured - read queries will be routed to replica");
+    } else {
+        tracing::info!("No replica configured - all queries will use primary database");
+    }
 
     // Run migrations
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Initialize partition manager (runs every 24 hours)
+    let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24);
+    partition_manager.start();
+    tracing::info!("Partition manager started");
+
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
-    tracing::info!("Stellar Horizon client initialized with URL: {}", config.stellar_horizon_url);
+    tracing::info!(
+        "Stellar Horizon client initialized with URL: {}",
+        config.stellar_horizon_url
+    );
 
-    // Build router with state
-    let app_state = AppState { 
-        db: pool,
+    // Initialize Settlement Service
+    let _settlement_service = SettlementService::new(pool.clone());
+
+    // Start background settlement worker
+    let settlement_pool = pool.clone();
+    tokio::spawn(async move {
+        let service = SettlementService::new(settlement_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Default to hourly
+        loop {
+            interval.tick().await;
+            tracing::info!("Running scheduled settlement job...");
+            match service.run_settlements().await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        tracing::info!("Successfully generated {} settlements", results.len());
+                    }
+                }
+                Err(e) => tracing::error!("Scheduled settlement job failed: {:?}", e),
+            }
+        }
+    });
+
+    // Start background webhook delivery worker (runs every 30 seconds)
+    let webhook_pool = pool.clone();
+    tokio::spawn(async move {
+        let dispatcher = WebhookDispatcher::new(webhook_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = dispatcher.process_pending().await {
+                tracing::error!("Webhook dispatcher error: {e}");
+            }
+        }
+    });
+    tracing::info!("Webhook dispatcher background worker started");
+
+    // Initialize metrics
+    let _metrics_handle = metrics::init_metrics()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
+    tracing::info!("Metrics initialized successfully");
+
+    // Initialize rate limiting
+    // let rate_limit_config = Arc::new(RateLimitConfig::new(&config));
+
+    // Load whitelisted IPs from config
+    // if !config.whitelisted_ips.is_empty() {
+    //     rate_limit_config.load_whitelisted_ips(&config.whitelisted_ips).await;
+    // }
+
+    tracing::info!(
+        "Rate limiting configured: {} req/sec (default), {} req/sec (whitelisted)",
+        config.default_rate_limit,
+        config.whitelist_rate_limit
+    );
+
+    // Initialize Redis idempotency service
+    let _idempotency_service = IdempotencyService::new(&config.redis_url)?;
+    tracing::info!("Redis idempotency service initialized");
+
+    // Initialize query cache
+    let query_cache = synapse_core::services::QueryCache::new(&config.redis_url)?;
+    tracing::info!("Query cache initialized");
+
+    // Warm cache on startup
+    let cache_config = synapse_core::services::CacheConfig::default();
+    if let Err(e) = query_cache.warm_cache(&pool, &cache_config).await {
+        tracing::warn!("Failed to warm cache on startup: {:?}", e);
+    }
+
+    // Create broadcast channel for WebSocket notifications
+    // Channel capacity of 100 - slow clients will miss old messages (backpressure handling)
+    let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
+    tracing::info!("WebSocket broadcast channel initialized");
+
+    // Initialize feature flags service
+    let feature_flags = FeatureFlagService::new(pool.clone());
+    tracing::info!("Feature flags service initialized");
+
+    let monitor_pool = pool.clone();
+    let app_state = AppState {
+        db: pool.clone(),
+        pool_manager,
         horizon_client,
+        feature_flags,
+        redis_url: config.redis_url.clone(),
+        start_time: std::time::Instant::now(),
+        readiness: ReadinessState::new(),
+        tx_broadcast,
+        query_cache,
     };
-    let app = Router::new()
+
+    let graphql_schema = build_schema(app_state.clone());
+    let api_state = ApiState {
+        app_state,
+        graphql_schema,
+    };
+
+    tokio::spawn(async move {
+        pool_monitor_task(monitor_pool).await;
+    });
+
+    let _api_routes: Router = Router::new()
         .route("/health", get(handlers::health))
-        .route("/admin/webhook-endpoints/:id/reset-circuit", post(handlers::admin::reset_webhook_circuit))
-        .with_state(app_state);
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route(
+            "/settlements/:id",
+            get(handlers::settlements::get_settlement),
+        )
+        .route("/callback", post(handlers::webhook::callback))
+        .route("/transactions/:id", get(handlers::webhook::get_transaction))
+        .route("/graphql", post(handlers::graphql::graphql_handler))
+        .with_state(api_state.clone());
+
+    let _webhook_routes: Router = Router::new()
+        .route("/webhook", post(handlers::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn_with_state(
+            config.clone(),
+            metrics::metrics_auth_middleware::<axum::body::Body>,
+        ))
+        .with_state(api_state.clone());
+
+    let _dlq_routes: Router =
+        handlers::dlq::dlq_routes().with_state(api_state.app_state.db.clone());
+
+    let _admin_routes: Router = Router::new()
+        .nest("/admin/queue", handlers::admin::admin_routes())
+        .nest("/admin", handlers::admin::webhook_replay_routes())
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+        .with_state(api_state.app_state.db.clone());
+    // Admin routes disabled - requires AdminState setup
+    // let _admin_routes: Router = Router::new()
+    //     .nest("/admin/queue", handlers::admin::admin_routes())
+    //     .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+    //     .with_state(api_state.app_state.db.clone());
+
+    let _admin_profiling_routes: Router = Router::new()
+        .route("/start", post(handlers::profiling::start_profiling))
+        .route("/status", get(handlers::profiling::get_profiling_status))
+        .route("/stop", post(handlers::profiling::stop_profiling))
+        .route(
+            "/flamegraph/:session_id",
+            get(handlers::profiling::get_flamegraph),
+        )
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+        .with_state(api_state.app_state.clone());
+
+    let _search_routes: Router = Router::new()
+        .route(
+            "/transactions/search",
+            get(handlers::search::search_transactions),
+        )
+        .with_state(api_state.app_state.pool_manager.clone());
+
+    let app = Router::new()
+        // Unversioned routes - default to latest (V2) or specific base routes
+        .route("/health", get(handlers::health))
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route(
+            "/settlements/:id",
+            get(handlers::settlements::get_settlement),
+        )
+        .with_state(api_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
 
-    let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
+
+    // Flush and shut down the OTel exporter on clean exit.
+    opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
 }
 
+/// Background task to monitor database connection pool usage
+async fn pool_monitor_task(pool: sqlx::PgPool) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
+    loop {
+        interval.tick().await;
+
+        let active = pool.size();
+        let idle = pool.num_idle();
+        let max = pool.options().get_max_connections();
+        let usage_percent = (active as f32 / max as f32) * 100.0;
+
+        // Log warning if pool usage exceeds 80%
+        if usage_percent >= 80.0 {
+            tracing::warn!(
+                "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
+                usage_percent,
+                active,
+                max,
+                idle
+            );
+        } else {
+            tracing::debug!(
+                "Database connection pool status: {:.1}% ({}/{} connections active, {} idle)",
+                usage_percent,
+                active,
+                max,
+                idle
+            );
+        }
+    }
+}

@@ -1,26 +1,49 @@
 pub mod admin;
+pub mod dlq;
+pub mod export;
+pub mod graphql;
+pub mod profiling;
+pub mod search;
+pub mod settlements;
+pub mod stats;
+pub mod v1;
+pub mod v2;
+pub mod webhook;
+pub mod ws;
 
-use crate::AppState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use crate::ApiState;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HealthStatus {
-    status: String,
-    version: String,
-    db: String,
-}
-
-pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthStatus),
+        (status = 503, description = "Service is unhealthy", body = HealthStatus)
+    ),
+    tag = "Health"
+)]
+pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     // Check database connectivity with SELECT 1 query
-    let db_status = match sqlx::query("SELECT 1").execute(&state.db).await {
+    let db_status = match sqlx::query("SELECT 1").execute(&state.app_state.db).await {
         Ok(_) => "connected",
         Err(_) => "disconnected",
+    };
+
+    // Gather pool statistics
+    let pool = &state.app_state.db;
+    let active_connections = pool.size();
+    let idle_connections = pool.num_idle();
+    let max_connections = pool.options().get_max_connections();
+    let usage_percent = (active_connections as f32 / max_connections as f32) * 100.0;
+
+    let pool_stats = DbPoolStats {
+        active_connections,
+        idle_connections: idle_connections as u32,
+        max_connections,
+        usage_percent,
     };
 
     let health_response = HealthStatus {
@@ -31,6 +54,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
         },
         version: "0.1.0".to_string(),
         db: db_status.to_string(),
+        db_pool: pool_stats,
     };
 
     // Return 503 if database is down, 200 otherwise
@@ -41,4 +65,56 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     (status_code, Json(health_response))
+}
+
+/// Readiness probe endpoint for Kubernetes
+/// Returns 200 when ready to accept traffic, 503 when draining or not ready
+pub async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
+    if state.app_state.readiness.is_ready() {
+        let response = ReadinessResponse {
+            status: "ready".to_string(),
+            draining: state.app_state.readiness.is_draining(),
+        };
+        (StatusCode::OK, Json(response))
+    } else {
+        let response = ReadinessResponse {
+            status: "not_ready".to_string(),
+            draining: state.app_state.readiness.is_draining(),
+        };
+        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub draining: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HealthStatus {
+    pub status: String,
+    pub version: String,
+    pub db: String,
+    pub db_pool: DbPoolStats,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DbPoolStats {
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
+    pub usage_percent: f32,
+}
+
+/// Error catalog endpoint
+/// Returns all available error codes and their descriptions
+pub async fn error_catalog() -> impl IntoResponse {
+    let errors = crate::error::get_all_error_codes();
+    let catalog = crate::error::ErrorCatalogResponse {
+        errors,
+        version: "1.0.0".to_string(),
+    };
+
+    (StatusCode::OK, Json(catalog))
 }

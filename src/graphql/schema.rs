@@ -1,0 +1,15 @@
+use crate::graphql::resolvers::{Mutation, Query, Subscription};
+use crate::AppState;
+use async_graphql::Schema;
+
+pub type AppSchema = Schema<Query, Mutation, Subscription>;
+
+pub fn build_schema(state: AppState) -> AppSchema {
+    Schema::build(
+        Query::default(),
+        Mutation::default(),
+        Subscription::default(),
+    )
+    .data(state)
+    .finish()
+}

@@ -11,14 +11,21 @@ synapse-core/
 ├── Cargo.toml # Rust dependencies and workspace config
 ├── .env.example # Example environment variables
 ├── migrations/ # SQL migrations (sqlx)
-│ └── 20250216000000_init.sql
+│ ├── 20250216000000_init.sql
+│ ├── 20250217000000_partition_transactions.sql
+│ └── ... (other migrations)
+├── docs/ # Documentation
+│ ├── partitioning.md # Database partitioning guide
+│ └── partition_utils.sql # Manual partition management utilities
 └── src/
 ├── main.rs # Entry point, server setup, migrations
 ├── config.rs # Configuration from environment
 ├── error.rs # (Planned) Custom error types
 ├── db/ # Database module
 │ ├── mod.rs # Connection pool creation
-│ └── models.rs # Transaction struct and tests
+│ ├── models.rs # Transaction struct and tests
+│ ├── queries.rs # Database queries
+│ └── partition.rs # Partition management
 └── handlers/ # HTTP handlers (e.g. /health, /callback)
 └── mod.rs
 ```
@@ -28,7 +35,7 @@ synapse-core/
 ### Prerequisites
 
 - **Rust** (latest stable, 1.84+ recommended) – [Install](https://rustup.rs/)
-- **PostgreSQL** 14+ – can be run locally or via Docker
+- **PostgreSQL** 14+ – can be run locally or via Docker (required for native partitioning)
 - **Stellar Anchor Platform** (optional for development) – see [anchor platform docs](https://github.com/stellar/anchor-platform)
 
 ### Setup
@@ -50,6 +57,7 @@ The required variables are:
 DATABASE_URL – PostgresSQL connection string (e.g., postgres://synapse:synapse@localhost:5432/synapse)
 SERVER_PORT – Port for the web server (default 3000)
 STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.stellar.org)
+REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
 ```
 
 3. Start PostgresSQL Using Docker (recommended for development):
@@ -59,6 +67,12 @@ Docker run --name synapse-postgres -e POSTGRES_USER=synapse -e POSTGRES_PASSWORD
 ```
 
 Or install PostgreSQL natively and create a database named synapse.
+
+Alternatively, use docker-compose to start all services (PostgreSQL + Redis):
+
+```bash
+docker-compose up -d
+```
 
 4. Run database migrations
    The app will automatically run migrations on startup, but you can also run them manually with sqlx:
@@ -92,15 +106,57 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 
 NOTE: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
 
+## 📊 Database Partitioning
+
+The `transactions` table uses time-based partitioning for high-volume scaling:
+
+- **Monthly partitions** by `created_at` timestamp
+- **Automatic partition creation** for upcoming months
+- **Retention policy** detaches partitions older than 12 months
+- **Background maintenance** runs every 24 hours
+
+See [docs/partitioning.md](docs/partitioning.md) for detailed documentation.
+
+### Manual Partition Operations
+
+```sql
+-- Create next month's partition
+SELECT create_monthly_partition();
+
+-- Detach old partitions (12 months retention)
+SELECT detach_old_partitions(12);
+
+-- Run full maintenance
+SELECT maintain_partitions();
+```
+
+More utilities available in `migrations/partition_utils.sql`.
+
 #### 📡 Webhook Endpoint (Under Development)
 
 The main purpose of this service is to receive callbacks from the Stellar Anchor Platform. The endpoint will be:
 
 ```text
-POST /callback/transaction
+POST /webhook
 ```
 
-It expects a JSON payload as described in the Anchor Platform callbacks documentation. When implemented, it will store the transaction in the database with status pending.
+It expects a JSON payload with an `X-Idempotency-Key` header (typically the `anchor_transaction_id`) to prevent duplicate processing. When implemented, it will store the transaction in the database with status pending.
+
+##### Idempotency Protection
+
+Webhooks are protected against duplicate delivery using Redis-based idempotency:
+- Each webhook must include an `X-Idempotency-Key` header
+- Duplicate requests within 24 hours return cached responses
+- Concurrent requests for the same key return `429 Too Many Requests`
+- See [docs/idempotency.md](docs/idempotency.md) for detailed documentation
+
+#### 🔄 Circuit Breaker
+
+The Stellar Horizon client includes a circuit breaker to prevent cascading failures:
+- Automatically detects when Horizon API is down or slow
+- Fails fast instead of waiting for timeouts
+- Configurable failure threshold and reset timeout
+- See [docs/circuit-breaker.md](docs/circuit-breaker.md) for detailed documentation
 
 🤝 Contributing
 We welcome contributions! Please see the open issues for tasks labeled phase-1. Each issue includes a description and acceptance criteria.
