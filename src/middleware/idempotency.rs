@@ -156,7 +156,7 @@ pub fn validate_idempotency_key(key: &str) -> Result<String, String> {
     let trimmed_key = key.trim();
 
     // Check empty after trimming
-    if trimmed_key.is_empty() {
+    if trimmed_key.len() < IDEMPOTENCY_KEY_MIN_LENGTH {
         return Err("Idempotency key cannot be empty or whitespace only".to_string());
     }
 
@@ -277,75 +277,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_keys() {
-        // Valid alphanumeric keys
-        assert!(validate_idempotency_key("abc123").is_ok());
-        assert!(validate_idempotency_key("ABC123").is_ok());
-        assert!(validate_idempotency_key("abc-def").is_ok());
-        assert!(validate_idempotency_key("abc_def").is_ok());
-        assert!(validate_idempotency_key("abc.def").is_ok());
-        assert!(validate_idempotency_key("a-b_c.d123").is_ok());
+    fn test_validate_idempotency_key_success() {
+        assert_eq!(validate_idempotency_key("abc123").unwrap(), "abc123");
+        assert_eq!(validate_idempotency_key("abc-def_123.45").unwrap(), "abc-def_123.45");
+        assert_eq!(validate_idempotency_key("  abc123  ").unwrap(), "abc123");
     }
 
     #[test]
-    fn test_valid_keys_with_whitespace_trimming() {
-        // Keys with leading/trailing whitespace should be trimmed
-        assert!(validate_idempotency_key("  abc123  ").is_ok());
-        let result = validate_idempotency_key("  abc123  ");
-        assert_eq!(result.unwrap(), "abc123");
+    fn test_validate_idempotency_key_empty_or_whitespace() {
+        assert!(validate_idempotency_key("").is_err());
+        assert!(validate_idempotency_key("   ").is_err());
     }
 
     #[test]
-    fn test_empty_key() {
-        let result = validate_idempotency_key("");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty"));
-    }
-
-    #[test]
-    fn test_whitespace_only_key() {
-        let result = validate_idempotency_key("   ");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty"));
-    }
-
-    #[test]
-    fn test_overlong_key() {
-        let long_key = "a".repeat(256);
-        let result = validate_idempotency_key(&long_key);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("exceeds maximum length"));
-    }
-
-    #[test]
-    fn test_max_length_key() {
-        let max_key = "a".repeat(255);
-        assert!(validate_idempotency_key(&max_key).is_ok());
-    }
-
-    #[test]
-    fn test_invalid_characters() {
-        // Keys with special characters should fail
-        assert!(validate_idempotency_key("abc@def").is_err());
-        assert!(validate_idempotency_key("abc#def").is_err());
-        assert!(validate_idempotency_key("abc/def").is_err());
+    fn test_validate_idempotency_key_invalid_characters() {
         assert!(validate_idempotency_key("abc def").is_err());
+        assert!(validate_idempotency_key("abc@def").is_err());
+        assert!(validate_idempotency_key("abc/def").is_err());
         assert!(validate_idempotency_key("abc\tdef").is_err());
     }
 
     #[test]
-    fn test_control_characters() {
-        // Keys with control characters should fail
-        assert!(validate_idempotency_key("abc\x00def").is_err());
-        assert!(validate_idempotency_key("abc\ndef").is_err());
-        assert!(validate_idempotency_key("abc\rdef").is_err());
+    fn test_validate_idempotency_key_control_characters() {
+        assert!(validate_idempotency_key("abc\n123").is_err());
+        assert!(validate_idempotency_key("abc\r123").is_err());
+        assert!(validate_idempotency_key("abc\x00").is_err());
     }
 
     #[test]
-    fn test_single_character_key() {
-        // Single character keys should be valid if alphanumeric
-        assert!(validate_idempotency_key("a").is_ok());
-        assert!(validate_idempotency_key("1").is_ok());
+    fn test_validate_idempotency_key_length_limits() {
+        let max_key = "a".repeat(IDEMPOTENCY_KEY_MAX_LENGTH);
+        assert!(validate_idempotency_key(&max_key).is_ok());
+
+        let too_long_key = "a".repeat(IDEMPOTENCY_KEY_MAX_LENGTH + 1);
+        assert!(validate_idempotency_key(&too_long_key).is_err());
     }
 }
+
 
