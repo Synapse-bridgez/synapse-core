@@ -51,12 +51,10 @@ pub struct AppState {
     pub query_cache: QueryCache,
     pub profiling_manager: ProfilingManager,
     pub tenant_configs: Arc<tokio::sync::RwLock<HashMap<Uuid, TenantConfig>>>,
-    pub idempotency_cache_hits: Arc<AtomicU64>,
-    pub idempotency_cache_misses: Arc<AtomicU64>,
-    pub idempotency_lock_acquired: Arc<AtomicU64>,
-    pub idempotency_lock_contention: Arc<AtomicU64>,
-    pub idempotency_errors: Arc<AtomicU64>,
-    pub idempotency_fallback_count: Arc<AtomicU64>,
+    /// Current count of pending transactions, updated every 5s by background task.
+    pub pending_queue_depth: Arc<AtomicU64>,
+    /// Current adaptive batch size, updated by the processor pool.
+    pub current_batch_size: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -89,12 +87,8 @@ impl AppState {
             query_cache: QueryCache::new("redis://localhost:6379").unwrap(),
             profiling_manager: ProfilingManager::new(),
             tenant_configs: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
-            idempotency_cache_misses: Arc::new(AtomicU64::new(0)),
-            idempotency_lock_acquired: Arc::new(AtomicU64::new(0)),
-            idempotency_lock_contention: Arc::new(AtomicU64::new(0)),
-            idempotency_errors: Arc::new(AtomicU64::new(0)),
-            idempotency_fallback_count: Arc::new(AtomicU64::new(0)),
+            pending_queue_depth: Arc::new(AtomicU64::new(0)),
+            current_batch_size: Arc::new(AtomicU64::new(10)),
         }
     }
 }

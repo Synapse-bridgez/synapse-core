@@ -32,6 +32,19 @@ pub struct Config {
     pub backup_dir: String,
     pub backup_encryption_key: Option<String>,
     pub otlp_endpoint: Option<String>,
+    // Back-pressure
+    pub max_pending_queue: u64,
+    // DB pool sizing
+    pub db_min_connections: u32,
+    pub db_max_connections: u32,
+    // Processor pool
+    pub processor_workers: usize,
+    pub processor_batch_size: u32,
+    pub processor_poll_interval_ms: u64,
+    // Adaptive batch sizing
+    pub processor_min_batch: u32,
+    pub processor_max_batch: u32,
+    pub processor_scaling_factor: f64,
 }
 
 pub mod assets;
@@ -87,6 +100,33 @@ impl Config {
             backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
             backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
             otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
+            max_pending_queue: env::var("MAX_PENDING_QUEUE")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()?,
+            db_min_connections: env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()?,
+            db_max_connections: env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            processor_workers: env::var("PROCESSOR_WORKERS")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()?,
+            processor_batch_size: env::var("PROCESSOR_BATCH_SIZE")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            processor_poll_interval_ms: env::var("PROCESSOR_POLL_INTERVAL_MS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
+            processor_min_batch: env::var("PROCESSOR_MIN_BATCH")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+            processor_max_batch: env::var("PROCESSOR_MAX_BATCH")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()?,
+            processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
+                .unwrap_or_else(|_| "0.5".to_string())
+                .parse()?,
         })
     }
 }

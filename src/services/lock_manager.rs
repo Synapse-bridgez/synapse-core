@@ -4,6 +4,10 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+const LEADER_KEY: &str = "processor:leader";
+const LEADER_LEASE_SECS: u64 = 30;
+const HEARTBEAT_TTL_SECS: u64 = 45;
+
 pub struct LockManager {
     redis_client: Client,
     default_ttl: Duration,
@@ -207,6 +211,94 @@ impl Drop for Lock {
                     .await;
             }
         });
+    }
+}
+
+/// Redis-based leader election for processor coordination.
+///
+/// Uses `SET NX EX` with a 30-second lease. Only the leader should run
+/// partition maintenance, settlement jobs, and webhook dispatch.
+/// All instances run processor workers (safe via SKIP LOCKED).
+pub struct LeaderElection {
+    redis_client: Client,
+    instance_id: String,
+}
+
+impl LeaderElection {
+    pub fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
+        Ok(Self {
+            redis_client: Client::open(redis_url)?,
+            instance_id: Uuid::new_v4().to_string(),
+        })
+    }
+
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Try to acquire or renew the leader lease. Returns true if this instance is leader.
+    pub async fn try_acquire_leadership(&self) -> Result<bool, redis::RedisError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // Try SET NX EX first
+        let result: Option<String> = conn
+            .set_options(
+                LEADER_KEY,
+                &self.instance_id,
+                redis::SetOptions::default()
+                    .conditional_set(redis::ExistenceCheck::NX)
+                    .with_expiration(redis::SetExpiry::EX(LEADER_LEASE_SECS as usize)),
+            )
+            .await?;
+
+        if result.is_some() {
+            return Ok(true);
+        }
+
+        // If we already hold the lease, renew it
+        let script = Script::new(
+            r#"
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("expire", KEYS[1], ARGV[2])
+            else
+                return 0
+            end
+            "#,
+        );
+        let renewed: i32 = script
+            .key(LEADER_KEY)
+            .arg(&self.instance_id)
+            .arg(LEADER_LEASE_SECS as i32)
+            .invoke_async(&mut conn)
+            .await?;
+
+        Ok(renewed == 1)
+    }
+
+    /// Publish a heartbeat key with TTL so other instances can discover this one.
+    pub async fn publish_heartbeat(&self) -> Result<(), redis::RedisError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+        let key = format!("processor:heartbeat:{}", self.instance_id);
+        conn.set_ex(key, "alive", HEARTBEAT_TTL_SECS as usize)
+            .await?;
+        Ok(())
+    }
+
+    /// List all active instance IDs by scanning heartbeat keys.
+    pub async fn list_active_instances(&self) -> Result<Vec<String>, redis::RedisError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+        let keys: Vec<String> = conn.keys("processor:heartbeat:*").await?;
+        Ok(keys
+            .into_iter()
+            .map(|k| k.trim_start_matches("processor:heartbeat:").to_string())
+            .collect())
+    }
+
+    /// Return the current leader instance ID, if any.
+    pub async fn current_leader(&self) -> Result<Option<String>, redis::RedisError> {
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+        let leader: Option<String> = conn.get(LEADER_KEY).await?;
+        Ok(leader)
     }
 }
 
