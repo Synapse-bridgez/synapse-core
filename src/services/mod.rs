@@ -1,14 +1,23 @@
+pub mod account_monitor;
 pub mod backup;
 pub mod feature_flags;
+pub mod lock_manager;
 pub mod processor;
+pub mod query_cache;
+pub mod reconciliation;
 pub mod scheduler;
 pub mod settlement;
 pub mod transaction_processor;
 pub mod transaction_processor_job;
+pub mod webhook_dispatcher;
 
+pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
 pub use feature_flags::FeatureFlagService;
+pub use query_cache::{CacheConfig, QueryCache};
+pub use reconciliation::ReconciliationService;
 pub use scheduler::{Job, JobScheduler, JobStatus};
 pub use settlement::SettlementService;
 pub use transaction_processor::TransactionProcessor;
 pub use transaction_processor_job::TransactionProcessorJob;
+pub use webhook_dispatcher::WebhookDispatcher;

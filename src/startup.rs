@@ -180,6 +180,7 @@ mod tests {
             allowed_ips: crate::config::AllowedIps::Any,
             backup_dir: "/tmp".to_string(),
             backup_encryption_key: None,
+            otlp_endpoint: None,
         };
 
         assert!(validate_env_vars(&config).is_err());
@@ -201,6 +202,7 @@ mod tests {
             allowed_ips: crate::config::AllowedIps::Any,
             backup_dir: "/tmp".to_string(),
             backup_encryption_key: None,
+            otlp_endpoint: None,
         };
 
         assert!(validate_env_vars(&config).is_err());

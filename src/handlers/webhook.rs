@@ -17,6 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use std::str::FromStr;
+use tracing::instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -117,6 +118,7 @@ fn validate_webhook_payload(
     })
 }
 
+#[instrument(name = "webhook.transaction_callback", skip(state, payload))]
 pub async fn transaction_callback(
     State(state): State<AppState>,
     Json(payload): Json<WebhookTransactionRequest>,
@@ -309,6 +311,7 @@ fn validate_memo_type(memo_type: &Option<String>) -> Result<(), AppError> {
     ),
     tag = "Webhooks"
 )]
+#[instrument(name = "webhook.callback", skip(state, payload))]
 pub async fn callback(
     State(state): State<ApiState>,
     Json(payload): Json<CallbackPayload>,
@@ -348,6 +351,7 @@ pub async fn callback(
     ),
     tag = "Webhooks"
 )]
+#[instrument(name = "webhook.handle_webhook", skip(payload))]
 pub async fn handle_webhook(
     State(_state): State<ApiState>,
     Json(payload): Json<WebhookPayload>,
@@ -378,6 +382,7 @@ pub async fn handle_webhook(
     ),
     tag = "Transactions"
 )]
+#[instrument(name = "webhook.get_transaction", skip(state), fields(transaction.id = %id))]
 pub async fn get_transaction(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,

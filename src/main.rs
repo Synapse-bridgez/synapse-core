@@ -12,14 +12,18 @@ use synapse_core::{
     graphql::schema::build_schema,
     handlers,
     handlers::ws::TransactionStatusUpdate,
-    metrics, middleware,
+    metrics,
+    middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
-    services::{FeatureFlagService, SettlementService},
+    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
+    telemetry,
     ApiState, AppState, ReadinessState,
 };
+use opentelemetry::trace::TracerProvider as _;
 use tokio::sync::broadcast;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 mod cli;
@@ -69,20 +73,30 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = config::Config::load().await?;
 
-    // Setup logging
+    // Setup logging + OpenTelemetry tracing layer
     let env_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    // Init OTel tracer early so the tracing layer can reference it.
+    let tracer_provider = telemetry::init_tracer(
+        "synapse-core",
+        config.otlp_endpoint.as_deref(),
+    )
+    .expect("failed to initialise OpenTelemetry tracer");
+
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
+                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
+                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
                 .init();
         }
     }
@@ -94,6 +108,12 @@ async fn main() -> anyhow::Result<()> {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
+            TxCommands::Reconcile {
+                account,
+                start,
+                end,
+                format,
+            } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
@@ -164,6 +184,20 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         }
     });
 
+    // Start background webhook delivery worker (runs every 30 seconds)
+    let webhook_pool = pool.clone();
+    tokio::spawn(async move {
+        let dispatcher = WebhookDispatcher::new(webhook_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = dispatcher.process_pending().await {
+                tracing::error!("Webhook dispatcher error: {e}");
+            }
+        }
+    });
+    tracing::info!("Webhook dispatcher background worker started");
+
     // Initialize metrics
     let _metrics_handle = metrics::init_metrics()
         .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
@@ -187,6 +221,16 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let _idempotency_service = IdempotencyService::new(&config.redis_url)?;
     tracing::info!("Redis idempotency service initialized");
 
+    // Initialize query cache
+    let query_cache = synapse_core::services::QueryCache::new(&config.redis_url)?;
+    tracing::info!("Query cache initialized");
+
+    // Warm cache on startup
+    let cache_config = synapse_core::services::CacheConfig::default();
+    if let Err(e) = query_cache.warm_cache(&pool, &cache_config).await {
+        tracing::warn!("Failed to warm cache on startup: {:?}", e);
+    }
+
     // Create broadcast channel for WebSocket notifications
     // Channel capacity of 100 - slow clients will miss old messages (backpressure handling)
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
@@ -206,6 +250,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         start_time: std::time::Instant::now(),
         readiness: ReadinessState::new(),
         tx_broadcast,
+        query_cache,
+        profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let graphql_schema = build_schema(app_state.clone());
@@ -243,8 +290,25 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     let _admin_routes: Router = Router::new()
         .nest("/admin/queue", handlers::admin::admin_routes())
+        .nest("/admin", handlers::admin::webhook_replay_routes())
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
         .with_state(api_state.app_state.db.clone());
+    // Admin routes disabled - requires AdminState setup
+    // let _admin_routes: Router = Router::new()
+    //     .nest("/admin/queue", handlers::admin::admin_routes())
+    //     .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+    //     .with_state(api_state.app_state.db.clone());
+
+    let _admin_profiling_routes: Router = Router::new()
+        .route("/start", post(handlers::profiling::start_profiling))
+        .route("/status", get(handlers::profiling::get_profiling_status))
+        .route("/stop", post(handlers::profiling::stop_profiling))
+        .route(
+            "/flamegraph/:session_id",
+            get(handlers::profiling::get_flamegraph),
+        )
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+        .with_state(api_state.app_state.clone());
 
     let _search_routes: Router = Router::new()
         .route(
@@ -269,6 +333,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
+
+    // Flush and shut down the OTel exporter on clean exit.
+    opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
 }

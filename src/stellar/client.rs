@@ -1,9 +1,13 @@
 use failsafe::futures::CircuitBreaker as FuturesCircuitBreaker;
 use failsafe::{backoff, failure_policy, Config, Error as FailsafeError, StateMachine};
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
+use tracing::instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Error, Debug)]
 pub enum HorizonError {
@@ -42,8 +46,8 @@ pub struct Balance {
 /// HTTP client for interacting with the Stellar Horizon API
 #[derive(Clone)]
 pub struct HorizonClient {
-    client: Client,
-    base_url: String,
+    pub(crate) client: Client,
+    pub(crate) base_url: String,
     circuit_breaker: StateMachine<failure_policy::ConsecutiveFailures<backoff::EqualJittered>, ()>,
 }
 
@@ -100,7 +104,9 @@ impl HorizonClient {
         }
     }
 
-    /// Fetches account details from the Horizon API
+    /// Fetches account details from the Horizon API.
+    /// The current trace context is propagated via W3C `traceparent` headers.
+    #[instrument(name = "horizon.get_account", skip(self), fields(stellar.account = %address))]
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
         let url = format!(
             "{}/accounts/{}",
@@ -110,10 +116,20 @@ impl HorizonClient {
         let client = self.client.clone();
         let addr = address.to_string();
 
+        // Inject W3C traceparent / tracestate into outgoing request headers.
+        let mut headers = std::collections::HashMap::new();
+        let propagator = TraceContextPropagator::new();
+        let cx = tracing::Span::current().context();
+        propagator.inject_context(&cx, &mut headers);
+
         let result = self
             .circuit_breaker
             .call(async move {
-                let response = client.get(&url).send().await?;
+                let mut req = client.get(&url);
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let response = req.send().await?;
 
                 if response.status() == 404 {
                     return Err(HorizonError::AccountNotFound(addr));

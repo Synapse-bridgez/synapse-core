@@ -1,9 +1,11 @@
+pub mod webhook_replay;
+
 use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -13,8 +15,17 @@ pub struct UpdateFlagRequest {
     pub enabled: bool,
 }
 
+/// Create admin routes for queue management
 pub fn admin_routes() -> Router<sqlx::PgPool> {
     Router::new().route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
+}
+
+/// Create webhook replay admin routes
+pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
+    Router::new()
+        .route("/webhooks/failed", get(webhook_replay::list_failed_webhooks))
+        .route("/webhooks/replay/:id", post(webhook_replay::replay_webhook))
+        .route("/webhooks/replay/batch", post(webhook_replay::batch_replay_webhooks))
 }
 
 pub async fn get_flags(State(state): State<AppState>) -> impl IntoResponse {

@@ -31,6 +31,7 @@ pub struct Config {
     pub allowed_ips: AllowedIps,
     pub backup_dir: String,
     pub backup_encryption_key: Option<String>,
+    pub otlp_endpoint: Option<String>,
 }
 
 pub mod assets;
@@ -85,6 +86,7 @@ impl Config {
             allowed_ips,
             backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
             backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
+            otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
         })
     }
 }
