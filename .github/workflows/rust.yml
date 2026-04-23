@@ -15,40 +15,46 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    # Add PostgreSQL service container
     services:
       postgres:
         image: postgres:14-alpine
         env:
           POSTGRES_USER: synapse
           POSTGRES_PASSWORD: synapse
-          POSTGRES_DB: synapse_test   # creates the database automatically
+          POSTGRES_DB: synapse_test
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
-          - 5432:5432   # maps container's 5432 to host's 5432
+          - 5432:5432
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Cache Cargo
-uses: actions/cache@v4
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        components: clippy, rustfmt
+
+    - name: Cache Cargo registry and build artifacts
+      uses: actions/cache@v4
       with:
         path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      run: cargo install sccache --locked
+    - name: Check formatting
+      run: cargo fmt --all -- --check
 
-    - name: Install sqlx-cli  
+    - name: Install sqlx-cli
       run: cargo install sqlx-cli --no-default-features --features postgres
 
     - name: Start sccache
@@ -56,6 +62,11 @@ uses: actions/cache@v4
 
     - name: Run migrations
       run: sqlx migrate run
+      env:
+        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
