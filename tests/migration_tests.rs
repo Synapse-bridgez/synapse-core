@@ -117,6 +117,7 @@ fn down_migrations_are_non_empty() {
 ///   2. Dummy data can be inserted.
 ///   3. All down-migrations apply cleanly (in reverse order).
 ///   4. All up-migrations can be re-applied (schema integrity).
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn migration_round_trip() {
     let container = Postgres::default().start().await.unwrap();

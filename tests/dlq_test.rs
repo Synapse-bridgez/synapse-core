@@ -15,6 +15,29 @@ async fn setup_db(pool: &PgPool) {
     if let Ok(m) = migrator {
         let _ = m.run(pool).await;
     }
+
+    // Ensure a partition exists for the current month
+    sqlx::query(
+        r#"
+        DO $$
+        DECLARE
+            p_date DATE := DATE_TRUNC('month', NOW());
+            p_name TEXT := 'transactions_y' || TO_CHAR(p_date, 'YYYY') || 'm' || TO_CHAR(p_date, 'MM');
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = p_name) THEN
+                EXECUTE format(
+                    'CREATE TABLE %I PARTITION OF transactions FOR VALUES FROM (%L) TO (%L)',
+                    p_name,
+                    TO_CHAR(p_date, 'YYYY-MM-DD'),
+                    TO_CHAR(p_date + INTERVAL '1 month', 'YYYY-MM-DD')
+                );
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("Failed to ensure current month partition");
 }
 
 #[tokio::test]

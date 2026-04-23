@@ -38,7 +38,7 @@ pub fn init_tracer(
                 .build_span_exporter()?;
 
             let provider = sdktrace::TracerProvider::builder()
-                .with_resource(resource)
+                .with_config(sdktrace::Config::default().with_resource(resource))
                 .with_batch_exporter(exporter, runtime::Tokio)
                 .build();
 
@@ -46,9 +46,8 @@ pub fn init_tracer(
             provider
         }
         None => {
-            // No endpoint configured — use a no-op provider (traces are dropped).
             let provider = sdktrace::TracerProvider::builder()
-                .with_resource(resource)
+                .with_config(sdktrace::Config::default().with_resource(resource))
                 .build();
 
             tracing::info!(
@@ -67,7 +66,11 @@ pub fn init_tracer(
 
 /// Shut down the tracer provider, flushing any buffered spans.
 pub fn shutdown_tracer(provider: TracerProvider) {
-    if let Err(e) = provider.shutdown() {
-        tracing::error!("OpenTelemetry shutdown error: {e}");
+    let results = provider.force_flush();
+    for r in results {
+        if let Err(e) = r {
+            tracing::error!("OpenTelemetry flush error: {e}");
+        }
     }
+    drop(provider);
 }

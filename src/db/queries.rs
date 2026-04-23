@@ -442,6 +442,26 @@ pub async fn get_audit_logs(
     .bind(entity_id)
     .bind(limit)
     .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("id"),
+                row.get("entity_id"),
+                row.get("entity_type"),
+                row.get("action"),
+                row.get("old_val"),
+                row.get("new_val"),
+                row.get("actor"),
+                row.get("timestamp"),
+            )
+        })
+        .collect())
+}
+
 // --- Aggregate Queries (Cacheable) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -505,17 +525,37 @@ pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal
 
     Ok(rows
         .into_iter()
-        .map(|row| {
-            (
-                row.get("id"),
-                row.get("entity_id"),
-                row.get("entity_type"),
-                row.get("action"),
-                row.get("old_val"),
-                row.get("new_val"),
-                row.get("actor"),
-                row.get("timestamp"),
-            )
+        .map(|row| DailyTotal {
+            date: row.get("date"),
+            total_amount: row.get("total_amount"),
+            tx_count: row.get("tx_count"),
+        })
+        .collect())
+}
+
+pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            asset_code,
+            SUM(amount) as total_amount,
+            COUNT(*) as tx_count,
+            AVG(amount) as avg_amount
+        FROM transactions
+        GROUP BY asset_code
+        ORDER BY total_amount DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| AssetStats {
+            asset_code: row.get("asset_code"),
+            total_amount: row.get("total_amount"),
+            tx_count: row.get("tx_count"),
+            avg_amount: row.get("avg_amount"),
         })
         .collect())
 }

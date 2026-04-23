@@ -24,6 +24,7 @@ async fn setup_test_db() -> (PgPool, impl std::any::Any) {
     (pool, container)
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_flag_evaluation_enabled() {
     let (pool, _container) = setup_test_db().await;
@@ -38,6 +39,7 @@ async fn test_flag_evaluation_enabled() {
     assert!(is_enabled);
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_flag_evaluation_disabled() {
     let (pool, _container) = setup_test_db().await;
@@ -52,6 +54,7 @@ async fn test_flag_evaluation_disabled() {
     assert!(!is_enabled);
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_flag_cache_refresh() {
     let (pool, _container) = setup_test_db().await;
@@ -70,6 +73,7 @@ async fn test_flag_cache_refresh() {
     assert_ne!(initial, after_update);
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_flag_update_via_api() {
     let (pool, _container) = setup_test_db().await;
@@ -95,6 +99,7 @@ async fn test_flag_update_via_api() {
     assert!(!is_enabled);
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_flag_evaluation_performance() {
     let (pool, _container) = setup_test_db().await;
@@ -113,6 +118,7 @@ async fn test_flag_evaluation_performance() {
     );
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_flag_default_values() {
     let (pool, _container) = setup_test_db().await;

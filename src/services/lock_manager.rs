@@ -214,6 +214,7 @@ impl Drop for Lock {
 mod tests {
     use super::*;
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_lock_acquire_release() {
         let manager = LockManager::new("redis://localhost:6379", 30).unwrap();
@@ -229,6 +230,7 @@ mod tests {
         lock.release().await.unwrap();
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_lock_prevents_duplicate() {
         let manager = LockManager::new("redis://localhost:6379", 30).unwrap();

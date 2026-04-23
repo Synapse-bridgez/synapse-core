@@ -208,6 +208,7 @@ mod tests {
         pool
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_insert_and_query_transaction() {
         let pool = setup_test_db().await;
@@ -272,6 +273,7 @@ mod tests {
         assert_eq!(fetched.callback_status, callback_status);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_insert_transaction() {
         let pool = setup_test_db().await;
@@ -292,6 +294,7 @@ mod tests {
         assert_eq!(inserted.stellar_account, tx.stellar_account);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_get_transaction() {
         let pool = setup_test_db().await;
@@ -315,6 +318,7 @@ mod tests {
         assert_eq!(fetched.id, inserted.id);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_list_transactions() {
         let pool = setup_test_db().await;
