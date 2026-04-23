@@ -58,6 +58,7 @@ async fn setup_test_db() -> (PgPool, impl std::any::Any) {
     (pool, container)
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_audit_log_on_insert() {
     let (pool, _container) = setup_test_db().await;
@@ -104,6 +105,7 @@ async fn test_audit_log_on_insert() {
     assert_eq!(new_val["status"], "pending");
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_audit_log_on_status_change() {
     let (pool, _container) = setup_test_db().await;
@@ -142,6 +144,7 @@ async fn test_audit_log_on_status_change() {
     assert_eq!(new_val["status"], "completed");
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_audit_log_on_field_update() {
     let (pool, _container) = setup_test_db().await;
@@ -181,6 +184,7 @@ async fn test_audit_log_on_field_update() {
     assert_eq!(new_val["settlement_id"], settlement_id.to_string());
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_audit_log_on_deletion() {
     let (pool, _container) = setup_test_db().await;
@@ -223,6 +227,7 @@ async fn test_audit_log_on_deletion() {
     assert!(new_val.is_none());
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_audit_log_query() {
     let (pool, _container) = setup_test_db().await;
@@ -301,6 +306,7 @@ async fn test_audit_log_query() {
     assert_eq!(actor_logs.get::<i64, _>("count"), 1);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_audit_log_immutability() {
     let (pool, _container) = setup_test_db().await;

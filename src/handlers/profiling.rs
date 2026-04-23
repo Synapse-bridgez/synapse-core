@@ -65,6 +65,7 @@ fn default_generate_flamegraph() -> bool {
 }
 
 /// Global profiling state
+#[derive(Clone)]
 pub struct ProfilingManager {
     is_profiling: Arc<AtomicBool>,
     current_session: Arc<tokio::sync::Mutex<Option<ProfilingSession>>>,

@@ -36,10 +36,10 @@ impl Job for TransactionProcessorJob {
 
         // Process a single batch of transactions instead of running continuously
         let result =
-            crate::services::processor::process_batch(&self.pool, &self.horizon_client).await;
+            crate::services::processor::process_batch(&self.pool, &self.horizon_client, 10).await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 info!("Transaction processor job completed successfully");
                 Ok(())
             }

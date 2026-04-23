@@ -5,7 +5,7 @@ use axum::{
 };
 use clap::Parser;
 use sqlx::migrate::Migrator;
-use std::{net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path, sync::Arc, sync::atomic::AtomicU64};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
@@ -13,13 +13,15 @@ use synapse_core::{
     handlers,
     handlers::ws::TransactionStatusUpdate,
     metrics,
+    middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
-    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
+    services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
     telemetry,
     ApiState, AppState, ReadinessState,
 };
+use opentelemetry::trace::TracerProvider as _;
 use tokio::sync::broadcast;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -82,23 +84,19 @@ async fn main() -> anyhow::Result<()> {
     )
     .expect("failed to initialise OpenTelemetry tracer");
 
-    let otel_layer = OpenTelemetryLayer::new(
-        tracer_provider.tracer("synapse-core"),
-    );
-
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(otel_layer)
+                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(otel_layer)
+                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
                 .init();
         }
     }
@@ -220,7 +218,22 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     );
 
     // Initialize Redis idempotency service
-    let _idempotency_service = IdempotencyService::new(&config.redis_url)?;
+    let idempotency_cache_hits = Arc::new(AtomicU64::new(0));
+    let idempotency_cache_misses = Arc::new(AtomicU64::new(0));
+    let idempotency_lock_acquired = Arc::new(AtomicU64::new(0));
+    let idempotency_lock_contention = Arc::new(AtomicU64::new(0));
+    let idempotency_errors = Arc::new(AtomicU64::new(0));
+    let idempotency_fallback_count = Arc::new(AtomicU64::new(0));
+    let _idempotency_service = IdempotencyService::new(
+        &config.redis_url,
+        pool.clone(),
+        Arc::clone(&idempotency_cache_hits),
+        Arc::clone(&idempotency_cache_misses),
+        Arc::clone(&idempotency_lock_acquired),
+        Arc::clone(&idempotency_lock_contention),
+        Arc::clone(&idempotency_errors),
+        Arc::clone(&idempotency_fallback_count),
+    )?;
     tracing::info!("Redis idempotency service initialized");
 
     // Initialize query cache
@@ -243,16 +256,24 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Feature flags service initialized");
 
     let monitor_pool = pool.clone();
+    let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        config.processor_min_batch as u64,
+    ));
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
-        horizon_client,
+        horizon_client: horizon_client.clone(),
         feature_flags,
         redis_url: config.redis_url.clone(),
         start_time: std::time::Instant::now(),
         readiness: ReadinessState::new(),
         tx_broadcast,
         query_cache,
+        profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        pending_queue_depth: pending_queue_depth.clone(),
+        current_batch_size: current_batch_size.clone(),
     };
 
     let graphql_schema = build_schema(app_state.clone());
@@ -264,6 +285,27 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
     });
+
+    // Back-pressure: refresh pending queue depth every 5s
+    let depth_pool = pool.clone();
+    let depth_counter = pending_queue_depth.clone();
+    tokio::spawn(async move {
+        synapse_core::services::processor::queue_depth_task(depth_pool, depth_counter).await;
+    });
+
+    // Concurrent processor pool
+    let processor_pool = synapse_core::services::processor::ProcessorPool::new(
+        pool.clone(),
+        horizon_client,
+        config.processor_workers,
+        config.processor_poll_interval_ms,
+        config.processor_min_batch,
+        config.processor_max_batch,
+        config.processor_scaling_factor,
+        current_batch_size,
+        pending_queue_depth,
+    );
+    let _processor_shutdown = processor_pool.start();
 
     let _api_routes: Router = Router::new()
         .route("/health", get(handlers::health))
@@ -325,6 +367,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
         )
+        .route(
+            "/admin/instances",
+            get(handlers::admin::list_active_instances),
+        )
         .with_state(api_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
@@ -343,6 +389,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 /// Background task to monitor database connection pool usage
 async fn pool_monitor_task(pool: sqlx::PgPool) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    let mut consecutive_high: u32 = 0;
 
     loop {
         interval.tick().await;
@@ -352,16 +399,29 @@ async fn pool_monitor_task(pool: sqlx::PgPool) {
         let max = pool.options().get_max_connections();
         let usage_percent = (active as f32 / max as f32) * 100.0;
 
-        // Log warning if pool usage exceeds 80%
         if usage_percent >= 80.0 {
-            tracing::warn!(
-                "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
-                usage_percent,
-                active,
-                max,
-                idle
-            );
+            consecutive_high += 1;
+            if consecutive_high >= 3 {
+                tracing::error!(
+                    "CRITICAL: Database connection pool usage has been ≥80% for {} consecutive checks: \
+                     {:.1}% ({}/{} active, {} idle)",
+                    consecutive_high,
+                    usage_percent,
+                    active,
+                    max,
+                    idle
+                );
+            } else {
+                tracing::warn!(
+                    "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
+                    usage_percent,
+                    active,
+                    max,
+                    idle
+                );
+            }
         } else {
+            consecutive_high = 0;
             tracing::debug!(
                 "Database connection pool status: {:.1}% ({}/{} connections active, {} idle)",
                 usage_percent,

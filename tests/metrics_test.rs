@@ -24,6 +24,7 @@ async fn test_gauge_updates() {
     // Test passes if metrics initialize successfully
 }
 
+#[ignore = "Requires DATABASE_URL"]
 #[tokio::test]
 async fn test_prometheus_export_format() {
     use sqlx::postgres::PgPoolOptions;
@@ -62,6 +63,7 @@ fn test_metrics_handle_clone() {
     // Verify cloning works for MetricsHandle
 }
 
+#[ignore = "Requires DATABASE_URL"]
 #[test]
 fn test_metrics_state_creation() {
     use sqlx::postgres::PgPoolOptions;

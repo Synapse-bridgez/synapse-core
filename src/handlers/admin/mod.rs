@@ -28,6 +28,42 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
         .route("/webhooks/replay/batch", post(webhook_replay::batch_replay_webhooks))
 }
 
+/// GET /admin/instances — list active processor instances via Redis heartbeat keys.
+pub async fn list_active_instances(State(state): State<crate::ApiState>) -> impl IntoResponse {
+    let election = match crate::services::LeaderElection::new(&state.app_state.redis_url) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": format!("Redis unavailable: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let (instances_res, leader_res) = tokio::join!(
+        election.list_active_instances(),
+        election.current_leader(),
+    );
+
+    match (instances_res, leader_res) {
+        (Ok(instances), Ok(leader)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "instances": instances,
+                "leader": leader,
+                "count": instances.len(),
+            })),
+        )
+            .into_response(),
+        (Err(e), _) | (_, Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn get_flags(State(state): State<AppState>) -> impl IntoResponse {
     match state.feature_flags.get_all().await {
         Ok(flags) => (StatusCode::OK, Json(flags)).into_response(),

@@ -4,6 +4,7 @@ use synapse_core::db::models::Transaction;
 use synapse_core::db::queries;
 use uuid::Uuid;
 
+#[ignore = "Requires DATABASE_URL"]
 #[sqlx::test]
 async fn test_webhook_replay_tracking(pool: PgPool) -> sqlx::Result<()> {
     // Create a test transaction
@@ -50,6 +51,7 @@ async fn test_webhook_replay_tracking(pool: PgPool) -> sqlx::Result<()> {
     Ok(())
 }
 
+#[ignore = "Requires DATABASE_URL"]
 #[sqlx::test]
 async fn test_list_failed_webhooks(pool: PgPool) -> sqlx::Result<()> {
     // Create a failed transaction
@@ -85,6 +87,7 @@ async fn test_list_failed_webhooks(pool: PgPool) -> sqlx::Result<()> {
     Ok(())
 }
 
+#[ignore = "Requires DATABASE_URL"]
 #[sqlx::test]
 async fn test_replay_updates_status(pool: PgPool) -> sqlx::Result<()> {
     // Create a failed transaction
