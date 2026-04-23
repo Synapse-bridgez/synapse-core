@@ -1,3 +1,4 @@
+use crate::middleware::idempotency::RedisCircuitBreaker;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,6 +8,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct QueryCache {
     client: Client,
+    cb: RedisCircuitBreaker,
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
 }
@@ -33,6 +35,7 @@ impl QueryCache {
         let client = Client::open(redis_url)?;
         Ok(Self {
             client,
+            cb: RedisCircuitBreaker::from_env(),
             hits: Arc::new(AtomicU64::new(0)),
             misses: Arc::new(AtomicU64::new(0)),
         })
@@ -42,38 +45,51 @@ impl QueryCache {
         self.client.get_multiplexed_async_connection().await
     }
 
-    pub async fn get<T: DeserializeOwned>(
+    pub async fn get<T: DeserializeOwned + Send>(
         &self,
         key: &str,
     ) -> Result<Option<T>, redis::RedisError> {
-        let mut conn: MultiplexedConnection = self.get_connection().await?;
-        let value: Option<String> = conn.get(key).await?;
+        let client = self.client.clone();
+        let key = key.to_string();
+        let hits = self.hits.clone();
+        let misses = self.misses.clone();
 
-        match value {
-            Some(v) => {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                serde_json::from_str(&v).map(Some).map_err(|e| {
-                    redis::RedisError::from((
-                        redis::ErrorKind::TypeError,
-                        "deserialization failed",
-                        e.to_string(),
-                    ))
-                })
-            }
-            None => {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                Ok(None)
-            }
-        }
+        self.cb
+            .call(|| async move {
+                let mut conn = client.get_multiplexed_async_connection().await?;
+                let value: Option<String> = conn.get(&key).await?;
+                match value {
+                    Some(v) => {
+                        hits.fetch_add(1, Ordering::Relaxed);
+                        serde_json::from_str(&v).map(Some).map_err(|e| {
+                            redis::RedisError::from((
+                                redis::ErrorKind::TypeError,
+                                "deserialization failed",
+                                e.to_string(),
+                            ))
+                        })
+                    }
+                    None => {
+                        misses.fetch_add(1, Ordering::Relaxed);
+                        Ok(None)
+                    }
+                }
+            })
+            .await
+            .map_err(|e| match e {
+                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
+                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
+                ),
+                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            })
     }
 
-    pub async fn set<T: Serialize>(
+    pub async fn set<T: Serialize + Send>(
         &self,
         key: &str,
         value: &T,
         ttl: Duration,
     ) -> Result<(), redis::RedisError> {
-        let mut conn: MultiplexedConnection = self.get_connection().await?;
         let serialized = serde_json::to_string(value).map_err(|e| {
             redis::RedisError::from((
                 redis::ErrorKind::TypeError,
@@ -81,8 +97,21 @@ impl QueryCache {
                 e.to_string(),
             ))
         })?;
+        let client = self.client.clone();
+        let key = key.to_string();
 
-        conn.set_ex(key, serialized, ttl.as_secs()).await
+        self.cb
+            .call(|| async move {
+                let mut conn = client.get_multiplexed_async_connection().await?;
+                conn.set_ex(&key, serialized, ttl.as_secs()).await
+            })
+            .await
+            .map_err(|e| match e {
+                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
+                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
+                ),
+                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            })
     }
 
     pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
@@ -98,6 +127,11 @@ impl QueryCache {
     pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
         let mut conn: MultiplexedConnection = self.get_connection().await?;
         conn.del::<_, ()>(key).await
+    }
+
+    /// Returns the circuit breaker state: `"open"` or `"closed"`.
+    pub fn circuit_state(&self) -> String {
+        self.cb.state()
     }
 
     pub fn metrics(&self) -> CacheMetrics {

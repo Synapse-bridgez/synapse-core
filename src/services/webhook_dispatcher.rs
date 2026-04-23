@@ -5,6 +5,7 @@
 //! up to MAX_ATTEMPTS times and records every attempt in webhook_deliveries.
 
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -60,16 +61,22 @@ pub struct OutgoingPayload {
 pub struct WebhookDispatcher {
     pool: PgPool,
     http: Client,
+    concurrency: usize,
 }
 
 impl WebhookDispatcher {
     pub fn new(pool: PgPool) -> Self {
+        let concurrency = std::env::var("WEBHOOK_DELIVERY_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10usize);
         Self {
             pool,
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("failed to build reqwest client"),
+            concurrency,
         }
     }
 
@@ -112,8 +119,7 @@ impl WebhookDispatcher {
         Ok(())
     }
 
-    /// Process all pending deliveries that are due. Intended to be called from
-    /// a background task on a short interval (e.g. every 30 seconds).
+    /// Process all pending deliveries concurrently using `buffer_unordered`.
     pub async fn process_pending(&self) -> anyhow::Result<()> {
         let deliveries: Vec<WebhookDelivery> = sqlx::query_as(
             r#"
@@ -127,14 +133,28 @@ impl WebhookDispatcher {
         .fetch_all(&self.pool)
         .await?;
 
-        for delivery in deliveries {
-            if let Err(e) = self.attempt_delivery(&delivery).await {
-                tracing::error!(
-                    delivery_id = %delivery.id,
-                    "Webhook delivery attempt error: {e}"
-                );
-            }
-        }
+        stream::iter(deliveries)
+            .map(|delivery| {
+                let dispatcher = self.clone();
+                async move {
+                    let start = std::time::Instant::now();
+                    if let Err(e) = dispatcher.attempt_delivery(&delivery).await {
+                        tracing::error!(
+                            delivery_id = %delivery.id,
+                            "Webhook delivery attempt error: {e}"
+                        );
+                    }
+                    let latency_ms = start.elapsed().as_millis() as u64;
+                    tracing::debug!(
+                        delivery_id = %delivery.id,
+                        webhook_delivery_latency_ms = latency_ms,
+                        "Webhook delivery attempt completed"
+                    );
+                }
+            })
+            .buffer_unordered(self.concurrency)
+            .collect::<()>()
+            .await;
 
         Ok(())
     }
@@ -231,7 +251,6 @@ impl WebhookDispatcher {
             );
             ("failed", None)
         } else {
-            // Exponential backoff: 10s, 20s, 40s, 80s, 160s
             let delay = BASE_DELAY_SECS * (1_i64 << attempt_count);
             let next = now + chrono::Duration::seconds(delay);
             tracing::warn!(

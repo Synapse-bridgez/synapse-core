@@ -59,7 +59,7 @@ async fn test_duplicate_request_returns_cached_response() {
 
     // Verify key was stored in Redis
     let mut conn = client.get_connection().unwrap();
-    let cache_key = format!("idempotency:{}", idempotency_key);
+    let cache_key = format!("idempotency:default:{}", idempotency_key);
     let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
     assert!(exists, "Idempotency key should be cached");
 
@@ -145,7 +145,7 @@ async fn test_idempotency_key_expires_after_ttl() {
 
     // Manually expire the key in Redis
     let mut conn = client.get_connection().unwrap();
-    let cache_key = format!("idempotency:{}", idempotency_key);
+    let cache_key = format!("idempotency:default:{}", idempotency_key);
     redis::cmd("DEL").arg(&cache_key).execute(&mut conn);
 
     // Verify key is deleted
@@ -186,7 +186,7 @@ async fn test_cached_response_matches_original() {
     
     // Verify cached response exists
     let mut conn = client.get_connection().unwrap();
-    let cache_key = format!("idempotency:{}", idempotency_key);
+    let cache_key = format!("idempotency:default:{}", idempotency_key);
     let cached_data: String = redis::cmd("GET").arg(&cache_key).query(&mut conn).unwrap();
     assert!(!cached_data.is_empty());
     
@@ -229,7 +229,7 @@ async fn test_different_payload_same_key_rejected() {
 
     // Verify key is cached
     let mut conn = client.get_connection().unwrap();
-    let cache_key = format!("idempotency:{}", idempotency_key);
+    let cache_key = format!("idempotency:default:{}", idempotency_key);
     let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
     assert!(exists);
 
@@ -306,4 +306,138 @@ async fn test_invalid_idempotency_key_format() {
     
     // Should process normally with valid key
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ── Issue 1: Tenant-scoped idempotency key tests ──────────────────────────────
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_two_tenants_same_key_get_independent_responses() {
+    let (_client, redis_url) = setup_redis().await;
+    let service = IdempotencyService::new(&redis_url).unwrap();
+
+    let key = "shared-key-tenant-test";
+
+    // Tenant A processes the key
+    let app_a = create_test_app(service.clone());
+    let req_a = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", key)
+        .header("x-tenant-id", "tenant-a")
+        .body(Body::empty())
+        .unwrap();
+    let resp_a = app_a.oneshot(req_a).await.unwrap();
+    assert_eq!(resp_a.status(), StatusCode::OK);
+
+    // Tenant B uses the same key — should be treated as a new request
+    let app_b = create_test_app(service.clone());
+    let req_b = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", key)
+        .header("x-tenant-id", "tenant-b")
+        .body(Body::empty())
+        .unwrap();
+    let resp_b = app_b.oneshot(req_b).await.unwrap();
+    // Should be 200 (new request), not 429 (blocked by tenant-a's lock)
+    assert_eq!(resp_b.status(), StatusCode::OK);
+}
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_no_tenant_id_uses_default_scope() {
+    let (_client, redis_url) = setup_redis().await;
+    let service = IdempotencyService::new(&redis_url).unwrap();
+    let app = create_test_app(service);
+
+    let key = "no-tenant-backward-compat";
+
+    // First request without X-Tenant-Id
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", key)
+        .body(Body::empty())
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    // Second request without X-Tenant-Id — should return cached
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", key)
+        .body(Body::empty())
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+}
+
+// ── Issue 4: Stale lock recovery tests ───────────────────────────────────────
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_stale_lock_recovery() {
+    let (client, redis_url) = setup_redis().await;
+    let service = IdempotencyService::new(&redis_url).unwrap();
+
+    let tenant_id = "default";
+    let key = "stale-lock-test-key";
+
+    // Simulate a crash: set a lock with a timestamp 3 minutes ago, no cached response
+    let lock_key = format!("idempotency:lock:{}:{}", tenant_id, key);
+    let old_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 180; // 3 minutes ago
+    let lock_val = serde_json::json!({"instance_id": "crashed-instance", "locked_at": old_timestamp});
+    let mut conn = client.get_connection().unwrap();
+    redis::cmd("SET")
+        .arg(&lock_key)
+        .arg(lock_val.to_string())
+        .arg("EX")
+        .arg(300u64)
+        .execute(&mut conn);
+
+    // Verify lock exists
+    let exists: bool = redis::cmd("EXISTS").arg(&lock_key).query(&mut conn).unwrap();
+    assert!(exists, "Lock should exist before recovery");
+
+    // Run recovery
+    service.recover_stale_locks().await.unwrap();
+
+    // Lock should be deleted
+    let exists_after: bool = redis::cmd("EXISTS").arg(&lock_key).query(&mut conn).unwrap();
+    assert!(!exists_after, "Stale lock should be deleted after recovery");
+}
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_normal_flow_not_affected_by_recovery() {
+    let (client, redis_url) = setup_redis().await;
+    let service = IdempotencyService::new(&redis_url).unwrap();
+    let app = create_test_app(service.clone());
+
+    let key = "normal-flow-recovery-test";
+
+    // Process a request normally
+    let req = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", key)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Run recovery — should not delete the cached response
+    service.recover_stale_locks().await.unwrap();
+
+    // Cached response should still exist
+    let cache_key = format!("idempotency:default:{}", key);
+    let mut conn = client.get_connection().unwrap();
+    let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
+    assert!(exists, "Cached response should not be deleted by recovery");
 }

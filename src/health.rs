@@ -53,11 +53,16 @@ impl DependencyChecker for PostgresChecker {
 
 pub struct RedisChecker {
     url: String,
+    circuit_state: Option<String>,
 }
 
 impl RedisChecker {
     pub fn new(url: String) -> Self {
-        Self { url }
+        Self { url, circuit_state: None }
+    }
+
+    pub fn with_circuit_state(url: String, circuit_state: String) -> Self {
+        Self { url, circuit_state: Some(circuit_state) }
     }
 }
 
@@ -65,6 +70,17 @@ impl RedisChecker {
 impl DependencyChecker for RedisChecker {
     async fn check(&self) -> DependencyStatus {
         let start = Instant::now();
+
+        // If circuit is open, report immediately without connecting
+        if let Some(ref state) = self.circuit_state {
+            if state == "open" {
+                return DependencyStatus::Unhealthy {
+                    status: "unhealthy".to_string(),
+                    error: "Redis circuit breaker is open".to_string(),
+                };
+            }
+        }
+
         match redis::Client::open(self.url.as_str()) {
             Ok(client) => match client.get_multiplexed_async_connection().await {
                 Ok(mut conn) => {
