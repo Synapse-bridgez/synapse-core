@@ -3,7 +3,7 @@ use crate::services::query_cache::{
     cache_key_asset_stats, cache_key_daily_totals, cache_key_status_counts, CacheConfig,
 };
 use crate::ApiState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::{HeaderValue, StatusCode}, response::{IntoResponse, Response}, Json};
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -44,7 +44,8 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
     }
 
     // Cache miss - query database
-    match crate::db::queries::get_status_counts(&state.app_state.db).await {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    match crate::db::queries::get_status_counts(pool).await {
         Ok(counts) => {
             // Store in cache
             let _ = state
@@ -57,7 +58,14 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
                 )
                 .await;
 
-            (StatusCode::OK, Json(counts))
+            let mut response: Response = (StatusCode::OK, Json(counts)).into_response();
+            if replica_used {
+                response.headers_mut().insert(
+                    "X-Read-Consistency",
+                    HeaderValue::from_static("eventual"),
+                );
+            }
+            return response;
         }
         Err(e) => {
             tracing::error!("Failed to get status counts: {:?}", e);
@@ -87,7 +95,8 @@ pub async fn daily_totals(
     }
 
     // Cache miss - query database
-    match crate::db::queries::get_daily_totals(&state.app_state.db, query.days).await {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    match crate::db::queries::get_daily_totals(pool, query.days).await {
         Ok(totals) => {
             // Store in cache
             let _ = state
@@ -100,7 +109,14 @@ pub async fn daily_totals(
                 )
                 .await;
 
-            (StatusCode::OK, Json(totals))
+            let mut response: Response = (StatusCode::OK, Json(totals)).into_response();
+            if replica_used {
+                response.headers_mut().insert(
+                    "X-Read-Consistency",
+                    HeaderValue::from_static("eventual"),
+                );
+            }
+            return response;
         }
         Err(e) => {
             tracing::error!("Failed to get daily totals: {:?}", e);
@@ -127,7 +143,8 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
     }
 
     // Cache miss - query database
-    match crate::db::queries::get_asset_stats(&state.app_state.db).await {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    match crate::db::queries::get_asset_stats(pool).await {
         Ok(stats) => {
             // Store in cache
             let _ = state
@@ -140,7 +157,14 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
                 )
                 .await;
 
-            (StatusCode::OK, Json(stats))
+            let mut response: Response = (StatusCode::OK, Json(stats)).into_response();
+            if replica_used {
+                response.headers_mut().insert(
+                    "X-Read-Consistency",
+                    HeaderValue::from_static("eventual"),
+                );
+            }
+            return response;
         }
         Err(e) => {
             tracing::error!("Failed to get asset stats: {:?}", e);
