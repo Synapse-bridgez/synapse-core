@@ -16,7 +16,7 @@ use synapse_core::{
     middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
-    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
+    services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
     telemetry,
     ApiState, AppState, ReadinessState,
@@ -351,6 +351,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
+        )
+        .route(
+            "/admin/instances",
+            get(handlers::admin::list_active_instances),
         )
         .with_state(api_state);
 
