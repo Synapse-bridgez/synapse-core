@@ -10,13 +10,14 @@ use crate::validation::{
 use crate::{ApiState, AppState};
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 use tracing::instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -316,6 +317,34 @@ pub async fn callback(
     State(state): State<ApiState>,
     Json(payload): Json<CallbackPayload>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Back-pressure: reject if pending queue exceeds threshold
+    let depth = state
+        .app_state
+        .pending_queue_depth
+        .load(Ordering::Relaxed);
+    let max_pending = std::env::var("MAX_PENDING_QUEUE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10_000);
+    if depth >= max_pending {
+        tracing::warn!(
+            depth,
+            max_pending,
+            "callback_rejected_backpressure: queue depth exceeded"
+        );
+        // Emit metric counter via tracing event (metrics crate not available)
+        tracing::info!(counter.callback_rejected_backpressure = 1u64);
+        let mut response = axum::response::Response::new(axum::body::boxed(
+            axum::body::Full::from(r#"{"error":"service busy, retry later"}"#),
+        ));
+        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        response.headers_mut().insert(
+            "Retry-After",
+            HeaderValue::from_static("30"),
+        );
+        return Ok(response.into_response());
+    }
+
     validate_memo_type(&payload.memo_type)?;
 
     let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
@@ -337,7 +366,7 @@ pub async fn callback(
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-    Ok((StatusCode::CREATED, Json(inserted)))
+    Ok((StatusCode::CREATED, Json(inserted)).into_response())
 }
 
 #[utoipa::path(

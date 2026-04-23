@@ -46,6 +46,15 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         usage_percent,
     };
 
+    let pending_queue_depth = state
+        .app_state
+        .pending_queue_depth
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let current_batch_size = state
+        .app_state
+        .current_batch_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     let health_response = HealthStatus {
         status: if db_status == "connected" {
             "healthy".to_string()
@@ -55,6 +64,8 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         version: "0.1.0".to_string(),
         db: db_status.to_string(),
         db_pool: pool_stats,
+        pending_queue_depth,
+        current_batch_size,
     };
 
     // Return 503 if database is down, 200 otherwise
@@ -97,6 +108,8 @@ pub struct HealthStatus {
     pub version: String,
     pub db: String,
     pub db_pool: DbPoolStats,
+    pub pending_queue_depth: u64,
+    pub current_batch_size: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

@@ -241,10 +241,14 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Feature flags service initialized");
 
     let monitor_pool = pool.clone();
+    let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        config.processor_min_batch as u64,
+    ));
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
-        horizon_client,
+        horizon_client: horizon_client.clone(),
         feature_flags,
         redis_url: config.redis_url.clone(),
         start_time: std::time::Instant::now(),
@@ -253,6 +257,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         query_cache,
         profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        pending_queue_depth: pending_queue_depth.clone(),
+        current_batch_size: current_batch_size.clone(),
     };
 
     let graphql_schema = build_schema(app_state.clone());
@@ -264,6 +270,27 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
     });
+
+    // Back-pressure: refresh pending queue depth every 5s
+    let depth_pool = pool.clone();
+    let depth_counter = pending_queue_depth.clone();
+    tokio::spawn(async move {
+        synapse_core::services::processor::queue_depth_task(depth_pool, depth_counter).await;
+    });
+
+    // Concurrent processor pool
+    let processor_pool = synapse_core::services::processor::ProcessorPool::new(
+        pool.clone(),
+        horizon_client,
+        config.processor_workers,
+        config.processor_poll_interval_ms,
+        config.processor_min_batch,
+        config.processor_max_batch,
+        config.processor_scaling_factor,
+        current_batch_size,
+        pending_queue_depth,
+    );
+    let _processor_shutdown = processor_pool.start();
 
     let _api_routes: Router = Router::new()
         .route("/health", get(handlers::health))
@@ -343,6 +370,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 /// Background task to monitor database connection pool usage
 async fn pool_monitor_task(pool: sqlx::PgPool) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    let mut consecutive_high: u32 = 0;
 
     loop {
         interval.tick().await;
@@ -352,16 +380,29 @@ async fn pool_monitor_task(pool: sqlx::PgPool) {
         let max = pool.options().get_max_connections();
         let usage_percent = (active as f32 / max as f32) * 100.0;
 
-        // Log warning if pool usage exceeds 80%
         if usage_percent >= 80.0 {
-            tracing::warn!(
-                "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
-                usage_percent,
-                active,
-                max,
-                idle
-            );
+            consecutive_high += 1;
+            if consecutive_high >= 3 {
+                tracing::error!(
+                    "CRITICAL: Database connection pool usage has been ≥80% for {} consecutive checks: \
+                     {:.1}% ({}/{} active, {} idle)",
+                    consecutive_high,
+                    usage_percent,
+                    active,
+                    max,
+                    idle
+                );
+            } else {
+                tracing::warn!(
+                    "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
+                    usage_percent,
+                    active,
+                    max,
+                    idle
+                );
+            }
         } else {
+            consecutive_high = 0;
             tracing::debug!(
                 "Database connection pool status: {:.1}% ({}/{} connections active, {} idle)",
                 usage_percent,
