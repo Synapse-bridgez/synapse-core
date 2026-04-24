@@ -7,6 +7,7 @@ pub mod models;
 pub mod partition;
 pub mod pool_manager;
 pub mod queries;
+pub mod slow_query;
 
 pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()

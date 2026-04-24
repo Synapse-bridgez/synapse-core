@@ -66,6 +66,7 @@ opentelemetry_sdk = { version = "0.21", features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.14", features = ["tonic", "trace"] }
 opentelemetry-semantic-conventions = "0.13"
 tracing-opentelemetry = "0.22"
+prometheus = "0.13"
 
 [dev-dependencies]
 mockito = "1"

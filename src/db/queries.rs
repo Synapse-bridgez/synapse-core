@@ -1,12 +1,17 @@
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::db::slow_query;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
+use std::time::Instant;
 use uuid::Uuid;
+
+// Default slow query threshold in milliseconds (can be overridden)
+const SLOW_QUERY_THRESHOLD_MS: u64 = 500;
 
 // --- Tenant Queries --------------------------------------------------------
 
@@ -81,10 +86,18 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
 }
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
+    let start = Instant::now();
+    let query_sql = "SELECT * FROM transactions WHERE id = $1";
+    
+    let result = sqlx::query_as::<_, Transaction>(query_sql)
         .bind(id)
         .fetch_one(pool)
-        .await
+        .await;
+    
+    let duration_ms = start.elapsed().as_millis() as u64;
+    slow_query::log_query_timing("get_transaction", query_sql, duration_ms, 1, SLOW_QUERY_THRESHOLD_MS);
+    
+    result
 }
 
 pub async fn list_transactions(
@@ -98,7 +111,9 @@ pub async fn list_transactions(
     // For forward pagination (older items) we query WHERE (created_at, id) < (cursor)
     // For backward pagination (newer items) we query WHERE (created_at, id) > (cursor)
 
-    if let Some((ts, id)) = cursor {
+    let start = Instant::now();
+
+    let result = if let Some((ts, id)) = cursor {
         if !backward {
             // forward page: older records than cursor
             let q = sqlx::query_as::<_, Transaction>(
@@ -142,7 +157,19 @@ pub async fn list_transactions(
         .await?;
         rows.reverse();
         Ok(rows)
-    }
+    };
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let rows_count = result.as_ref().map(|r| r.len()).unwrap_or(0);
+    slow_query::log_query_timing(
+        "list_transactions",
+        "SELECT * FROM transactions [with cursor pagination]",
+        duration_ms,
+        rows_count,
+        SLOW_QUERY_THRESHOLD_MS,
+    );
+
+    result
 }
 
 pub async fn get_unsettled_transactions(

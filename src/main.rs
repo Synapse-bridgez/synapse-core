@@ -199,7 +199,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Webhook dispatcher background worker started");
 
     // Initialize metrics
-    let _metrics_handle = metrics::init_metrics()
+    let metrics_handle = metrics::init_metrics()
         .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
     tracing::info!("Metrics initialized successfully");
 
@@ -274,6 +274,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
+        metrics_handle,
     };
 
     let graphql_schema = build_schema(app_state.clone());
@@ -281,6 +282,24 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         app_state,
         graphql_schema,
     };
+
+    // Run initialization checks and mark service as ready
+    // This must happen before the server accepts traffic
+    match api_state
+        .app_state
+        .readiness
+        .run_initialization_checks(&pool, &config.redis_url, &config.stellar_horizon_url)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!("✓ Service initialization complete and marked as READY");
+        }
+        Err(e) => {
+            tracing::error!("✗ Critical initialization check failed: {:?}", e);
+            tracing::warn!("Service will not accept traffic until critical checks pass");
+            // Service continues but remains not ready - /ready endpoint will return 503
+        }
+    }
 
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
@@ -362,6 +381,13 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let app = Router::new()
         // Unversioned routes - default to latest (V2) or specific base routes
         .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
+        .route("/metrics", get(metrics::metrics_handler).layer(
+            axum_middleware::from_fn_with_state(
+                config.clone(),
+                metrics::metrics_auth_middleware::<axum::body::Body>,
+            )
+        ))
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route(
             "/settlements/:id",

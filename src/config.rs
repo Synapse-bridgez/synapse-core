@@ -45,6 +45,8 @@ pub struct Config {
     pub processor_min_batch: u32,
     pub processor_max_batch: u32,
     pub processor_scaling_factor: f64,
+    // Slow query logging
+    pub slow_query_threshold_ms: u64,
 }
 
 pub mod assets;
@@ -126,6 +128,9 @@ impl Config {
                 .parse()?,
             processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
                 .unwrap_or_else(|_| "0.5".to_string())
+                .parse()?,
+            slow_query_threshold_ms: env::var("SLOW_QUERY_THRESHOLD_MS")
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()?,
         })
     }

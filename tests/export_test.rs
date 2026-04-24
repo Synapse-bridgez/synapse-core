@@ -71,6 +71,7 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
     };
     let app = create_app(app_state);
 
