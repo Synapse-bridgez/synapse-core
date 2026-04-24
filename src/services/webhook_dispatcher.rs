@@ -28,6 +28,7 @@ pub struct WebhookEndpoint {
     pub event_types: Vec<String>,
     pub enabled: bool,
     pub max_delivery_rate: i32,
+    pub filter_rules: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
 }
@@ -93,7 +94,7 @@ impl WebhookDispatcher {
         event_type: &str,
         data: serde_json::Value,
     ) -> anyhow::Result<()> {
-        let endpoints = self.endpoints_for_event(event_type).await?;
+        let endpoints = self.endpoints_for_event(event_type, &data).await?;
         if endpoints.is_empty() {
             return Ok(());
         }
@@ -355,8 +356,8 @@ impl WebhookDispatcher {
         Ok(())
     }
 
-    async fn endpoints_for_event(&self, event_type: &str) -> anyhow::Result<Vec<WebhookEndpoint>> {
-        let endpoints: Vec<WebhookEndpoint> = sqlx::query_as(
+    async fn endpoints_for_event(&self, event_type: &str, transaction_data: &serde_json::Value) -> anyhow::Result<Vec<WebhookEndpoint>> {
+        let all_endpoints: Vec<WebhookEndpoint> = sqlx::query_as(
             r#"
             SELECT * FROM webhook_endpoints
             WHERE enabled = TRUE
@@ -367,7 +368,76 @@ impl WebhookDispatcher {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(endpoints)
+        // Apply filter rules
+        let mut filtered_endpoints = Vec::new();
+        for endpoint in all_endpoints {
+            if self.matches_filters(&endpoint, transaction_data) {
+                filtered_endpoints.push(endpoint);
+            }
+        }
+
+        Ok(filtered_endpoints)
+    }
+
+    pub fn matches_filters(&self, endpoint: &WebhookEndpoint, transaction_data: &serde_json::Value) -> bool {
+        // If no filter rules, accept all
+        let Some(filter_rules) = &endpoint.filter_rules else {
+            return true;
+        };
+
+        // Extract transaction properties
+        let asset_code = transaction_data.get("asset_code").and_then(|v| v.as_str());
+        let amount_str = transaction_data.get("amount").and_then(|v| v.as_str());
+        let amount = amount_str.and_then(|s| s.parse::<f64>().ok());
+
+        // Check asset_codes filter
+        if let Some(asset_codes) = filter_rules.get("asset_codes") {
+            if let Some(asset_codes_array) = asset_codes.as_array() {
+                if let Some(asset_code) = asset_code {
+                    let allowed = asset_codes_array.iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|allowed_code| allowed_code == asset_code);
+                    if !allowed {
+                        return false;
+                    }
+                } else {
+                    // If transaction has no asset_code but filter requires specific codes, reject
+                    return false;
+                }
+            }
+        }
+
+        // Check min_amount filter
+        if let Some(min_amount_str) = filter_rules.get("min_amount").and_then(|v| v.as_str()) {
+            if let Some(min_amount) = min_amount_str.parse::<f64>().ok() {
+                if let Some(amount) = amount {
+                    if amount < min_amount {
+                        return false;
+                    }
+                } else {
+                    // If transaction has no amount but filter requires min_amount, reject
+                    return false;
+                }
+            }
+        }
+
+        // Check max_amount filter
+        if let Some(max_amount_str) = filter_rules.get("max_amount").and_then(|v| v.as_str()) {
+            if let Some(max_amount) = max_amount_str.parse::<f64>().ok() {
+                if let Some(amount) = amount {
+                    if amount > max_amount {
+                        return false;
+                    }
+                } else {
+                    // If transaction has no amount but filter requires max_amount, reject
+                    return false;
+                }
+            }
+        }
+
+        // Add more filters as needed (e.g., tenant, status, etc.)
+
+        true
     }
 }
 
@@ -524,5 +594,130 @@ mod tests {
             sig1, sig2,
             "Signature should be deterministic for same inputs"
         );
+    }
+
+    #[test]
+    fn test_filter_no_rules_accepts_all() {
+        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let endpoint = WebhookEndpoint {
+            id: Uuid::new_v4(),
+            url: "http://example.com".to_string(),
+            secret: "secret".to_string(),
+            event_types: vec!["transaction.completed".to_string()],
+            enabled: true,
+            max_delivery_rate: 10,
+            filter_rules: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let transaction_data = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "100.00"
+        });
+
+        assert!(dispatcher.matches_filters(&endpoint, &transaction_data));
+    }
+
+    #[test]
+    fn test_filter_asset_codes_matches() {
+        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let endpoint = WebhookEndpoint {
+            id: Uuid::new_v4(),
+            url: "http://example.com".to_string(),
+            secret: "secret".to_string(),
+            event_types: vec!["transaction.completed".to_string()],
+            enabled: true,
+            max_delivery_rate: 10,
+            filter_rules: Some(serde_json::json!({"asset_codes": ["USD", "EUR"]})),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let usd_transaction = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "100.00"
+        });
+        let eur_transaction = serde_json::json!({
+            "asset_code": "EUR",
+            "amount": "200.00"
+        });
+        let btc_transaction = serde_json::json!({
+            "asset_code": "BTC",
+            "amount": "0.5"
+        });
+
+        assert!(dispatcher.matches_filters(&endpoint, &usd_transaction));
+        assert!(dispatcher.matches_filters(&endpoint, &eur_transaction));
+        assert!(!dispatcher.matches_filters(&endpoint, &btc_transaction));
+    }
+
+    #[test]
+    fn test_filter_min_amount() {
+        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let endpoint = WebhookEndpoint {
+            id: Uuid::new_v4(),
+            url: "http://example.com".to_string(),
+            secret: "secret".to_string(),
+            event_types: vec!["transaction.completed".to_string()],
+            enabled: true,
+            max_delivery_rate: 10,
+            filter_rules: Some(serde_json::json!({"min_amount": "100.00"})),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let large_transaction = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "150.00"
+        });
+        let small_transaction = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "50.00"
+        });
+
+        assert!(dispatcher.matches_filters(&endpoint, &large_transaction));
+        assert!(!dispatcher.matches_filters(&endpoint, &small_transaction));
+    }
+
+    #[test]
+    fn test_filter_combined_rules() {
+        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let endpoint = WebhookEndpoint {
+            id: Uuid::new_v4(),
+            url: "http://example.com".to_string(),
+            secret: "secret".to_string(),
+            event_types: vec!["transaction.completed".to_string()],
+            enabled: true,
+            max_delivery_rate: 10,
+            filter_rules: Some(serde_json::json!({
+                "asset_codes": ["USD"],
+                "min_amount": "100.00",
+                "max_amount": "1000.00"
+            })),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let matching_transaction = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "500.00"
+        });
+        let wrong_asset = serde_json::json!({
+            "asset_code": "EUR",
+            "amount": "500.00"
+        });
+        let too_small = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "50.00"
+        });
+        let too_large = serde_json::json!({
+            "asset_code": "USD",
+            "amount": "1500.00"
+        });
+
+        assert!(dispatcher.matches_filters(&endpoint, &matching_transaction));
+        assert!(!dispatcher.matches_filters(&endpoint, &wrong_asset));
+        assert!(!dispatcher.matches_filters(&endpoint, &too_small));
+        assert!(!dispatcher.matches_filters(&endpoint, &too_large));
     }
 }

@@ -61,6 +61,67 @@ This secret is used both for:
 - **Outgoing**: Signing webhooks created by this service
 - **Incoming**: Verifying webhooks received from other services
 
+## Event Filtering
+
+Webhook endpoints can be configured with filter rules to receive only events that match specific transaction criteria. Filters are applied before enqueuing deliveries to prevent unnecessary webhook traffic.
+
+### Filter Rules Syntax
+
+Filter rules are stored as JSONB in the `filter_rules` column of the `webhook_endpoints` table.
+
+#### Supported Filters
+
+- `asset_codes` (array of strings): Only receive events for transactions with these asset codes
+- `min_amount` (string): Only receive events for transactions with amount >= this value
+- `max_amount` (string): Only receive events for transactions with amount <= this value
+
+#### Examples
+
+```json
+{
+  "asset_codes": ["USD", "EUR"]
+}
+```
+
+Only receives events for USD and EUR transactions.
+
+```json
+{
+  "min_amount": "100.00"
+}
+```
+
+Only receives events for transactions with amount >= 100.00.
+
+```json
+{
+  "asset_codes": ["USD"],
+  "min_amount": "50.00",
+  "max_amount": "1000.00"
+}
+```
+
+Only receives events for USD transactions between 50.00 and 1000.00.
+
+#### Filter Logic
+
+- If no `filter_rules` is set, the endpoint receives all events for its subscribed `event_types`
+- Filters are AND-combined (all conditions must be met)
+- String comparisons are case-sensitive
+- Amount comparisons use numeric comparison after parsing as decimal
+
+### Configuration
+
+Filter rules can be set when creating or updating webhook endpoints via the admin API:
+
+```bash
+curl -X POST /admin/webhooks/endpoints/{id}/rate-limit \
+  -H "Content-Type: application/json" \
+  -d '{"max_delivery_rate": 10}'
+```
+
+Note: Filter rules are configured separately from rate limits.
+
 ## Implementation Details
 
 ### Outgoing Webhooks (Dispatched by Synapse Core)
