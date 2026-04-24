@@ -32,6 +32,8 @@ pub struct Config {
     pub backup_dir: String,
     pub backup_encryption_key: Option<String>,
     pub otlp_endpoint: Option<String>,
+    // CORS
+    pub cors_allowed_origins: Vec<String>,
     // Back-pressure
     pub max_pending_queue: u64,
     // DB pool sizing
@@ -100,6 +102,13 @@ impl Config {
             backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
             backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
             otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
             max_pending_queue: env::var("MAX_PENDING_QUEUE")
                 .unwrap_or_else(|_| "10000".to_string())
                 .parse()?,

@@ -23,6 +23,7 @@ use crate::graphql::schema::AppSchema;
 use crate::handlers::profiling::ProfilingManager;
 use crate::handlers::ws::TransactionStatusUpdate;
 pub use crate::readiness::ReadinessState;
+use crate::secrets::SecretsStore;
 use crate::services::feature_flags::FeatureFlagService;
 use crate::services::query_cache::QueryCache;
 use crate::stellar::HorizonClient;
@@ -51,6 +52,7 @@ pub struct AppState {
     pub query_cache: QueryCache,
     pub profiling_manager: ProfilingManager,
     pub tenant_configs: Arc<tokio::sync::RwLock<HashMap<Uuid, TenantConfig>>>,
+    pub secrets_store: Option<SecretsStore>,
     /// Current count of pending transactions, updated every 5s by background task.
     pub pending_queue_depth: Arc<AtomicU64>,
     /// Current adaptive batch size, updated by the processor pool.
@@ -87,6 +89,7 @@ impl AppState {
             query_cache: QueryCache::new("redis://localhost:6379").unwrap(),
             profiling_manager: ProfilingManager::new(),
             tenant_configs: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            secrets_store: None,
             pending_queue_depth: Arc::new(AtomicU64::new(0)),
             current_batch_size: Arc::new(AtomicU64::new(10)),
         }
@@ -108,29 +111,44 @@ impl std::fmt::Debug for ApiState {
 pub fn create_app(app_state: AppState) -> Router {
     let graphql_schema = crate::graphql::schema::build_schema(app_state.clone());
     let api_state = ApiState {
-        app_state,
+        app_state: app_state.clone(),
         graphql_schema,
     };
 
-    // Callback routes with validation middleware
+    // Callback routes with validation + quota middleware
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
+        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
         ));
 
-    // Webhook route with validation middleware
+    // Webhook route with validation + quota middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
+        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
         ));
 
-    Router::new()
+    // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
+    let mut admin_router = Router::new()
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
-        .route("/errors", get(handlers::error_catalog))
+        .route("/errors", get(handlers::error_catalog));
+
+    if let Some(store) = &app_state.secrets_store {
+        admin_router = admin_router.layer(axum::Extension(store.clone()));
+    }
+
+    admin_router
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route(
             "/settlements/:id",

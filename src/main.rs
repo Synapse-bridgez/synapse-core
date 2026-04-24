@@ -16,6 +16,7 @@ use synapse_core::{
     middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
+    secrets::SecretsStore,
     services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
     telemetry,
@@ -23,6 +24,7 @@ use synapse_core::{
 };
 use opentelemetry::trace::TracerProvider as _;
 use tokio::sync::broadcast;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
@@ -204,15 +206,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Metrics initialized successfully");
 
     // Initialize rate limiting
-    // let rate_limit_config = Arc::new(RateLimitConfig::new(&config));
-
-    // Load whitelisted IPs from config
-    // if !config.whitelisted_ips.is_empty() {
-    //     rate_limit_config.load_whitelisted_ips(&config.whitelisted_ips).await;
-    // }
-
     tracing::info!(
-        "Rate limiting configured: {} req/sec (default), {} req/sec (whitelisted)",
+        "Rate limiting configured: {} req/min (default), {} req/min (whitelisted)",
         config.default_rate_limit,
         config.whitelist_rate_limit
     );
@@ -255,6 +250,27 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let feature_flags = FeatureFlagService::new(pool.clone());
     tracing::info!("Feature flags service initialized");
 
+    // Initialize secrets store and start rotation task (if Vault is configured).
+    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok() {
+        match synapse_core::secrets::SecretsManager::new().await {
+            Ok(manager) => {
+                let anchor_secret = manager.get_anchor_secret().await?;
+                let admin_key = manager.get_admin_api_key().await?;
+                let store = SecretsStore::new(anchor_secret, admin_key);
+                manager.start_refresh_task(store.clone());
+                tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!("Vault unavailable, secrets rotation disabled: {e}");
+                None
+            }
+        }
+    } else {
+        tracing::info!("Vault not configured, secrets rotation disabled");
+        None
+    };
+
     let monitor_pool = pool.clone();
     let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
@@ -272,6 +288,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         query_cache,
         profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        secrets_store,
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
     };
@@ -372,6 +389,29 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             get(handlers::admin::list_active_instances),
         )
         .with_state(api_state);
+
+    // Configure CORS if allowed origins are specified.
+    let app = if !config.cors_allowed_origins.is_empty() {
+        let origins: Vec<_> = config
+            .cors_allowed_origins
+            .iter()
+            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        tracing::info!(
+            "CORS enabled for origins: {:?}",
+            config.cors_allowed_origins
+        );
+        let cors = CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(AllowMethods::any())
+            .allow_headers(AllowHeaders::any())
+            .allow_credentials(true)
+            .max_age(std::time::Duration::from_secs(3600));
+        app.layer(cors)
+    } else {
+        tracing::info!("CORS disabled (no allowed origins configured)");
+        app
+    };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
