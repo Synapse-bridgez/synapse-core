@@ -45,7 +45,7 @@ csv = "1"
 cron = "0.12"
 async-graphql = { version = "6", features = ["chrono", "uuid", "bigdecimal"] }
 async-graphql-axum = "6"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 governor = "0.6"
 redis = { version = "0.24", features = ["tokio-comp"] }

@@ -1,3 +1,4 @@
+pub mod bulk_status;
 pub mod webhook_replay;
 
 use crate::AppState;

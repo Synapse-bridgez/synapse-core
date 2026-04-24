@@ -30,7 +30,7 @@ use crate::stellar::HorizonClient;
 use crate::tenant::TenantConfig;
 use axum::{
     middleware as axum_middleware,
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use std::collections::HashMap;
@@ -159,6 +159,11 @@ pub fn create_app(app_state: AppState) -> Router {
         .merge(callback_routes)
         .merge(webhook_routes)
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
+        .route("/transactions", get(handlers::webhook::list_transactions_api))
+        .route(
+            "/admin/transactions/bulk-status",
+            patch(handlers::admin::bulk_status::bulk_update_status_api),
+        )
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
         .route("/stats/status", get(handlers::stats::status_counts))
