@@ -1,15 +1,17 @@
-use chrono::Utc;
 use serde_json::json;
 use sqlx::{migrate::Migrator, PgPool, Row};
 use std::path::Path;
 use synapse_core::db::{
     audit::{AuditLog, ENTITY_TRANSACTION},
-    models::Transaction,
     queries::insert_transaction,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
+
+#[path = "fixtures.rs"]
+mod fixtures;
+use fixtures::TransactionFixture;
 
 async fn setup_test_db() -> (PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
@@ -63,23 +65,14 @@ async fn setup_test_db() -> (PgPool, impl std::any::Any) {
 async fn test_audit_log_on_insert() {
     let (pool, _container) = setup_test_db().await;
 
-    let tx_id = Uuid::new_v4();
-    let tx = Transaction {
-        id: tx_id,
-        stellar_account: "GTEST123".to_string(),
-        amount: "100.50".parse().unwrap(),
-        asset_code: "USD".to_string(),
-        status: "pending".to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        anchor_transaction_id: Some("anchor-123".to_string()),
-        callback_type: Some("deposit".to_string()),
-        callback_status: Some("pending".to_string()),
-        settlement_id: None,
-        memo: None,
-        memo_type: None,
-        metadata: None,
-    };
+    let tx = TransactionFixture::new()
+        .with_stellar_account("GTEST123")
+        .with_amount("100.50")
+        .with_callback_type("deposit")
+        .with_callback_status("pending")
+        .with_anchor_transaction_id("anchor-123")
+        .build();
+    let tx_id = tx.id;
 
     insert_transaction(&pool, &tx).await.unwrap();
 

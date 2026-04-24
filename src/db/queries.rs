@@ -27,62 +27,65 @@ pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> 
 // --- Transaction Queries ---
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    let mut db_tx = pool.begin().await?;
+    crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
+        let mut db_tx = pool.begin().await?;
 
-    let result = sqlx::query_as::<_, Transaction>(
-        r#"
-        INSERT INTO transactions (
-            id, stellar_account, amount, asset_code, status,
-            created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
-            settlement_id, memo, memo_type, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-        RETURNING *
-        "#,
-    )
-    .bind(tx.id)
-    .bind(&tx.stellar_account)
-    .bind(&tx.amount)
-    .bind(&tx.asset_code)
-    .bind(&tx.status)
-    .bind(tx.created_at)
-    .bind(tx.updated_at)
-    .bind(&tx.anchor_transaction_id)
-    .bind(&tx.callback_type)
-    .bind(&tx.callback_status)
-    .bind(tx.settlement_id)
-    .bind(&tx.memo)
-    .bind(&tx.memo_type)
-    .bind(&tx.metadata)
-    .fetch_one(&mut *db_tx)
-    .await?;
+        let result = sqlx::query_as::<_, Transaction>(
+            r#"
+            INSERT INTO transactions (
+                id, stellar_account, amount, asset_code, status,
+                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                settlement_id, memo, memo_type, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            RETURNING *
+            "#,
+        )
+        .bind(tx.id)
+        .bind(&tx.stellar_account)
+        .bind(&tx.amount)
+        .bind(&tx.asset_code)
+        .bind(&tx.status)
+        .bind(tx.created_at)
+        .bind(tx.updated_at)
+        .bind(&tx.anchor_transaction_id)
+        .bind(&tx.callback_type)
+        .bind(&tx.callback_status)
+        .bind(tx.settlement_id)
+        .bind(&tx.memo)
+        .bind(&tx.memo_type)
+        .bind(&tx.metadata)
+        .fetch_one(&mut *db_tx)
+        .await?;
 
-    // Audit log: transaction created
-    AuditLog::log_creation(
-        &mut db_tx,
-        result.id,
-        ENTITY_TRANSACTION,
-        json!({
-            "stellar_account": result.stellar_account,
-            "amount": result.amount.to_string(),
-            "asset_code": result.asset_code,
-            "status": result.status,
-            "anchor_transaction_id": result.anchor_transaction_id,
-            "callback_type": result.callback_type,
-            "callback_status": result.callback_status,
-            "memo": result.memo,
-            "memo_type": result.memo_type,
-            "metadata": result.metadata,
-        }),
-        "system",
-    )
-    .await?;
+        // Audit log: transaction created
+        AuditLog::log_creation(
+            &mut db_tx,
+            result.id,
+            ENTITY_TRANSACTION,
+            json!({
+                "stellar_account": result.stellar_account,
+                "amount": result.amount.to_string(),
+                "asset_code": result.asset_code,
+                "status": result.status,
+                "anchor_transaction_id": result.anchor_transaction_id,
+                "callback_type": result.callback_type,
+                "callback_status": result.callback_status,
+                "memo": result.memo,
+                "memo_type": result.memo_type,
+                "metadata": result.metadata,
+            }),
+            "system",
+        )
+        .await?;
 
-    db_tx.commit().await?;
+        db_tx.commit().await?;
 
-    // Invalidate cache after successful commit
-    invalidate_transaction_caches(&result.asset_code).await;
+        // Invalidate cache after successful commit
+        invalidate_transaction_caches(&result.asset_code).await;
 
-    Ok(result)
+        Ok(result)
+    })
+    .await
 }
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
@@ -456,7 +459,18 @@ pub async fn get_audit_logs(
     entity_id: Uuid,
     limit: i64,
     offset: i64,
-) -> Result<Vec<(Uuid, Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, String, DateTime<Utc>)>> {
+) -> Result<
+    Vec<(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+        String,
+        DateTime<Utc>,
+    )>,
+> {
     let rows = sqlx::query(
         r#"
         SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
@@ -464,7 +478,7 @@ pub async fn get_audit_logs(
         WHERE entity_id = $1
         ORDER BY timestamp DESC
         LIMIT $2 OFFSET $3
-        "#
+        "#,
     )
     .bind(entity_id)
     .bind(limit)
@@ -534,21 +548,41 @@ pub async fn get_status_counts(pool: &PgPool) -> Result<Vec<StatusCount>> {
 }
 
 pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal>> {
-    let rows = sqlx::query(
-        r#"
+    let end = Utc::now();
+    let start = end - chrono::Duration::days(days.into());
+    let sql = r#"
         SELECT 
             DATE(created_at)::text as date,
             SUM(amount) as total_amount,
             COUNT(*) as tx_count
         FROM transactions
-        WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+        WHERE created_at >= $1
+          AND created_at < $2
         GROUP BY DATE(created_at)
         ORDER BY DATE(created_at) DESC
-        "#,
-    )
-    .bind(days)
-    .fetch_all(pool)
-    .await?;
+        "#;
+
+    if cfg!(debug_assertions) {
+        let explain_rows = sqlx::query(&format!("EXPLAIN ANALYZE {}", sql))
+            .bind(start)
+            .bind(end)
+            .fetch_all(pool)
+            .await?;
+
+        let explain_plan = explain_rows
+            .into_iter()
+            .map(|row| row.get::<String, _>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        tracing::debug!("get_daily_totals EXPLAIN ANALYZE:\n{}", explain_plan);
+    }
+
+    let rows = sqlx::query(sql)
+        .bind(start)
+        .bind(end)
+        .fetch_all(pool)
+        .await?;
 
     Ok(rows
         .into_iter()
@@ -635,13 +669,11 @@ pub async fn update_idempotency_key_response(
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1",
-    )
-    .bind(key)
-    .bind(response)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
+        .bind(key)
+        .bind(response)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

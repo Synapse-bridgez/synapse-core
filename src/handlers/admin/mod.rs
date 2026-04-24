@@ -9,10 +9,16 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateFlagRequest {
     pub enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateWebhookRateLimitRequest {
+    pub max_delivery_rate: i32,
 }
 
 /// Create admin routes for queue management
@@ -23,9 +29,19 @@ pub fn admin_routes() -> Router<sqlx::PgPool> {
 /// Create webhook replay admin routes
 pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
     Router::new()
-        .route("/webhooks/failed", get(webhook_replay::list_failed_webhooks))
+        .route(
+            "/webhooks/failed",
+            get(webhook_replay::list_failed_webhooks),
+        )
         .route("/webhooks/replay/:id", post(webhook_replay::replay_webhook))
-        .route("/webhooks/replay/batch", post(webhook_replay::batch_replay_webhooks))
+        .route(
+            "/webhooks/replay/batch",
+            post(webhook_replay::batch_replay_webhooks),
+        )
+        .route(
+            "/webhooks/endpoints/:id/rate-limit",
+            post(update_webhook_rate_limit),
+        )
 }
 
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
@@ -41,10 +57,8 @@ pub async fn list_active_instances(State(state): State<crate::ApiState>) -> impl
         }
     };
 
-    let (instances_res, leader_res) = tokio::join!(
-        election.list_active_instances(),
-        election.current_leader(),
-    );
+    let (instances_res, leader_res) =
+        tokio::join!(election.list_active_instances(), election.current_leader(),);
 
     match (instances_res, leader_res) {
         (Ok(instances), Ok(leader)) => (
@@ -93,6 +107,71 @@ pub async fn update_flag(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
                     "error": format!("Feature flag '{}' not found", name)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn update_webhook_rate_limit(
+    State(pool): State<sqlx::PgPool>,
+    Path(endpoint_id): Path<uuid::Uuid>,
+    Json(payload): Json<UpdateWebhookRateLimitRequest>,
+) -> impl IntoResponse {
+    if payload.max_delivery_rate <= 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "max_delivery_rate must be greater than 0"
+            })),
+        )
+            .into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        UPDATE webhook_endpoints
+        SET max_delivery_rate = $1, updated_at = NOW()
+        WHERE id = $2
+        "#,
+    )
+    .bind(payload.max_delivery_rate)
+    .bind(endpoint_id)
+    .execute(&pool)
+    .await
+    {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "Webhook endpoint not found"
+                    })),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "message": "Rate limit updated successfully",
+                        "endpoint_id": endpoint_id,
+                        "max_delivery_rate": payload.max_delivery_rate
+                    })),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to update webhook rate limit for {}: {}",
+                endpoint_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to update rate limit"
                 })),
             )
                 .into_response()

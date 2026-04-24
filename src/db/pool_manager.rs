@@ -52,16 +52,21 @@ impl PoolManager {
         self.replica.as_ref()
     }
 
-    pub async fn get_read_pool(&self) -> &PgPool {
+    pub async fn read_pool(&self) -> (&PgPool, bool) {
         let state = self.failover_state.read().await;
 
         if let Some(replica) = &self.replica {
             if state.replica_healthy {
-                return replica;
+                tracing::info!("Routing read query to replica database");
+                return (replica, true);
             }
         }
 
-        &self.primary
+        (&self.primary, false)
+    }
+
+    pub async fn get_read_pool(&self) -> &PgPool {
+        self.read_pool().await.0
     }
 
     pub async fn get_write_pool(&self) -> &PgPool {

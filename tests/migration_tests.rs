@@ -41,11 +41,7 @@ fn up_migration_stems() -> Vec<String> {
 fn every_up_migration_has_a_down_migration() {
     let dir = migrations_dir();
     let stems = up_migration_stems();
-    assert!(
-        !stems.is_empty(),
-        "No migration files found in {:?}",
-        dir
-    );
+    assert!(!stems.is_empty(), "No migration files found in {:?}", dir);
 
     let mut missing: Vec<String> = Vec::new();
     for stem in &stems {

@@ -115,7 +115,7 @@ pub async fn list_failed_webhooks(
     Query(params): Query<ListFailedWebhooksQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let limit = params.limit.min(100);
-    
+
     // Build query to find transactions with failed status or in DLQ
     let mut query_builder = sqlx::QueryBuilder::new(
         "SELECT t.id, t.stellar_account, t.amount, t.asset_code, 
@@ -124,7 +124,7 @@ pub async fn list_failed_webhooks(
                 d.error_reason as last_error
          FROM transactions t
          LEFT JOIN transaction_dlq d ON t.id = d.transaction_id
-         WHERE (t.status = 'failed' OR d.id IS NOT NULL)"
+         WHERE (t.status = 'failed' OR d.id IS NOT NULL)",
     );
 
     if let Some(asset_code) = &params.asset_code {
@@ -172,9 +172,9 @@ pub async fn list_failed_webhooks(
     let count_query = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM transactions t
          LEFT JOIN transaction_dlq d ON t.id = d.transaction_id
-         WHERE (t.status = 'failed' OR d.id IS NOT NULL)"
+         WHERE (t.status = 'failed' OR d.id IS NOT NULL)",
     );
-    
+
     let total = count_query.fetch_one(&pool).await.unwrap_or(0);
 
     Ok(Json(FailedWebhooksResponse { total, webhooks }))
@@ -205,7 +205,7 @@ pub async fn replay_webhook(
     let result = if request.dry_run {
         // Dry-run mode: validate payload without committing
         let _ = track_replay_attempt(&pool, transaction_id, true, true, None).await;
-        
+
         ReplayResult {
             transaction_id,
             success: true,
@@ -259,8 +259,15 @@ pub async fn replay_webhook(
             }
             Err(e) => {
                 let error_msg = format!("Failed to replay webhook: {}", e);
-                let _ = track_replay_attempt(&pool, transaction_id, false, false, Some(error_msg.clone())).await;
-                
+                let _ = track_replay_attempt(
+                    &pool,
+                    transaction_id,
+                    false,
+                    false,
+                    Some(error_msg.clone()),
+                )
+                .await;
+
                 ReplayResult {
                     transaction_id,
                     success: false,
@@ -368,7 +375,14 @@ pub async fn batch_replay_webhooks(
                 }
                 Err(e) => {
                     let error_msg = format!("Failed to replay webhook: {}", e);
-                    let _ = track_replay_attempt(&pool, transaction_id, false, false, Some(error_msg.clone())).await;
+                    let _ = track_replay_attempt(
+                        &pool,
+                        transaction_id,
+                        false,
+                        false,
+                        Some(error_msg.clone()),
+                    )
+                    .await;
                     failed += 1;
                     ReplayResult {
                         transaction_id,
@@ -401,7 +415,7 @@ async fn reprocess_webhook(pool: &PgPool, transaction: &Transaction) -> Result<(
     sqlx::query(
         "UPDATE transactions 
          SET status = 'pending', updated_at = NOW() 
-         WHERE id = $1"
+         WHERE id = $1",
     )
     .bind(transaction.id)
     .execute(pool)
@@ -429,7 +443,7 @@ async fn track_replay_attempt(
         INSERT INTO webhook_replay_history 
         (transaction_id, replayed_by, dry_run, success, error_message, replayed_at)
         VALUES ($1, $2, $3, $4, $5, NOW())
-        "#
+        "#,
     )
     .bind(transaction_id)
     .bind("admin")

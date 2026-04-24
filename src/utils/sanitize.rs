@@ -250,3 +250,69 @@ mod tests {
         assert_eq!(sanitized["field_0"], "value_0");
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// sanitize_json must be idempotent: applying it twice gives the same result.
+        #[test]
+        fn prop_sanitize_json_idempotent(
+            key in "[a-zA-Z_]{1,20}",
+            value in "[a-zA-Z0-9 ]{0,100}",
+        ) {
+            let input = serde_json::json!({ key: value });
+            let once = sanitize_json(&input);
+            let twice = sanitize_json(&once);
+            prop_assert_eq!(once, twice, "sanitize_json is not idempotent");
+        }
+
+        /// Non-sensitive fields must never be masked.
+        #[test]
+        fn prop_non_sensitive_fields_not_masked(
+            // Use field names that are clearly not sensitive
+            key in "data|info|result|value|name|count|total",
+            value in "[a-zA-Z0-9]{5,20}",
+        ) {
+            let input = serde_json::json!({ key.clone(): value.clone() });
+            let sanitized = sanitize_json(&input);
+            prop_assert_eq!(
+                sanitized[&key].as_str().unwrap_or(""),
+                value.as_str(),
+                "Non-sensitive field '{}' was unexpectedly masked",
+                key
+            );
+        }
+
+        /// Sensitive fields must always be masked.
+        #[test]
+        fn prop_sensitive_fields_always_masked(
+            value in "[a-zA-Z0-9]{5,50}",
+        ) {
+            for key in &["password", "secret", "token", "api_key", "account", "authorization"] {
+                let input = serde_json::json!({ *key: value.clone() });
+                let sanitized = sanitize_json(&input);
+                let sanitized_val = sanitized[key].as_str().unwrap_or("");
+                prop_assert!(
+                    sanitized_val.contains("****"),
+                    "Sensitive field '{}' was not masked, got: {}",
+                    key,
+                    sanitized_val
+                );
+            }
+        }
+
+        /// sanitize_json must not panic on deeply nested or large inputs.
+        #[test]
+        fn prop_sanitize_json_handles_arrays(
+            values in prop::collection::vec("[a-zA-Z0-9]{1,20}", 0..50),
+        ) {
+            let input = serde_json::Value::Array(
+                values.iter().map(|v| serde_json::json!(v)).collect()
+            );
+            let _ = sanitize_json(&input);
+        }
+    }
+}

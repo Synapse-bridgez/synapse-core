@@ -6,153 +6,132 @@ This document describes the transaction lifecycle and state transitions in Synap
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: Webhook received
-    
-    pending --> completed: Process successful
-    pending --> dlq: Processing error
-    
-    dlq --> pending: Requeue from DLQ
-    
+    [*] --> pending: Webhook received / reprocess
+
+    pending --> processing: Processor picks up transaction
+    pending --> completed: Direct completion (account monitor)
+    pending --> failed: Validation or processing error
+
+    processing --> completed: Processing successful
+    processing --> failed: Processing error
+
+    failed --> pending: Reprocess (requeue from DLQ)
+
     completed --> [*]
 ```
 
 ## States
 
 ### pending
-**Initial state** - Transaction created and awaiting processing.
+**Initial state** — Transaction created and awaiting processing.
 
 **Entry conditions:**
 - Webhook received with valid payload
-- Transaction requeued from DLQ
+- Transaction requeued from DLQ (`failed → pending`)
 
 **Exit transitions:**
-- → `completed`: Transaction processor successfully processes transaction
-- → `dlq`: Processing error or max retry attempts exceeded
+- → `processing`: Processor picks up the transaction
+- → `completed`: Direct completion (e.g., account monitor matches payment)
+- → `failed`: Validation or processing error
 
 **Database field:** `status = 'pending'`
 
-**Code references:**
-- Default status in `Transaction::new()`: `src/db/models.rs`
-- Set on requeue: `src/services/transaction_processor.rs:48`
+---
+
+### processing
+**Intermediate state** — Transaction is actively being processed.
+
+**Entry conditions:**
+- Processor picks up a `pending` transaction
+
+**Exit transitions:**
+- → `completed`: Processing pipeline succeeds
+- → `failed`: Processing pipeline fails
+
+**Database field:** `status = 'processing'`
 
 ---
 
 ### completed
-**Terminal state** - Transaction successfully processed and verified.
+**Terminal state** — Transaction successfully processed and verified.
 
 **Entry conditions:**
-- Transaction processor successfully completes processing
+- Processing pipeline completes successfully
+- Account monitor matches an incoming payment to a pending transaction
 
 **Exit transitions:** None (terminal state)
 
 **Database field:** `status = 'completed'`
 
-**Code references:**
-- Set by processor: `src/services/transaction_processor.rs:22`
-- Force complete (admin): `src/cli.rs:83`
-- GraphQL mutation: `src/graphql/resolvers/transaction.rs:84`
-
 ---
 
-### dlq
-**Dead Letter Queue state** - Transaction failed and moved to DLQ for manual review.
+### failed
+**Error state** — Transaction failed and may be reprocessed.
 
 **Entry conditions:**
-- Processing error occurred
-- Max retry attempts exceeded
+- Processing error occurred at any stage
 
 **Exit transitions:**
 - → `pending`: Manual requeue via `requeue_dlq()` API
 
-**Database storage:** Separate `transaction_dlq` table with reference to original transaction
-
-**Code references:**
-- Requeue function: `src/services/transaction_processor.rs:requeue_dlq()`
-- DLQ table: `migrations/20260220143500_transaction_dlq.sql`
+**Database field:** `status = 'failed'`
 
 ---
 
-## Transition Triggers
+## Transition Validation
 
-### Automatic Transitions
+All status updates are guarded by `validate_status_transition(from, to) -> Result<(), AppError>` in `src/validation/state_machine.rs`.
 
-| From | To | Trigger | Code Location |
-|------|-----|---------|---------------|
-| pending | completed | Successful processing | `src/services/transaction_processor.rs:process_transaction()` |
-| pending | dlq | Processing error | Error handler (implicit) |
+Invalid transitions return `AppError::InvalidStatusTransition` (HTTP 400, code `ERR_TRANSACTION_005`).
 
-### Manual Transitions
+### Valid Transitions Table
 
-| From | To | Trigger | Code Location |
-|------|-----|---------|---------------|
-| dlq | pending | Admin requeue | `src/services/transaction_processor.rs:requeue_dlq()` |
-| pending | completed | Force complete (admin) | `src/cli.rs:handle_tx_force_complete()` |
+| From        | To          | Trigger                                 |
+|-------------|-------------|-----------------------------------------|
+| pending     | processing  | Processor picks up transaction          |
+| pending     | completed   | Account monitor direct completion       |
+| pending     | failed      | Validation or processing error          |
+| processing  | completed   | Processing pipeline success             |
+| processing  | failed      | Processing pipeline error               |
+| failed      | pending     | Admin requeue from DLQ                  |
 
----
+### Invalid Transitions (examples)
 
-## Error Paths
-
-### Processing Errors
-```
-pending → [processing error] → dlq
-```
-
-### Recovery Paths
-```
-dlq → [requeue] → pending → [process] → completed
-```
-
----
-
-## State Persistence
-
-States are persisted in the PostgreSQL database:
-
-**Main table:** `transactions`
-- `status` column: `'pending'` or `'completed'`
-- Default value: `'pending'`
-
-**DLQ table:** `transaction_dlq`
-- Stores failed transactions with error details
-- Links to original transaction via `transaction_id`
-- Original transaction status remains `'pending'` in `transactions` table
-
----
-
-## Monitoring
-
-### Key Metrics
-- Transactions by status: `GET /stats/status-counts`
-- DLQ size: Count of records in `transaction_dlq`
-- Completion rate: `completed / (completed + pending + dlq)`
-
-### State Duration
-- `pending → completed`: Target < 30 seconds
-- `dlq` retention: 30 days (configurable)
+| From        | To          | Reason                                  |
+|-------------|-------------|-----------------------------------------|
+| completed   | pending     | Terminal state — cannot be reversed     |
+| completed   | processing  | Terminal state — cannot be reversed     |
+| completed   | failed      | Terminal state — cannot be reversed     |
+| processing  | pending     | Must complete or fail, not revert       |
+| failed      | processing  | Must go through pending first           |
+| failed      | completed   | Must go through pending first           |
 
 ---
 
 ## Code References
 
-### State Transitions
-- **Transaction Processor**: `src/services/transaction_processor.rs`
-  - `process_transaction()`: pending → completed
-  - `requeue_dlq()`: dlq → pending
-- **Webhook Handler**: `src/handlers/webhook.rs`
-  - Creates transactions in `pending` state
-- **CLI Commands**: `src/cli.rs`
-  - `handle_tx_force_complete()`: Force transition to completed
-- **GraphQL Mutations**: `src/graphql/resolvers/transaction.rs`
-  - `force_complete_transaction()`: Admin override to completed
+### Validation Function
+- `src/validation/state_machine.rs` — `validate_status_transition(from, to)`
+
+### Status Update Sites
+- `src/services/transaction_processor.rs` — `CompleteStage::execute()` (pending/processing → completed)
+- `src/services/transaction_processor.rs` — `requeue_dlq()` (failed → pending)
+- `src/services/account_monitor.rs` — `process_payment()` (pending → completed)
 
 ### Database Schema
-- **Transactions Table**: `migrations/20250216000000_init.sql`
-  - `status VARCHAR(20) NOT NULL DEFAULT 'pending'`
-- **DLQ Table**: `migrations/20260220143500_transaction_dlq.sql`
-  - Stores failed transaction references
+- `migrations/20250216000000_init.sql` — `status VARCHAR(20) NOT NULL DEFAULT 'pending'`
+- `migrations/20260220143500_transaction_dlq.sql` — DLQ table
 
-### Models
-- **Transaction Model**: `src/db/models.rs`
-  - Default status: `'pending'`
-- **Query Functions**: `src/db/queries.rs`
-  - Status-based queries and filtering
+---
+
+## Error Handling
+
+Invalid transitions return:
+
+```json
+{
+  "error": "Invalid status transition: Cannot transition from 'completed' to 'pending'",
+  "code": "ERR_TRANSACTION_005",
+  "status": 400
+}
+```

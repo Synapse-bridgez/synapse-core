@@ -79,6 +79,10 @@ impl ProcessingStage for CompleteStage {
                 .fetch_one(&self.pool)
                 .await?;
 
+        // Validate status transition: current status → completed
+        crate::validation::state_machine::validate_status_transition(&tx.status, "completed")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
         sqlx::query(
             "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1",
         )
@@ -136,12 +140,22 @@ impl TransactionProcessor {
         stages.push(Box::new(ValidateStage));
 
         // Enrich stage - feature flagged
-        if self.feature_flags.is_enabled("transaction_enrich_stage").await.unwrap_or(false) {
+        if self
+            .feature_flags
+            .is_enabled("transaction_enrich_stage")
+            .await
+            .unwrap_or(false)
+        {
             stages.push(Box::new(EnrichStage));
         }
 
         // Verify stage - feature flagged
-        if self.feature_flags.is_enabled("transaction_verify_stage").await.unwrap_or(false) {
+        if self
+            .feature_flags
+            .is_enabled("transaction_verify_stage")
+            .await
+            .unwrap_or(false)
+        {
             stages.push(Box::new(VerifyStage));
         }
 
@@ -157,12 +171,23 @@ impl TransactionProcessor {
             match stage.execute(&tx).await {
                 Ok(()) => {
                     let duration = start.elapsed();
-                    tracing::info!("{} stage completed in {:?} for transaction {}", stage_name, duration, tx_id);
+                    tracing::info!(
+                        "{} stage completed in {:?} for transaction {}",
+                        stage_name,
+                        duration,
+                        tx_id
+                    );
                 }
                 Err(e) => {
-                    tracing::error!("{} stage failed for transaction {}: {}", stage_name, tx_id, e);
+                    tracing::error!(
+                        "{} stage failed for transaction {}: {}",
+                        stage_name,
+                        tx_id,
+                        e
+                    );
                     // Move to DLQ on failure
-                    self.move_to_dlq(tx_id, &format!("{} stage failed: {}", stage_name, e)).await?;
+                    self.move_to_dlq(tx_id, &format!("{} stage failed: {}", stage_name, e))
+                        .await?;
                     return Err(e);
                 }
             }
@@ -190,12 +215,16 @@ impl TransactionProcessor {
                 .fetch_one(&self.pool)
                 .await?;
 
-        // Get asset_code for cache invalidation
-        let asset_code: String =
-            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+        // Get current status and asset_code
+        let (current_status, asset_code): (String, String) =
+            sqlx::query_as("SELECT status, asset_code FROM transactions WHERE id = $1")
                 .bind(tx_id)
                 .fetch_one(&self.pool)
                 .await?;
+
+        // Validate status transition: current status → pending
+        crate::validation::state_machine::validate_status_transition(&current_status, "pending")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         sqlx::query("UPDATE transactions SET status = 'pending', updated_at = NOW() WHERE id = $1")
             .bind(tx_id)

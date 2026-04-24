@@ -2,6 +2,8 @@ use axum::{body::Body, http::Request, middleware::Next, response::Response};
 use std::time::Instant;
 use uuid::Uuid;
 
+use crate::error::RequestId;
+
 pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>) -> Response {
     let request_id = Uuid::new_v4().to_string();
     let method = req.method().clone();
@@ -11,6 +13,9 @@ pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>)
     // Insert request ID into headers for downstream handlers
     req.headers_mut()
         .insert("x-request-id", request_id.parse().unwrap());
+
+    // Insert request ID as a typed extension so error handlers can access it
+    req.extensions_mut().insert(RequestId(request_id.clone()));
 
     // Log request
     tracing::info!(

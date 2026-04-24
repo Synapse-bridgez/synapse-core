@@ -4,25 +4,25 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
-use std::{net::SocketAddr, path::Path, sync::Arc, sync::atomic::AtomicU64};
+use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
     graphql::schema::build_schema,
     handlers,
     handlers::ws::TransactionStatusUpdate,
-    metrics,
-    middleware,
+    metrics, middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
+    secrets::SecretsStore,
     services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
-    telemetry,
-    ApiState, AppState, ReadinessState,
+    telemetry, ApiState, AppState, ReadinessState,
 };
-use opentelemetry::trace::TracerProvider as _;
 use tokio::sync::broadcast;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
@@ -78,25 +78,26 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let tracer_provider = telemetry::init_tracer(
-        "synapse-core",
-        config.otlp_endpoint.as_deref(),
-    )
-    .expect("failed to initialise OpenTelemetry tracer");
+    let tracer_provider = telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
+        .expect("failed to initialise OpenTelemetry tracer");
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
+                .with(OpenTelemetryLayer::new(
+                    tracer_provider.tracer("synapse-core"),
+                ))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
+                .with(OpenTelemetryLayer::new(
+                    tracer_provider.tracer("synapse-core"),
+                ))
                 .init();
         }
     }
@@ -186,8 +187,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     // Start background webhook delivery worker (runs every 30 seconds)
     let webhook_pool = pool.clone();
+    let redis_url = config.redis_url.clone();
     tokio::spawn(async move {
-        let dispatcher = WebhookDispatcher::new(webhook_pool);
+        let dispatcher = WebhookDispatcher::new(webhook_pool, &redis_url)
+            .expect("failed to create webhook dispatcher");
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
@@ -204,15 +207,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Metrics initialized successfully");
 
     // Initialize rate limiting
-    // let rate_limit_config = Arc::new(RateLimitConfig::new(&config));
-
-    // Load whitelisted IPs from config
-    // if !config.whitelisted_ips.is_empty() {
-    //     rate_limit_config.load_whitelisted_ips(&config.whitelisted_ips).await;
-    // }
-
     tracing::info!(
-        "Rate limiting configured: {} req/sec (default), {} req/sec (whitelisted)",
+        "Rate limiting configured: {} req/min (default), {} req/min (whitelisted)",
         config.default_rate_limit,
         config.whitelist_rate_limit
     );
@@ -255,6 +251,27 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let feature_flags = FeatureFlagService::new(pool.clone());
     tracing::info!("Feature flags service initialized");
 
+    // Initialize secrets store and start rotation task (if Vault is configured).
+    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok() {
+        match synapse_core::secrets::SecretsManager::new().await {
+            Ok(manager) => {
+                let anchor_secret = manager.get_anchor_secret().await?;
+                let admin_key = manager.get_admin_api_key().await?;
+                let store = SecretsStore::new(anchor_secret, admin_key);
+                manager.start_refresh_task(store.clone());
+                tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!("Vault unavailable, secrets rotation disabled: {e}");
+                None
+            }
+        }
+    } else {
+        tracing::info!("Vault not configured, secrets rotation disabled");
+        None
+    };
+
     let monitor_pool = pool.clone();
     let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
@@ -271,7 +288,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tx_broadcast,
         query_cache,
         profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
-        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
@@ -398,6 +417,29 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             get(handlers::admin::list_active_instances),
         )
         .with_state(api_state);
+
+    // Configure CORS if allowed origins are specified.
+    let app = if !config.cors_allowed_origins.is_empty() {
+        let origins: Vec<_> = config
+            .cors_allowed_origins
+            .iter()
+            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        tracing::info!(
+            "CORS enabled for origins: {:?}",
+            config.cors_allowed_origins
+        );
+        let cors = CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(AllowMethods::any())
+            .allow_headers(AllowHeaders::any())
+            .allow_credentials(true)
+            .max_age(std::time::Duration::from_secs(3600));
+        app.layer(cors)
+    } else {
+        tracing::info!("CORS disabled (no allowed origins configured)");
+        app
+    };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);

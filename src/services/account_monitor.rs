@@ -153,6 +153,10 @@ impl AccountMonitor {
             if let Some((tx_id,)) = tx {
                 info!("Matched payment {} to transaction {}", payment.id, tx_id);
 
+                // Validate status transition: pending → completed
+                crate::validation::state_machine::validate_status_transition("pending", "completed")
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
                 // Update transaction to completed
                 sqlx::query(
                     "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1"

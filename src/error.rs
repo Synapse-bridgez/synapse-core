@@ -3,6 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -310,13 +311,44 @@ impl AppError {
     }
 }
 
+/// Extension type to carry request ID through the request lifecycle.
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let timestamp = Utc::now().to_rfc3339();
+        let code = self.code();
+        let docs_url = format!("/errors#{}", code);
+
+        // Generate actionable detail message
+        let detail = match &self {
+            AppError::InvalidTransactionAmount(msg) => {
+                format!("Amount must be a positive number. {}", msg)
+            }
+            AppError::AmountBelowMinimum(msg) => {
+                format!("Amount is below the minimum threshold. {}", msg)
+            }
+            AppError::InvalidStellarAddress(msg) => {
+                format!("Stellar address must be 56 characters starting with 'G'. {}", msg)
+            }
+            AppError::InvalidStatusTransition(msg) => {
+                format!("Status transition is not allowed. {}", msg)
+            }
+            AppError::Validation(msg) => {
+                format!("Validation failed. {}", msg)
+            }
+            _ => self.to_string(),
+        };
+
         let body = Json(json!({
             "error": self.to_string(),
-            "code": self.code(),
+            "code": code,
             "status": status.as_u16(),
+            "timestamp": timestamp,
+            "detail": detail,
+            "docs_url": docs_url,
         }));
 
         (status, body).into_response()
