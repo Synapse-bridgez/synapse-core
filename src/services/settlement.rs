@@ -102,6 +102,9 @@ impl SettlementService {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache after successful commit
+        queries::invalidate_caches_for_asset(asset_code).await;
+
         tracing::info!(
             "Settled {} transactions for asset {} (ID: {})",
             tx_count,

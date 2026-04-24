@@ -20,6 +20,8 @@ use axum::{
 use std::{net::SocketAddr, time::Instant};
 use uuid::Uuid;
 
+use crate::error::RequestId;
+
 const MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 
 /// Axum middleware function.
@@ -61,6 +63,11 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
         "x-request-id",
         HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
+
+    // Also expose as a typed extension so error handlers can read it without
+    // parsing headers (compatible with the RequestId extractor in error.rs).
+    req.extensions_mut()
+        .insert(RequestId(correlation_id.clone()));
 
     // -----------------------------------------------------------------------
     // 3. Optionally log request body (controlled by LOG_REQUEST_BODY env var)

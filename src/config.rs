@@ -52,6 +52,26 @@ pub struct Config {
     pub backup_dir: String,
     pub backup_encryption_key: Option<String>,
     pub db_timeouts: DbTimeoutConfig,
+    pub otlp_endpoint: Option<String>,
+    // CORS
+    pub cors_allowed_origins: Vec<String>,
+    // Back-pressure
+    pub max_pending_queue: u64,
+    // DB pool sizing
+    pub db_min_connections: u32,
+    pub db_max_connections: u32,
+    // DB timeouts (statement-level, separate from our async tier timeouts)
+    pub db_statement_timeout_ms: u64,
+    pub db_idle_timeout_secs: u64,
+    pub db_long_running_statement_timeout_ms: u64,
+    // Processor pool
+    pub processor_workers: usize,
+    pub processor_batch_size: u32,
+    pub processor_poll_interval_ms: u64,
+    // Adaptive batch sizing
+    pub processor_min_batch: u32,
+    pub processor_max_batch: u32,
+    pub processor_scaling_factor: f64,
 }
 
 pub mod assets;
@@ -120,6 +140,50 @@ impl Config {
                     .parse()
                     .unwrap_or(60),
             },
+            otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            max_pending_queue: env::var("MAX_PENDING_QUEUE")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()?,
+            db_min_connections: env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()?,
+            db_max_connections: env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            db_statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
+                .unwrap_or_else(|_| "30000".to_string())
+                .parse()?,
+            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()?,
+            db_long_running_statement_timeout_ms: env::var("DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS")
+                .unwrap_or_else(|_| "300000".to_string())
+                .parse()?,
+            processor_workers: env::var("PROCESSOR_WORKERS")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()?,
+            processor_batch_size: env::var("PROCESSOR_BATCH_SIZE")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            processor_poll_interval_ms: env::var("PROCESSOR_POLL_INTERVAL_MS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
+            processor_min_batch: env::var("PROCESSOR_MIN_BATCH")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+            processor_max_batch: env::var("PROCESSOR_MAX_BATCH")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()?,
+            processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
+                .unwrap_or_else(|_| "0.5".to_string())
+                .parse()?,
         })
     }
 }

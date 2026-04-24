@@ -1,7 +1,8 @@
 use axum::routing::{get, post};
 use clap::Parser;
+use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
-use std::{net::SocketAddr, path::Path};
+use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
@@ -10,11 +11,14 @@ use synapse_core::{
     metrics,
     middleware::idempotency::IdempotencyService,
     schemas,
-    services::{FeatureFlagService, SettlementService},
+    secrets::SecretsStore,
+    services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
-    AppState, ReadinessState,
+    telemetry, ApiState, AppState, ReadinessState,
 };
 use tokio::sync::broadcast;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 mod cli;
@@ -64,20 +68,31 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = config::Config::load().await?;
 
-    // Setup logging
+    // Setup logging + OpenTelemetry tracing layer
     let env_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    // Init OTel tracer early so the tracing layer can reference it.
+    let tracer_provider = telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
+        .expect("failed to initialise OpenTelemetry tracer");
+
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
+                .with(OpenTelemetryLayer::new(
+                    tracer_provider.tracer("synapse-core"),
+                ))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
+                .with(OpenTelemetryLayer::new(
+                    tracer_provider.tracer("synapse-core"),
+                ))
                 .init();
         }
     }
@@ -89,6 +104,12 @@ async fn main() -> anyhow::Result<()> {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
+            TxCommands::Reconcile {
+                account,
+                start,
+                end,
+                format,
+            } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
@@ -159,6 +180,22 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         }
     });
 
+    // Start background webhook delivery worker (runs every 30 seconds)
+    let webhook_pool = pool.clone();
+    let redis_url = config.redis_url.clone();
+    tokio::spawn(async move {
+        let dispatcher = WebhookDispatcher::new(webhook_pool, &redis_url)
+            .expect("failed to create webhook dispatcher");
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(e) = dispatcher.process_pending().await {
+                tracing::error!("Webhook dispatcher error: {e}");
+            }
+        }
+    });
+    tracing::info!("Webhook dispatcher background worker started");
+
     // Initialize metrics (OTLP exporter + pool stats background task)
     let _metrics_handle = metrics::init_metrics()
         .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
@@ -166,22 +203,40 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     metrics::spawn_pool_metrics_task(pool.clone(), 30);
 
     // Initialize rate limiting
-    // let rate_limit_config = Arc::new(RateLimitConfig::new(&config));
-
-    // Load whitelisted IPs from config
-    // if !config.whitelisted_ips.is_empty() {
-    //     rate_limit_config.load_whitelisted_ips(&config.whitelisted_ips).await;
-    // }
-
     tracing::info!(
-        "Rate limiting configured: {} req/sec (default), {} req/sec (whitelisted)",
+        "Rate limiting configured: {} req/min (default), {} req/min (whitelisted)",
         config.default_rate_limit,
         config.whitelist_rate_limit
     );
 
     // Initialize Redis idempotency service
-    let _idempotency_service = IdempotencyService::new(&config.redis_url)?;
+    let idempotency_cache_hits = Arc::new(AtomicU64::new(0));
+    let idempotency_cache_misses = Arc::new(AtomicU64::new(0));
+    let idempotency_lock_acquired = Arc::new(AtomicU64::new(0));
+    let idempotency_lock_contention = Arc::new(AtomicU64::new(0));
+    let idempotency_errors = Arc::new(AtomicU64::new(0));
+    let idempotency_fallback_count = Arc::new(AtomicU64::new(0));
+    let _idempotency_service = IdempotencyService::new(
+        &config.redis_url,
+        pool.clone(),
+        Arc::clone(&idempotency_cache_hits),
+        Arc::clone(&idempotency_cache_misses),
+        Arc::clone(&idempotency_lock_acquired),
+        Arc::clone(&idempotency_lock_contention),
+        Arc::clone(&idempotency_errors),
+        Arc::clone(&idempotency_fallback_count),
+    )?;
     tracing::info!("Redis idempotency service initialized");
+
+    // Initialize query cache
+    let query_cache = synapse_core::services::QueryCache::new(&config.redis_url)?;
+    tracing::info!("Query cache initialized");
+
+    // Warm cache on startup
+    let cache_config = synapse_core::services::CacheConfig::default();
+    if let Err(e) = query_cache.warm_cache(&pool, &cache_config).await {
+        tracing::warn!("Failed to warm cache on startup: {:?}", e);
+    }
 
     // Create broadcast channel for WebSocket notifications
     // Channel capacity of 100 - slow clients will miss old messages (backpressure handling)
@@ -192,23 +247,99 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let feature_flags = FeatureFlagService::new(pool.clone());
     tracing::info!("Feature flags service initialized");
 
+    // Initialize secrets store and start rotation task (if Vault is configured).
+    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok() {
+        match synapse_core::secrets::SecretsManager::new().await {
+            Ok(manager) => {
+                let anchor_secret = manager.get_anchor_secret().await?;
+                let admin_key = manager.get_admin_api_key().await?;
+                let store = SecretsStore::new(anchor_secret, admin_key);
+                manager.start_refresh_task(store.clone());
+                tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!("Vault unavailable, secrets rotation disabled: {e}");
+                None
+            }
+        }
+    } else {
+        tracing::info!("Vault not configured, secrets rotation disabled");
+        None
+    };
+
     let monitor_pool = pool.clone();
+    let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+        config.processor_min_batch as u64,
+    ));
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
-        horizon_client,
+        horizon_client: horizon_client.clone(),
         feature_flags,
         redis_url: config.redis_url.clone(),
         start_time: std::time::Instant::now(),
         readiness: ReadinessState::new(),
         tx_broadcast,
+        query_cache,
+        profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        pending_queue_depth: pending_queue_depth.clone(),
+        current_batch_size: current_batch_size.clone(),
     };
 
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
     });
 
+    // Back-pressure: refresh pending queue depth every 5s
+    let depth_pool = pool.clone();
+    let depth_counter = pending_queue_depth.clone();
+    tokio::spawn(async move {
+        synapse_core::services::processor::queue_depth_task(depth_pool, depth_counter).await;
+    });
+
+    // Concurrent processor pool
+    let processor_pool = synapse_core::services::processor::ProcessorPool::new(
+        pool.clone(),
+        horizon_client,
+        config.processor_workers,
+        config.processor_poll_interval_ms,
+        config.processor_min_batch,
+        config.processor_max_batch,
+        config.processor_scaling_factor,
+        current_batch_size,
+        pending_queue_depth,
+    );
+    let _processor_shutdown = processor_pool.start();
+
     let app = synapse_core::create_app(app_state);
+
+    // Configure CORS if allowed origins are specified.
+    let app = if !config.cors_allowed_origins.is_empty() {
+        let origins: Vec<_> = config
+            .cors_allowed_origins
+            .iter()
+            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        tracing::info!(
+            "CORS enabled for origins: {:?}",
+            config.cors_allowed_origins
+        );
+        let cors = CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(AllowMethods::any())
+            .allow_headers(AllowHeaders::any())
+            .allow_credentials(true)
+            .max_age(std::time::Duration::from_secs(3600));
+        app.layer(cors)
+    } else {
+        tracing::info!("CORS disabled (no allowed origins configured)");
+        app
+    };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
@@ -217,12 +348,16 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
 
+    // Flush and shut down the OTel exporter on clean exit.
+    opentelemetry::global::shutdown_tracer_provider();
+
     Ok(())
 }
 
 /// Background task to monitor database connection pool usage
 async fn pool_monitor_task(pool: sqlx::PgPool) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    let mut consecutive_high: u32 = 0;
 
     loop {
         interval.tick().await;
@@ -232,16 +367,29 @@ async fn pool_monitor_task(pool: sqlx::PgPool) {
         let max = pool.options().get_max_connections();
         let usage_percent = (active as f32 / max as f32) * 100.0;
 
-        // Log warning if pool usage exceeds 80%
         if usage_percent >= 80.0 {
-            tracing::warn!(
-                "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
-                usage_percent,
-                active,
-                max,
-                idle
-            );
+            consecutive_high += 1;
+            if consecutive_high >= 3 {
+                tracing::error!(
+                    "CRITICAL: Database connection pool usage has been ≥80% for {} consecutive checks: \
+                     {:.1}% ({}/{} active, {} idle)",
+                    consecutive_high,
+                    usage_percent,
+                    active,
+                    max,
+                    idle
+                );
+            } else {
+                tracing::warn!(
+                    "Database connection pool usage high: {:.1}% ({}/{} connections active, {} idle)",
+                    usage_percent,
+                    active,
+                    max,
+                    idle
+                );
+            }
         } else {
+            consecutive_high = 0;
             tracing::debug!(
                 "Database connection pool status: {:.1}% ({}/{} connections active, {} idle)",
                 usage_percent,

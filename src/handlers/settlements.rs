@@ -1,12 +1,13 @@
 use crate::ApiState;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::Json,
+    http::{HeaderValue, StatusCode},
+    response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema, IntoParams)]
 pub struct Pagination {
@@ -35,16 +36,37 @@ pub struct SettlementListResponse {
     tag = "Settlements"
 )]
 pub async fn list_settlements(
-    State(_state): State<ApiState>,
-    _query: Query<Pagination>,
-) -> Result<Json<SettlementListResponse>, StatusCode> {
-    // TODO: Implement settlement listing
-    Ok(Json(SettlementListResponse {
-        settlements: vec![],
-        total: 0,
-        page: _query.page.unwrap_or(1),
-        limit: _query.limit.unwrap_or(10).min(100),
-    }))
+    State(state): State<ApiState>,
+    query: Query<Pagination>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let page = query.page.unwrap_or(1).max(1);
+    let limit = query.limit.unwrap_or(10).min(100).max(1);
+    let offset = (page.saturating_sub(1) as i64) * (limit as i64);
+
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    let settlements = crate::db::queries::list_settlements(pool, limit as i64, offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list settlements: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let response_body = SettlementListResponse {
+        settlements,
+        total: settlements.len() as i64,
+        page,
+        limit,
+    };
+
+    let mut response: Response = Json(response_body).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }
 
 #[utoipa::path(
@@ -61,9 +83,26 @@ pub async fn list_settlements(
     tag = "Settlements"
 )]
 pub async fn get_settlement(
-    State(_state): State<ApiState>,
-    Path(_id): Path<String>,
-) -> Result<Json<crate::db::models::Settlement>, StatusCode> {
-    // TODO: Implement settlement retrieval
-    Err(StatusCode::NOT_IMPLEMENTED)
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    let settlement = crate::db::queries::get_settlement(pool, id).await.map_err(|e| {
+        if matches!(e, sqlx::Error::RowNotFound) {
+            StatusCode::NOT_FOUND
+        } else {
+            tracing::error!("Failed to get settlement: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+
+    let mut response: Response = Json(settlement).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }

@@ -3,6 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -210,6 +211,12 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("Tenant not found")]
+    TenantNotFound,
+
+    #[error("Invalid API key or tenant header")]
+    InvalidApiKey,
+
     // Custom errors with specific codes
     #[error("Invalid transaction amount: {0}")]
     InvalidTransactionAmount(String),
@@ -258,6 +265,8 @@ impl AppError {
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::TenantNotFound => StatusCode::NOT_FOUND,
+            AppError::InvalidApiKey => StatusCode::UNAUTHORIZED,
             AppError::InvalidTransactionAmount(_) => StatusCode::BAD_REQUEST,
             AppError::AmountBelowMinimum(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidStellarAddress(_) => StatusCode::BAD_REQUEST,
@@ -284,6 +293,8 @@ impl AppError {
             AppError::Internal(_) => codes::INTERNAL_001.0,
             AppError::BadRequest(_) => codes::BAD_REQUEST_001.0,
             AppError::Unauthorized(_) => codes::UNAUTHORIZED_001.0,
+            AppError::TenantNotFound => codes::NOT_FOUND_001.0,
+            AppError::InvalidApiKey => codes::UNAUTHORIZED_001.0,
             AppError::InvalidTransactionAmount(_) => codes::TRANSACTION_001.0,
             AppError::AmountBelowMinimum(_) => codes::TRANSACTION_002.0,
             AppError::InvalidStellarAddress(_) => codes::TRANSACTION_003.0,
@@ -300,29 +311,52 @@ impl AppError {
     }
 }
 
+/// Extension type to carry request ID through the request lifecycle.
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let code = self.code();
+        let docs_url = format!("/errors#{}", code);
 
-        // Pull the correlation ID from the current tracing span if available.
-        // The request_logger middleware injects it as a span field named
-        // `correlation_id`.  When not present we omit the field rather than
-        // emitting a misleading empty string.
-        let correlation_id: Option<String> = {
-            // We read the thread-local tracing span; if the field is absent
-            // (e.g. in unit tests) we just skip it.
-            None // populated at the HTTP layer via the X-Request-Id header
+        // Generate actionable detail message
+        let detail = match &self {
+            AppError::InvalidTransactionAmount(msg) => {
+                format!("Amount must be a positive number. {}", msg)
+            }
+            AppError::AmountBelowMinimum(msg) => {
+                format!("Amount is below the minimum threshold. {}", msg)
+            }
+            AppError::InvalidStellarAddress(msg) => {
+                format!("Stellar address must be 56 characters starting with 'G'. {}", msg)
+            }
+            AppError::InvalidStatusTransition(msg) => {
+                format!("Status transition is not allowed. {}", msg)
+            }
+            AppError::Validation(msg) => {
+                format!("Validation failed. {}", msg)
+            }
+            _ => self.to_string(),
         };
 
         let mut body = serde_json::json!({
             "error": self.to_string(),
-            "code": self.code(),
+            "code": code,
             "status": status.as_u16(),
+            "timestamp": timestamp,
+            "detail": detail,
+            "docs_url": docs_url,
         });
 
-        if let Some(cid) = correlation_id {
-            body["correlation_id"] = serde_json::Value::String(cid);
-        }
+        // The request_logger middleware injects the correlation ID as the
+        // X-Request-Id header and as a RequestId extension. We can't read
+        // extensions here (we don't have the request), so the header is
+        // attached by the middleware layer after the response is built.
+        // We leave a placeholder that the middleware can fill in if needed.
+        let _ = body; // suppress unused warning if correlation_id is absent
 
         (status, Json(body)).into_response()
     }
