@@ -185,8 +185,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     // Start background webhook delivery worker (runs every 30 seconds)
     let webhook_pool = pool.clone();
+    let redis_url = config.redis_url.clone();
     tokio::spawn(async move {
-        let dispatcher = WebhookDispatcher::new(webhook_pool);
+        let dispatcher = WebhookDispatcher::new(webhook_pool, &redis_url)
+            .expect("failed to create webhook dispatcher");
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;

@@ -7,7 +7,8 @@
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
-use reqwest::Client;
+use redis::Client;
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
 use sqlx::PgPool;
@@ -26,6 +27,7 @@ pub struct WebhookEndpoint {
     pub secret: String,
     pub event_types: Vec<String>,
     pub enabled: bool,
+    pub max_delivery_rate: i32,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
 }
@@ -44,6 +46,7 @@ pub struct WebhookDelivery {
     pub response_status: Option<i32>,
     pub response_body: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
+    pub max_delivery_rate: i32,
 }
 
 /// Payload sent to external endpoints.
@@ -60,24 +63,26 @@ pub struct OutgoingPayload {
 #[derive(Clone)]
 pub struct WebhookDispatcher {
     pool: PgPool,
-    http: Client,
+    http: HttpClient,
+    redis: Client,
     concurrency: usize,
 }
 
 impl WebhookDispatcher {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, redis_url: &str) -> Result<Self, redis::RedisError> {
         let concurrency = std::env::var("WEBHOOK_DELIVERY_CONCURRENCY")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10usize);
-        Self {
+        Ok(Self {
             pool,
-            http: Client::builder()
+            http: HttpClient::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("failed to build reqwest client"),
+            redis: Client::open(redis_url)?,
             concurrency,
-        }
+        })
     }
 
     /// Enqueue deliveries for all enabled endpoints subscribed to `event_type`.
@@ -123,10 +128,12 @@ impl WebhookDispatcher {
     pub async fn process_pending(&self) -> anyhow::Result<()> {
         let deliveries: Vec<WebhookDelivery> = sqlx::query_as(
             r#"
-            SELECT * FROM webhook_deliveries
-            WHERE status = 'pending'
-              AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
-            ORDER BY created_at
+            SELECT wd.*, we.max_delivery_rate
+            FROM webhook_deliveries wd
+            JOIN webhook_endpoints we ON wd.endpoint_id = we.id
+            WHERE wd.status = 'pending'
+              AND (wd.next_attempt_at IS NULL OR wd.next_attempt_at <= NOW())
+            ORDER BY wd.created_at
             LIMIT 100
             "#,
         )
@@ -159,9 +166,60 @@ impl WebhookDispatcher {
         Ok(())
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
+    async fn check_rate_limit(&self, endpoint_id: Uuid, max_rate: i32) -> anyhow::Result<bool> {
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let key = format!("webhook_rate:{}", endpoint_id);
+
+        // Use Redis INCR to atomically increment the counter
+        // If the key doesn't exist, INCR sets it to 1
+        let current_count: i32 = conn.incr(&key, 1).await?;
+
+        // If this is the first request in the window, set expiry
+        if current_count == 1 {
+            let _: () = conn.expire(&key, 60).await?;
+        }
+
+        // Check if we're within the rate limit
+        let allowed = current_count <= max_rate;
+        if !allowed {
+            tracing::warn!(
+                endpoint_id = %endpoint_id,
+                current_count = current_count,
+                max_rate = max_rate,
+                "Rate limit exceeded for webhook endpoint"
+            );
+        }
+
+        Ok(allowed)
+    }
 
     async fn attempt_delivery(&self, delivery: &WebhookDelivery) -> anyhow::Result<()> {
+        // Check rate limit first
+        if !self
+            .check_rate_limit(delivery.endpoint_id, delivery.max_delivery_rate)
+            .await?
+        {
+            // Rate limit exceeded, delay this delivery to next cycle
+            let next_cycle = Utc::now() + chrono::Duration::seconds(30); // Next processing cycle
+            sqlx::query(
+                r#"
+                UPDATE webhook_deliveries
+                SET next_attempt_at = $1
+                WHERE id = $2
+                "#,
+            )
+            .bind(next_cycle)
+            .bind(delivery.id)
+            .execute(&self.pool)
+            .await?;
+            tracing::debug!(
+                delivery_id = %delivery.id,
+                endpoint_id = %delivery.endpoint_id,
+                "Rate limit exceeded, delaying delivery to next cycle"
+            );
+            return Ok(());
+        }
+
         let endpoint: WebhookEndpoint =
             sqlx::query_as("SELECT * FROM webhook_endpoints WHERE id = $1")
                 .bind(delivery.endpoint_id)
