@@ -4,24 +4,22 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
-use std::{net::SocketAddr, path::Path, sync::Arc, sync::atomic::AtomicU64};
+use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
     graphql::schema::build_schema,
     handlers,
     handlers::ws::TransactionStatusUpdate,
-    metrics,
-    middleware,
+    metrics, middleware,
     middleware::idempotency::IdempotencyService,
     schemas,
     services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
-    telemetry,
-    ApiState, AppState, ReadinessState,
+    telemetry, ApiState, AppState, ReadinessState,
 };
-use opentelemetry::trace::TracerProvider as _;
 use tokio::sync::broadcast;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -78,25 +76,26 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let tracer_provider = telemetry::init_tracer(
-        "synapse-core",
-        config.otlp_endpoint.as_deref(),
-    )
-    .expect("failed to initialise OpenTelemetry tracer");
+    let tracer_provider = telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
+        .expect("failed to initialise OpenTelemetry tracer");
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
+                .with(OpenTelemetryLayer::new(
+                    tracer_provider.tracer("synapse-core"),
+                ))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(OpenTelemetryLayer::new(tracer_provider.tracer("synapse-core")))
+                .with(OpenTelemetryLayer::new(
+                    tracer_provider.tracer("synapse-core"),
+                ))
                 .init();
         }
     }
@@ -271,7 +270,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tx_broadcast,
         query_cache,
         profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
-        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
     };

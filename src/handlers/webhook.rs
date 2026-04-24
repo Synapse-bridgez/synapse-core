@@ -318,10 +318,7 @@ pub async fn callback(
     Json(payload): Json<CallbackPayload>,
 ) -> Result<impl IntoResponse, AppError> {
     // Back-pressure: reject if pending queue exceeds threshold
-    let depth = state
-        .app_state
-        .pending_queue_depth
-        .load(Ordering::Relaxed);
+    let depth = state.app_state.pending_queue_depth.load(Ordering::Relaxed);
     let max_pending = std::env::var("MAX_PENDING_QUEUE")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -338,10 +335,9 @@ pub async fn callback(
             axum::body::Full::from(r#"{"error":"service busy, retry later"}"#),
         ));
         *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-        response.headers_mut().insert(
-            "Retry-After",
-            HeaderValue::from_static("30"),
-        );
+        response
+            .headers_mut()
+            .insert("Retry-After", HeaderValue::from_static("30"));
         return Ok(response.into_response());
     }
 

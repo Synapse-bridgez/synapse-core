@@ -136,12 +136,22 @@ impl TransactionProcessor {
         stages.push(Box::new(ValidateStage));
 
         // Enrich stage - feature flagged
-        if self.feature_flags.is_enabled("transaction_enrich_stage").await.unwrap_or(false) {
+        if self
+            .feature_flags
+            .is_enabled("transaction_enrich_stage")
+            .await
+            .unwrap_or(false)
+        {
             stages.push(Box::new(EnrichStage));
         }
 
         // Verify stage - feature flagged
-        if self.feature_flags.is_enabled("transaction_verify_stage").await.unwrap_or(false) {
+        if self
+            .feature_flags
+            .is_enabled("transaction_verify_stage")
+            .await
+            .unwrap_or(false)
+        {
             stages.push(Box::new(VerifyStage));
         }
 
@@ -157,12 +167,23 @@ impl TransactionProcessor {
             match stage.execute(&tx).await {
                 Ok(()) => {
                     let duration = start.elapsed();
-                    tracing::info!("{} stage completed in {:?} for transaction {}", stage_name, duration, tx_id);
+                    tracing::info!(
+                        "{} stage completed in {:?} for transaction {}",
+                        stage_name,
+                        duration,
+                        tx_id
+                    );
                 }
                 Err(e) => {
-                    tracing::error!("{} stage failed for transaction {}: {}", stage_name, tx_id, e);
+                    tracing::error!(
+                        "{} stage failed for transaction {}: {}",
+                        stage_name,
+                        tx_id,
+                        e
+                    );
                     // Move to DLQ on failure
-                    self.move_to_dlq(tx_id, &format!("{} stage failed: {}", stage_name, e)).await?;
+                    self.move_to_dlq(tx_id, &format!("{} stage failed: {}", stage_name, e))
+                        .await?;
                     return Err(e);
                 }
             }

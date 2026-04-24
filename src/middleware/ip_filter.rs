@@ -286,7 +286,11 @@ mod tests {
 
         let res = service.oneshot(req).await.expect("response");
         // Non-whitelisted IP should be blocked with 403
-        assert_eq!(res.status(), StatusCode::FORBIDDEN, "expected blocked IP to receive 403");
+        assert_eq!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "expected blocked IP to receive 403"
+        );
     }
 
     #[derive(Clone)]

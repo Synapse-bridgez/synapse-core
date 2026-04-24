@@ -39,12 +39,11 @@ async fn test_webhook_replay_tracking(pool: PgPool) -> sqlx::Result<()> {
     .await?;
 
     // Verify the replay was tracked
-    let replay_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM webhook_replay_history WHERE transaction_id = $1",
-    )
-    .bind(inserted.id)
-    .fetch_one(&pool)
-    .await?;
+    let replay_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_replay_history WHERE transaction_id = $1")
+            .bind(inserted.id)
+            .fetch_one(&pool)
+            .await?;
 
     assert_eq!(replay_count, 1);
 
@@ -76,11 +75,10 @@ async fn test_list_failed_webhooks(pool: PgPool) -> sqlx::Result<()> {
         .await?;
 
     // Query failed webhooks
-    let failed_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions WHERE status = 'failed'",
-    )
-    .fetch_one(&pool)
-    .await?;
+    let failed_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE status = 'failed'")
+            .fetch_one(&pool)
+            .await?;
 
     assert!(failed_count >= 1);
 

@@ -23,9 +23,15 @@ pub fn admin_routes() -> Router<sqlx::PgPool> {
 /// Create webhook replay admin routes
 pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
     Router::new()
-        .route("/webhooks/failed", get(webhook_replay::list_failed_webhooks))
+        .route(
+            "/webhooks/failed",
+            get(webhook_replay::list_failed_webhooks),
+        )
         .route("/webhooks/replay/:id", post(webhook_replay::replay_webhook))
-        .route("/webhooks/replay/batch", post(webhook_replay::batch_replay_webhooks))
+        .route(
+            "/webhooks/replay/batch",
+            post(webhook_replay::batch_replay_webhooks),
+        )
 }
 
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
@@ -41,10 +47,8 @@ pub async fn list_active_instances(State(state): State<crate::ApiState>) -> impl
         }
     };
 
-    let (instances_res, leader_res) = tokio::join!(
-        election.list_active_instances(),
-        election.current_leader(),
-    );
+    let (instances_res, leader_res) =
+        tokio::join!(election.list_active_instances(), election.current_leader(),);
 
     match (instances_res, leader_res) {
         (Ok(instances), Ok(leader)) => (

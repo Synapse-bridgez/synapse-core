@@ -77,7 +77,9 @@ impl AppState {
         let (tx, _) = broadcast::channel(100);
         Self {
             db: pool.clone(),
-            pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None).await.unwrap(),
+            pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)
+                .await
+                .unwrap(),
             horizon_client: HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
             feature_flags: FeatureFlagService::new(pool),
             redis_url: "redis://localhost:6379".to_string(),

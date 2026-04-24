@@ -429,7 +429,18 @@ pub async fn get_audit_logs(
     entity_id: Uuid,
     limit: i64,
     offset: i64,
-) -> Result<Vec<(Uuid, Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, String, DateTime<Utc>)>> {
+) -> Result<
+    Vec<(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+        String,
+        DateTime<Utc>,
+    )>,
+> {
     let rows = sqlx::query(
         r#"
         SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
@@ -437,7 +448,7 @@ pub async fn get_audit_logs(
         WHERE entity_id = $1
         ORDER BY timestamp DESC
         LIMIT $2 OFFSET $3
-        "#
+        "#,
     )
     .bind(entity_id)
     .bind(limit)
@@ -628,13 +639,11 @@ pub async fn update_idempotency_key_response(
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1",
-    )
-    .bind(key)
-    .bind(response)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
+        .bind(key)
+        .bind(response)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

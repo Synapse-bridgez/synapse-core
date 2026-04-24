@@ -180,12 +180,27 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
     let query_cache_metrics = state.app_state.query_cache.metrics();
     let combined_metrics = CombinedCacheMetrics {
         query_cache: query_cache_metrics,
-        idempotency_cache_hits: state.app_state.idempotency_cache_hits.load(Ordering::Relaxed),
-        idempotency_cache_misses: state.app_state.idempotency_cache_misses.load(Ordering::Relaxed),
-        idempotency_lock_acquired: state.app_state.idempotency_lock_acquired.load(Ordering::Relaxed),
-        idempotency_lock_contention: state.app_state.idempotency_lock_contention.load(Ordering::Relaxed),
+        idempotency_cache_hits: state
+            .app_state
+            .idempotency_cache_hits
+            .load(Ordering::Relaxed),
+        idempotency_cache_misses: state
+            .app_state
+            .idempotency_cache_misses
+            .load(Ordering::Relaxed),
+        idempotency_lock_acquired: state
+            .app_state
+            .idempotency_lock_acquired
+            .load(Ordering::Relaxed),
+        idempotency_lock_contention: state
+            .app_state
+            .idempotency_lock_contention
+            .load(Ordering::Relaxed),
         idempotency_errors: state.app_state.idempotency_errors.load(Ordering::Relaxed),
-        idempotency_fallback_count: state.app_state.idempotency_fallback_count.load(Ordering::Relaxed),
+        idempotency_fallback_count: state
+            .app_state
+            .idempotency_fallback_count
+            .load(Ordering::Relaxed),
     };
     (StatusCode::OK, Json(combined_metrics))
 }

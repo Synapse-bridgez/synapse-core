@@ -9,7 +9,7 @@ use axum::{
 use redis::Client;
 use serde_json::json;
 use std::time::Duration;
-use synapse_core::middleware::idempotency::{IdempotencyService, idempotency_middleware};
+use synapse_core::middleware::idempotency::{idempotency_middleware, IdempotencyService};
 use tokio::time::sleep;
 use tower::ServiceExt;
 
@@ -27,13 +27,16 @@ fn create_test_app(service: IdempotencyService) -> Router {
 }
 
 async fn setup_redis() -> (Client, String) {
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let client = Client::open(redis_url.clone()).expect("Failed to connect to Redis");
-    
+
     // Flush test database
-    let mut conn = client.get_connection().expect("Failed to get Redis connection");
+    let mut conn = client
+        .get_connection()
+        .expect("Failed to get Redis connection");
     redis::cmd("FLUSHDB").execute(&mut conn);
-    
+
     (client, redis_url)
 }
 
@@ -60,7 +63,10 @@ async fn test_duplicate_request_returns_cached_response() {
     // Verify key was stored in Redis
     let mut conn = client.get_connection().unwrap();
     let cache_key = format!("idempotency:default:{}", idempotency_key);
-    let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&cache_key)
+        .query(&mut conn)
+        .unwrap();
     assert!(exists, "Idempotency key should be cached");
 
     // Second request with same key
@@ -149,7 +155,10 @@ async fn test_idempotency_key_expires_after_ttl() {
     redis::cmd("DEL").arg(&cache_key).execute(&mut conn);
 
     // Verify key is deleted
-    let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&cache_key)
+        .query(&mut conn)
+        .unwrap();
     assert!(!exists, "Key should be deleted");
 
     // Second request after expiry
@@ -183,13 +192,13 @@ async fn test_cached_response_matches_original() {
 
     let response1 = app.clone().oneshot(req1).await.unwrap();
     let status1 = response1.status();
-    
+
     // Verify cached response exists
     let mut conn = client.get_connection().unwrap();
     let cache_key = format!("idempotency:default:{}", idempotency_key);
     let cached_data: String = redis::cmd("GET").arg(&cache_key).query(&mut conn).unwrap();
     assert!(!cached_data.is_empty());
-    
+
     // Second request
     let req2 = Request::builder()
         .method("POST")
@@ -230,7 +239,10 @@ async fn test_different_payload_same_key_rejected() {
     // Verify key is cached
     let mut conn = client.get_connection().unwrap();
     let cache_key = format!("idempotency:default:{}", idempotency_key);
-    let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&cache_key)
+        .query(&mut conn)
+        .unwrap();
     assert!(exists);
 
     // Second request with different payload B but same key
@@ -243,7 +255,7 @@ async fn test_different_payload_same_key_rejected() {
         .unwrap();
 
     let response2 = app.oneshot(req2).await.unwrap();
-    
+
     // Should return cached response, not process new payload
     assert_eq!(response2.status(), StatusCode::OK);
 }
@@ -264,7 +276,7 @@ async fn test_redis_failure_fallback() {
         .unwrap();
 
     let response = app.oneshot(req).await.unwrap();
-    
+
     // Should fail open and process the request
     assert_eq!(response.status(), StatusCode::OK);
 }
@@ -303,7 +315,7 @@ async fn test_invalid_idempotency_key_format() {
         .unwrap();
 
     let response = app.oneshot(req).await.unwrap();
-    
+
     // Should process normally with valid key
     assert_eq!(response.status(), StatusCode::OK);
 }
@@ -392,7 +404,8 @@ async fn test_stale_lock_recovery() {
         .unwrap()
         .as_secs()
         - 180; // 3 minutes ago
-    let lock_val = serde_json::json!({"instance_id": "crashed-instance", "locked_at": old_timestamp});
+    let lock_val =
+        serde_json::json!({"instance_id": "crashed-instance", "locked_at": old_timestamp});
     let mut conn = client.get_connection().unwrap();
     redis::cmd("SET")
         .arg(&lock_key)
@@ -402,14 +415,20 @@ async fn test_stale_lock_recovery() {
         .execute(&mut conn);
 
     // Verify lock exists
-    let exists: bool = redis::cmd("EXISTS").arg(&lock_key).query(&mut conn).unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&lock_key)
+        .query(&mut conn)
+        .unwrap();
     assert!(exists, "Lock should exist before recovery");
 
     // Run recovery
     service.recover_stale_locks().await.unwrap();
 
     // Lock should be deleted
-    let exists_after: bool = redis::cmd("EXISTS").arg(&lock_key).query(&mut conn).unwrap();
+    let exists_after: bool = redis::cmd("EXISTS")
+        .arg(&lock_key)
+        .query(&mut conn)
+        .unwrap();
     assert!(!exists_after, "Stale lock should be deleted after recovery");
 }
 
@@ -438,6 +457,9 @@ async fn test_normal_flow_not_affected_by_recovery() {
     // Cached response should still exist
     let cache_key = format!("idempotency:default:{}", key);
     let mut conn = client.get_connection().unwrap();
-    let exists: bool = redis::cmd("EXISTS").arg(&cache_key).query(&mut conn).unwrap();
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&cache_key)
+        .query(&mut conn)
+        .unwrap();
     assert!(exists, "Cached response should not be deleted by recovery");
 }

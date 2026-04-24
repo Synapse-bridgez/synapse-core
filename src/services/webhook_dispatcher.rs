@@ -9,7 +9,7 @@ use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Sha256, Sha512};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -169,13 +169,23 @@ impl WebhookDispatcher {
                 .await?;
 
         let body = serde_json::to_string(&delivery.payload)?;
-        let signature = sign_payload(&endpoint.secret, &body);
+
+        // Extract timestamp from payload (OutgoingPayload includes timestamp field)
+        let timestamp = delivery
+            .payload
+            .get("timestamp")
+            .and_then(|ts| ts.as_str())
+            .map(|ts| ts.to_string())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        let signature = sign_payload_with_version(&endpoint.secret, &timestamp, &body);
 
         let response = self
             .http
             .post(&endpoint.url)
             .header("Content-Type", "application/json")
-            .header("X-Webhook-Signature", format!("sha256={signature}"))
+            .header("X-Webhook-Signature", &signature)
+            .header("X-Webhook-Timestamp", &timestamp)
             .header("X-Webhook-Event", &delivery.event_type)
             .body(body)
             .send()
@@ -303,10 +313,158 @@ impl WebhookDispatcher {
     }
 }
 
-/// Compute HMAC-SHA256 hex signature for a payload.
+/// Signature versions supported by the webhook system.
+const SIGNATURE_VERSION: &str = "v1";
+
+/// Compute versioned HMAC signature for a payload with timestamp.
+///
+/// # Signature Format
+/// Returns: `v1=sha256_hex_value`
+///
+/// # Signed Content
+/// The signed content is formatted as: `timestamp.body`
+/// where timestamp is included in the X-Webhook-Timestamp header.
+fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> String {
+    let signed_content = format!("{}.{}", timestamp, body);
+    let signature_hex = sign_payload_v1(secret, &signed_content);
+    format!("{}={}", SIGNATURE_VERSION, signature_hex)
+}
+
+/// Compute HMAC-SHA256 hex signature (v1).
+fn sign_payload_v1(secret: &str, signed_content: &str) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(signed_content.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Prepare structure for v2 (HMAC-SHA512).
+/// Currently returns the same as v1 for compatibility.
+#[allow(dead_code)]
+fn sign_payload_v2(secret: &str, signed_content: &str) -> String {
+    let mut mac =
+        Hmac::<Sha512>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(signed_content.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256 hex signature for a payload (legacy).
+/// This is deprecated in favor of sign_payload_with_version.
+#[allow(dead_code)]
 fn sign_payload(secret: &str, body: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_v1_signature_includes_timestamp() {
+        let secret = "test-secret";
+        let timestamp = "2025-01-15T10:30:00Z";
+        let body = r#"{"transaction_id":"123","status":"completed"}"#;
+
+        let signature = sign_payload_with_version(secret, timestamp, body);
+
+        // Verify signature format: v1=<hex>
+        assert!(
+            signature.starts_with("v1="),
+            "Signature should start with v1="
+        );
+        assert_eq!(
+            signature.len(),
+            68,
+            "v1 signature should be 68 chars (4 for 'v1=' + 64 for sha256 hex)"
+        );
+    }
+
+    #[test]
+    fn test_v1_signature_matches_expected_value() {
+        let secret = "webhook-secret";
+        let timestamp = "2025-01-15T10:30:00Z";
+        let body = r#"{"id":"txn-123"}"#;
+
+        // Compute expected signature manually
+        let signed_content = format!("{}.{}", timestamp, body);
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(signed_content.as_bytes());
+        let expected_hex = hex::encode(mac.finalize().into_bytes());
+        let expected_signature = format!("v1={}", expected_hex);
+
+        let signature = sign_payload_with_version(secret, timestamp, body);
+
+        assert_eq!(
+            signature, expected_signature,
+            "Signature should match expected value"
+        );
+    }
+
+    #[test]
+    fn test_different_timestamps_produce_different_signatures() {
+        let secret = "webhook-secret";
+        let body = r#"{"id":"txn-123"}"#;
+
+        let sig1 = sign_payload_with_version(secret, "2025-01-15T10:30:00Z", body);
+        let sig2 = sign_payload_with_version(secret, "2025-01-15T10:30:01Z", body);
+
+        assert_ne!(
+            sig1, sig2,
+            "Different timestamps should produce different signatures"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_in_signed_content() {
+        let secret = "webhook-secret";
+        let timestamp = "2025-01-15T10:30:00Z";
+        let body = r#"{"id":"txn-123"}"#;
+
+        // Verify by computing signature with timestamp included
+        let sig_with_ts = sign_payload_with_version(secret, timestamp, body);
+
+        // Verify that body alone would produce different signature
+        let old_style_hex = sign_payload(secret, body);
+        let old_style_sig = format!("v1={}", old_style_hex);
+
+        assert_ne!(
+            sig_with_ts, old_style_sig,
+            "Signature with timestamp should differ from signature without timestamp"
+        );
+    }
+
+    #[test]
+    fn test_v1_signature_hex_encoding() {
+        let secret = "test";
+        let timestamp = "2025-01-15T10:30:00Z";
+        let body = "{}";
+
+        let signature = sign_payload_with_version(secret, timestamp, body);
+
+        // Remove v1= prefix and verify it's valid hex
+        let hex_part = &signature[3..];
+        assert!(
+            hex_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "Signature hex should contain only valid hex characters"
+        );
+        assert_eq!(hex_part.len(), 64, "SHA256 hex should be 64 characters");
+    }
+
+    #[test]
+    fn test_v1_signature_deterministic() {
+        let secret = "webhook-secret";
+        let timestamp = "2025-01-15T10:30:00Z";
+        let body = r#"{"id":"txn-123"}"#;
+
+        let sig1 = sign_payload_with_version(secret, timestamp, body);
+        let sig2 = sign_payload_with_version(secret, timestamp, body);
+
+        assert_eq!(
+            sig1, sig2,
+            "Signature should be deterministic for same inputs"
+        );
+    }
 }

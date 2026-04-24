@@ -16,8 +16,7 @@ use std::time::Duration;
 
 // ── Circuit breaker type alias ────────────────────────────────────────────────
 
-type RedisCBInner =
-    StateMachine<failure_policy::ConsecutiveFailures<backoff::EqualJittered>, ()>;
+type RedisCBInner = StateMachine<failure_policy::ConsecutiveFailures<backoff::EqualJittered>, ()>;
 
 /// Shared Redis circuit breaker (cheaply cloneable).
 #[derive(Clone)]
@@ -187,7 +186,7 @@ impl IdempotencyService {
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
         let cache_key = format!("idempotency:{}", key);
         let lock_key = format!("idempotency:lock:{}", key);
-        
+
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
                 // Check if response is cached
@@ -195,16 +194,21 @@ impl IdempotencyService {
                     .arg(&cache_key)
                     .query_async(&mut conn)
                     .await?;
-                    
+
                 if let Some(data) = cached {
                     self.cache_hits.fetch_add(1, Ordering::Relaxed);
-                    let response: CachedResponse = serde_json::from_str(&data)
-                        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "deserialization error", e.to_string())))?;
+                    let response: CachedResponse = serde_json::from_str(&data).map_err(|e| {
+                        redis::RedisError::from((
+                            redis::ErrorKind::TypeError,
+                            "deserialization error",
+                            e.to_string(),
+                        ))
+                    })?;
                     return Ok(IdempotencyStatus::Completed(response));
                 }
-                
+
                 self.cache_misses.fetch_add(1, Ordering::Relaxed);
-                
+
                 // Try to acquire lock
                 let acquired: bool = redis::cmd("SET")
                     .arg(&lock_key)
@@ -214,7 +218,7 @@ impl IdempotencyService {
                     .arg(300) // 5 minute lock
                     .query_async(&mut conn)
                     .await?;
-                    
+
                 if acquired {
                     self.lock_acquired.fetch_add(1, Ordering::Relaxed);
                     Ok(IdempotencyStatus::New)
@@ -225,9 +229,12 @@ impl IdempotencyService {
             }
             Err(redis_err) => {
                 // Redis failed, fall back to database
-                tracing::warn!("Redis unavailable for idempotency check, falling back to database: {}", redis_err);
+                tracing::warn!(
+                    "Redis unavailable for idempotency check, falling back to database: {}",
+                    redis_err
+                );
                 self.fallback_count.fetch_add(1, Ordering::Relaxed);
-                
+
                 self.check_idempotency_db(key).await
             }
         }
@@ -238,16 +245,30 @@ impl IdempotencyService {
         key: &str,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
         use chrono::{Duration, Utc};
-        
+
         // Check if key exists in database
         if let Some(db_key) = crate::db::queries::check_idempotency_key(&self.pool, key).await? {
             match db_key.status.as_str() {
                 "completed" => {
                     if let Some(response_json) = db_key.response {
-                        let status = response_json.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
-                        let body = response_json.get("body").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
-                        let content_type = response_json.get("content_type").and_then(|v| v.as_str()).map(|s| s.to_string());
-                        let cached = CachedResponse { status, body, content_type };
+                        let status = response_json
+                            .get("status")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(200) as u16;
+                        let body = response_json
+                            .get("body")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}")
+                            .to_string();
+                        let content_type = response_json
+                            .get("content_type")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let cached = CachedResponse {
+                            status,
+                            body,
+                            content_type,
+                        };
                         Ok(IdempotencyStatus::Completed(cached))
                     } else {
                         // No response stored, treat as processing
@@ -266,7 +287,8 @@ impl IdempotencyService {
                 "processing",
                 None,
                 expires_at,
-            ).await?;
+            )
+            .await?;
             Ok(IdempotencyStatus::New)
         }
     }
@@ -281,10 +303,14 @@ impl IdempotencyService {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let cache_key = format!("idempotency:{}", key);
         let lock_key = format!("idempotency:lock:{}", key);
-        
-        let cached = CachedResponse { status, body: body.clone(), content_type: content_type.clone() };
+
+        let cached = CachedResponse {
+            status,
+            body: body.clone(),
+            content_type: content_type.clone(),
+        };
         let data = serde_json::to_string(&cached)?;
-        
+
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
                 // Store response with 24 hour TTL
@@ -294,40 +320,47 @@ impl IdempotencyService {
                     .arg(&data)
                     .query_async::<_, ()>(&mut conn)
                     .await?;
-                
+
                 // Release lock
                 redis::cmd("DEL")
                     .arg(&lock_key)
                     .query_async::<_, ()>(&mut conn)
                     .await?;
-                
+
                 Ok(())
             }
             Err(redis_err) => {
                 // Redis failed, store in database
-                tracing::warn!("Redis unavailable for storing idempotency response, storing in database: {}", redis_err);
-                
+                tracing::warn!(
+                    "Redis unavailable for storing idempotency response, storing in database: {}",
+                    redis_err
+                );
+
                 let response_json = serde_json::json!({
                     "status": status,
                     "body": body,
                     "content_type": content_type
                 });
                 let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
-                
+
                 crate::db::queries::update_idempotency_key_response(
                     &self.pool,
                     key,
                     &response_json,
-                ).await?;
-                
+                )
+                .await?;
+
                 Ok(())
             }
         }
     }
 
-    pub async fn release_lock(&self, key: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn release_lock(
+        &self,
+        key: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let lock_key = format!("idempotency:lock:{}", key);
-        
+
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
                 redis::cmd("DEL")
@@ -473,12 +506,15 @@ pub async fn idempotency_middleware(
 
             if response.status().is_success() {
                 let status = response.status().as_u16();
-                let content_type = response.headers().get("content-type")
+                let content_type = response
+                    .headers()
+                    .get("content-type")
                     .and_then(|h| h.to_str().ok())
                     .map(|s| s.to_string());
-                
+
                 // Read the response body
-                let body_bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
+                let body_bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await
+                {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         tracing::error!("Failed to read response body for caching: {}", e);
@@ -489,7 +525,7 @@ pub async fn idempotency_middleware(
                             .into_response();
                     }
                 };
-                
+
                 let body_string = if body_bytes.len() > 64 * 1024 {
                     // Body too large, cache status only
                     tracing::warn!("Response body exceeds 64KB limit, caching status only");
@@ -504,18 +540,21 @@ pub async fn idempotency_middleware(
                         }
                     }
                 };
-                
+
                 // Recreate the response for the client
                 let client_response = Response::builder()
                     .status(status)
-                    .header("content-type", content_type.as_deref().unwrap_or("application/json"))
+                    .header(
+                        "content-type",
+                        content_type.as_deref().unwrap_or("application/json"),
+                    )
                     .body(Body::from(body_bytes))
                     .unwrap();
 
                 if let Err(e) = service.store_response(&validated_key, status, body).await {
                     tracing::error!("Failed to store idempotency response: {}", e);
                 }
-                
+
                 client_response
             } else {
                 if let Err(e) = service.release_lock(&validated_key).await {
@@ -534,30 +573,33 @@ pub async fn idempotency_middleware(
             .into_response(),
         Ok(IdempotencyStatus::Completed(cached)) => {
             let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
-            
+
             // Reconstruct the response body
             let body_bytes = if cached.body.starts_with("ey") || cached.body.contains("{") {
                 // Assume it's JSON or base64
                 if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&cached.body) {
                     // It's JSON
-                    serde_json::to_vec(&json_value).unwrap_or_else(|_| cached.body.as_bytes().to_vec())
+                    serde_json::to_vec(&json_value)
+                        .unwrap_or_else(|_| cached.body.as_bytes().to_vec())
                 } else {
                     // Try base64 decode
                     use base64::Engine;
-                    base64::engine::general_purpose::STANDARD.decode(&cached.body).unwrap_or_else(|_| cached.body.as_bytes().to_vec())
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&cached.body)
+                        .unwrap_or_else(|_| cached.body.as_bytes().to_vec())
                 }
             } else {
                 cached.body.as_bytes().to_vec()
             };
-            
+
             let mut response_builder = Response::builder()
                 .status(status)
                 .header("x-idempotent-replayed", "true");
-                
+
             if let Some(content_type) = &cached.content_type {
                 response_builder = response_builder.header("content-type", content_type);
             }
-            
+
             response_builder
                 .body(Body::from(body_bytes))
                 .unwrap_or_else(|_| {
@@ -583,7 +625,10 @@ mod tests {
     #[test]
     fn test_validate_idempotency_key_success() {
         assert_eq!(validate_idempotency_key("abc123").unwrap(), "abc123");
-        assert_eq!(validate_idempotency_key("abc-def_123.45").unwrap(), "abc-def_123.45");
+        assert_eq!(
+            validate_idempotency_key("abc-def_123.45").unwrap(),
+            "abc-def_123.45"
+        );
         assert_eq!(validate_idempotency_key("  abc123  ").unwrap(), "abc123");
     }
 
@@ -617,5 +662,3 @@ mod tests {
         assert!(validate_idempotency_key(&too_long_key).is_err());
     }
 }
-
-

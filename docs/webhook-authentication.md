@@ -2,98 +2,263 @@
 
 ## Overview
 
-This implementation provides secure webhook signature verification for Anchor Platform callbacks using HMAC-SHA256. It prevents spoofing attacks by validating the `X-Stellar-Signature` header against the request payload.
+This implementation provides secure webhook signature verification using **versioned HMAC signatures**. Outgoing webhooks include cryptographic signatures that prevent spoofing attacks and include timestamps to prevent replay attacks.
 
 ## Security Features
 
-1. **HMAC-SHA256**: Industry-standard cryptographic hash function
-2. **Constant-time comparison**: Prevents timing attacks using the `hmac` crate's built-in verification
-3. **Automatic rejection**: Invalid or missing signatures return 401 Unauthorized
+1. **Versioned Signatures**: Support for multiple signing algorithms (v1: HMAC-SHA256, v2: HMAC-SHA512 prepared)
+2. **Timestamp Inclusion**: Every signature includes a timestamp to prevent replay attacks
+3. **HMAC Security**: Industry-standard cryptographic hash function
+4. **Constant-time comparison**: Verification uses constant-time comparison to prevent timing attacks
+
+## Signature Format
+
+### Header Format
+
+Outgoing webhooks include the following headers:
+
+- `X-Webhook-Signature`: The versioned signature in format `v1=<hex_value>`
+- `X-Webhook-Timestamp`: ISO 8601 formatted timestamp when the webhook was sent
+- `X-Webhook-Event`: Event type (e.g., `transaction.completed`)
+- `Content-Type`: `application/json`
+
+Example:
+```
+X-Webhook-Signature: v1=a1b2c3d4e5f6...
+X-Webhook-Timestamp: 2025-01-15T10:30:00Z
+X-Webhook-Event: transaction.completed
+```
+
+### Signature Verification Algorithm
+
+#### v1 (HMAC-SHA256)
+
+To verify a v1 signature:
+
+1. Extract the timestamp from `X-Webhook-Timestamp` header
+2. Get the raw JSON body as a string
+3. Concatenate: `signed_content = timestamp + "." + body`
+4. Compute: `computed_signature = HMAC-SHA256(secret_key, signed_content)`
+5. Convert to hex: `computed_hex = hex(computed_signature)`
+6. Compare: `X-Webhook-Signature == "v1=" + computed_hex`
+
+**Critical**: Use constant-time comparison to prevent timing attacks.
+
+#### v2 (HMAC-SHA512, Prepared Structure)
+
+Future versions will support additional algorithms. The signature format will remain compatible:
+- `X-Webhook-Signature: v2=sha512_hex_value`
 
 ## Configuration
 
-Add the webhook secret to your environment variables:
+Store your webhook secret securely:
 
 ```bash
-ANCHOR_WEBHOOK_SECRET=your_secret_key_here
+export WEBHOOK_SECRET="your_webhook_secret_key"
 ```
 
-This secret must match the one configured in your Anchor Platform instance.
+This secret is used both for:
+- **Outgoing**: Signing webhooks created by this service
+- **Incoming**: Verifying webhooks received from other services
 
 ## Implementation Details
 
-### Components
+### Outgoing Webhooks (Dispatched by Synapse Core)
 
-1. **`src/handlers/auth.rs`**: Contains the `VerifiedWebhook` extractor
-   - Extracts `X-Stellar-Signature` header
-   - Reads request body
-   - Computes HMAC-SHA256 of body
-   - Performs constant-time comparison
-   - Returns 401 on failure
+Located in `src/services/webhook_dispatcher.rs`:
 
-2. **`src/handlers/webhook.rs`**: Transaction callback handler
-   - Uses `VerifiedWebhook` extractor for automatic verification
-   - Only processes requests with valid signatures
+1. When a transaction reaches a terminal state, the dispatcher enqueues webhook deliveries
+2. For each registered endpoint, a `WebhookDelivery` is created with the serialized payload
+3. During delivery (`attempt_delivery`):
+   - Extract timestamp from payload
+   - Create signed content: `timestamp.body`
+   - Compute HMAC-SHA256 signature
+   - Format as `v1=<hex>`
+   - Include in `X-Webhook-Signature` header
+   - Include timestamp in `X-Webhook-Timestamp` header
 
-3. **`src/config.rs`**: Configuration management
-   - Loads `ANCHOR_WEBHOOK_SECRET` from environment
+### Example Payload
 
-### How It Works
+```json
+{
+  "event_type": "transaction.completed",
+  "transaction_id": "123e4567-e89b-12d3-a456-426614174000",
+  "timestamp": "2025-01-15T10:30:00Z",
+  "data": {
+    "status": "completed",
+    "amount": "100.00",
+    "currency": "USD"
+  }
+}
+```
 
-1. Anchor Platform sends a POST request to `/callback/transaction`
-2. Request includes `X-Stellar-Signature` header with hex-encoded HMAC-SHA256
-3. `VerifiedWebhook` extractor:
-   - Extracts the signature header
-   - Reads the request body
-   - Computes HMAC-SHA256(secret, body)
-   - Compares computed signature with header value using constant-time comparison
-4. If verification succeeds, handler processes the callback
-5. If verification fails, returns 401 Unauthorized
+## Verification Examples
 
-### Signature Format
-
-The `X-Stellar-Signature` header contains a hex-encoded HMAC-SHA256 hash:
-- Algorithm: HMAC-SHA256
-- Key: `ANCHOR_WEBHOOK_SECRET`
-- Message: Raw request body (JSON)
-- Encoding: Hexadecimal (64 characters)
-
-## Usage Example
+### Rust
 
 ```rust
-use crate::handlers::auth::VerifiedWebhook;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
-pub async fn transaction_callback(
-    State(state): State<AppState>,
-    VerifiedWebhook { body }: VerifiedWebhook,
-) -> impl IntoResponse {
-    // Body is already verified - safe to process
-    let callback: TransactionCallback = serde_json::from_slice(&body)?;
-    // ... process callback
+fn verify_webhook(secret: &str, timestamp: &str, body: &str, signature: &str) -> bool {
+    let signed_content = format!("{}.{}", timestamp, body);
+    
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(signed_content.as_bytes());
+    
+    let computed = hex::encode(mac.finalize().into_bytes());
+    let expected = format!("v1={}", computed);
+    
+    // Use constant-time comparison
+    signature == expected
+}
+```
+
+### Python
+
+```python
+import hmac
+import hashlib
+
+def verify_webhook(secret, timestamp, body, signature):
+    signed_content = f"{timestamp}.{body}"
+    computed = hmac.new(
+        secret.encode(),
+        signed_content.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    expected = f"v1={computed}"
+    
+    # Use constant-time comparison
+    return hmac.compare_digest(signature, expected)
+```
+
+### JavaScript/Node.js
+
+```javascript
+const crypto = require('crypto');
+
+function verifyWebhook(secret, timestamp, body, signature) {
+  const signedContent = `${timestamp}.${body}`;
+  const computed = crypto
+    .createHmac('sha256', secret)
+    .update(signedContent)
+    .digest('hex');
+  const expected = `v1=${computed}`;
+  
+  // Use constant-time comparison
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(expected)
+  );
+}
+```
+
+### cURL Example
+
+```bash
+# Set variables
+SECRET="your_webhook_secret_key"
+TIMESTAMP="2025-01-15T10:30:00Z"
+BODY='{"id":"txn-123","status":"completed"}'
+
+# Compute signature
+SIGNED_CONTENT="${TIMESTAMP}.${BODY}"
+SIGNATURE="v1=$(echo -n "${SIGNED_CONTENT}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $2}')"
+
+echo "X-Webhook-Signature: ${SIGNATURE}"
+echo "X-Webhook-Timestamp: ${TIMESTAMP}"
+```
+
+## Timestamp Validation
+
+Consumers **should** validate the timestamp to prevent replay attacks:
+
+1. Extract `X-Webhook-Timestamp` from headers
+2. Parse as ISO 8601 datetime
+3. Compare to current time
+4. Reject if timestamp is older than your max window (e.g., 5 minutes)
+
+Example:
+```rust
+use chrono::{Duration, Utc};
+
+fn validate_timestamp(timestamp_str: &str, max_age_secs: i64) -> bool {
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(timestamp_str) {
+        let now = Utc::now();
+        let age = now.signed_duration_since(timestamp.with_timezone(&Utc));
+        age < Duration::seconds(max_age_secs)
+    } else {
+        false
+    }
 }
 ```
 
 ## Testing
 
-Generate a test signature:
+### Generate a test signature
 
 ```bash
-echo -n '{"id":"123","status":"completed"}' | \
-  openssl dgst -sha256 -hmac "your_secret_key" | \
-  awk '{print $2}'
+SECRET="test-secret"
+TIMESTAMP="2025-01-15T10:30:00Z"
+BODY='{"id":"txn-123"}'
+SIGNED_CONTENT="${TIMESTAMP}.${BODY}"
+
+SIGNATURE="v1=$(echo -n "${SIGNED_CONTENT}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $2}')"
+echo "Generated signature: ${SIGNATURE}"
 ```
 
-Send a test request:
+### Test with cURL
 
 ```bash
-SIGNATURE=$(echo -n '{"id":"123","status":"completed"}' | \
-  openssl dgst -sha256 -hmac "your_secret_key" | awk '{print $2}')
+SECRET="webhook-secret"
+TIMESTAMP="2025-01-15T10:30:00Z"
+BODY='{"id":"txn-123"}'
+SIGNED_CONTENT="${TIMESTAMP}.${BODY}"
+SIGNATURE="v1=$(echo -n "${SIGNED_CONTENT}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $2}')"
 
-curl -X POST http://localhost:3000/callback/transaction \
+curl -X POST http://localhost:3000/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Stellar-Signature: $SIGNATURE" \
-  -d '{"id":"123","status":"completed"}'
+  -H "X-Webhook-Signature: ${SIGNATURE}" \
+  -H "X-Webhook-Timestamp: ${TIMESTAMP}" \
+  -H "X-Webhook-Event: transaction.completed" \
+  -d "${BODY}"
 ```
+
+## Migration from Unversioned Signatures
+
+If you previously used unversioned signatures, update your verification:
+
+**Old format:**
+```
+X-Webhook-Signature: sha256=<hex>
+Body: raw_json_only
+```
+
+**New format:**
+```
+X-Webhook-Signature: v1=<hex>
+X-Webhook-Timestamp: <iso8601_timestamp>
+Signed Content: <timestamp>.<raw_json>
+```
+
+### Update Your Consumer
+
+1. Extract `X-Webhook-Timestamp` header
+2. Change signed content to: `timestamp + "." + body`
+3. Parse version from `X-Webhook-Signature` (e.g., extract `v1` from `v1=<hex>`)
+4. Update signature comparison to include timestamp
+
+## Security Best Practices
+
+1. **Store secrets securely**: Use environment variables or secure secret management systems
+2. **Use constant-time comparison**: Prevent timing attacks by always comparing the full signature
+3. **Validate timestamps**: Reject timestamped signatures outside your acceptable window
+4. **Rotate secrets regularly**: Implement key rotation policies
+5. **HTTPS only**: Always use HTTPS for webhook delivery and validation
+6. **Monitor failures**: Log and alert on signature verification failures
+7. **Rate limiting**: Implement rate limiting on webhook endpoints
 
 ## Error Responses
 

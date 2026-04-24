@@ -313,8 +313,7 @@ pub async fn run_processor_with_leader_election(
         "Processor started with leader election"
     );
 
-    let mut heartbeat_tick =
-        tokio::time::interval(Duration::from_secs(LEADER_HEARTBEAT_SECS));
+    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(LEADER_HEARTBEAT_SECS));
     let mut process_tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
 
     loop {
