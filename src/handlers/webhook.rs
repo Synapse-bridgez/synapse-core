@@ -11,7 +11,7 @@ use crate::{ApiState, AppState};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderValue, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -318,10 +318,7 @@ pub async fn callback(
     Json(payload): Json<CallbackPayload>,
 ) -> Result<impl IntoResponse, AppError> {
     // Back-pressure: reject if pending queue exceeds threshold
-    let depth = state
-        .app_state
-        .pending_queue_depth
-        .load(Ordering::Relaxed);
+    let depth = state.app_state.pending_queue_depth.load(Ordering::Relaxed);
     let max_pending = std::env::var("MAX_PENDING_QUEUE")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -338,10 +335,9 @@ pub async fn callback(
             axum::body::Full::from(r#"{"error":"service busy, retry later"}"#),
         ));
         *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-        response.headers_mut().insert(
-            "Retry-After",
-            HeaderValue::from_static("30"),
-        );
+        response
+            .headers_mut()
+            .insert("Retry-After", HeaderValue::from_static("30"));
         return Ok(response.into_response());
     }
 
@@ -416,14 +412,24 @@ pub async fn get_transaction(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let transaction = queries::get_transaction(&state.app_state.db, id)
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+
+    let transaction = queries::get_transaction(pool, id)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
             _ => AppError::DatabaseError(e.to_string()),
         })?;
 
-    Ok(Json(transaction))
+    let mut response: Response = Json(transaction).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -466,7 +472,8 @@ pub async fn list_transactions(
 
     // fetch one extra to determine has_more
     let fetch_limit = limit + 1;
-    let mut rows = queries::list_transactions(&state.db, fetch_limit, decoded_cursor, backward)
+    let (pool, replica_used) = state.pool_manager.read_pool().await;
+    let mut rows = queries::list_transactions(pool, fetch_limit, decoded_cursor, backward)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
@@ -488,7 +495,15 @@ pub async fn list_transactions(
         }
     });
 
-    Ok(Json(resp))
+    let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }
 
 /// Wrapper to accept the router's ApiState without forcing all handlers to change.
@@ -512,7 +527,8 @@ pub async fn list_transactions_api(
     };
 
     let fetch_limit = limit + 1;
-    let mut rows = queries::list_transactions(&app_state.db, fetch_limit, decoded_cursor, backward)
+    let (pool, replica_used) = app_state.pool_manager.read_pool().await;
+    let mut rows = queries::list_transactions(pool, fetch_limit, decoded_cursor, backward)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
@@ -533,5 +549,13 @@ pub async fn list_transactions_api(
         }
     });
 
-    Ok(Json(resp))
+    let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }

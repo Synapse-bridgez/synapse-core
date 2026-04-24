@@ -3,7 +3,7 @@ use crate::services::query_cache::{
     cache_key_asset_stats, cache_key_daily_totals, cache_key_status_counts, CacheConfig,
 };
 use crate::ApiState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::{HeaderValue, StatusCode}, response::{IntoResponse, Response}, Json};
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -44,7 +44,8 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
     }
 
     // Cache miss - query database
-    match crate::db::queries::get_status_counts(&state.app_state.db).await {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    match crate::db::queries::get_status_counts(pool).await {
         Ok(counts) => {
             // Store in cache
             let _ = state
@@ -57,7 +58,14 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
                 )
                 .await;
 
-            (StatusCode::OK, Json(counts))
+            let mut response: Response = (StatusCode::OK, Json(counts)).into_response();
+            if replica_used {
+                response.headers_mut().insert(
+                    "X-Read-Consistency",
+                    HeaderValue::from_static("eventual"),
+                );
+            }
+            return response;
         }
         Err(e) => {
             tracing::error!("Failed to get status counts: {:?}", e);
@@ -87,7 +95,8 @@ pub async fn daily_totals(
     }
 
     // Cache miss - query database
-    match crate::db::queries::get_daily_totals(&state.app_state.db, query.days).await {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    match crate::db::queries::get_daily_totals(pool, query.days).await {
         Ok(totals) => {
             // Store in cache
             let _ = state
@@ -100,7 +109,14 @@ pub async fn daily_totals(
                 )
                 .await;
 
-            (StatusCode::OK, Json(totals))
+            let mut response: Response = (StatusCode::OK, Json(totals)).into_response();
+            if replica_used {
+                response.headers_mut().insert(
+                    "X-Read-Consistency",
+                    HeaderValue::from_static("eventual"),
+                );
+            }
+            return response;
         }
         Err(e) => {
             tracing::error!("Failed to get daily totals: {:?}", e);
@@ -127,7 +143,8 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
     }
 
     // Cache miss - query database
-    match crate::db::queries::get_asset_stats(&state.app_state.db).await {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    match crate::db::queries::get_asset_stats(pool).await {
         Ok(stats) => {
             // Store in cache
             let _ = state
@@ -140,7 +157,14 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
                 )
                 .await;
 
-            (StatusCode::OK, Json(stats))
+            let mut response: Response = (StatusCode::OK, Json(stats)).into_response();
+            if replica_used {
+                response.headers_mut().insert(
+                    "X-Read-Consistency",
+                    HeaderValue::from_static("eventual"),
+                );
+            }
+            return response;
         }
         Err(e) => {
             tracing::error!("Failed to get asset stats: {:?}", e);
@@ -156,12 +180,27 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
     let query_cache_metrics = state.app_state.query_cache.metrics();
     let combined_metrics = CombinedCacheMetrics {
         query_cache: query_cache_metrics,
-        idempotency_cache_hits: state.app_state.idempotency_cache_hits.load(Ordering::Relaxed),
-        idempotency_cache_misses: state.app_state.idempotency_cache_misses.load(Ordering::Relaxed),
-        idempotency_lock_acquired: state.app_state.idempotency_lock_acquired.load(Ordering::Relaxed),
-        idempotency_lock_contention: state.app_state.idempotency_lock_contention.load(Ordering::Relaxed),
+        idempotency_cache_hits: state
+            .app_state
+            .idempotency_cache_hits
+            .load(Ordering::Relaxed),
+        idempotency_cache_misses: state
+            .app_state
+            .idempotency_cache_misses
+            .load(Ordering::Relaxed),
+        idempotency_lock_acquired: state
+            .app_state
+            .idempotency_lock_acquired
+            .load(Ordering::Relaxed),
+        idempotency_lock_contention: state
+            .app_state
+            .idempotency_lock_contention
+            .load(Ordering::Relaxed),
         idempotency_errors: state.app_state.idempotency_errors.load(Ordering::Relaxed),
-        idempotency_fallback_count: state.app_state.idempotency_fallback_count.load(Ordering::Relaxed),
+        idempotency_fallback_count: state
+            .app_state
+            .idempotency_fallback_count
+            .load(Ordering::Relaxed),
     };
     (StatusCode::OK, Json(combined_metrics))
 }

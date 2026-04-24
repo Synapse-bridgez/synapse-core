@@ -432,7 +432,18 @@ pub async fn get_audit_logs(
     entity_id: Uuid,
     limit: i64,
     offset: i64,
-) -> Result<Vec<(Uuid, Uuid, String, String, Option<serde_json::Value>, Option<serde_json::Value>, String, DateTime<Utc>)>> {
+) -> Result<
+    Vec<(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+        String,
+        DateTime<Utc>,
+    )>,
+> {
     let rows = sqlx::query(
         r#"
         SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
@@ -440,7 +451,7 @@ pub async fn get_audit_logs(
         WHERE entity_id = $1
         ORDER BY timestamp DESC
         LIMIT $2 OFFSET $3
-        "#
+        "#,
     )
     .bind(entity_id)
     .bind(limit)
@@ -510,21 +521,41 @@ pub async fn get_status_counts(pool: &PgPool) -> Result<Vec<StatusCount>> {
 }
 
 pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal>> {
-    let rows = sqlx::query(
-        r#"
+    let end = Utc::now();
+    let start = end - chrono::Duration::days(days.into());
+    let sql = r#"
         SELECT 
             DATE(created_at)::text as date,
             SUM(amount) as total_amount,
             COUNT(*) as tx_count
         FROM transactions
-        WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+        WHERE created_at >= $1
+          AND created_at < $2
         GROUP BY DATE(created_at)
         ORDER BY DATE(created_at) DESC
-        "#,
-    )
-    .bind(days)
-    .fetch_all(pool)
-    .await?;
+        "#;
+
+    if cfg!(debug_assertions) {
+        let explain_rows = sqlx::query(&format!("EXPLAIN ANALYZE {}", sql))
+            .bind(start)
+            .bind(end)
+            .fetch_all(pool)
+            .await?;
+
+        let explain_plan = explain_rows
+            .into_iter()
+            .map(|row| row.get::<String, _>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        tracing::debug!("get_daily_totals EXPLAIN ANALYZE:\n{}", explain_plan);
+    }
+
+    let rows = sqlx::query(sql)
+        .bind(start)
+        .bind(end)
+        .fetch_all(pool)
+        .await?;
 
     Ok(rows
         .into_iter()
@@ -611,13 +642,11 @@ pub async fn update_idempotency_key_response(
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1",
-    )
-    .bind(key)
-    .bind(response)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
+        .bind(key)
+        .bind(response)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

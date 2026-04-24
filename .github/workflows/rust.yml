@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/synapse-core
 
 jobs:
   build:
@@ -79,6 +80,34 @@ jobs:
       run: cargo test --verbose
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+
+    - name: Extract Cargo package version
+      id: extract-version
+      run: |
+        VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v5
+      with:
+        registry: ghcr.io
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./dockerfile
+        push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        tags: |
+          ${{ env.IMAGE_NAME }}:latest
+          ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
     - name: Stop sccache
       run: sccache --stop-server

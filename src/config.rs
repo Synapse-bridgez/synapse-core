@@ -39,6 +39,10 @@ pub struct Config {
     // DB pool sizing
     pub db_min_connections: u32,
     pub db_max_connections: u32,
+    // DB timeouts
+    pub db_statement_timeout_ms: u64,
+    pub db_idle_timeout_secs: u64,
+    pub db_long_running_statement_timeout_ms: u64,
     // Processor pool
     pub processor_workers: usize,
     pub processor_batch_size: u32,
@@ -117,6 +121,15 @@ impl Config {
                 .parse()?,
             db_max_connections: env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            db_statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
+                .unwrap_or_else(|_| "30000".to_string())
+                .parse()?,
+            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()?,
+            db_long_running_statement_timeout_ms: env::var("DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS")
+                .unwrap_or_else(|_| "300000".to_string())
                 .parse()?,
             processor_workers: env::var("PROCESSOR_WORKERS")
                 .unwrap_or_else(|_| "4".to_string())

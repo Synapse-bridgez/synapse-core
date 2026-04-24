@@ -44,7 +44,9 @@ async fn test_api_versioning_headers() {
         tx_broadcast: tx,
         query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
         profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
-        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
     };

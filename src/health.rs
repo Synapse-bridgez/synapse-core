@@ -58,11 +58,17 @@ pub struct RedisChecker {
 
 impl RedisChecker {
     pub fn new(url: String) -> Self {
-        Self { url, circuit_state: None }
+        Self {
+            url,
+            circuit_state: None,
+        }
     }
 
     pub fn with_circuit_state(url: String, circuit_state: String) -> Self {
-        Self { url, circuit_state: Some(circuit_state) }
+        Self {
+            url,
+            circuit_state: Some(circuit_state),
+        }
     }
 }
 

@@ -50,9 +50,7 @@ pub fn init_tracer(
                 .with_config(sdktrace::Config::default().with_resource(resource))
                 .build();
 
-            tracing::info!(
-                "No OTLP_ENDPOINT set — OpenTelemetry running in no-op mode"
-            );
+            tracing::info!("No OTLP_ENDPOINT set — OpenTelemetry running in no-op mode");
             provider
         }
     };
