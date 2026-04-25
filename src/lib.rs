@@ -33,6 +33,7 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
+use tower_http::limit::RequestBodyLimitLayer;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -124,24 +125,34 @@ pub fn create_app(app_state: AppState) -> Router {
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::api_key_auth,
+        ))
+        .layer(axum::Extension(app_state.db.clone()))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
-        ));
+        ))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MB
 
     // Webhook route with validation + quota middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::api_key_auth,
+        ))
+        .layer(axum::Extension(app_state.db.clone()))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
-        ));
+        ))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MB
 
     // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
     let mut admin_router = Router::new()
@@ -177,6 +188,7 @@ pub fn create_app(app_state: AppState) -> Router {
         // Admin: webhook endpoint health scores
         .route("/admin/webhooks/health", get(handlers::admin::list_webhook_health))
         .route("/admin/webhooks/health/:id", get(handlers::admin::get_webhook_health))
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB for admin/export
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
