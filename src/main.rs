@@ -317,6 +317,11 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     );
     let _processor_shutdown = processor_pool.start();
 
+    // Mark service as ready before starting the server
+    app_state.readiness.set_ready();
+    tracing::info!("Service is ready to accept traffic");
+    let readiness = app_state.readiness.clone();
+
     let app = synapse_core::create_app(app_state);
 
     // Configure CORS if allowed origins are specified.
@@ -347,6 +352,34 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(async move {
+            // Wait for SIGTERM or SIGINT
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
+                tokio::select! {
+                    _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+                    _ = sigint.recv() => tracing::info!("Received SIGINT"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to register Ctrl-C handler");
+                tracing::info!("Received Ctrl-C");
+            }
+
+            // If not already draining (e.g. /admin/drain was not called), start drain now
+            if !readiness.is_draining() {
+                readiness.start_drain();
+            }
+            readiness.wait_for_drain().await;
+        })
         .await?;
 
     // Flush and shut down the OTel exporter on clean exit.

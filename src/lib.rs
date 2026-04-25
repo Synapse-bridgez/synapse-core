@@ -177,6 +177,7 @@ pub fn create_app(app_state: AppState) -> Router {
         // Admin: webhook endpoint health scores
         .route("/admin/webhooks/health", get(handlers::admin::list_webhook_health))
         .route("/admin/webhooks/health/:id", get(handlers::admin::get_webhook_health))
+        .route("/admin/drain", post(crate::readiness::drain_handler))
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
