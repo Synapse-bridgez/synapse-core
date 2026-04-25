@@ -41,8 +41,7 @@ pub fn validate_status_transition(from: &str, to: &str) -> Result<(), AppError> 
         Ok(())
     } else {
         Err(AppError::InvalidStatusTransition(format!(
-            "Cannot transition from '{}' to '{}'",
-            from, to
+            "Cannot transition from '{from}' to '{to}'"
         )))
     }
 }

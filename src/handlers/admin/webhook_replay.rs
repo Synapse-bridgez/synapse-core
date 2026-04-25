@@ -101,7 +101,7 @@ async fn get_webhook_payload_from_audit(
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => {
-                AppError::NotFound(format!("Transaction {} not found", transaction_id))
+                AppError::NotFound(format!("Transaction {transaction_id} not found"))
             }
             _ => AppError::DatabaseError(e.to_string()),
         })?;
@@ -222,7 +222,7 @@ pub async fn replay_webhook(
             Ok(_) => {
                 // Log the replay attempt in audit logs
                 let mut db_tx = pool.begin().await.map_err(|e| {
-                    AppError::DatabaseError(format!("Failed to begin transaction: {}", e))
+                    AppError::DatabaseError(format!("Failed to begin transaction: {e}"))
                 })?;
 
                 crate::db::audit::AuditLog::log(
@@ -243,7 +243,7 @@ pub async fn replay_webhook(
                 .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
                 db_tx.commit().await.map_err(|e| {
-                    AppError::DatabaseError(format!("Failed to commit transaction: {}", e))
+                    AppError::DatabaseError(format!("Failed to commit transaction: {e}"))
                 })?;
 
                 // Track replay in history table
@@ -258,7 +258,7 @@ pub async fn replay_webhook(
                 }
             }
             Err(e) => {
-                let error_msg = format!("Failed to replay webhook: {}", e);
+                let error_msg = format!("Failed to replay webhook: {e}");
                 let _ = track_replay_attempt(
                     &pool,
                     transaction_id,
@@ -306,7 +306,7 @@ pub async fn batch_replay_webhooks(
                 results.push(ReplayResult {
                     transaction_id,
                     success: false,
-                    message: format!("Failed to retrieve transaction: {}", e),
+                    message: format!("Failed to retrieve transaction: {e}"),
                     dry_run: request.dry_run,
                     replayed_at: None,
                 });
@@ -374,7 +374,7 @@ pub async fn batch_replay_webhooks(
                     }
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to replay webhook: {}", e);
+                    let error_msg = format!("Failed to replay webhook: {e}");
                     let _ = track_replay_attempt(
                         &pool,
                         transaction_id,

@@ -1,4 +1,3 @@
-use axum::routing::{get, post};
 use clap::Parser;
 use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
@@ -12,9 +11,9 @@ use synapse_core::{
     middleware::idempotency::IdempotencyService,
     schemas,
     secrets::SecretsStore,
-    services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
+    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
-    telemetry, ApiState, AppState, ReadinessState,
+    telemetry, AppState, ReadinessState,
 };
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -29,8 +28,6 @@ use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
 #[openapi(
     paths(
         handlers::health,
-        handlers::settlements::list_settlements,
-        handlers::settlements::get_settlement,
         handlers::webhook::handle_webhook,
         handlers::webhook::callback,
         handlers::webhook::get_transaction,
@@ -39,7 +36,6 @@ use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
         schemas(
             handlers::HealthStatus,
             handlers::DbPoolStats,
-            handlers::settlements::Pagination,
             handlers::settlements::SettlementListResponse,
             handlers::webhook::WebhookPayload,
             handlers::webhook::WebhookResponse,
@@ -159,12 +155,22 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     );
 
     // Initialize Settlement Service
-    let _settlement_service = SettlementService::new(pool.clone());
+    let _settlement_service = SettlementService::with_config(
+        pool.clone(),
+        config.settlement_max_batch_size,
+        config.settlement_min_tx_count,
+    );
 
     // Start background settlement worker
     let settlement_pool = pool.clone();
+    let settlement_max_batch = config.settlement_max_batch_size;
+    let settlement_min_tx = config.settlement_min_tx_count;
     tokio::spawn(async move {
-        let service = SettlementService::new(settlement_pool);
+        let service = SettlementService::with_config(
+            settlement_pool,
+            settlement_max_batch,
+            settlement_min_tx,
+        );
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Default to hourly
         loop {
             interval.tick().await;
@@ -197,8 +203,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Webhook dispatcher background worker started");
 
     // Initialize metrics (OTLP exporter + pool stats background task)
-    let _metrics_handle = metrics::init_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
+    let metrics_handle = metrics::init_metrics()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {e}"))?;
     tracing::info!("Metrics initialized successfully");
     metrics::spawn_pool_metrics_task(pool.clone(), 30);
 
@@ -289,6 +295,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         )),
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
+        secrets_store,
         metrics_handle,
     };
 

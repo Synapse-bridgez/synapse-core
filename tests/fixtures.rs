@@ -39,8 +39,7 @@ impl Default for TransactionFixture {
     fn default() -> Self {
         Self {
             id: Uuid::new_v4(),
-            stellar_account: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
-                .to_string(),
+            stellar_account: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF".to_string(),
             amount: BigDecimal::from_str("100.00").unwrap(),
             asset_code: "USD".to_string(),
             status: "pending".to_string(),

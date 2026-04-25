@@ -28,23 +28,19 @@ pub async fn create_month_partition(
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| sqlx::Error::Protocol("Invalid time".into()))?;
 
-    let part_name = format!("transactions_y{}m{:02}", year, month);
+    let part_name = format!("transactions_y{year}m{month:02}");
     let start_ts = Utc.from_utc_datetime(&start).to_rfc3339();
     let end_ts = Utc.from_utc_datetime(&end).to_rfc3339();
 
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\" PARTITION OF transactions FOR VALUES FROM ('{}') TO ('{}')",
-        part_name, start_ts, end_ts
+        "CREATE TABLE IF NOT EXISTS \"{part_name}\" PARTITION OF transactions FOR VALUES FROM ('{start_ts}') TO ('{end_ts}')"
     );
 
     sqlx::query(&create_sql).execute(pool).await?;
-    let idx1 = format!(
-        "CREATE INDEX IF NOT EXISTS idx_{}_status ON \"{}\" (status)",
-        part_name, part_name
-    );
+    let idx1 =
+        format!("CREATE INDEX IF NOT EXISTS idx_{part_name}_status ON \"{part_name}\" (status)");
     let idx2 = format!(
-        "CREATE INDEX IF NOT EXISTS idx_{}_stellar_account ON \"{}\" (stellar_account)",
-        part_name, part_name
+        "CREATE INDEX IF NOT EXISTS idx_{part_name}_stellar_account ON \"{part_name}\" (stellar_account)"
     );
     sqlx::query(&idx1).execute(pool).await?;
     sqlx::query(&idx2).execute(pool).await?;
@@ -78,10 +74,10 @@ pub async fn detach_and_archive_old_partitions(
             let part_date = Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0).single().unwrap();
             if part_date < cutoff {
                 // detach
-                let detach_sql = format!("ALTER TABLE transactions DETACH PARTITION \"{}\"", child);
+                let detach_sql = format!("ALTER TABLE transactions DETACH PARTITION \"{child}\"");
                 sqlx::query(&detach_sql).execute(pool).await?;
                 // move to archive schema
-                let set_schema = format!("ALTER TABLE \"{}\" SET SCHEMA archive", child);
+                let set_schema = format!("ALTER TABLE \"{child}\" SET SCHEMA archive");
                 sqlx::query(&set_schema).execute(pool).await?;
             }
         }

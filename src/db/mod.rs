@@ -21,7 +21,7 @@ pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
         .after_connect(move |conn, _meta| {
             let statement_timeout_ms = statement_timeout_ms;
             Box::pin(async move {
-                sqlx::query(&format!("SET statement_timeout = {}", statement_timeout_ms))
+                sqlx::query(&format!("SET statement_timeout = {statement_timeout_ms}"))
                     .execute(conn)
                     .await?;
                 Ok(())
@@ -42,7 +42,7 @@ pub async fn create_long_running_pool(config: &Config) -> Result<PgPool, sqlx::E
         .after_connect(move |conn, _meta| {
             let statement_timeout_ms = statement_timeout_ms;
             Box::pin(async move {
-                sqlx::query(&format!("SET statement_timeout = {}", statement_timeout_ms))
+                sqlx::query(&format!("SET statement_timeout = {statement_timeout_ms}"))
                     .execute(conn)
                     .await?;
                 Ok(())
@@ -51,4 +51,3 @@ pub async fn create_long_running_pool(config: &Config) -> Result<PgPool, sqlx::E
         .connect(&config.database_url)
         .await
 }
-
