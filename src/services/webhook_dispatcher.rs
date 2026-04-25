@@ -449,6 +449,134 @@ impl WebhookDispatcher {
 
         true
     }
+
+    // -----------------------------------------------------------------------
+    // Reliability tracking (per-endpoint success rate + auto-disable)
+    // -----------------------------------------------------------------------
+
+    /// Record a delivery event and recompute endpoint reliability stats.
+    /// Called after every delivery attempt (success or failure).
+    pub async fn record_delivery_event(
+        &self,
+        endpoint_id: Uuid,
+        success: bool,
+        http_status: Option<i32>,
+        response_time_ms: i32,
+        error_message: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_delivery_events
+                (endpoint_id, delivered_at, success, http_status, response_time_ms, error_message)
+            VALUES ($1, NOW(), $2, $3, $4, $5)
+            "#,
+        )
+        .bind(endpoint_id)
+        .bind(success)
+        .bind(http_status)
+        .bind(response_time_ms)
+        .bind(error_message)
+        .execute(&self.pool)
+        .await?;
+
+        self.update_endpoint_stats(endpoint_id).await?;
+        Ok(())
+    }
+
+    /// Recompute success_rate and total_deliveries from the last 100 deliveries,
+    /// then auto-disable the endpoint if the rate drops below 10%.
+    async fn update_endpoint_stats(&self, endpoint_id: Uuid) -> anyhow::Result<()> {
+        const ROLLING_WINDOW: i64 = 100;
+        const AUTO_DISABLE_THRESHOLD: f64 = 10.0;
+
+        let row = sqlx::query!(
+            r#"
+            SELECT
+                COUNT(*)                                    AS total,
+                SUM(CASE WHEN success THEN 1 ELSE 0 END)   AS successes
+            FROM (
+                SELECT success
+                FROM webhook_delivery_events
+                WHERE endpoint_id = $1
+                ORDER BY delivered_at DESC
+                LIMIT $2
+            ) recent
+            "#,
+            endpoint_id,
+            ROLLING_WINDOW,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total = row.total.unwrap_or(0) as i32;
+        let successes = row.successes.unwrap_or(0) as f64;
+        let success_rate = if total > 0 {
+            (successes / total as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE webhook_endpoints
+            SET
+                success_rate     = $2,
+                total_deliveries = $3,
+                last_success_at  = CASE
+                    WHEN (
+                        SELECT success FROM webhook_delivery_events
+                        WHERE endpoint_id = $1
+                        ORDER BY delivered_at DESC
+                        LIMIT 1
+                    ) THEN NOW()
+                    ELSE last_success_at
+                END,
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(endpoint_id)
+        .bind(success_rate)
+        .bind(total)
+        .execute(&self.pool)
+        .await?;
+
+        if success_rate < AUTO_DISABLE_THRESHOLD && total >= 100 {
+            let updated = sqlx::query!(
+                r#"
+                UPDATE webhook_endpoints
+                SET enabled = FALSE, updated_at = NOW()
+                WHERE id = $1 AND enabled = TRUE
+                RETURNING id
+                "#,
+                endpoint_id,
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if updated.is_some() {
+                tracing::warn!(
+                    endpoint_id = %endpoint_id,
+                    success_rate = success_rate,
+                    "Webhook endpoint auto-disabled due to low success rate"
+                );
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO webhook_endpoint_notifications
+                        (endpoint_id, reason, success_rate, notified_at)
+                    VALUES ($1, 'auto_disabled_low_success_rate', $2, NOW())
+                    "#,
+                )
+                .bind(endpoint_id)
+                .bind(success_rate)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Signature versions supported by the webhook system.
@@ -735,4 +863,77 @@ mod tests {
     // calling enqueue twice for the same (endpoint_id, transaction_id, event_type)
     // creates only one delivery record due to the unique constraint and
     // ON CONFLICT DO NOTHING clause.
+}
+
+// ---------------------------------------------------------------------------
+// Admin query helpers (used by handlers/admin.rs)
+// ---------------------------------------------------------------------------
+
+/// Snapshot of an endpoint's health as returned by the admin API.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EndpointHealth {
+    pub id: Uuid,
+    pub url: String,
+    pub enabled: bool,
+    pub success_rate: f64,
+    pub total_deliveries: i32,
+    pub last_success_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Return health scores for all webhook endpoints.
+pub async fn list_endpoint_health(pool: &PgPool) -> Result<Vec<EndpointHealth>, crate::error::AppError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
+        FROM webhook_endpoints
+        ORDER BY success_rate ASC, total_deliveries DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(crate::error::AppError::Database)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| EndpointHealth {
+            id: r.id,
+            url: r.url,
+            enabled: r.enabled,
+            success_rate: r.success_rate
+                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(100.0),
+            total_deliveries: r.total_deliveries.unwrap_or(0),
+            last_success_at: r.last_success_at,
+        })
+        .collect())
+}
+
+/// Return health score for a single endpoint.
+pub async fn get_endpoint_health(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+) -> Result<EndpointHealth, crate::error::AppError> {
+    let r = sqlx::query!(
+        r#"
+        SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
+        FROM webhook_endpoints
+        WHERE id = $1
+        "#,
+        endpoint_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(crate::error::AppError::Database)?
+    .ok_or_else(|| crate::error::AppError::NotFound(format!("Endpoint {} not found", endpoint_id)))?;
+
+    Ok(EndpointHealth {
+        id: r.id,
+        url: r.url,
+        enabled: r.enabled,
+        success_rate: r.success_rate
+            .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(100.0),
+        total_deliveries: r.total_deliveries.unwrap_or(0),
+        last_success_at: r.last_success_at,
+    })
 }

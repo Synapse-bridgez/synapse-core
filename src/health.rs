@@ -4,6 +4,16 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
+/// Severity level for a dependency
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DependencySeverity {
+    /// Critical dependency - if unhealthy, the overall service is unhealthy
+    Critical,
+    /// Non-critical dependency - if unhealthy, the service is degraded
+    NonCritical,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -15,8 +25,16 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DependencyStatus {
-    Healthy { status: String, latency_ms: u64 },
-    Unhealthy { status: String, error: String },
+    Healthy {
+        status: String,
+        severity: DependencySeverity,
+        latency_ms: u64,
+    },
+    Unhealthy {
+        status: String,
+        severity: DependencySeverity,
+        error: String,
+    },
 }
 
 #[async_trait]
@@ -41,10 +59,12 @@ impl DependencyChecker for PostgresChecker {
         match sqlx::query("SELECT 1").execute(&self.pool).await {
             Ok(_) => DependencyStatus::Healthy {
                 status: "healthy".to_string(),
+                severity: DependencySeverity::Critical,
                 latency_ms: start.elapsed().as_millis() as u64,
             },
             Err(e) => DependencyStatus::Unhealthy {
                 status: "unhealthy".to_string(),
+                severity: DependencySeverity::Critical,
                 error: e.to_string(),
             },
         }
@@ -82,6 +102,7 @@ impl DependencyChecker for RedisChecker {
             if state == "open" {
                 return DependencyStatus::Unhealthy {
                     status: "unhealthy".to_string(),
+                    severity: DependencySeverity::NonCritical,
                     error: "Redis circuit breaker is open".to_string(),
                 };
             }
@@ -93,21 +114,25 @@ impl DependencyChecker for RedisChecker {
                     match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
                         Ok(_) => DependencyStatus::Healthy {
                             status: "healthy".to_string(),
+                            severity: DependencySeverity::NonCritical,
                             latency_ms: start.elapsed().as_millis() as u64,
                         },
                         Err(e) => DependencyStatus::Unhealthy {
                             status: "unhealthy".to_string(),
+                            severity: DependencySeverity::NonCritical,
                             error: e.to_string(),
                         },
                     }
                 }
                 Err(e) => DependencyStatus::Unhealthy {
                     status: "unhealthy".to_string(),
+                    severity: DependencySeverity::NonCritical,
                     error: e.to_string(),
                 },
             },
             Err(e) => DependencyStatus::Unhealthy {
                 status: "unhealthy".to_string(),
+                severity: DependencySeverity::NonCritical,
                 error: e.to_string(),
             },
         }
@@ -133,11 +158,13 @@ impl DependencyChecker for HorizonChecker {
             Ok(_) | Err(crate::stellar::HorizonError::AccountNotFound(_)) => {
                 DependencyStatus::Healthy {
                     status: "healthy".to_string(),
+                    severity: DependencySeverity::NonCritical,
                     latency_ms: start.elapsed().as_millis() as u64,
                 }
             }
             Err(e) => DependencyStatus::Unhealthy {
                 status: "unhealthy".to_string(),
+                severity: DependencySeverity::NonCritical,
                 error: e.to_string(),
             },
         }
@@ -164,6 +191,7 @@ pub async fn check_health(
         "postgres".to_string(),
         postgres_result.unwrap_or_else(|_| DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: DependencySeverity::Critical,
             error: "timeout".to_string(),
         }),
     );
@@ -172,6 +200,7 @@ pub async fn check_health(
         "redis".to_string(),
         redis_result.unwrap_or_else(|_| DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: DependencySeverity::NonCritical,
             error: "timeout".to_string(),
         }),
     );
@@ -180,6 +209,7 @@ pub async fn check_health(
         "horizon".to_string(),
         horizon_result.unwrap_or_else(|_| DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: DependencySeverity::NonCritical,
             error: "timeout".to_string(),
         }),
     );
@@ -195,17 +225,18 @@ pub async fn check_health(
 }
 
 fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) -> String {
-    let critical_deps = ["postgres"];
     let mut has_critical_failure = false;
     let mut has_non_critical_failure = false;
 
-    for (name, status) in dependencies {
-        if matches!(status, DependencyStatus::Unhealthy { .. }) {
-            if critical_deps.contains(&name.as_str()) {
-                has_critical_failure = true;
-            } else {
-                has_non_critical_failure = true;
+    for (_name, status) in dependencies {
+        match status {
+            DependencyStatus::Unhealthy { severity, .. } => {
+                match severity {
+                    DependencySeverity::Critical => has_critical_failure = true,
+                    DependencySeverity::NonCritical => has_non_critical_failure = true,
+                }
             }
+            DependencyStatus::Healthy { .. } => {}
         }
     }
 

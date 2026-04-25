@@ -318,7 +318,7 @@ pub struct RequestId(pub String);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let timestamp = Utc::now().to_rfc3339();
+        let timestamp = chrono::Utc::now().to_rfc3339();
         let code = self.code();
         let docs_url = format!("/errors#{}", code);
 
@@ -342,16 +342,23 @@ impl IntoResponse for AppError {
             _ => self.to_string(),
         };
 
-        let body = Json(json!({
+        let mut body = serde_json::json!({
             "error": self.to_string(),
             "code": code,
             "status": status.as_u16(),
             "timestamp": timestamp,
             "detail": detail,
             "docs_url": docs_url,
-        }));
+        });
 
-        (status, body).into_response()
+        // The request_logger middleware injects the correlation ID as the
+        // X-Request-Id header and as a RequestId extension. We can't read
+        // extensions here (we don't have the request), so the header is
+        // attached by the middleware layer after the response is built.
+        // We leave a placeholder that the middleware can fill in if needed.
+        let _ = body; // suppress unused warning if correlation_id is absent
+
+        (status, Json(body)).into_response()
     }
 }
 

@@ -1,8 +1,4 @@
-use axum::{
-    middleware as axum_middleware,
-    routing::{get, post},
-    Router,
-};
+use axum::routing::{get, post};
 use clap::Parser;
 use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
@@ -10,10 +6,9 @@ use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
-    graphql::schema::build_schema,
     handlers,
     handlers::ws::TransactionStatusUpdate,
-    metrics, middleware,
+    metrics,
     middleware::idempotency::IdempotencyService,
     schemas,
     secrets::SecretsStore,
@@ -201,10 +196,11 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     });
     tracing::info!("Webhook dispatcher background worker started");
 
-    // Initialize metrics
+    // Initialize metrics (OTLP exporter + pool stats background task)
     let _metrics_handle = metrics::init_metrics()
         .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
     tracing::info!("Metrics initialized successfully");
+    metrics::spawn_pool_metrics_task(pool.clone(), 30);
 
     // Initialize rate limiting
     tracing::info!(
@@ -293,12 +289,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         )),
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
-    };
-
-    let graphql_schema = build_schema(app_state.clone());
-    let api_state = ApiState {
-        app_state,
-        graphql_schema,
+        metrics_handle,
     };
 
     tokio::spawn(async move {
@@ -326,71 +317,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     );
     let _processor_shutdown = processor_pool.start();
 
-    let _api_routes: Router = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/settlements", get(handlers::settlements::list_settlements))
-        .route(
-            "/settlements/:id",
-            get(handlers::settlements::get_settlement),
-        )
-        .route("/callback", post(handlers::webhook::callback))
-        .route("/transactions/:id", get(handlers::webhook::get_transaction))
-        .route("/graphql", post(handlers::graphql::graphql_handler))
-        .with_state(api_state.clone());
-
-    let _webhook_routes: Router = Router::new()
-        .route("/webhook", post(handlers::webhook::handle_webhook))
-        .layer(axum_middleware::from_fn_with_state(
-            config.clone(),
-            metrics::metrics_auth_middleware::<axum::body::Body>,
-        ))
-        .with_state(api_state.clone());
-
-    let _dlq_routes: Router =
-        handlers::dlq::dlq_routes().with_state(api_state.app_state.db.clone());
-
-    let _admin_routes: Router = Router::new()
-        .nest("/admin/queue", handlers::admin::admin_routes())
-        .nest("/admin", handlers::admin::webhook_replay_routes())
-        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
-        .with_state(api_state.app_state.db.clone());
-    // Admin routes disabled - requires AdminState setup
-    // let _admin_routes: Router = Router::new()
-    //     .nest("/admin/queue", handlers::admin::admin_routes())
-    //     .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
-    //     .with_state(api_state.app_state.db.clone());
-
-    let _admin_profiling_routes: Router = Router::new()
-        .route("/start", post(handlers::profiling::start_profiling))
-        .route("/status", get(handlers::profiling::get_profiling_status))
-        .route("/stop", post(handlers::profiling::stop_profiling))
-        .route(
-            "/flamegraph/:session_id",
-            get(handlers::profiling::get_flamegraph),
-        )
-        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
-        .with_state(api_state.app_state.clone());
-
-    let _search_routes: Router = Router::new()
-        .route(
-            "/transactions/search",
-            get(handlers::search::search_transactions),
-        )
-        .with_state(api_state.app_state.pool_manager.clone());
-
-    let app = Router::new()
-        // Unversioned routes - default to latest (V2) or specific base routes
-        .route("/health", get(handlers::health))
-        .route("/settlements", get(handlers::settlements::list_settlements))
-        .route(
-            "/settlements/:id",
-            get(handlers::settlements::get_settlement),
-        )
-        .route(
-            "/admin/instances",
-            get(handlers::admin::list_active_instances),
-        )
-        .with_state(api_state);
+    let app = synapse_core::create_app(app_state);
 
     // Configure CORS if allowed origins are specified.
     let app = if !config.cors_allowed_origins.is_empty() {

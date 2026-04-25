@@ -1,12 +1,96 @@
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::db::slow_query;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::time::timeout;
 use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Timeout tiers
+// ---------------------------------------------------------------------------
+
+/// Default read-query timeout (SELECT). Overridden by `DB_TIMEOUT_READ_SECS`.
+const DEFAULT_READ_TIMEOUT_SECS: u64 = 5;
+/// Default write-query timeout (INSERT/UPDATE/DELETE). Overridden by `DB_TIMEOUT_WRITE_SECS`.
+const DEFAULT_WRITE_TIMEOUT_SECS: u64 = 10;
+/// Default admin-query timeout (migrations, maintenance). Overridden by `DB_TIMEOUT_ADMIN_SECS`.
+const DEFAULT_ADMIN_TIMEOUT_SECS: u64 = 60;
+
+/// Global counter for timed-out queries (metric: `db_query_timeout_total`).
+pub static DB_QUERY_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Tier used when wrapping a query with [`with_timeout`].
+#[derive(Debug, Clone, Copy)]
+pub enum QueryTier {
+    Read,
+    Write,
+    Admin,
+}
+
+impl QueryTier {
+    fn duration(self) -> Duration {
+        let secs = match self {
+            QueryTier::Read => std::env::var("DB_TIMEOUT_READ_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_READ_TIMEOUT_SECS),
+            QueryTier::Write => std::env::var("DB_TIMEOUT_WRITE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_WRITE_TIMEOUT_SECS),
+            QueryTier::Admin => std::env::var("DB_TIMEOUT_ADMIN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_ADMIN_TIMEOUT_SECS),
+        };
+        Duration::from_secs(secs)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            QueryTier::Read => "read",
+            QueryTier::Write => "write",
+            QueryTier::Admin => "admin",
+        }
+    }
+}
+
+/// Wrap a database future with a timeout.
+///
+/// On timeout the counter `DB_QUERY_TIMEOUT_TOTAL` is incremented, the
+/// sanitised SQL label is logged (no parameter values), and the connection is
+/// dropped so the pool can reclaim it rather than leaving it in a hung state.
+pub async fn with_timeout<F, T>(
+    tier: QueryTier,
+    sql_label: &str,
+    fut: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let dur = tier.duration();
+    match timeout(dur, fut).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            DB_QUERY_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                tier = tier.label(),
+                timeout_secs = dur.as_secs(),
+                sql = sql_label,
+                db_query_timeout_total = DB_QUERY_TIMEOUT_TOTAL.load(Ordering::Relaxed),
+                "Database query timed out; connection will be dropped"
+            );
+            Err(sqlx::Error::PoolTimedOut)
+        }
+    }
+}
 
 // --- Tenant Queries --------------------------------------------------------
 
@@ -22,11 +106,14 @@ pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> 
 // --- Transaction Queries ---
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
-        let mut db_tx = pool.begin().await?;
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO transactions ... RETURNING *",
+        crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
+            let mut db_tx = pool.begin().await?;
 
-        let result = sqlx::query_as::<_, Transaction>(
-            r#"
+            let result = sqlx::query_as::<_, Transaction>(
+                r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
                 created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
@@ -34,60 +121,63 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
             "#,
-        )
-        .bind(tx.id)
-        .bind(&tx.stellar_account)
-        .bind(&tx.amount)
-        .bind(&tx.asset_code)
-        .bind(&tx.status)
-        .bind(tx.created_at)
-        .bind(tx.updated_at)
-        .bind(&tx.anchor_transaction_id)
-        .bind(&tx.callback_type)
-        .bind(&tx.callback_status)
-        .bind(tx.settlement_id)
-        .bind(&tx.memo)
-        .bind(&tx.memo_type)
-        .bind(&tx.metadata)
-        .fetch_one(&mut *db_tx)
-        .await?;
+            )
+            .bind(tx.id)
+            .bind(&tx.stellar_account)
+            .bind(&tx.amount)
+            .bind(&tx.asset_code)
+            .bind(&tx.status)
+            .bind(tx.created_at)
+            .bind(tx.updated_at)
+            .bind(&tx.anchor_transaction_id)
+            .bind(&tx.callback_type)
+            .bind(&tx.callback_status)
+            .bind(tx.settlement_id)
+            .bind(&tx.memo)
+            .bind(&tx.memo_type)
+            .bind(&tx.metadata)
+            .fetch_one(&mut *db_tx)
+            .await?;
 
-        // Audit log: transaction created
-        AuditLog::log_creation(
-            &mut db_tx,
-            result.id,
-            ENTITY_TRANSACTION,
-            json!({
-                "stellar_account": result.stellar_account,
-                "amount": result.amount.to_string(),
-                "asset_code": result.asset_code,
-                "status": result.status,
-                "anchor_transaction_id": result.anchor_transaction_id,
-                "callback_type": result.callback_type,
-                "callback_status": result.callback_status,
-                "memo": result.memo,
-                "memo_type": result.memo_type,
-                "metadata": result.metadata,
-            }),
-            "system",
-        )
-        .await?;
+            // Audit log: transaction created
+            AuditLog::log_creation(
+                &mut db_tx,
+                result.id,
+                ENTITY_TRANSACTION,
+                json!({
+                    "stellar_account": result.stellar_account,
+                    "amount": result.amount.to_string(),
+                    "asset_code": result.asset_code,
+                    "status": result.status,
+                    "anchor_transaction_id": result.anchor_transaction_id,
+                    "callback_type": result.callback_type,
+                    "callback_status": result.callback_status,
+                    "memo": result.memo,
+                    "memo_type": result.memo_type,
+                    "metadata": result.metadata,
+                }),
+                "system",
+            )
+            .await?;
 
-        db_tx.commit().await?;
+            db_tx.commit().await?;
 
-        // Invalidate cache after successful commit
-        invalidate_transaction_caches(&result.asset_code).await;
+            // Invalidate cache after successful commit
+            invalidate_transaction_caches(&result.asset_code).await;
 
-        Ok(result)
-    })
-    .await
-}
+            Ok(result)
+        }),
+    )
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions WHERE id = $1",
+        sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool),
+    )
+    .await
 }
 
 pub async fn list_transactions(
@@ -96,103 +186,54 @@ pub async fn list_transactions(
     cursor: Option<(DateTime<Utc>, Uuid)>,
     backward: bool,
 ) -> Result<Vec<Transaction>> {
-    list_transactions_filtered(pool, limit, cursor, backward, None, None).await
-}
-
-/// List transactions with optional date range filtering combined with cursor pagination.
-pub async fn list_transactions_filtered(
-    pool: &PgPool,
-    limit: i64,
-    cursor: Option<(DateTime<Utc>, Uuid)>,
-    backward: bool,
-    from_date: Option<DateTime<Utc>>,
-    to_date: Option<DateTime<Utc>>,
-) -> Result<Vec<Transaction>> {
-    // Build WHERE conditions dynamically
-    let mut conditions: Vec<String> = Vec::new();
-    if let Some(from) = from_date {
-        let _ = from; // used via bind below
-        conditions.push("created_at >= $FROM_DATE".to_string());
-    }
-    if let Some(to) = to_date {
-        let _ = to;
-        conditions.push("created_at < $TO_DATE".to_string());
-    }
-
-    // We use a macro-free approach: build the query string with positional params
-    // Param order: [from_date?, to_date?, cursor_ts?, cursor_id?, limit]
-    let mut param_idx = 1usize;
-    let mut parts: Vec<String> = Vec::new();
-
-    let from_param = if from_date.is_some() {
-        let p = param_idx;
-        param_idx += 1;
-        Some(p)
-    } else {
-        None
-    };
-    let to_param = if to_date.is_some() {
-        let p = param_idx;
-        param_idx += 1;
-        Some(p)
-    } else {
-        None
-    };
-
-    if let Some(p) = from_param {
-        parts.push(format!("created_at >= ${}", p));
-    }
-    if let Some(p) = to_param {
-        parts.push(format!("created_at < ${}", p));
-    }
-
-    let (order_asc, cursor_op) = if !backward { (false, "<") } else { (true, ">") };
-
-    if let Some(_) = cursor {
-        let ts_p = param_idx;
-        let id_p = param_idx + 1;
-        param_idx += 2;
-        parts.push(format!("(created_at, id) {} (${}, ${})", cursor_op, ts_p, id_p));
-    }
-
-    let limit_param = param_idx;
-
-    let where_clause = if parts.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", parts.join(" AND "))
-    };
-
-    let order = if order_asc {
-        "ORDER BY created_at ASC, id ASC"
-    } else {
-        "ORDER BY created_at DESC, id DESC"
-    };
-
-    let sql = format!(
-        "SELECT * FROM transactions {} {} LIMIT ${}",
-        where_clause, order, limit_param
-    );
-
-    let mut q = sqlx::query_as::<_, Transaction>(&sql);
-    if let Some(from) = from_date {
-        q = q.bind(from);
-    }
-    if let Some(to) = to_date {
-        q = q.bind(to);
-    }
-    if let Some((ts, id)) = cursor {
-        q = q.bind(ts).bind(id);
-    }
-    q = q.bind(limit);
-
-    let mut rows = q.fetch_all(pool).await?;
-
-    if backward {
-        rows.reverse();
-    }
-
-    Ok(rows)
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions [cursor-paginated]",
+        async {
+            if let Some((ts, id)) = cursor {
+                if !backward {
+                    let q = sqlx::query_as::<_, Transaction>(
+                        "SELECT * FROM transactions WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT $3",
+                    )
+                    .bind(ts)
+                    .bind(id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?;
+                    Ok(q)
+                } else {
+                    let mut rows = sqlx::query_as::<_, Transaction>(
+                        "SELECT * FROM transactions WHERE (created_at, id) > ($1, $2) ORDER BY created_at ASC, id ASC LIMIT $3",
+                    )
+                    .bind(ts)
+                    .bind(id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?;
+                    rows.reverse();
+                    Ok(rows)
+                }
+            } else if !backward {
+                let q = sqlx::query_as::<_, Transaction>(
+                    "SELECT * FROM transactions ORDER BY created_at DESC, id DESC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                Ok(q)
+            } else {
+                let mut rows = sqlx::query_as::<_, Transaction>(
+                    "SELECT * FROM transactions ORDER BY created_at ASC, id ASC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                rows.reverse();
+                Ok(rows)
+            }
+        },
+    )
+    .await
 }
 
 pub async fn get_unsettled_transactions(
@@ -200,8 +241,11 @@ pub async fn get_unsettled_transactions(
     asset_code: &str,
     end_time: DateTime<Utc>,
 ) -> Result<Vec<Transaction>> {
-    sqlx::query_as::<_, Transaction>(
-        r#"
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions WHERE status = 'completed' AND settlement_id IS NULL FOR UPDATE",
+        sqlx::query_as::<_, Transaction>(
+            r#"
         SELECT * FROM transactions
         WHERE status = 'completed'
         AND settlement_id IS NULL
@@ -209,10 +253,11 @@ pub async fn get_unsettled_transactions(
         AND updated_at <= $2
         FOR UPDATE
         "#,
+        )
+        .bind(asset_code)
+        .bind(end_time)
+        .fetch_all(&mut **executor),
     )
-    .bind(asset_code)
-    .bind(end_time)
-    .fetch_all(&mut **executor)
     .await
 }
 
@@ -221,32 +266,42 @@ pub async fn update_transactions_settlement(
     tx_ids: &[Uuid],
     settlement_id: Uuid,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE transactions SET settlement_id = $1, updated_at = NOW() WHERE id = ANY($2)",
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE transactions SET settlement_id = $1 WHERE id = ANY($2)",
+        async {
+            sqlx::query(
+                "UPDATE transactions SET settlement_id = $1, updated_at = NOW() WHERE id = ANY($2)",
+            )
+            .bind(settlement_id)
+            .bind(tx_ids)
+            .execute(&mut **executor)
+            .await?;
+
+            // Audit log: record settlement_id update for each transaction
+            for tx_id in tx_ids {
+                AuditLog::log_field_update(
+                    executor,
+                    *tx_id,
+                    ENTITY_TRANSACTION,
+                    "settlement_id",
+                    json!(null),
+                    json!(settlement_id.to_string()),
+                    "system",
+                )
+                .await?;
+            }
+
+            Ok(())
+        },
     )
-    .bind(settlement_id)
-    .bind(tx_ids)
-    .execute(&mut **executor)
-    .await?;
-
-    // Audit log: record settlement_id update for each transaction
-    for tx_id in tx_ids {
-        AuditLog::log_field_update(
-            executor,
-            *tx_id,
-            ENTITY_TRANSACTION,
-            "settlement_id",
-            json!(null),
-            json!(settlement_id.to_string()),
-            "system",
-        )
-        .await?;
-    }
-
-    Ok(())
+    .await
 }
 
+// ---------------------------------------------------------------------------
 // Cache invalidation helper
+// ---------------------------------------------------------------------------
+
 async fn invalidate_transaction_caches(asset_code: &str) {
     if let Ok(redis_url) = std::env::var("REDIS_URL") {
         if let Ok(cache) = crate::services::QueryCache::new(&redis_url) {
@@ -265,103 +320,87 @@ pub async fn invalidate_caches_for_asset(asset_code: &str) {
     invalidate_transaction_caches(asset_code).await;
 }
 
-// --- Settlement Queries ---
+// ---------------------------------------------------------------------------
+// Settlement Queries
+// ---------------------------------------------------------------------------
 
 pub async fn insert_settlement(
     executor: &mut SqlxTransaction<'_, Postgres>,
     settlement: &Settlement,
 ) -> Result<Settlement> {
-    let result = sqlx::query_as::<_, Settlement>(
-        r#"
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO settlements ... RETURNING *",
+        sqlx::query_as::<_, Settlement>(
+            r#"
         INSERT INTO settlements (
             id, asset_code, total_amount, tx_count, period_start, period_end, status, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
-        "#
+        "#,
+        )
+        .bind(settlement.id)
+        .bind(&settlement.asset_code)
+        .bind(&settlement.total_amount)
+        .bind(settlement.tx_count)
+        .bind(settlement.period_start)
+        .bind(settlement.period_end)
+        .bind(&settlement.status)
+        .bind(settlement.created_at)
+        .bind(settlement.updated_at)
+        .fetch_one(&mut **executor),
     )
-    .bind(settlement.id)
-    .bind(&settlement.asset_code)
-    .bind(&settlement.total_amount)
-    .bind(settlement.tx_count)
-    .bind(settlement.period_start)
-    .bind(settlement.period_end)
-    .bind(&settlement.status)
-    .bind(settlement.created_at)
-    .bind(settlement.updated_at)
-    .fetch_one(&mut **executor)
-    .await?;
-
-    Ok(result)
+    .await
 }
 
 pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
-    sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM settlements WHERE id = $1",
+        sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool),
+    )
+    .await
 }
 
-pub async fn list_settlements(
-    pool: &PgPool,
-    limit: i64,
-    cursor: Option<(DateTime<Utc>, Uuid)>,
-    backward: bool,
-) -> Result<Vec<Settlement>> {
-    if let Some((ts, id)) = cursor {
-        if !backward {
-            sqlx::query_as::<_, Settlement>(
-                "SELECT * FROM settlements WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT $3",
-            )
-            .bind(ts)
-            .bind(id)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-        } else {
-            let mut rows = sqlx::query_as::<_, Settlement>(
-                "SELECT * FROM settlements WHERE (created_at, id) > ($1, $2) ORDER BY created_at ASC, id ASC LIMIT $3",
-            )
-            .bind(ts)
-            .bind(id)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
-            rows.reverse();
-            Ok(rows)
-        }
-    } else if !backward {
+pub async fn list_settlements(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Settlement>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM settlements ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         sqlx::query_as::<_, Settlement>(
-            "SELECT * FROM settlements ORDER BY created_at DESC, id DESC LIMIT $1",
+            "SELECT * FROM settlements ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
-        .fetch_all(pool)
-        .await
-    } else {
-        let mut rows = sqlx::query_as::<_, Settlement>(
-            "SELECT * FROM settlements ORDER BY created_at ASC, id ASC LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
-        rows.reverse();
-        Ok(rows)
-    }
+        .bind(offset)
+        .fetch_all(pool),
+    )
+    .await
 }
 
 pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
-    let rows = sqlx::query(
-        "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL"
-    )
-    .fetch_all(pool)
-    .await?;
+    with_timeout(
+        QueryTier::Read,
+        "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL",
+        async {
+            let rows = sqlx::query(
+                "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL"
+            )
+            .fetch_all(pool)
+            .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| r.get::<String, _>("asset_code"))
-        .collect())
+            Ok(rows
+                .into_iter()
+                .map(|r| r.get::<String, _>("asset_code"))
+                .collect())
+        },
+    )
+    .await
 }
 
-// --- Transaction Search ---
+// ---------------------------------------------------------------------------
+// Transaction Search
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub async fn search_transactions(
@@ -376,136 +415,201 @@ pub async fn search_transactions(
     limit: i64,
     cursor: Option<(DateTime<Utc>, Uuid)>,
 ) -> Result<(i64, Vec<Transaction>)> {
-    // Build dynamic WHERE clause
-    let mut conditions = Vec::new();
-    let mut param_count = 1;
+    with_timeout(
+        QueryTier::Read,
+        "search_transactions [dynamic WHERE clause]",
+        async {
+            // Build dynamic WHERE clause
+            let mut conditions = Vec::new();
+            let mut param_count = 1;
 
-    if status.is_some() {
-        conditions.push(format!("status = ${}", param_count));
-        param_count += 1;
+            if status.is_some() {
+                conditions.push(format!("status = ${}", param_count));
+                param_count += 1;
+            }
+
+            if asset_code.is_some() {
+                conditions.push(format!("asset_code = ${}", param_count));
+                param_count += 1;
+            }
+
+            if min_amount.is_some() {
+                conditions.push(format!("amount >= ${}", param_count));
+                param_count += 1;
+            }
+
+            if max_amount.is_some() {
+                conditions.push(format!("amount <= ${}", param_count));
+                param_count += 1;
+            }
+
+            if from_date.is_some() {
+                conditions.push(format!("created_at >= ${}", param_count));
+                param_count += 1;
+            }
+
+            if to_date.is_some() {
+                conditions.push(format!("created_at <= ${}", param_count));
+                param_count += 1;
+            }
+
+            if stellar_account.is_some() {
+                conditions.push(format!("stellar_account = ${}", param_count));
+                param_count += 1;
+            }
+
+            // Add cursor condition
+            if cursor.is_some() {
+                conditions.push(format!(
+                    "(created_at, id) < (${}, ${})",
+                    param_count,
+                    param_count + 1
+                ));
+                param_count += 2;
+            }
+
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+
+            // Build count query
+            let count_query = format!(
+                "SELECT COUNT(*) as count FROM transactions {}",
+                where_clause
+            );
+
+            // Build data query with pagination
+            let data_query = format!(
+                "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
+                where_clause, param_count
+            );
+
+            // Execute count query
+            let mut count_query_builder = sqlx::query(&count_query);
+
+            if let Some(s) = status {
+                count_query_builder = count_query_builder.bind(s);
+            }
+            if let Some(a) = asset_code {
+                count_query_builder = count_query_builder.bind(a);
+            }
+            if let Some(min) = min_amount {
+                count_query_builder = count_query_builder.bind(min);
+            }
+            if let Some(max) = max_amount {
+                count_query_builder = count_query_builder.bind(max);
+            }
+            if let Some(from) = from_date {
+                count_query_builder = count_query_builder.bind(from);
+            }
+            if let Some(to) = to_date {
+                count_query_builder = count_query_builder.bind(to);
+            }
+            if let Some(acc) = stellar_account {
+                count_query_builder = count_query_builder.bind(acc);
+            }
+            if let Some((ts, id)) = cursor {
+                count_query_builder = count_query_builder.bind(ts).bind(id);
+            }
+
+            let count_row = count_query_builder.fetch_one(pool).await?;
+            let total: i64 = count_row.try_get("count")?;
+
+            // Execute data query
+            let mut data_query_builder = sqlx::query_as::<_, Transaction>(&data_query);
+
+            if let Some(s) = status {
+                data_query_builder = data_query_builder.bind(s);
+            }
+            if let Some(a) = asset_code {
+                data_query_builder = data_query_builder.bind(a);
+            }
+            if let Some(min) = min_amount {
+                data_query_builder = data_query_builder.bind(min);
+            }
+            if let Some(max) = max_amount {
+                data_query_builder = data_query_builder.bind(max);
+            }
+            if let Some(from) = from_date {
+                data_query_builder = data_query_builder.bind(from);
+            }
+            if let Some(to) = to_date {
+                data_query_builder = data_query_builder.bind(to);
+            }
+            if let Some(acc) = stellar_account {
+                data_query_builder = data_query_builder.bind(acc);
+            }
+            if let Some((ts, id)) = cursor {
+                data_query_builder = data_query_builder.bind(ts).bind(id);
+            }
+            data_query_builder = data_query_builder.bind(limit);
+
+            let transactions = data_query_builder.fetch_all(pool).await?;
+
+            Ok((total, transactions))
+        },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use tokio::time::Duration;
+
+    /// Verify that `with_timeout` fires when the future exceeds the deadline.
+    #[tokio::test]
+    async fn test_with_timeout_triggers_on_slow_future() {
+        // Override env so the timeout is 1 ms
+        std::env::set_var("DB_TIMEOUT_READ_SECS", "0");
+
+        let result = with_timeout(QueryTier::Read, "SELECT pg_sleep(10)", async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            // This line is never reached
+            Err::<(), _>(sqlx::Error::RowNotFound)
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(sqlx::Error::PoolTimedOut)),
+            "Expected PoolTimedOut, got {:?}",
+            result
+        );
+
+        // Counter must have been incremented
+        assert!(
+            DB_QUERY_TIMEOUT_TOTAL.load(Ordering::Relaxed) >= 1,
+            "Timeout counter should be >= 1"
+        );
+
+        // Restore
+        std::env::remove_var("DB_TIMEOUT_READ_SECS");
     }
 
-    if asset_code.is_some() {
-        conditions.push(format!("asset_code = ${}", param_count));
-        param_count += 1;
-    }
+    /// Verify that a fast future completes without triggering the timeout.
+    #[tokio::test]
+    async fn test_with_timeout_passes_fast_future() {
+        let before = DB_QUERY_TIMEOUT_TOTAL.load(Ordering::Relaxed);
 
-    if min_amount.is_some() {
-        conditions.push(format!("amount >= ${}", param_count));
-        param_count += 1;
-    }
+        let result = with_timeout(QueryTier::Read, "SELECT 1", async {
+            Ok::<i32, sqlx::Error>(42)
+        })
+        .await;
 
-    if max_amount.is_some() {
-        conditions.push(format!("amount <= ${}", param_count));
-        param_count += 1;
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(
+            DB_QUERY_TIMEOUT_TOTAL.load(Ordering::Relaxed),
+            before,
+            "Counter should not change for a fast query"
+        );
     }
-
-    if from_date.is_some() {
-        conditions.push(format!("created_at >= ${}", param_count));
-        param_count += 1;
-    }
-
-    if to_date.is_some() {
-        conditions.push(format!("created_at <= ${}", param_count));
-        param_count += 1;
-    }
-
-    if stellar_account.is_some() {
-        conditions.push(format!("stellar_account = ${}", param_count));
-        param_count += 1;
-    }
-
-    // Add cursor condition
-    if cursor.is_some() {
-        conditions.push(format!(
-            "(created_at, id) < (${}, ${})",
-            param_count,
-            param_count + 1
-        ));
-        param_count += 2;
-    }
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", conditions.join(" AND "))
-    };
-
-    // Build count query
-    let count_query = format!(
-        "SELECT COUNT(*) as count FROM transactions {}",
-        where_clause
-    );
-
-    // Build data query with pagination
-    let data_query = format!(
-        "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
-        where_clause, param_count
-    );
-
-    // Execute count query
-    let mut count_query_builder = sqlx::query(&count_query);
-
-    if let Some(s) = status {
-        count_query_builder = count_query_builder.bind(s);
-    }
-    if let Some(a) = asset_code {
-        count_query_builder = count_query_builder.bind(a);
-    }
-    if let Some(min) = min_amount {
-        count_query_builder = count_query_builder.bind(min);
-    }
-    if let Some(max) = max_amount {
-        count_query_builder = count_query_builder.bind(max);
-    }
-    if let Some(from) = from_date {
-        count_query_builder = count_query_builder.bind(from);
-    }
-    if let Some(to) = to_date {
-        count_query_builder = count_query_builder.bind(to);
-    }
-    if let Some(acc) = stellar_account {
-        count_query_builder = count_query_builder.bind(acc);
-    }
-    if let Some((ts, id)) = cursor {
-        count_query_builder = count_query_builder.bind(ts).bind(id);
-    }
-
-    let count_row = count_query_builder.fetch_one(pool).await?;
-    let total: i64 = count_row.try_get("count")?;
-
-    // Execute data query
-    let mut data_query_builder = sqlx::query_as::<_, Transaction>(&data_query);
-
-    if let Some(s) = status {
-        data_query_builder = data_query_builder.bind(s);
-    }
-    if let Some(a) = asset_code {
-        data_query_builder = data_query_builder.bind(a);
-    }
-    if let Some(min) = min_amount {
-        data_query_builder = data_query_builder.bind(min);
-    }
-    if let Some(max) = max_amount {
-        data_query_builder = data_query_builder.bind(max);
-    }
-    if let Some(from) = from_date {
-        data_query_builder = data_query_builder.bind(from);
-    }
-    if let Some(to) = to_date {
-        data_query_builder = data_query_builder.bind(to);
-    }
-    if let Some(acc) = stellar_account {
-        data_query_builder = data_query_builder.bind(acc);
-    }
-    if let Some((ts, id)) = cursor {
-        data_query_builder = data_query_builder.bind(ts).bind(id);
-    }
-    data_query_builder = data_query_builder.bind(limit);
-
-    let transactions = data_query_builder.fetch_all(pool).await?;
-
-    Ok((total, transactions))
 }
 
 // --- Audit Log Queries ---

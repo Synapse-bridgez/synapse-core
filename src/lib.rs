@@ -57,6 +57,8 @@ pub struct AppState {
     pub pending_queue_depth: Arc<AtomicU64>,
     /// Current adaptive batch size, updated by the processor pool.
     pub current_batch_size: Arc<AtomicU64>,
+    /// Prometheus metrics handle
+    pub metrics_handle: crate::metrics::MetricsHandle,
 }
 
 impl AppState {
@@ -94,6 +96,7 @@ impl AppState {
             secrets_store: None,
             pending_queue_depth: Arc::new(AtomicU64::new(0)),
             current_batch_size: Arc::new(AtomicU64::new(10)),
+            metrics_handle: crate::metrics::init_metrics().unwrap(),
         }
     }
 }
@@ -166,12 +169,19 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
+        // Stats endpoints
         .route("/stats/status", get(handlers::stats::status_counts))
         .route("/stats/daily", get(handlers::stats::daily_totals))
         .route("/stats/assets", get(handlers::stats::asset_stats))
         .route("/cache/metrics", get(handlers::stats::cache_metrics))
+        // Admin: webhook endpoint health scores
+        .route("/admin/webhooks/health", get(handlers::admin::list_webhook_health))
+        .route("/admin/webhooks/health/:id", get(handlers::admin::get_webhook_health))
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
         .with_state(api_state)
+        .layer(axum_middleware::from_fn(
+            middleware::request_logger::request_logger_middleware,
+        ))
 }
