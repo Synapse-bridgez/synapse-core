@@ -100,8 +100,8 @@ impl ReadinessState {
     ) -> Result<(), InitializationError> {
         tracing::info!("Starting initialization checks...");
 
-        // Check 1: Verify migrations completed (implicit - pool is already initialized)
-        tracing::info!("✓ Database migrations already verified during pool initialization");
+        // Check 1: Verify pool warm-up completed (create_pool blocks until min_connections are established)
+        tracing::info!("✓ Database pool warm-up already completed during pool creation");
 
         // Check 2: Verify Redis connection
         match self.check_redis(redis_url).await {
