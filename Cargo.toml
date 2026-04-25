@@ -45,7 +45,7 @@ csv = "1"
 cron = "0.12"
 async-graphql = { version = "6", features = ["chrono", "uuid", "bigdecimal"] }
 async-graphql-axum = "6"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 governor = "0.6"
 redis = { version = "0.24", features = ["tokio-comp"] }
@@ -66,6 +66,17 @@ opentelemetry_sdk = { version = "0.21", features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.14", features = ["tonic", "trace"] }
 opentelemetry-semantic-conventions = "0.13"
 tracing-opentelemetry = "0.22"
+prometheus = "0.13"
+
+# OpenTelemetry — metrics + traces via OTLP
+opentelemetry = { version = "0.22", features = ["metrics", "trace"] }
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio", "metrics", "trace"] }
+opentelemetry-otlp = { version = "0.15", features = [
+    "grpc-tonic",
+    "metrics",
+    "trace",
+] }
+opentelemetry-semantic-conventions = "0.14"
 
 [dev-dependencies]
 mockito = "1"

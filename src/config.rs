@@ -17,6 +17,26 @@ pub enum LogFormat {
 }
 
 #[derive(Debug, Clone)]
+pub struct DbTimeoutConfig {
+    /// Timeout for read queries (SELECT), in seconds. Default: 5
+    pub read_query_secs: u64,
+    /// Timeout for write queries (INSERT/UPDATE/DELETE), in seconds. Default: 10
+    pub write_query_secs: u64,
+    /// Timeout for admin queries (migrations, maintenance), in seconds. Default: 60
+    pub admin_query_secs: u64,
+}
+
+impl Default for DbTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            read_query_secs: 5,
+            write_query_secs: 10,
+            admin_query_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub server_port: u16,
     pub database_url: String,
@@ -31,6 +51,7 @@ pub struct Config {
     pub allowed_ips: AllowedIps,
     pub backup_dir: String,
     pub backup_encryption_key: Option<String>,
+    pub db_timeouts: DbTimeoutConfig,
     pub otlp_endpoint: Option<String>,
     // CORS
     pub cors_allowed_origins: Vec<String>,
@@ -39,7 +60,7 @@ pub struct Config {
     // DB pool sizing
     pub db_min_connections: u32,
     pub db_max_connections: u32,
-    // DB timeouts
+    // DB timeouts (statement-level, separate from our async tier timeouts)
     pub db_statement_timeout_ms: u64,
     pub db_idle_timeout_secs: u64,
     pub db_long_running_statement_timeout_ms: u64,
@@ -51,6 +72,8 @@ pub struct Config {
     pub processor_min_batch: u32,
     pub processor_max_batch: u32,
     pub processor_scaling_factor: f64,
+    // Slow query logging
+    pub slow_query_threshold_ms: u64,
 }
 
 pub mod assets;
@@ -105,6 +128,20 @@ impl Config {
             allowed_ips,
             backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
             backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
+            db_timeouts: DbTimeoutConfig {
+                read_query_secs: env::var("DB_TIMEOUT_READ_SECS")
+                    .unwrap_or_else(|_| "5".to_string())
+                    .parse()
+                    .unwrap_or(5),
+                write_query_secs: env::var("DB_TIMEOUT_WRITE_SECS")
+                    .unwrap_or_else(|_| "10".to_string())
+                    .parse()
+                    .unwrap_or(10),
+                admin_query_secs: env::var("DB_TIMEOUT_ADMIN_SECS")
+                    .unwrap_or_else(|_| "60".to_string())
+                    .parse()
+                    .unwrap_or(60),
+            },
             otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
                 .unwrap_or_default()
@@ -148,6 +185,9 @@ impl Config {
                 .parse()?,
             processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
                 .unwrap_or_else(|_| "0.5".to_string())
+                .parse()?,
+            slow_query_threshold_ms: env::var("SLOW_QUERY_THRESHOLD_MS")
+                .unwrap_or_else(|_| "500".to_string())
                 .parse()?,
         })
     }

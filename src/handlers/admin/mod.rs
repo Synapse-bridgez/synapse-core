@@ -1,3 +1,4 @@
+pub mod bulk_status;
 pub mod webhook_replay;
 
 use crate::AppState;
@@ -173,6 +174,48 @@ pub async fn update_webhook_rate_limit(
                 Json(serde_json::json!({
                     "error": "Failed to update rate limit"
                 })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook endpoint health score handlers
+// ---------------------------------------------------------------------------
+
+/// GET /admin/webhooks/health
+pub async fn list_webhook_health(State(state): State<crate::ApiState>) -> impl IntoResponse {
+    match crate::services::webhook_dispatcher::list_endpoint_health(&state.app_state.db).await {
+        Ok(health) => (StatusCode::OK, Json(health)).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list webhook endpoint health: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /admin/webhooks/health/:id
+pub async fn get_webhook_health(
+    State(state): State<crate::ApiState>,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    match crate::services::webhook_dispatcher::get_endpoint_health(&state.app_state.db, id).await {
+        Ok(health) => (StatusCode::OK, Json(health)).into_response(),
+        Err(crate::error::AppError::NotFound(msg)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to get webhook endpoint health {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
             )
                 .into_response()
         }
