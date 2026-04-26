@@ -170,8 +170,19 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/stats/assets", get(handlers::stats::asset_stats))
         .route("/cache/metrics", get(handlers::stats::cache_metrics))
         // Admin: webhook endpoint health scores
-        .route("/admin/webhooks/health", get(handlers::admin::list_webhook_health))
-        .route("/admin/webhooks/health/:id", get(handlers::admin::get_webhook_health))
+        .route(
+            "/admin/webhooks/health",
+            get(handlers::admin::list_webhook_health),
+        )
+        .route(
+            "/admin/webhooks/health/:id",
+            get(handlers::admin::get_webhook_health),
+        )
+        // Admin: audit log search & export
+        .route(
+            "/admin/audit/search",
+            get(handlers::admin::audit::search_audit_logs_handler),
+        )
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
