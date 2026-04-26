@@ -17,7 +17,7 @@ pub use feature_flags::FeatureFlagService;
 pub use lock_manager::LeaderElection;
 pub use query_cache::{CacheConfig, QueryCache};
 pub use reconciliation::ReconciliationService;
-pub use scheduler::{Job, JobScheduler, JobStatus};
+pub use scheduler::{AuditLogRetentionJob, Job, JobScheduler, JobStatus};
 pub use settlement::SettlementService;
 pub use transaction_processor::TransactionProcessor;
 pub use transaction_processor_job::TransactionProcessorJob;
