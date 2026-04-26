@@ -2,16 +2,19 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod metrics;
 mod stellar;
 
-use axum::{Router, extract::State, routing::get};
-use sqlx::migrate::Migrator; // for Migrator
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
+use axum::{Router, routing::get};
+use sqlx::migrate::Migrator;
+use std::net::SocketAddr;
+use std::path::Path;
+use tokio::net::TcpListener;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use stellar::HorizonClient;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::time::Duration;
 
 #[derive(Clone)] // <-- Add Clone
 pub struct AppState {
@@ -45,9 +48,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Build router with state
     let app_state = AppState { 
-        db: pool,
+        db: pool.clone(),
         horizon_client,
     };
+    
+    // Spawn pool monitoring task
+    let pool_clone = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let metrics = metrics::PoolMetrics::from_pool(&pool_clone);
+            metrics::emit_metrics(&metrics);
+        }
+    });
+    
     let app = Router::new()
         .route("/health", get(handlers::health))
         .with_state(app_state);

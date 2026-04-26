@@ -55,8 +55,6 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
 
     #[test]
     fn test_validation_error_status_code() {
