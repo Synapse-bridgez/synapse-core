@@ -1,3 +1,5 @@
+pub mod bulk_status;
+pub mod quota;
 pub mod webhook_replay;
 
 use crate::AppState;
@@ -189,6 +191,34 @@ pub async fn list_webhook_health(State(state): State<crate::ApiState>) -> impl I
         Ok(health) => (StatusCode::OK, Json(health)).into_response(),
         Err(e) => {
             tracing::error!("Failed to list webhook endpoint health: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /admin/tenants/reload — immediately reload tenant configs from DB
+pub async fn reload_tenant_configs(
+    State(state): State<crate::ApiState>,
+) -> impl IntoResponse {
+    match state.app_state.load_tenant_configs().await {
+        Ok(()) => {
+            let count = state.app_state.tenant_configs.read().await.len();
+            tracing::info!(count, "Tenant configs reloaded via admin endpoint");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "Tenant configs reloaded",
+                    "tenant_count": count
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to reload tenant configs: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
