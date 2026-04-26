@@ -103,7 +103,7 @@ impl AuditLog {
             tx,
             entity_id,
             entity_type,
-            &format!("{}_update", field_name),
+            &format!("{field_name}_update"),
             Some(json!({ field_name: old_value })),
             Some(json!({ field_name: new_value })),
             actor,

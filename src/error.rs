@@ -3,9 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 
 /// Error codes for programmatic error handling
@@ -320,29 +318,29 @@ impl IntoResponse for AppError {
         let status = self.status_code();
         let timestamp = chrono::Utc::now().to_rfc3339();
         let code = self.code();
-        let docs_url = format!("/errors#{}", code);
+        let docs_url = format!("/errors#{code}");
 
         // Generate actionable detail message
         let detail = match &self {
             AppError::InvalidTransactionAmount(msg) => {
-                format!("Amount must be a positive number. {}", msg)
+                format!("Amount must be a positive number. {msg}")
             }
             AppError::AmountBelowMinimum(msg) => {
-                format!("Amount is below the minimum threshold. {}", msg)
+                format!("Amount is below the minimum threshold. {msg}")
             }
             AppError::InvalidStellarAddress(msg) => {
-                format!("Stellar address must be 56 characters starting with 'G'. {}", msg)
+                format!("Stellar address must be 56 characters starting with 'G'. {msg}")
             }
             AppError::InvalidStatusTransition(msg) => {
-                format!("Status transition is not allowed. {}", msg)
+                format!("Status transition is not allowed. {msg}")
             }
             AppError::Validation(msg) => {
-                format!("Validation failed. {}", msg)
+                format!("Validation failed. {msg}")
             }
             _ => self.to_string(),
         };
 
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "error": self.to_string(),
             "code": code,
             "status": status.as_u16(),
@@ -350,13 +348,6 @@ impl IntoResponse for AppError {
             "detail": detail,
             "docs_url": docs_url,
         });
-
-        // The request_logger middleware injects the correlation ID as the
-        // X-Request-Id header and as a RequestId extension. We can't read
-        // extensions here (we don't have the request), so the header is
-        // attached by the middleware layer after the response is built.
-        // We leave a placeholder that the middleware can fill in if needed.
-        let _ = body; // suppress unused warning if correlation_id is absent
 
         (status, Json(body)).into_response()
     }

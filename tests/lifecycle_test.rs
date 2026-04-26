@@ -83,7 +83,11 @@ async fn test_full_transaction_lifecycle() {
         .await
         .unwrap();
 
-    assert_eq!(res.status(), StatusCode::CREATED, "callback should return 201");
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "callback should return 201"
+    );
 
     let tx_body: Value = res.json().await.unwrap();
     let tx_id_str = tx_body["id"].as_str().expect("response must have id");
@@ -111,13 +115,11 @@ async fn test_full_transaction_lifecycle() {
     // what the processor will do once fully implemented.
     let mut db_tx_conn = app.pool.begin().await.unwrap();
 
-    sqlx::query(
-        "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1",
-    )
-    .bind(tx_id)
-    .execute(&mut *db_tx_conn)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1")
+        .bind(tx_id)
+        .execute(&mut *db_tx_conn)
+        .await
+        .unwrap();
 
     // Write audit log for the status change (mirrors what the processor does)
     sqlx::query(
@@ -137,23 +139,19 @@ async fn test_full_transaction_lifecycle() {
     db_tx_conn.commit().await.unwrap();
 
     // ── 6. Poll GET /transactions/:id until status = completed ────────────────
-    let completed = poll_until(
-        Duration::from_secs(5),
-        Duration::from_millis(200),
-        || {
-            let client = client.clone();
-            let url = format!("{}/transactions/{}", app.base_url, tx_id);
-            async move {
-                let res = client.get(&url).send().await.ok()?;
-                let body: Value = res.json().await.ok()?;
-                if body["status"].as_str() == Some("completed") {
-                    Some(body)
-                } else {
-                    None
-                }
+    let completed = poll_until(Duration::from_secs(5), Duration::from_millis(200), || {
+        let client = client.clone();
+        let url = format!("{}/transactions/{}", app.base_url, tx_id);
+        async move {
+            let res = client.get(&url).send().await.ok()?;
+            let body: Value = res.json().await.ok()?;
+            if body["status"].as_str() == Some("completed") {
+                Some(body)
+            } else {
+                None
             }
-        },
-    )
+        }
+    })
     .await;
 
     assert!(
@@ -189,10 +187,7 @@ async fn test_full_transaction_lifecycle() {
     .await
     .unwrap();
 
-    assert!(
-        delivery.is_some(),
-        "webhook_deliveries record should exist"
-    );
+    assert!(delivery.is_some(), "webhook_deliveries record should exist");
     let delivery = delivery.unwrap();
     assert_eq!(delivery.get::<String, _>("status"), "delivered");
 
@@ -263,12 +258,11 @@ async fn test_callback_returns_201_and_persists() {
     let body: Value = res.json().await.unwrap();
     let tx_id: Uuid = body["id"].as_str().unwrap().parse().unwrap();
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE id = $1")
-            .bind(tx_id)
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE id = $1")
+        .bind(tx_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -324,5 +318,9 @@ async fn test_all_state_transitions_are_audited() {
     .unwrap();
 
     // created + 2 status_updates = at least 3
-    assert!(count >= 3, "expected at least 3 audit entries, got {}", count);
+    assert!(
+        count >= 3,
+        "expected at least 3 audit entries, got {}",
+        count
+    );
 }

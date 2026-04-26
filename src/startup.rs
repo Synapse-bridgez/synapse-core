@@ -26,7 +26,7 @@ impl ValidationReport {
         if !self.errors.is_empty() {
             println!("\nErrors:");
             for error in &self.errors {
-                println!("  ❌ {}", error);
+                println!("  ❌ {error}");
             }
         }
 
@@ -62,25 +62,25 @@ pub async fn validate_environment(config: &Config, pool: &PgPool) -> Result<Vali
     // Validate environment variables
     if let Err(e) = validate_env_vars(config) {
         report.environment = false;
-        report.errors.push(format!("Environment: {}", e));
+        report.errors.push(format!("Environment: {e}"));
     }
 
     // Validate database
     if let Err(e) = validate_database(pool).await {
         report.database = false;
-        report.errors.push(format!("Database: {}", e));
+        report.errors.push(format!("Database: {e}"));
     }
 
     // Validate Redis
     if let Err(e) = validate_redis(&config.redis_url).await {
         report.redis = false;
-        report.errors.push(format!("Redis: {}", e));
+        report.errors.push(format!("Redis: {e}"));
     }
 
     // Validate Horizon
     if let Err(e) = validate_horizon(&config.stellar_horizon_url).await {
         report.horizon = false;
-        report.errors.push(format!("Horizon: {}", e));
+        report.errors.push(format!("Horizon: {e}"));
     }
 
     Ok(report)
@@ -194,6 +194,9 @@ mod tests {
             processor_min_batch: 10,
             processor_max_batch: 500,
             processor_scaling_factor: 0.5,
+            slow_query_threshold_ms: 500,
+            settlement_max_batch_size: 10_000,
+            settlement_min_tx_count: 1,
         }
     }
 

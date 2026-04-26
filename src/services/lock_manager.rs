@@ -35,7 +35,7 @@ impl LockManager {
         resource: &str,
         timeout_duration: Duration,
     ) -> Result<Option<Lock>, redis::RedisError> {
-        let key = format!("lock:{}", resource);
+        let key = format!("lock:{resource}");
         let token = Uuid::new_v4().to_string();
         let ttl = self.default_ttl;
 
@@ -279,7 +279,7 @@ impl LeaderElection {
     pub async fn publish_heartbeat(&self) -> Result<(), redis::RedisError> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
         let key = format!("processor:heartbeat:{}", self.instance_id);
-        conn.set_ex(key, "alive", HEARTBEAT_TTL_SECS as usize)
+        conn.set_ex::<_, _, ()>(key, "alive", HEARTBEAT_TTL_SECS)
             .await?;
         Ok(())
     }
