@@ -86,6 +86,13 @@ pub enum BackupCommands {
         filename: String,
     },
 
+    /// Restore to a specific point in time
+    RestorePitr {
+        /// Target timestamp (ISO 8601 format, e.g., 2026-01-15T10:30:00Z)
+        #[arg(long)]
+        timestamp: String,
+    },
+
     /// Apply retention policy to clean old backups
     Cleanup,
 }
@@ -278,4 +285,8 @@ pub async fn handle_tx_reconcile(
     }
 
     Ok(())
+}
+
+pub async fn handle_backup_restore_pitr(_config: &Config, _timestamp_str: &str) -> anyhow::Result<()> {
+    anyhow::bail!("PITR restore service not yet implemented")
 }
