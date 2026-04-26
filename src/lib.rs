@@ -203,11 +203,13 @@ pub fn create_app(app_state: AppState) -> Router {
         // Admin: webhook endpoint health scores
         .route("/admin/webhooks/health", get(handlers::admin::list_webhook_health))
         .route("/admin/webhooks/health/:id", get(handlers::admin::get_webhook_health))
-        // Admin: tenant hot-reload
-        .route(
-            "/admin/tenants/reload",
-            post(handlers::admin::reload_tenant_configs),
-        )
+        // Admin: per-tenant quota management
+        .route("/admin/quotas", get(handlers::admin::quota::list_tenant_quotas))
+        .route("/admin/quotas/:tenant_id", get(handlers::admin::quota::get_tenant_quota))
+        .route("/admin/quotas/:tenant_id", axum::routing::put(handlers::admin::quota::set_tenant_quota))
+        .route("/admin/quotas/:tenant_id/reset", axum::routing::delete(handlers::admin::quota::reset_tenant_quota))
+        // Admin: settlement dispute workflow
+        .route("/admin/settlements/:id/status", axum::routing::patch(handlers::settlements::update_settlement_status))
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))

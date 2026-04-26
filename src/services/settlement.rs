@@ -7,6 +7,21 @@ use uuid::Uuid;
 use crate::error::AppError;
 use bigdecimal::BigDecimal;
 
+/// Valid settlement status transitions.
+fn valid_transition(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        ("completed", "pending_review")
+            | ("completed", "disputed")
+            | ("pending_review", "disputed")
+            | ("pending_review", "adjusted")
+            | ("pending_review", "voided")
+            | ("disputed", "adjusted")
+            | ("disputed", "voided")
+            | ("disputed", "pending_review")
+    )
+}
+
 pub struct SettlementService {
     pool: PgPool,
 }
@@ -85,6 +100,10 @@ impl SettlementService {
             status: "completed".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            dispute_reason: None,
+            original_total_amount: None,
+            reviewed_by: None,
+            reviewed_at: None,
         };
 
         // Save settlement record
@@ -113,5 +132,38 @@ impl SettlementService {
         );
 
         Ok(Some(saved_settlement))
+    }
+
+    /// Change a settlement's status (dispute, adjust, void, etc.).
+    /// Validates the transition, then delegates to the query layer which
+    /// handles audit logging and releasing transactions on void.
+    pub async fn update_status(
+        &self,
+        id: Uuid,
+        new_status: &str,
+        reason: Option<&str>,
+        new_total: Option<&BigDecimal>,
+        actor: &str,
+    ) -> Result<Settlement, AppError> {
+        let current = queries::get_settlement(&self.pool, id)
+            .await
+            .map_err(|e| {
+                if matches!(e, sqlx::Error::RowNotFound) {
+                    AppError::NotFound(format!("settlement {id}"))
+                } else {
+                    AppError::DatabaseError(e.to_string())
+                }
+            })?;
+
+        if !valid_transition(&current.status, new_status) {
+            return Err(AppError::BadRequest(format!(
+                "invalid transition: {} -> {}",
+                current.status, new_status
+            )));
+        }
+
+        queries::update_settlement_status(&self.pool, id, new_status, reason, new_total, actor)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))
     }
 }
