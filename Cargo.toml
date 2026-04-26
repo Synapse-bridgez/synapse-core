@@ -82,6 +82,7 @@ opentelemetry-semantic-conventions = "0.14"
 mockito = "1"
 proptest = "1"
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
 sqlx = { version = "0.7", features = [
     "runtime-tokio-native-tls",
     "postgres",
@@ -92,3 +93,7 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 reqwest = { version = "0.11", features = ["json"] }
 tokio-tungstenite = "0.21"
 assert_cmd = "2"
+
+[[bench]]
+name = "critical_paths"
+harness = false

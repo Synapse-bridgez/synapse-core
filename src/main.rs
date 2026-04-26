@@ -21,6 +21,7 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 mod cli;
 use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
 
@@ -34,6 +35,7 @@ use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
         handlers::webhook::handle_webhook,
         handlers::webhook::callback,
         handlers::webhook::get_transaction,
+        handlers::webhook::list_transactions,
     ),
     components(
         schemas(
@@ -287,10 +289,37 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        secrets_store,
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
     };
+
+    // Load tenant configs on startup
+    if let Err(e) = app_state.load_tenant_configs().await {
+        tracing::warn!("Failed to load tenant configs on startup: {}", e);
+    } else {
+        let count = app_state.tenant_configs.read().await.len();
+        tracing::info!(count, "Tenant configs loaded on startup");
+    }
+
+    // Background task: reload tenant configs every 60 seconds
+    let tenant_reload_state = app_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match tenant_reload_state.load_tenant_configs().await {
+                Ok(()) => {
+                    let count = tenant_reload_state.tenant_configs.read().await.len();
+                    tracing::debug!(count, "Tenant configs reloaded (background task)");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to reload tenant configs: {}", e);
+                }
+            }
+        }
+    });
 
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
@@ -317,12 +346,36 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     );
     let _processor_shutdown = processor_pool.start();
 
-    // Mark service as ready before starting the server
-    app_state.readiness.set_ready();
-    tracing::info!("Service is ready to accept traffic");
-    let readiness = app_state.readiness.clone();
+    // Register and start scheduled jobs
+    let scheduler = synapse_core::services::JobScheduler::new();
+    let stellar_account = std::env::var("RECONCILIATION_ACCOUNT").ok();
+
+    if let Some(account) = stellar_account {
+        let recon_job = synapse_core::services::reconciliation::ReconciliationJob {
+            pool: pool.clone(),
+            horizon_client: horizon_client.clone(),
+            stellar_account: account,
+        };
+        if let Err(e) = scheduler.register_job(Box::new(recon_job)).await {
+            tracing::warn!("Failed to register reconciliation job: {}", e);
+        }
+    } else {
+        tracing::info!(
+            "RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled"
+        );
+    }
+    if let Err(e) = scheduler.start().await {
+        tracing::warn!("Failed to start job scheduler: {}", e);
+    }
+    tracing::info!("Job scheduler started");
 
     let app = synapse_core::create_app(app_state);
+
+    // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
+    let app = app.merge(
+        SwaggerUi::new("/api/docs")
+            .url("/api/docs/openapi.json", ApiDoc::openapi()),
+    );
 
     // Configure CORS if allowed origins are specified.
     let app = if !config.cors_allowed_origins.is_empty() {

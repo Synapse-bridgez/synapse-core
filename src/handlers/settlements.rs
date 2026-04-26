@@ -43,7 +43,7 @@ pub async fn list_settlements(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
     let mut settlements =
-        crate::db::queries::list_settlements(pool, fetch_limit, decoded_cursor, backward)
+        crate::db::queries::list_settlements_cursor(pool, fetch_limit, decoded_cursor, backward)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to list settlements: {:?}", e);
@@ -99,4 +99,66 @@ pub async fn get_settlement(
     }
 
     Ok(response)
+}
+
+/// Request body for admin settlement status changes.
+#[derive(Debug, Deserialize)]
+pub struct UpdateSettlementStatusRequest {
+    pub status: String,
+    pub reason: Option<String>,
+    /// New total amount — only meaningful when transitioning to "adjusted".
+    pub new_total: Option<String>,
+    /// Actor performing the change (defaults to "admin").
+    pub actor: Option<String>,
+}
+
+/// PATCH /admin/settlements/:id/status
+/// Allowed transitions: completed→pending_review, →disputed, pending_review→adjusted/voided/disputed,
+/// disputed→adjusted/voided/pending_review.
+pub async fn update_settlement_status(
+    State(state): State<ApiState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateSettlementStatusRequest>,
+) -> impl IntoResponse {
+    let new_total: Option<sqlx::types::BigDecimal> = match payload.new_total.as_deref() {
+        Some(s) => match s.parse() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid new_total"})),
+                )
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+
+    let actor = payload.actor.as_deref().unwrap_or("admin");
+    let service = crate::services::SettlementService::new(state.app_state.db.clone());
+
+    match service
+        .update_status(id, &payload.status, payload.reason.as_deref(), new_total.as_ref(), actor)
+        .await
+    {
+        Ok(settlement) => (StatusCode::OK, Json(settlement)).into_response(),
+        Err(crate::error::AppError::NotFound(msg)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Err(crate::error::AppError::BadRequest(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update settlement status {}: {:?}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response()
+        }
+    }
 }

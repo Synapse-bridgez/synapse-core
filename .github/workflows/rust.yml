@@ -66,8 +66,17 @@ jobs:
     - name: Install sqlx-cli
       run: cargo install sqlx-cli --no-default-features --features postgres
 
+    - name: Install cargo-deny
+      if: matrix.rust == 'stable'
+      run: cargo install cargo-deny --locked
+
     - name: Start sccache
       run: sccache --start-server
+
+    - name: Validate migrations
+      run: bash scripts/validate-migrations.sh
+      env:
+        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
     - name: Run migrations
       run: sqlx migrate run
@@ -84,6 +93,10 @@ jobs:
       run: cargo build --verbose
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+
+    - name: Security audit (cargo-deny)
+      if: matrix.rust == 'stable'
+      run: cargo deny check advisories
 
     - name: Run unit tests
       run: cargo test --lib --bins --verbose
@@ -151,6 +164,11 @@ jobs:
 
     - name: Start sccache
       run: sccache --start-server
+
+    - name: Validate migrations
+      run: bash scripts/validate-migrations.sh
+      env:
+        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
     - name: Run migrations
       run: sqlx migrate run
