@@ -1,0 +1,17 @@
+[package]
+name = "admin-auth-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4.4"
+actix-rt = "2.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+jsonwebtoken = "9.2"
+chrono = "0.4"
+thiserror = "1.0"
+
+[dev-dependencies]
+actix-web = "4.4"
+actix-rt = "2.9"
