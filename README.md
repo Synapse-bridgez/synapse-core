@@ -1,5 +1,7 @@
 # Synapse Core – Phase 1: Fiat Gateway Callback Processor
 
+[![codecov](https://codecov.io/gh/Synapse-bridgez/synapse-core/branch/develop/graph/badge.svg)](https://codecov.io/gh/Synapse-bridgez/synapse-core)
+
 Synapse Core is the first component of the Synapse Bridge project. It acts as a **callback processor** for the Stellar Anchor Platform, handling fiat-to-Stellar deposit events. When a user deposits fiat currency (e.g., USD) via an anchor, this service receives a webhook, stores the transaction, and prepares it for the next phases (swap and cross-chain bridging).
 
 This repository is part of the larger Synapse Bridge ecosystem. It is designed to be run alongside the Stellar Anchor Platform and a PostgreSQL database.
