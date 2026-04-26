@@ -143,6 +143,32 @@ pub fn create_app(app_state: AppState) -> Router {
             crate::middleware::validate::validate_webhook,
         ));
 
+    // Core API routes (shared between versioned and unversioned)
+    let core_routes = Router::new()
+        .route("/transactions/:id", get(handlers::webhook::get_transaction))
+        .route("/transactions", get(handlers::webhook::list_transactions_api))
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route(
+            "/settlements/:id",
+            get(handlers::settlements::get_settlement),
+        )
+        .merge(callback_routes.clone())
+        .merge(webhook_routes.clone());
+
+    // V1 routes — stable, with deprecation headers
+    let v1_routes = core_routes
+        .clone()
+        .layer(axum_middleware::from_fn(
+            middleware::versioning::v1_version_middleware,
+        ));
+
+    // V2 routes — latest, with API-Version: v2 header
+    let v2_routes = core_routes
+        .clone()
+        .layer(axum_middleware::from_fn(
+            middleware::versioning::v2_version_middleware,
+        ));
+
     // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
     let mut admin_router = Router::new()
         .route("/health", get(handlers::health))
@@ -154,15 +180,15 @@ pub fn create_app(app_state: AppState) -> Router {
     }
 
     admin_router
-        .route("/settlements", get(handlers::settlements::list_settlements))
-        .route(
-            "/settlements/:id",
-            get(handlers::settlements::get_settlement),
+        // Unversioned routes default to V2 behaviour
+        .merge(
+            core_routes.layer(axum_middleware::from_fn(
+                middleware::versioning::v2_version_middleware,
+            )),
         )
-        .merge(callback_routes)
-        .merge(webhook_routes)
-        .route("/transactions/:id", get(handlers::webhook::get_transaction))
-        .route("/transactions", get(handlers::webhook::list_transactions_api))
+        // Versioned route groups
+        .nest("/api/v1", v1_routes)
+        .nest("/api/v2", v2_routes)
         .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
