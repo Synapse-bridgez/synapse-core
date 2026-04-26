@@ -21,6 +21,7 @@ pub struct Transaction {
     pub memo: Option<String>,
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub tenant_id: Option<Uuid>,
 }
 
 #[async_graphql::Object]
@@ -94,6 +95,7 @@ impl Transaction {
             memo,
             memo_type,
             metadata,
+            tenant_id: None,
         }
     }
 }
@@ -109,6 +111,10 @@ pub struct Settlement {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub dispute_reason: Option<String>,
+    pub original_total_amount: Option<BigDecimal>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
 }
 
 #[async_graphql::Object]
