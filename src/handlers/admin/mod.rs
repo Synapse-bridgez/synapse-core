@@ -2,7 +2,7 @@ pub mod webhook_replay;
 
 use crate::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -26,12 +26,20 @@ pub struct UpdateWebhookRateLimitRequest {
     pub max_delivery_rate: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub flag_name: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
 /// Create admin routes for queue management
 pub fn admin_routes() -> Router<sqlx::PgPool> {
     Router::new()
         .route("/flags", get(get_flags))
         .route("/flags/:name", post(update_flag))
         .route("/flags/:name/rollout", post(update_rollout_percentage))
+        .route("/feature-flags/history", get(get_flag_history))
 }
 
 /// Create webhook replay admin routes
@@ -218,6 +226,32 @@ pub async fn update_webhook_rate_limit(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "error": "Failed to update rate limit"
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn get_flag_history(
+    State(state): State<AppState>,
+    Query(params): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50).min(1000);
+    let offset = params.offset.unwrap_or(0);
+
+    match state
+        .feature_flags
+        .get_audit_history(params.flag_name.as_deref(), limit, offset)
+        .await
+    {
+        Ok(history) => (StatusCode::OK, Json(history)).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to get feature flag history: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to retrieve audit history"
                 })),
             )
                 .into_response()

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
@@ -13,6 +14,16 @@ pub struct FeatureFlag {
     pub enabled: bool,
     pub description: Option<String>,
     pub rollout_percentage: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct FlagAuditEntry {
+    pub id: uuid::Uuid,
+    pub flag_name: String,
+    pub old_value: Option<serde_json::Value>,
+    pub new_value: Option<serde_json::Value>,
+    pub actor: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 impl FeatureFlagService {
@@ -86,13 +97,38 @@ impl FeatureFlagService {
     }
 
     pub async fn update(&self, name: &str, enabled: bool) -> Result<FeatureFlag, sqlx::Error> {
-        sqlx::query_as::<_, FeatureFlag>(
+        let old_flag = sqlx::query_as::<_, FeatureFlag>(
+            "SELECT name, enabled, description, rollout_percentage FROM feature_flags WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let flag = sqlx::query_as::<_, FeatureFlag>(
             "UPDATE feature_flags SET enabled = $2 WHERE name = $1 RETURNING name, enabled, description, rollout_percentage",
         )
         .bind(name)
         .bind(enabled)
         .fetch_one(&self.pool)
-        .await
+        .await?;
+
+        // Log the change
+        if let Some(old) = old_flag {
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO feature_flag_audit_logs (flag_name, old_value, new_value, actor)
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(name)
+            .bind(json!({ "enabled": old.enabled }))
+            .bind(json!({ "enabled": enabled }))
+            .bind("admin")
+            .execute(&self.pool)
+            .await;
+        }
+
+        Ok(flag)
     }
 
     pub async fn update_rollout_percentage(
@@ -100,13 +136,75 @@ impl FeatureFlagService {
         name: &str,
         percentage: i32,
     ) -> Result<FeatureFlag, sqlx::Error> {
-        sqlx::query_as::<_, FeatureFlag>(
+        let old_flag = sqlx::query_as::<_, FeatureFlag>(
+            "SELECT name, enabled, description, rollout_percentage FROM feature_flags WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let flag = sqlx::query_as::<_, FeatureFlag>(
             "UPDATE feature_flags SET rollout_percentage = $2 WHERE name = $1 RETURNING name, enabled, description, rollout_percentage",
         )
         .bind(name)
         .bind(percentage)
         .fetch_one(&self.pool)
-        .await
+        .await?;
+
+        // Log the change
+        if let Some(old) = old_flag {
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO feature_flag_audit_logs (flag_name, old_value, new_value, actor)
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(name)
+            .bind(json!({ "rollout_percentage": old.rollout_percentage }))
+            .bind(json!({ "rollout_percentage": percentage }))
+            .bind("admin")
+            .execute(&self.pool)
+            .await;
+        }
+
+        Ok(flag)
+    }
+
+    pub async fn get_audit_history(
+        &self,
+        flag_name: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<FlagAuditEntry>, sqlx::Error> {
+        if let Some(name) = flag_name {
+            sqlx::query_as::<_, FlagAuditEntry>(
+                r#"
+                SELECT id, flag_name, old_value, new_value, actor, timestamp
+                FROM feature_flag_audit_logs
+                WHERE flag_name = $1
+                ORDER BY timestamp DESC
+                LIMIT $2 OFFSET $3
+                "#,
+            )
+            .bind(name)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as::<_, FlagAuditEntry>(
+                r#"
+                SELECT id, flag_name, old_value, new_value, actor, timestamp
+                FROM feature_flag_audit_logs
+                ORDER BY timestamp DESC
+                LIMIT $1 OFFSET $2
+                "#,
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+        }
     }
 }
 
