@@ -12,8 +12,6 @@ use std::path::Path;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use stellar::HorizonClient;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::time::Duration;
 
 #[derive(Clone)] // <-- Add Clone
