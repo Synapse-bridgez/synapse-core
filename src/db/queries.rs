@@ -480,7 +480,10 @@ pub async fn search_transactions(
                 where_clause
             );
 
-            // Build data query with pagination
+            // Build data query with pagination.
+            // ORDER BY is aligned with idx_transactions_status_asset_created
+            // (status, asset_code, created_at DESC) so the planner can use an
+            // index scan instead of a sequential scan + sort.
             let data_query = format!(
                 "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
                 where_clause, param_count
