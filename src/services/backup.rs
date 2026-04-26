@@ -3,8 +3,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackupType {
@@ -24,10 +26,20 @@ pub struct BackupMetadata {
     pub checksum: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupProgress {
+    pub phase: String,
+    pub progress_percentage: u32,
+    pub elapsed_seconds: u64,
+    pub estimated_remaining_seconds: Option<u64>,
+    pub total_size_bytes: u64,
+}
+
 pub struct BackupService {
     database_url: String,
     backup_dir: PathBuf,
     encryption_key: Option<String>,
+    progress: Arc<Mutex<Option<BackupProgress>>>,
 }
 
 impl BackupService {
@@ -36,7 +48,47 @@ impl BackupService {
             database_url,
             backup_dir,
             encryption_key,
+            progress: Arc::new(Mutex::new(None)),
         }
+    }
+
+    async fn update_progress(
+        &self,
+        phase: &str,
+        progress_percentage: u32,
+        total_size_bytes: u64,
+        start_time: DateTime<Utc>,
+    ) {
+        let elapsed = Utc::now()
+            .signed_duration_since(start_time)
+            .num_seconds() as u64;
+
+        let estimated_remaining = if progress_percentage > 0 && progress_percentage < 100 {
+            let rate = elapsed as f64 / progress_percentage as f64;
+            Some((rate * (100 - progress_percentage) as f64) as u64)
+        } else {
+            None
+        };
+
+        let progress = BackupProgress {
+            phase: phase.to_string(),
+            progress_percentage,
+            elapsed_seconds: elapsed,
+            estimated_remaining_seconds: estimated_remaining,
+            total_size_bytes,
+        };
+
+        *self.progress.lock().await = Some(progress);
+        tracing::info!(
+            "Backup progress: {} - {}% (elapsed: {}s)",
+            phase,
+            progress_percentage,
+            elapsed
+        );
+    }
+
+    pub async fn get_progress(&self) -> Option<BackupProgress> {
+        self.progress.lock().await.clone()
     }
 
     pub async fn create_backup(&self, backup_type: BackupType) -> Result<BackupMetadata> {
@@ -50,17 +102,23 @@ impl BackupService {
         let backup_path = self.backup_dir.join(&filename);
         let temp_path = self.backup_dir.join(format!("{filename}.tmp"));
 
+        // Get database size for progress estimation
+        let total_size = self.get_database_size().await.unwrap_or(0);
+
         // Run pg_dump
         tracing::info!("Running pg_dump for {:?} backup", backup_type);
+        self.update_progress("pg_dump", 25, total_size, timestamp).await;
         self.run_pg_dump(&temp_path).await?;
 
         // Compress the backup
         tracing::info!("Compressing backup");
+        self.update_progress("compress", 50, total_size, timestamp).await;
         let compressed_path = self.compress_backup(&temp_path).await?;
 
         // Encrypt if key is provided
         let final_path = if self.encryption_key.is_some() {
             tracing::info!("Encrypting backup");
+            self.update_progress("encrypt", 75, total_size, timestamp).await;
             self.encrypt_backup(&compressed_path).await?
         } else {
             compressed_path
@@ -92,9 +150,32 @@ impl BackupService {
         // Save metadata
         self.save_metadata(&backup_metadata).await?;
 
+        // Mark as complete
+        self.update_progress("complete", 100, total_size, timestamp).await;
+
         tracing::info!("Backup created successfully: {}", backup_metadata.filename);
 
         Ok(backup_metadata)
+    }
+
+    async fn get_database_size(&self) -> Result<u64> {
+        let output = Command::new("psql")
+            .arg(&self.database_url)
+            .arg("-t")
+            .arg("-c")
+            .arg("SELECT pg_database_size(current_database());")
+            .output()
+            .context("Failed to get database size")?;
+
+        if !output.status.success() {
+            return Ok(0);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Failed to parse database size"))
     }
 
     pub async fn list_backups(&self) -> Result<Vec<BackupMetadata>> {

@@ -40,6 +40,7 @@ pub fn admin_routes() -> Router<sqlx::PgPool> {
         .route("/flags/:name", post(update_flag))
         .route("/flags/:name/rollout", post(update_rollout_percentage))
         .route("/feature-flags/history", get(get_flag_history))
+        .route("/backup/status", get(get_backup_status))
 }
 
 /// Create webhook replay admin routes
@@ -58,6 +59,23 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
             "/webhooks/endpoints/:id/rate-limit",
             post(update_webhook_rate_limit),
         )
+}
+
+pub async fn get_backup_status(State(state): State<AppState>) -> impl IntoResponse {
+    match state.backup_service.get_progress().await {
+        Some(progress) => (StatusCode::OK, Json(progress)).into_response(),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "phase": "idle",
+                "progress_percentage": 0,
+                "elapsed_seconds": 0,
+                "estimated_remaining_seconds": null,
+                "total_size_bytes": 0
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
