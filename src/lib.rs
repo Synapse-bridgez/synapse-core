@@ -210,6 +210,8 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/admin/quotas/:tenant_id/reset", axum::routing::delete(handlers::admin::quota::reset_tenant_quota))
         // Admin: settlement dispute workflow
         .route("/admin/settlements/:id/status", axum::routing::patch(handlers::settlements::update_settlement_status))
+        // Admin: reconciliation reports
+        .nest("/admin/reconciliation", handlers::admin::reconciliation::reconciliation_routes())
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
