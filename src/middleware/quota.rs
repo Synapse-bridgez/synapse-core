@@ -357,7 +357,7 @@ pub async fn rate_limit_middleware(
     };
 
     // Override the quota config with the per-tenant per-minute limit.
-    let per_minute_key = format!("ratelimit:{quota_key}");
+    let per_minute_key = format!("tenant:{quota_key}");
     let quota_cfg = Quota {
         tier: Tier::Free,
         custom_limit: Some(limit_per_minute),
