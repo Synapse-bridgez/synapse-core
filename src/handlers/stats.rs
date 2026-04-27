@@ -29,7 +29,7 @@ pub struct CombinedCacheMetrics {
     pub idempotency_fallback_count: u64,
 }
 
-pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn status_counts(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_status_counts();
     let config = CacheConfig::default();
 
@@ -40,47 +40,38 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
         .get::<Vec<StatusCount>>(&cache_key)
         .await
     {
-        return (StatusCode::OK, Json(cached));
+        return Ok((StatusCode::OK, Json(cached)).into_response());
     }
 
     // Cache miss - query database
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    match crate::db::queries::get_status_counts(pool).await {
-        Ok(counts) => {
-            // Store in cache
-            let _ = state
-                .app_state
-                .query_cache
-                .set(
-                    &cache_key,
-                    &counts,
-                    Duration::from_secs(config.status_counts_ttl),
-                )
-                .await;
+    let counts = crate::db::queries::get_status_counts(pool).await?;
+    
+    // Store in cache
+    let _ = state
+        .app_state
+        .query_cache
+        .set(
+            &cache_key,
+            &counts,
+            Duration::from_secs(config.status_counts_ttl),
+        )
+        .await;
 
-            let mut response: Response = (StatusCode::OK, Json(counts)).into_response();
-            if replica_used {
-                response.headers_mut().insert(
-                    "X-Read-Consistency",
-                    HeaderValue::from_static("eventual"),
-                );
-            }
-            return response;
-        }
-        Err(e) => {
-            tracing::error!("Failed to get status counts: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(Vec::<StatusCount>::new()),
-            )
-        }
+    let mut response: Response = (StatusCode::OK, Json(counts)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
     }
+    Ok(response)
 }
 
 pub async fn daily_totals(
     State(state): State<ApiState>,
     axum::extract::Query(query): axum::extract::Query<DailyTotalsQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_daily_totals(query.days);
     let config = CacheConfig::default();
 
@@ -91,44 +82,35 @@ pub async fn daily_totals(
         .get::<Vec<DailyTotal>>(&cache_key)
         .await
     {
-        return (StatusCode::OK, Json(cached));
+        return Ok((StatusCode::OK, Json(cached)).into_response());
     }
 
     // Cache miss - query database
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    match crate::db::queries::get_daily_totals(pool, query.days).await {
-        Ok(totals) => {
-            // Store in cache
-            let _ = state
-                .app_state
-                .query_cache
-                .set(
-                    &cache_key,
-                    &totals,
-                    Duration::from_secs(config.daily_totals_ttl),
-                )
-                .await;
+    let totals = crate::db::queries::get_daily_totals(pool, query.days).await?;
+    
+    // Store in cache
+    let _ = state
+        .app_state
+        .query_cache
+        .set(
+            &cache_key,
+            &totals,
+            Duration::from_secs(config.daily_totals_ttl),
+        )
+        .await;
 
-            let mut response: Response = (StatusCode::OK, Json(totals)).into_response();
-            if replica_used {
-                response.headers_mut().insert(
-                    "X-Read-Consistency",
-                    HeaderValue::from_static("eventual"),
-                );
-            }
-            return response;
-        }
-        Err(e) => {
-            tracing::error!("Failed to get daily totals: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(Vec::<DailyTotal>::new()),
-            )
-        }
+    let mut response: Response = (StatusCode::OK, Json(totals)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
     }
+    Ok(response)
 }
 
-pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn asset_stats(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_asset_stats();
     let config = CacheConfig::default();
 
@@ -139,44 +121,35 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
         .get::<Vec<AssetStats>>(&cache_key)
         .await
     {
-        return (StatusCode::OK, Json(cached));
+        return Ok((StatusCode::OK, Json(cached)).into_response());
     }
 
     // Cache miss - query database
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    match crate::db::queries::get_asset_stats(pool).await {
-        Ok(stats) => {
-            // Store in cache
-            let _ = state
-                .app_state
-                .query_cache
-                .set(
-                    &cache_key,
-                    &stats,
-                    Duration::from_secs(config.asset_stats_ttl),
-                )
-                .await;
+    let stats = crate::db::queries::get_asset_stats(pool).await?;
+    
+    // Store in cache
+    let _ = state
+        .app_state
+        .query_cache
+        .set(
+            &cache_key,
+            &stats,
+            Duration::from_secs(config.asset_stats_ttl),
+        )
+        .await;
 
-            let mut response: Response = (StatusCode::OK, Json(stats)).into_response();
-            if replica_used {
-                response.headers_mut().insert(
-                    "X-Read-Consistency",
-                    HeaderValue::from_static("eventual"),
-                );
-            }
-            return response;
-        }
-        Err(e) => {
-            tracing::error!("Failed to get asset stats: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(Vec::<AssetStats>::new()),
-            )
-        }
+    let mut response: Response = (StatusCode::OK, Json(stats)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
     }
+    Ok(response)
 }
 
-pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn cache_metrics(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let query_cache_metrics = state.app_state.query_cache.metrics();
     let combined_metrics = CombinedCacheMetrics {
         query_cache: query_cache_metrics,
@@ -202,5 +175,5 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
             .idempotency_fallback_count
             .load(Ordering::Relaxed),
     };
-    (StatusCode::OK, Json(combined_metrics))
+    Ok((StatusCode::OK, Json(combined_metrics)))
 }

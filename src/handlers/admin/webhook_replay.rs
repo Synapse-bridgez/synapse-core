@@ -97,14 +97,7 @@ async fn get_webhook_payload_from_audit(
     transaction_id: Uuid,
 ) -> Result<Transaction, AppError> {
     // First, try to get the transaction directly
-    let transaction = queries::get_transaction(pool, transaction_id)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::RowNotFound => {
-                AppError::NotFound(format!("Transaction {} not found", transaction_id))
-            }
-            _ => AppError::DatabaseError(e.to_string()),
-        })?;
+    let transaction = queries::get_transaction(pool, transaction_id).await?;
 
     Ok(transaction)
 }
@@ -148,10 +141,7 @@ pub async fn list_failed_webhooks(
     query_builder.push_bind(params.offset);
 
     let query = query_builder.build();
-    let rows = query.fetch_all(&pool).await.map_err(|e| {
-        tracing::error!("Failed to fetch failed webhooks: {}", e);
-        AppError::DatabaseError(e.to_string())
-    })?;
+    let rows = query.fetch_all(&pool).await?;
 
     let webhooks: Vec<FailedWebhookInfo> = rows
         .iter()
@@ -221,9 +211,7 @@ pub async fn replay_webhook(
         match reprocess_webhook(&pool, &transaction).await {
             Ok(_) => {
                 // Log the replay attempt in audit logs
-                let mut db_tx = pool.begin().await.map_err(|e| {
-                    AppError::DatabaseError(format!("Failed to begin transaction: {}", e))
-                })?;
+                let mut db_tx = pool.begin().await?;
 
                 crate::db::audit::AuditLog::log(
                     &mut db_tx,
@@ -239,12 +227,9 @@ pub async fn replay_webhook(
                     })),
                     "admin",
                 )
-                .await
-                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+                .await?;
 
-                db_tx.commit().await.map_err(|e| {
-                    AppError::DatabaseError(format!("Failed to commit transaction: {}", e))
-                })?;
+                db_tx.commit().await?;
 
                 // Track replay in history table
                 let _ = track_replay_attempt(&pool, transaction_id, false, true, None).await;
@@ -419,8 +404,7 @@ async fn reprocess_webhook(pool: &PgPool, transaction: &Transaction) -> Result<(
     )
     .bind(transaction.id)
     .execute(pool)
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .await?;
 
     tracing::info!(
         "Transaction {} status updated to pending for reprocessing",
@@ -451,8 +435,7 @@ async fn track_replay_attempt(
     .bind(success)
     .bind(error_message)
     .execute(pool)
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .await?;
 
     Ok(())
 }

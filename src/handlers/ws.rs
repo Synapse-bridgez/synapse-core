@@ -5,6 +5,7 @@ use axum::{
     },
     response::IntoResponse,
 };
+use crate::error::AppError;
 use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -30,16 +31,16 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<WsQuery>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // Validate token if provided
     if let Some(token) = params.token {
         if !validate_token(&token) {
             tracing::warn!("Invalid WebSocket authentication token");
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            return Err(AppError::Unauthorized("Invalid authentication token".to_string()));
         }
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
 /// Handle individual WebSocket connection

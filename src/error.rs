@@ -85,6 +85,10 @@ pub mod codes {
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
         ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
+
+    // Redis errors
+    pub const REDIS_001: (&str, u16, &str) =
+        ("ERR_REDIS_001", 500, "Redis operation failed");
 }
 
 /// Get all error codes as a vector for catalog generation
@@ -185,6 +189,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
         },
+        ErrorCode {
+            code: codes::REDIS_001.0,
+            http_status: codes::REDIS_001.1,
+            description: codes::REDIS_001.2,
+        },
     ]
 }
 
@@ -253,6 +262,12 @@ pub enum AppError {
 
     #[error("Insufficient permissions: {0}")]
     InsufficientPermissions(String),
+
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
+
+    #[error("Internal error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
 
 impl AppError {
@@ -279,6 +294,8 @@ impl AppError {
             AppError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
+            AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -307,6 +324,8 @@ impl AppError {
             AppError::RateLimitExceeded => codes::RATE_LIMIT_001.0,
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
+            AppError::Redis(_) => codes::REDIS_001.0,
+            AppError::Anyhow(_) => codes::INTERNAL_001.0,
         }
     }
 }
