@@ -103,6 +103,26 @@ pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> 
     Ok(configs)
 }
 
+/// Set the tenant context on a connection so PostgreSQL RLS policies fire correctly.
+/// Pass `None` for admin connections that should bypass RLS.
+pub async fn set_tenant_context(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    tenant_id: Option<uuid::Uuid>,
+    is_admin: bool,
+) -> Result<()> {
+    if is_admin {
+        sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+            .execute(&mut **conn)
+            .await?;
+    } else if let Some(tid) = tenant_id {
+        sqlx::query("SELECT set_config('app.tenant_id', $1, true), set_config('app.is_admin', 'false', true)")
+            .bind(tid.to_string())
+            .execute(&mut **conn)
+            .await?;
+    }
+    Ok(())
+}
+
 // --- Transaction Queries ---
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
@@ -378,6 +398,125 @@ pub async fn list_settlements(pool: &PgPool, limit: i64, offset: i64) -> Result<
     .await
 }
 
+/// Cursor-based settlement listing used by the settlements handler.
+pub async fn list_settlements_cursor(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+) -> Result<Vec<Settlement>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM settlements [cursor-paginated]",
+        async {
+            if let Some((ts, id)) = cursor {
+                if !backward {
+                    sqlx::query_as::<_, Settlement>(
+                        "SELECT * FROM settlements WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT $3",
+                    )
+                    .bind(ts).bind(id).bind(limit)
+                    .fetch_all(pool).await
+                } else {
+                    let mut rows = sqlx::query_as::<_, Settlement>(
+                        "SELECT * FROM settlements WHERE (created_at, id) > ($1, $2) ORDER BY created_at ASC, id ASC LIMIT $3",
+                    )
+                    .bind(ts).bind(id).bind(limit)
+                    .fetch_all(pool).await?;
+                    rows.reverse();
+                    Ok(rows)
+                }
+            } else if !backward {
+                sqlx::query_as::<_, Settlement>(
+                    "SELECT * FROM settlements ORDER BY created_at DESC, id DESC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(pool).await
+            } else {
+                let mut rows = sqlx::query_as::<_, Settlement>(
+                    "SELECT * FROM settlements ORDER BY created_at ASC, id ASC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(pool).await?;
+                rows.reverse();
+                Ok(rows)
+            }
+        },
+    )
+    .await
+}
+
+/// Update settlement status with reason; returns the updated settlement.
+pub async fn update_settlement_status(
+    pool: &PgPool,
+    id: Uuid,
+    new_status: &str,
+    reason: Option<&str>,
+    new_total: Option<&sqlx::types::BigDecimal>,
+    actor: &str,
+) -> Result<Settlement> {
+    let mut db_tx = pool.begin().await?;
+
+    let current = sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *db_tx)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+
+    // Preserve original amount on first adjustment
+    let original_total = if current.original_total_amount.is_none() && new_total.is_some() {
+        Some(current.total_amount.clone())
+    } else {
+        current.original_total_amount.clone()
+    };
+
+    let updated = sqlx::query_as::<_, Settlement>(
+        r#"
+        UPDATE settlements SET
+            status = $1,
+            dispute_reason = COALESCE($2, dispute_reason),
+            total_amount = COALESCE($3, total_amount),
+            original_total_amount = COALESCE($4, original_total_amount),
+            reviewed_by = $5,
+            reviewed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $6
+        RETURNING *
+        "#,
+    )
+    .bind(new_status)
+    .bind(reason)
+    .bind(new_total)
+    .bind(original_total)
+    .bind(actor)
+    .bind(id)
+    .fetch_one(&mut *db_tx)
+    .await?;
+
+    // If voided, release transactions back to unsettled
+    if new_status == "voided" {
+        sqlx::query(
+            "UPDATE transactions SET settlement_id = NULL, updated_at = NOW() WHERE settlement_id = $1",
+        )
+        .bind(id)
+        .execute(&mut *db_tx)
+        .await?;
+    }
+
+    crate::db::audit::AuditLog::log(
+        &mut db_tx,
+        id,
+        crate::db::audit::ENTITY_SETTLEMENT,
+        "status_update",
+        Some(serde_json::json!({ "status": current.status })),
+        Some(serde_json::json!({ "status": new_status, "reason": reason })),
+        actor,
+    )
+    .await?;
+
+    db_tx.commit().await?;
+    Ok(updated)
+}
+
 pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
     with_timeout(
         QueryTier::Read,
@@ -480,7 +619,10 @@ pub async fn search_transactions(
                 where_clause
             );
 
-            // Build data query with pagination
+            // Build data query with pagination.
+            // ORDER BY is aligned with idx_transactions_status_asset_created
+            // (status, asset_code, created_at DESC) so the planner can use an
+            // index scan instead of a sequential scan + sort.
             let data_query = format!(
                 "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
                 where_clause, param_count
@@ -614,12 +756,12 @@ mod tests {
 
 // --- Audit Log Queries ---
 
-/// Retrieve audit logs for a specific entity
+/// Retrieve audit logs for a specific entity using cursor-based pagination on (timestamp, id).
 pub async fn get_audit_logs(
     pool: &PgPool,
     entity_id: Uuid,
     limit: i64,
-    offset: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
 ) -> Result<
     Vec<(
         Uuid,
@@ -632,20 +774,37 @@ pub async fn get_audit_logs(
         DateTime<Utc>,
     )>,
 > {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
-        FROM audit_logs
-        WHERE entity_id = $1
-        ORDER BY timestamp DESC
-        LIMIT $2 OFFSET $3
-        "#,
-    )
-    .bind(entity_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let rows = if let Some((ts, cid)) = cursor {
+        sqlx::query(
+            r#"
+            SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+            FROM audit_logs
+            WHERE entity_id = $1 AND (timestamp, id) < ($2, $3)
+            ORDER BY timestamp DESC, id DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(entity_id)
+        .bind(ts)
+        .bind(cid)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+            FROM audit_logs
+            WHERE entity_id = $1
+            ORDER BY timestamp DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(entity_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows
         .into_iter()
@@ -662,6 +821,115 @@ pub async fn get_audit_logs(
             )
         })
         .collect())
+}
+
+// --- Bulk Status Update ---
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BulkUpdateError {
+    pub transaction_id: Uuid,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BulkUpdateResult {
+    pub updated: usize,
+    pub failed: usize,
+    pub errors: Vec<BulkUpdateError>,
+}
+
+/// Bulk update transaction statuses, validating each transition individually.
+/// Uses a single UPDATE ... WHERE id = ANY($1) for the valid subset, then
+/// audit-logs each successful update within the same transaction.
+pub async fn bulk_update_transaction_status(
+    pool: &PgPool,
+    transaction_ids: &[Uuid],
+    new_status: &str,
+    reason: Option<&str>,
+    actor: &str,
+) -> Result<BulkUpdateResult> {
+    use crate::validation::state_machine::validate_status_transition;
+
+    // Fetch current statuses for all requested IDs in one query
+    let rows = sqlx::query(
+        "SELECT id, status FROM transactions WHERE id = ANY($1)",
+    )
+    .bind(transaction_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let current: std::collections::HashMap<Uuid, String> = rows
+        .into_iter()
+        .map(|r| (r.get::<Uuid, _>("id"), r.get::<String, _>("status")))
+        .collect();
+
+    let mut valid_ids: Vec<Uuid> = Vec::new();
+    let mut old_statuses: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    let mut errors: Vec<BulkUpdateError> = Vec::new();
+
+    for &id in transaction_ids {
+        match current.get(&id) {
+            None => errors.push(BulkUpdateError {
+                transaction_id: id,
+                error: "transaction not found".to_string(),
+            }),
+            Some(from) => match validate_status_transition(from, new_status) {
+                Ok(_) => {
+                    old_statuses.insert(id, from.clone());
+                    valid_ids.push(id);
+                }
+                Err(e) => errors.push(BulkUpdateError {
+                    transaction_id: id,
+                    error: e.to_string(),
+                }),
+            },
+        }
+    }
+
+    if valid_ids.is_empty() {
+        return Ok(BulkUpdateResult {
+            updated: 0,
+            failed: errors.len(),
+            errors,
+        });
+    }
+
+    let mut db_tx = pool.begin().await?;
+
+    sqlx::query(
+        "UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)",
+    )
+    .bind(new_status)
+    .bind(&valid_ids)
+    .execute(&mut *db_tx)
+    .await?;
+
+    for &id in &valid_ids {
+        let old_status = old_statuses.get(&id).map(|s| s.as_str()).unwrap_or("unknown");
+        let mut new_val = serde_json::json!({ "status": new_status });
+        if let Some(r) = reason {
+            new_val["reason"] = serde_json::json!(r);
+        }
+        AuditLog::log(
+            &mut db_tx,
+            id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            Some(serde_json::json!({ "status": old_status })),
+            Some(new_val),
+            actor,
+        )
+        .await?;
+    }
+
+    db_tx.commit().await?;
+
+    let updated = valid_ids.len();
+    Ok(BulkUpdateResult {
+        updated,
+        failed: errors.len(),
+        errors,
+    })
 }
 
 // --- Aggregate Queries (Cacheable) ---
