@@ -40,7 +40,7 @@ pub async fn list_settlements(
     query: Query<Pagination>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let page = query.page.unwrap_or(1).max(1);
-    let limit = query.limit.unwrap_or(10).min(100).max(1);
+    let limit = query.limit.unwrap_or(10).clamp(1, 100);
     let offset = (page.saturating_sub(1) as i64) * (limit as i64);
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
@@ -52,18 +52,17 @@ pub async fn list_settlements(
         })?;
 
     let response_body = SettlementListResponse {
-        settlements,
         total: settlements.len() as i64,
+        settlements,
         page,
         limit,
     };
 
     let mut response: Response = Json(response_body).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)
@@ -87,21 +86,22 @@ pub async fn get_settlement(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    let settlement = crate::db::queries::get_settlement(pool, id).await.map_err(|e| {
-        if matches!(e, sqlx::Error::RowNotFound) {
-            StatusCode::NOT_FOUND
-        } else {
-            tracing::error!("Failed to get settlement: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    })?;
+    let settlement = crate::db::queries::get_settlement(pool, id)
+        .await
+        .map_err(|e| {
+            if matches!(e, sqlx::Error::RowNotFound) {
+                StatusCode::NOT_FOUND
+            } else {
+                tracing::error!("Failed to get settlement: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
 
     let mut response: Response = Json(settlement).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)

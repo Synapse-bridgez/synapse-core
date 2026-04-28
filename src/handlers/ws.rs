@@ -25,7 +25,7 @@ pub struct WsQuery {
     token: Option<String>,
 }
 
-/// WebSocket upgrade handler
+/// WebSocket upgrade handler — requires a valid tenant API key.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<WsQuery>,
