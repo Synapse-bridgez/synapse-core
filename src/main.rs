@@ -1,6 +1,4 @@
-use axum::routing::{get, post};
 use clap::Parser;
-use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
 use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
@@ -12,13 +10,12 @@ use synapse_core::{
     middleware::idempotency::IdempotencyService,
     schemas,
     secrets::SecretsStore,
-    services::{FeatureFlagService, LeaderElection, SettlementService, WebhookDispatcher},
+    services::{FeatureFlagService, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
-    telemetry, ApiState, AppState, ReadinessState,
+    AppState, ReadinessState,
 };
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -41,7 +38,6 @@ use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
         schemas(
             handlers::HealthStatus,
             handlers::DbPoolStats,
-            handlers::settlements::Pagination,
             handlers::settlements::SettlementListResponse,
             handlers::webhook::WebhookPayload,
             handlers::webhook::WebhookResponse,
@@ -75,26 +71,21 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let tracer_provider = telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
-        .expect("failed to initialise OpenTelemetry tracer");
+    let _tracer_provider =
+        synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
+            .expect("failed to initialise OpenTelemetry tracer");
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(OpenTelemetryLayer::new(
-                    tracer_provider.tracer("synapse-core"),
-                ))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(OpenTelemetryLayer::new(
-                    tracer_provider.tracer("synapse-core"),
-                ))
                 .init();
         }
     }
@@ -199,7 +190,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Webhook dispatcher background worker started");
 
     // Initialize metrics (OTLP exporter + pool stats background task)
-    let _metrics_handle = metrics::init_metrics()
+    let metrics_handle = metrics::init_metrics()
         .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
     tracing::info!("Metrics initialized successfully");
     metrics::spawn_pool_metrics_task(pool.clone(), 30);
@@ -335,7 +326,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     // Concurrent processor pool
     let processor_pool = synapse_core::services::processor::ProcessorPool::new(
         pool.clone(),
-        horizon_client,
+        horizon_client.clone(),
         config.processor_workers,
         config.processor_poll_interval_ms,
         config.processor_min_batch,
@@ -367,7 +358,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     }
     tracing::info!("Job scheduler started");
 
-    let app = synapse_core::create_app(app_state);
+    let app = synapse_core::create_app(app_state.clone());
+    let readiness = app_state.readiness.clone();
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =

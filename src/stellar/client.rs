@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Error, Debug)]
 pub enum HorizonError {
@@ -52,8 +51,8 @@ pub struct HorizonClient {
 }
 
 impl HorizonClient {
-    /// Creates a new HorizonClient with the specified base URL and circuit breaker
-    pub fn new(base_url: String, circuit_breaker: CircuitBreaker) -> Self {
+    /// Creates a new HorizonClient with the specified base URL
+    pub fn new(base_url: String) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -119,7 +118,7 @@ impl HorizonClient {
         // Inject W3C traceparent / tracestate into outgoing request headers.
         let mut headers = std::collections::HashMap::new();
         let propagator = TraceContextPropagator::new();
-        let cx = tracing::Span::current().context();
+        let cx = opentelemetry::Context::current();
         propagator.inject_context(&cx, &mut headers);
 
         let result = self

@@ -136,7 +136,7 @@ impl QuotaManager {
             .cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                Ok::<Option<String>, redis::RedisError>(conn.get(&config_key).await?)
+                conn.get(&config_key).await
             })
             .await
             .map_err(redis_cb_err)?;
@@ -200,7 +200,7 @@ impl QuotaManager {
             .cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                Ok::<i64, redis::RedisError>(conn.ttl(&key).await?)
+                conn.ttl(&key).await
             })
             .await
             .map_err(redis_cb_err)?;

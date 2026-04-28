@@ -3,9 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 
 /// Error codes for programmatic error handling
@@ -345,7 +343,7 @@ impl IntoResponse for AppError {
             _ => self.to_string(),
         };
 
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "error": self.to_string(),
             "code": code,
             "status": status.as_u16(),

@@ -228,7 +228,7 @@ fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) ->
     let mut has_critical_failure = false;
     let mut has_non_critical_failure = false;
 
-    for (_name, status) in dependencies {
+    for status in dependencies.values() {
         match status {
             DependencyStatus::Unhealthy { severity, .. } => match severity {
                 DependencySeverity::Critical => has_critical_failure = true,

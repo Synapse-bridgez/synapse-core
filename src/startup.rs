@@ -166,6 +166,7 @@ mod tests {
 
     fn test_config_base() -> Config {
         Config {
+            app_env: crate::config::AppEnv::Development,
             server_port: 3000,
             database_url: "postgres://localhost:5432/test".to_string(),
             database_replica_url: None,
@@ -194,6 +195,7 @@ mod tests {
             processor_min_batch: 10,
             processor_max_batch: 500,
             processor_scaling_factor: 0.5,
+            slow_query_threshold_ms: 1000,
         }
     }
 

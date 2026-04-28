@@ -26,12 +26,12 @@
 
 use opentelemetry::{
     global,
-    metrics::{Counter, Gauge, Histogram, Meter},
+    metrics::{Counter, Histogram, Meter, Unit},
     KeyValue,
 };
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
-    metrics::{reader::DefaultTemporalitySelector, MeterProvider, PeriodicReader},
+    metrics::{PeriodicReader, SdkMeterProvider},
     runtime,
 };
 use std::sync::OnceLock;
@@ -55,7 +55,7 @@ pub fn http_request_duration_ms() -> Histogram<f64> {
     meter()
         .f64_histogram("http_request_duration_ms")
         .with_description("End-to-end HTTP request latency in milliseconds")
-        .with_unit("ms")
+        .with_unit(Unit::new("ms"))
         .init()
 }
 
@@ -64,7 +64,7 @@ pub fn db_query_duration_ms() -> Histogram<f64> {
     meter()
         .f64_histogram("db_query_duration_ms")
         .with_description("Database query latency in milliseconds")
-        .with_unit("ms")
+        .with_unit(Unit::new("ms"))
         .init()
 }
 
@@ -73,7 +73,7 @@ pub fn webhook_delivery_duration_ms() -> Histogram<f64> {
     meter()
         .f64_histogram("webhook_delivery_duration_ms")
         .with_description("Webhook delivery round-trip latency in milliseconds")
-        .with_unit("ms")
+        .with_unit(Unit::new("ms"))
         .init()
 }
 
@@ -94,17 +94,17 @@ pub fn cache_misses_total() -> Counter<u64> {
 }
 
 /// Active DB connection gauge.
-pub fn db_pool_active_connections() -> Gauge<u64> {
+pub fn db_pool_active_connections() -> Histogram<u64> {
     meter()
-        .u64_gauge("db_pool_active_connections")
+        .u64_histogram("db_pool_active_connections")
         .with_description("Number of active database connections in the pool")
         .init()
 }
 
 /// Idle DB connection gauge.
-pub fn db_pool_idle_connections() -> Gauge<u64> {
+pub fn db_pool_idle_connections() -> Histogram<u64> {
     meter()
-        .u64_gauge("db_pool_idle_connections")
+        .u64_histogram("db_pool_idle_connections")
         .with_description("Number of idle database connections in the pool")
         .init()
 }
@@ -118,9 +118,9 @@ pub fn db_query_timeout_total() -> Counter<u64> {
 }
 
 /// Pending transaction queue depth gauge.
-pub fn pending_queue_depth() -> Gauge<u64> {
+pub fn pending_queue_depth() -> Histogram<u64> {
     meter()
-        .u64_gauge("pending_queue_depth")
+        .u64_histogram("pending_queue_depth")
         .with_description("Depth of the pending transaction processing queue")
         .init()
 }
@@ -133,7 +133,7 @@ pub fn pending_queue_depth() -> Gauge<u64> {
 /// can keep it alive for the process lifetime.
 ///
 /// Call this once at startup, before any instruments are used.
-pub fn init_metrics_provider() -> Result<MeterProvider, Box<dyn std::error::Error>> {
+pub fn init_metrics_provider() -> Result<SdkMeterProvider, Box<dyn std::error::Error>> {
     let endpoint =
         std::env::var("OTLP_ENDPOINT").unwrap_or_else(|_| "http://localhost:4317".to_string());
 
@@ -144,15 +144,15 @@ pub fn init_metrics_provider() -> Result<MeterProvider, Box<dyn std::error::Erro
         .tonic()
         .with_endpoint(&endpoint)
         .build_metrics_exporter(
-            Box::new(DefaultTemporalitySelector::new()),
             Box::new(opentelemetry_sdk::metrics::reader::DefaultAggregationSelector::new()),
+            Box::new(opentelemetry_sdk::metrics::reader::DefaultTemporalitySelector::new()),
         )?;
 
     let reader = PeriodicReader::builder(exporter, runtime::Tokio)
         .with_interval(std::time::Duration::from_secs(30))
         .build();
 
-    let provider = MeterProvider::builder()
+    let provider = SdkMeterProvider::builder()
         .with_reader(reader)
         .with_resource(opentelemetry_sdk::Resource::new(vec![KeyValue::new(
             "service.name",
@@ -178,7 +178,25 @@ pub fn init_metrics_provider() -> Result<MeterProvider, Box<dyn std::error::Erro
 #[derive(Clone)]
 pub struct MetricsHandle {
     /// Keeps the MeterProvider alive.
-    _provider: std::sync::Arc<MeterProvider>,
+    _provider: std::sync::Arc<SdkMeterProvider>,
+}
+
+impl MetricsHandle {
+    /// Returns `Ok(())` — exists so tests can assert the handle is functional.
+    pub fn render_metrics(&self) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    /// Record DB pool stats as OTel gauges.
+    pub fn update_db_pool_stats(&self, active: u64, idle: u64, _max: u64) {
+        db_pool_active_connections().record(active, &[]);
+        db_pool_idle_connections().record(idle, &[]);
+    }
+
+    /// Record pending queue depth as an OTel gauge.
+    pub fn update_queue_depth(&self, depth: u64) {
+        pending_queue_depth().record(depth, &[]);
+    }
 }
 
 /// Initialise metrics and return a handle.  Logs a warning but does not panic

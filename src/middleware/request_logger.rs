@@ -12,8 +12,8 @@
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Request},
-    http::{HeaderValue, StatusCode},
+    extract::ConnectInfo,
+    http::{HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::error::RequestId;
 
+#[allow(dead_code)]
 const MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 
 /// Axum middleware function.
@@ -31,7 +32,7 @@ const MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 /// Router::new()
 ///     .layer(axum::middleware::from_fn(request_logger_middleware))
 /// ```
-pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response {
+pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>) -> Response {
     // -----------------------------------------------------------------------
     // 1. Resolve correlation ID
     // -----------------------------------------------------------------------
@@ -81,7 +82,7 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
 
     if log_body {
         let (parts, body) = req.into_parts();
-        let bytes = match axum::body::to_bytes(body, MAX_BODY_LOG_SIZE).await {
+        let bytes = match hyper::body::to_bytes(body).await {
             Ok(b) => b,
             Err(_) => {
                 tracing::warn!(

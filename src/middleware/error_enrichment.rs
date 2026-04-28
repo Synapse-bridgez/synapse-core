@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde_json::{json, Value};
 
@@ -33,11 +33,14 @@ pub async fn error_enrichment_middleware(
         let (parts, body) = response.into_parts();
 
         // Convert body to bytes
-        let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        let bytes = match hyper::body::to_bytes(body).await {
             Ok(b) => b,
             Err(_) => {
                 // If we can't read the body, just return the original response
-                return Ok(Response::from_parts(parts, Body::empty()));
+                return Ok(Response::from_parts(
+                    parts,
+                    axum::body::boxed(hyper::Body::empty()),
+                ));
             }
         };
 
@@ -50,11 +53,17 @@ pub async fn error_enrichment_middleware(
 
             // Serialize back to JSON
             let new_body = serde_json::to_vec(&json_value).unwrap_or(bytes.to_vec());
-            return Ok(Response::from_parts(parts, Body::from(new_body)));
+            return Ok(Response::from_parts(
+                parts,
+                axum::body::boxed(hyper::Body::from(new_body)),
+            ));
         }
 
         // If not JSON, return original response
-        Ok(Response::from_parts(parts, Body::from(bytes)))
+        Ok(Response::from_parts(
+            parts,
+            axum::body::boxed(hyper::Body::from(bytes.to_vec())),
+        ))
     } else {
         // Not an error response, pass through
         Ok(response)

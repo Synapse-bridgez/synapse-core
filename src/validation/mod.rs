@@ -262,7 +262,6 @@ mod tests {
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
-    use std::str::FromStr;
 
     // --- validate_stellar_address ---
 

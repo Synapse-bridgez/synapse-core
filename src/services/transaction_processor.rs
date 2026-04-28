@@ -1,5 +1,4 @@
 use crate::services::webhook_dispatcher::WebhookDispatcher;
-use async_trait::async_trait;
 use sqlx::PgPool;
 use tracing::instrument;
 

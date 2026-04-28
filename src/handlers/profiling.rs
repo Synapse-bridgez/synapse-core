@@ -145,7 +145,7 @@ impl ProfilingManager {
                         session.flamegraph_path = Some(flamegraph_path);
 
                         if let Ok(metadata) =
-                            fs::metadata(&session.flamegraph_path.as_ref().unwrap())
+                            fs::metadata(session.flamegraph_path.as_ref().unwrap())
                         {
                             session.data_size_bytes = Some(metadata.len());
                         }
@@ -225,7 +225,7 @@ impl ProfilingManager {
                         session.flamegraph_path = Some(flamegraph_path);
 
                         if let Ok(metadata) =
-                            fs::metadata(&session.flamegraph_path.as_ref().unwrap())
+                            fs::metadata(session.flamegraph_path.as_ref().unwrap())
                         {
                             session.data_size_bytes = Some(metadata.len());
                         }

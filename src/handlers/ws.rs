@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct TransactionStatusUpdate {
     pub transaction_id: Uuid,
     pub status: String,

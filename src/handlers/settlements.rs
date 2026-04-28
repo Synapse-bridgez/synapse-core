@@ -24,11 +24,26 @@ pub struct SettlementListResponse {
     pub has_more: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/settlements",
+    params(
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i64>, Query, description = "Page size (1-100, default 10)"),
+        ("direction" = Option<String>, Query, description = "\"forward\" (default) or \"backward\""),
+    ),
+    responses(
+        (status = 200, description = "List of settlements", body = SettlementListResponse),
+        (status = 400, description = "Invalid cursor"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "Settlements"
+)]
 pub async fn list_settlements(
     State(state): State<ApiState>,
     Query(params): Query<SettlementListQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let limit = params.limit.unwrap_or(10).min(100).max(1);
+    let limit = params.limit.unwrap_or(10).clamp(1, 100);
     let backward = params.direction.as_deref() == Some("backward");
 
     let decoded_cursor = if let Some(ref c) = params.cursor {
@@ -75,6 +90,19 @@ pub async fn list_settlements(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/settlements/{id}",
+    params(
+        ("id" = Uuid, Path, description = "Settlement ID"),
+    ),
+    responses(
+        (status = 200, description = "Settlement details", body = crate::db::models::Settlement),
+        (status = 404, description = "Settlement not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "Settlements"
+)]
 pub async fn get_settlement(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,

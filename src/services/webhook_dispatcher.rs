@@ -7,11 +7,13 @@
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
+use redis::AsyncCommands;
 use redis::Client;
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
 use sqlx::PgPool;
+use sqlx::Row;
 use uuid::Uuid;
 
 const MAX_ATTEMPTS: i32 = 5;
@@ -428,7 +430,7 @@ impl WebhookDispatcher {
 
         // Check min_amount filter
         if let Some(min_amount_str) = filter_rules.get("min_amount").and_then(|v| v.as_str()) {
-            if let Some(min_amount) = min_amount_str.parse::<f64>().ok() {
+            if let Ok(min_amount) = min_amount_str.parse::<f64>() {
                 if let Some(amount) = amount {
                     if amount < min_amount {
                         return false;
@@ -442,7 +444,7 @@ impl WebhookDispatcher {
 
         // Check max_amount filter
         if let Some(max_amount_str) = filter_rules.get("max_amount").and_then(|v| v.as_str()) {
-            if let Some(max_amount) = max_amount_str.parse::<f64>().ok() {
+            if let Ok(max_amount) = max_amount_str.parse::<f64>() {
                 if let Some(amount) = amount {
                     if amount > max_amount {
                         return false;
@@ -498,7 +500,7 @@ impl WebhookDispatcher {
         const ROLLING_WINDOW: i64 = 100;
         const AUTO_DISABLE_THRESHOLD: f64 = 10.0;
 
-        let row = sqlx::query!(
+        let row = sqlx::query(
             r#"
             SELECT
                 COUNT(*)                                    AS total,
@@ -511,16 +513,16 @@ impl WebhookDispatcher {
                 LIMIT $2
             ) recent
             "#,
-            endpoint_id,
-            ROLLING_WINDOW,
         )
+        .bind(endpoint_id)
+        .bind(ROLLING_WINDOW)
         .fetch_one(&self.pool)
         .await?;
 
-        let total = row.total.unwrap_or(0) as i32;
-        let successes = row.successes.unwrap_or(0) as f64;
+        let total: i64 = row.try_get("total").unwrap_or(0);
+        let successes: i64 = row.try_get("successes").unwrap_or(0);
         let success_rate = if total > 0 {
-            (successes / total as f64) * 100.0
+            (successes as f64 / total as f64) * 100.0
         } else {
             100.0
         };
@@ -551,15 +553,15 @@ impl WebhookDispatcher {
         .await?;
 
         if success_rate < AUTO_DISABLE_THRESHOLD && total >= 100 {
-            let updated = sqlx::query!(
+            let updated = sqlx::query(
                 r#"
                 UPDATE webhook_endpoints
                 SET enabled = FALSE, updated_at = NOW()
                 WHERE id = $1 AND enabled = TRUE
                 RETURNING id
                 "#,
-                endpoint_id,
             )
+            .bind(endpoint_id)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -746,7 +748,7 @@ mod tests {
     #[test]
     fn test_filter_no_rules_accepts_all() {
         let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -769,7 +771,7 @@ mod tests {
     #[test]
     fn test_filter_asset_codes_matches() {
         let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -803,7 +805,7 @@ mod tests {
     #[test]
     fn test_filter_min_amount() {
         let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -832,7 +834,7 @@ mod tests {
     #[test]
     fn test_filter_combined_rules() {
         let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -897,7 +899,7 @@ pub struct EndpointHealth {
 pub async fn list_endpoint_health(
     pool: &PgPool,
 ) -> Result<Vec<EndpointHealth>, crate::error::AppError> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query(
         r#"
         SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
         FROM webhook_endpoints
@@ -910,16 +912,20 @@ pub async fn list_endpoint_health(
 
     Ok(rows
         .into_iter()
-        .map(|r| EndpointHealth {
-            id: r.id,
-            url: r.url,
-            enabled: r.enabled,
-            success_rate: r
-                .success_rate
-                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
-                .unwrap_or(100.0),
-            total_deliveries: r.total_deliveries.unwrap_or(0),
-            last_success_at: r.last_success_at,
+        .map(|r: sqlx::postgres::PgRow| {
+            use sqlx::Row;
+            EndpointHealth {
+                id: r.get("id"),
+                url: r.get("url"),
+                enabled: r.get("enabled"),
+                success_rate: r
+                    .try_get::<sqlx::types::BigDecimal, _>("success_rate")
+                    .ok()
+                    .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                    .unwrap_or(100.0),
+                total_deliveries: r.try_get("total_deliveries").unwrap_or(0),
+                last_success_at: r.try_get("last_success_at").ok(),
+            }
         })
         .collect())
 }
@@ -929,14 +935,14 @@ pub async fn get_endpoint_health(
     pool: &PgPool,
     endpoint_id: Uuid,
 ) -> Result<EndpointHealth, crate::error::AppError> {
-    let r = sqlx::query!(
+    let r = sqlx::query(
         r#"
         SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
         FROM webhook_endpoints
         WHERE id = $1
         "#,
-        endpoint_id,
     )
+    .bind(endpoint_id)
     .fetch_optional(pool)
     .await
     .map_err(crate::error::AppError::Database)?
@@ -944,15 +950,17 @@ pub async fn get_endpoint_health(
         crate::error::AppError::NotFound(format!("Endpoint {} not found", endpoint_id))
     })?;
 
+    use sqlx::Row;
     Ok(EndpointHealth {
-        id: r.id,
-        url: r.url,
-        enabled: r.enabled,
+        id: r.get("id"),
+        url: r.get("url"),
+        enabled: r.get("enabled"),
         success_rate: r
-            .success_rate
+            .try_get::<sqlx::types::BigDecimal, _>("success_rate")
+            .ok()
             .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
             .unwrap_or(100.0),
-        total_deliveries: r.total_deliveries.unwrap_or(0),
-        last_success_at: r.last_success_at,
+        total_deliveries: r.try_get("total_deliveries").unwrap_or(0),
+        last_success_at: r.try_get("last_success_at").ok(),
     })
 }

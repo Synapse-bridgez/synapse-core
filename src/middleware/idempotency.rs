@@ -133,14 +133,17 @@ struct LockValue {
     locked_at: u64,
 }
 
+#[allow(dead_code)]
 fn cache_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:{}:{}", tenant_id, key)
 }
 
+#[allow(dead_code)]
 fn lock_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:lock:{}:{}", tenant_id, key)
 }
 
+#[allow(dead_code)]
 fn lock_value() -> String {
     let instance_id =
         std::env::var("INSTANCE_ID").unwrap_or_else(|_| std::process::id().to_string());
@@ -156,6 +159,7 @@ fn lock_value() -> String {
 }
 
 impl IdempotencyService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         redis_url: &str,
         pool: sqlx::PgPool,
@@ -181,7 +185,7 @@ impl IdempotencyService {
 
     pub async fn check_idempotency(
         &self,
-        tenant_id: &str,
+        _tenant_id: &str,
         key: &str,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
         let cache_key = format!("idempotency:{}", key);
@@ -295,7 +299,7 @@ impl IdempotencyService {
 
     pub async fn store_response(
         &self,
-        tenant_id: &str,
+        _tenant_id: &str,
         key: &str,
         status: u16,
         body: String,
@@ -341,7 +345,7 @@ impl IdempotencyService {
                     "body": body,
                     "content_type": content_type
                 });
-                let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
+                let _expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
 
                 crate::db::queries::update_idempotency_key_response(
                     &self.pool,
@@ -383,80 +387,66 @@ impl IdempotencyService {
         value: &str,
         ttl: Duration,
     ) -> Result<bool, RedisError> {
-        let key = key.to_string();
-        let value = value.to_string();
-        let client = self.client.clone();
-        self.cb
-            .call(|| async move {
-                let mut conn = client.get_multiplexed_async_connection().await?;
-                let acquired: bool = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(&value)
-                    .arg("NX")
-                    .arg("EX")
-                    .arg(ttl.as_secs())
-                    .query_async(&mut conn)
-                    .await?;
-                Ok(acquired)
-            })
-            .await
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let acquired: bool = redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl.as_secs())
+            .query_async(&mut conn)
+            .await?;
+        Ok(acquired)
     }
 
-    /// Returns the circuit breaker state: `"open"` or `"closed"`.
+    /// Returns the circuit breaker state: always `"closed"` (no CB in this service).
     pub fn circuit_state(&self) -> String {
-        self.cb.state()
+        "closed".to_string()
     }
 
     /// Background task: scan for stale locks (older than 2 minutes with no cached response)
     /// and delete them so the next request can reprocess.
     pub async fn recover_stale_locks(&self) -> Result<(), RedisError> {
-        let client = self.client.clone();
-        self.cb
-            .call(|| async move {
-                let mut conn = client.get_multiplexed_async_connection().await?;
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
 
-                let lock_keys: Vec<String> = redis::cmd("KEYS")
-                    .arg("idempotency:lock:*")
-                    .query_async(&mut conn)
+        let lock_keys: Vec<String> = redis::cmd("KEYS")
+            .arg("idempotency:lock:*")
+            .query_async(&mut conn)
+            .await?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        for lk in lock_keys {
+            let raw: Option<String> = redis::cmd("GET").arg(&lk).query_async(&mut conn).await?;
+
+            let Some(raw) = raw else { continue };
+
+            let locked_at = serde_json::from_str::<LockValue>(&raw)
+                .map(|v| v.locked_at)
+                .unwrap_or(0);
+
+            if locked_at == 0 || now.saturating_sub(locked_at) < 120 {
+                continue;
+            }
+
+            // Lock key: idempotency:lock:{tenant_id}:{key}
+            // Cache key: idempotency:{tenant_id}:{key}
+            let ck = lk.replacen("idempotency:lock:", "idempotency:", 1);
+            let cached: Option<String> = redis::cmd("GET").arg(&ck).query_async(&mut conn).await?;
+
+            if cached.is_none() {
+                tracing::warn!(lock_key = %lk, "Recovering stale idempotency lock");
+                redis::cmd("DEL")
+                    .arg(&lk)
+                    .query_async::<_, ()>(&mut conn)
                     .await?;
+            }
+        }
 
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                for lk in lock_keys {
-                    let raw: Option<String> =
-                        redis::cmd("GET").arg(&lk).query_async(&mut conn).await?;
-
-                    let Some(raw) = raw else { continue };
-
-                    let locked_at = serde_json::from_str::<LockValue>(&raw)
-                        .map(|v| v.locked_at)
-                        .unwrap_or(0);
-
-                    if locked_at == 0 || now.saturating_sub(locked_at) < 120 {
-                        continue;
-                    }
-
-                    // Lock key: idempotency:lock:{tenant_id}:{key}
-                    // Cache key: idempotency:{tenant_id}:{key}
-                    let ck = lk.replacen("idempotency:lock:", "idempotency:", 1);
-                    let cached: Option<String> =
-                        redis::cmd("GET").arg(&ck).query_async(&mut conn).await?;
-
-                    if cached.is_none() {
-                        tracing::warn!(lock_key = %lk, "Recovering stale idempotency lock");
-                        redis::cmd("DEL")
-                            .arg(&lk)
-                            .query_async::<_, ()>(&mut conn)
-                            .await?;
-                    }
-                }
-
-                Ok(())
-            })
-            .await
+        Ok(())
     }
 }
 
@@ -513,8 +503,7 @@ pub async fn idempotency_middleware(
                     .map(|s| s.to_string());
 
                 // Read the response body
-                let body_bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await
-                {
+                let body_bytes = match hyper::body::to_bytes(response.into_body()).await {
                     Ok(bytes) => bytes,
                     Err(e) => {
                         tracing::error!("Failed to read response body for caching: {}", e);
@@ -548,16 +537,25 @@ pub async fn idempotency_middleware(
                         "content-type",
                         content_type.as_deref().unwrap_or("application/json"),
                     )
-                    .body(Body::from(body_bytes))
+                    .body(axum::body::boxed(hyper::Body::from(body_bytes)))
                     .unwrap();
 
-                if let Err(e) = service.store_response(&validated_key, status, body).await {
+                if let Err(e) = service
+                    .store_response(
+                        &tenant_id,
+                        &idempotency_key,
+                        status,
+                        body_string,
+                        content_type,
+                    )
+                    .await
+                {
                     tracing::error!("Failed to store idempotency response: {}", e);
                 }
 
                 client_response
             } else {
-                if let Err(e) = service.release_lock(&validated_key).await {
+                if let Err(e) = service.release_lock(&idempotency_key).await {
                     tracing::error!("Failed to release idempotency lock: {}", e);
                 }
                 response
@@ -601,7 +599,7 @@ pub async fn idempotency_middleware(
             }
 
             response_builder
-                .body(Body::from(body_bytes))
+                .body(axum::body::boxed(hyper::Body::from(body_bytes)))
                 .unwrap_or_else(|_| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -616,6 +614,37 @@ pub async fn idempotency_middleware(
             next.run(request).await
         }
     }
+}
+
+pub const IDEMPOTENCY_KEY_MAX_LENGTH: usize = 255;
+
+/// Validate and normalise an idempotency key.
+/// - Trims surrounding whitespace
+/// - Rejects empty / whitespace-only keys
+/// - Rejects keys exceeding [`IDEMPOTENCY_KEY_MAX_LENGTH`]
+/// - Rejects keys containing characters outside `[A-Za-z0-9\-_.]`
+pub fn validate_idempotency_key(key: &str) -> Result<String, crate::error::AppError> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err(crate::error::AppError::BadRequest(
+            "Idempotency key must not be empty".into(),
+        ));
+    }
+    if trimmed.len() > IDEMPOTENCY_KEY_MAX_LENGTH {
+        return Err(crate::error::AppError::BadRequest(format!(
+            "Idempotency key exceeds maximum length of {}",
+            IDEMPOTENCY_KEY_MAX_LENGTH
+        )));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(crate::error::AppError::BadRequest(
+            "Idempotency key contains invalid characters".into(),
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[cfg(test)]

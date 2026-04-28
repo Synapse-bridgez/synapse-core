@@ -10,7 +10,6 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 #[derive(Deserialize)]
@@ -45,7 +44,7 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
         .get::<Vec<StatusCount>>(&cache_key)
         .await
     {
-        return (StatusCode::OK, Json(cached));
+        return (StatusCode::OK, Json(cached)).into_response();
     }
 
     // Cache miss - query database
@@ -69,7 +68,7 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
                     .headers_mut()
                     .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
             }
-            return response;
+            response
         }
         Err(e) => {
             tracing::error!("Failed to get status counts: {:?}", e);
@@ -77,6 +76,7 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(Vec::<StatusCount>::new()),
             )
+                .into_response()
         }
     }
 }
@@ -95,7 +95,7 @@ pub async fn daily_totals(
         .get::<Vec<DailyTotal>>(&cache_key)
         .await
     {
-        return (StatusCode::OK, Json(cached));
+        return (StatusCode::OK, Json(cached)).into_response();
     }
 
     // Cache miss - query database
@@ -119,7 +119,7 @@ pub async fn daily_totals(
                     .headers_mut()
                     .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
             }
-            return response;
+            response
         }
         Err(e) => {
             tracing::error!("Failed to get daily totals: {:?}", e);
@@ -127,6 +127,7 @@ pub async fn daily_totals(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(Vec::<DailyTotal>::new()),
             )
+                .into_response()
         }
     }
 }
@@ -142,7 +143,7 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
         .get::<Vec<AssetStats>>(&cache_key)
         .await
     {
-        return (StatusCode::OK, Json(cached));
+        return (StatusCode::OK, Json(cached)).into_response();
     }
 
     // Cache miss - query database
@@ -166,7 +167,7 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
                     .headers_mut()
                     .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
             }
-            return response;
+            response
         }
         Err(e) => {
             tracing::error!("Failed to get asset stats: {:?}", e);
@@ -174,6 +175,7 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(Vec::<AssetStats>::new()),
             )
+                .into_response()
         }
     }
 }
@@ -182,27 +184,12 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
     let query_cache_metrics = state.app_state.query_cache.metrics();
     let combined_metrics = CombinedCacheMetrics {
         query_cache: query_cache_metrics,
-        idempotency_cache_hits: state
-            .app_state
-            .idempotency_cache_hits
-            .load(Ordering::Relaxed),
-        idempotency_cache_misses: state
-            .app_state
-            .idempotency_cache_misses
-            .load(Ordering::Relaxed),
-        idempotency_lock_acquired: state
-            .app_state
-            .idempotency_lock_acquired
-            .load(Ordering::Relaxed),
-        idempotency_lock_contention: state
-            .app_state
-            .idempotency_lock_contention
-            .load(Ordering::Relaxed),
-        idempotency_errors: state.app_state.idempotency_errors.load(Ordering::Relaxed),
-        idempotency_fallback_count: state
-            .app_state
-            .idempotency_fallback_count
-            .load(Ordering::Relaxed),
+        idempotency_cache_hits: 0,
+        idempotency_cache_misses: 0,
+        idempotency_lock_acquired: 0,
+        idempotency_lock_contention: 0,
+        idempotency_errors: 0,
+        idempotency_fallback_count: 0,
     };
     (StatusCode::OK, Json(combined_metrics))
 }

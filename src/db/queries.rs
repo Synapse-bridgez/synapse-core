@@ -1,6 +1,5 @@
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
-use crate::db::slow_query;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -249,6 +248,63 @@ pub async fn list_transactions(
                 rows.reverse();
                 Ok(rows)
             }
+        },
+    )
+    .await
+}
+
+pub async fn list_transactions_filtered(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+) -> Result<Vec<Transaction>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions [filtered cursor-paginated]",
+        async {
+            // Build dynamic query with optional date filters
+            let mut conditions: Vec<String> = Vec::new();
+            if let Some(from) = from_date {
+                conditions.push(format!("created_at >= '{}'", from.to_rfc3339()));
+            }
+            if let Some(to) = to_date {
+                conditions.push(format!("created_at <= '{}'", to.to_rfc3339()));
+            }
+            if let Some((ts, id)) = cursor {
+                if !backward {
+                    conditions.push(format!(
+                        "(created_at, id) < ('{}', '{}')",
+                        ts.to_rfc3339(),
+                        id
+                    ));
+                } else {
+                    conditions.push(format!(
+                        "(created_at, id) > ('{}', '{}')",
+                        ts.to_rfc3339(),
+                        id
+                    ));
+                }
+            }
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+            let order = if backward { "ASC" } else { "DESC" };
+            let sql = format!(
+                "SELECT * FROM transactions {} ORDER BY created_at {}, id {} LIMIT {}",
+                where_clause, order, order, limit
+            );
+            let mut rows = sqlx::query_as::<_, Transaction>(&sql)
+                .fetch_all(pool)
+                .await?;
+            if backward {
+                rows.reverse();
+            }
+            Ok(rows)
         },
     )
     .await
@@ -1051,7 +1107,7 @@ pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
 
 // --- Idempotency Fallback Queries ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct IdempotencyKey {
     pub key: String,
     pub status: String,
