@@ -13,7 +13,6 @@ pub mod services;
 pub mod startup;
 pub mod stellar;
 pub mod telemetry;
-#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
 pub mod tenant;
 pub mod utils;
 pub mod validation;

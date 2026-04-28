@@ -3,6 +3,12 @@ name = "synapse-core"
 version = "0.1.0"
 edition = "2021"
 
+[lints.rust]
+dead_code = "warn"
+
+[lints.clippy]
+too_many_arguments = "warn"
+
 [lib]
 name = "synapse_core"
 path = "src/lib.rs"
