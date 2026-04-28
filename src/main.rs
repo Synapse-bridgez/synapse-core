@@ -293,6 +293,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
+        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // Load tenant configs on startup

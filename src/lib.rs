@@ -34,7 +34,7 @@ use axum::{
     Router,
 };
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -59,6 +59,8 @@ pub struct AppState {
     pub current_batch_size: Arc<AtomicU64>,
     /// Prometheus metrics handle
     pub metrics_handle: crate::metrics::MetricsHandle,
+    /// Active WebSocket connection count
+    pub ws_connection_count: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -97,6 +99,7 @@ impl AppState {
             pending_queue_depth: Arc::new(AtomicU64::new(0)),
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
+            ws_connection_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
