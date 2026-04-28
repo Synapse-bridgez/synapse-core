@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
 use reqwest::StatusCode;
-use serde_json::json;
 use sqlx::types::BigDecimal;
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
+use std::str::FromStr;
 use synapse_core::db::pool_manager::PoolManager;
 use synapse_core::services::feature_flags::FeatureFlagService;
 use synapse_core::{create_app, AppState};
@@ -29,7 +29,9 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
-    let pool_manager = PoolManager::new(pool.clone(), None);
+    let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
+    let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
+    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -37,18 +39,32 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         horizon_client: synapse_core::stellar::HorizonClient::new(
             "https://horizon-testnet.stellar.org".to_string(),
         ),
-        feature_flags: FeatureFlagService::new(false),
+        feature_flags: FeatureFlagService::new(pool.clone()),
         redis_url: "redis://localhost:6379".to_string(),
         start_time: std::time::Instant::now(),
         readiness: synapse_core::ReadinessState::new(),
+        tx_broadcast,
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+        profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
     };
     let app = create_app(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let std_listener = listener.into_std().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::Server::from_tcp(std_listener)
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
     });
 
     let base_url = format!("http://{}", addr);
@@ -60,107 +76,108 @@ async fn seed_test_data(pool: &PgPool) {
     let now = Utc::now();
 
     // Transaction 1: USD, pending, recent
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GABC1111111111",
-        BigDecimal::from(100),
-        "USD",
-        "pending",
-        now - Duration::hours(1),
-        now - Duration::hours(1),
     )
+    .bind(Uuid::new_v4())
+    .bind("GABC1111111111")
+    .bind(BigDecimal::from_str("100").unwrap())
+    .bind("USD")
+    .bind("pending")
+    .bind(now - Duration::hours(1))
+    .bind(now - Duration::hours(1))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 2: USD, completed, older
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GDEF2222222222",
-        BigDecimal::from(250),
-        "USD",
-        "completed",
-        now - Duration::days(2),
-        now - Duration::days(2),
     )
+    .bind(Uuid::new_v4())
+    .bind("GDEF2222222222")
+    .bind(BigDecimal::from_str("250").unwrap())
+    .bind("USD")
+    .bind("completed")
+    .bind(now - Duration::days(2))
+    .bind(now - Duration::days(2))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 3: EUR, completed, recent
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GHIJ3333333333",
-        BigDecimal::from(500),
-        "EUR",
-        "completed",
-        now - Duration::hours(2),
-        now - Duration::hours(2),
     )
+    .bind(Uuid::new_v4())
+    .bind("GHIJ3333333333")
+    .bind(BigDecimal::from_str("500").unwrap())
+    .bind("EUR")
+    .bind("completed")
+    .bind(now - Duration::hours(2))
+    .bind(now - Duration::hours(2))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 4: USD, failed, older
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GKLM4444444444",
-        BigDecimal::from(75),
-        "USD",
-        "failed",
-        now - Duration::days(5),
-        now - Duration::days(5),
     )
+    .bind(Uuid::new_v4())
+    .bind("GKLM4444444444")
+    .bind(BigDecimal::from_str("75").unwrap())
+    .bind("USD")
+    .bind("failed")
+    .bind(now - Duration::days(5))
+    .bind(now - Duration::days(5))
     .execute(pool)
     .await
     .unwrap();
 
     // Transaction 5: USDC, completed, mid-range
-    sqlx::query!(
+    sqlx::query(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
-        Uuid::new_v4(),
-        "GNOP5555555555",
-        BigDecimal::from(1000),
-        "USDC",
-        "completed",
-        now - Duration::days(1),
-        now - Duration::days(1),
     )
+    .bind(Uuid::new_v4())
+    .bind("GNOP5555555555")
+    .bind(BigDecimal::from_str("1000").unwrap())
+    .bind("USDC")
+    .bind("completed")
+    .bind(now - Duration::days(1))
+    .bind(now - Duration::days(1))
     .execute(pool)
     .await
     .unwrap();
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_by_status() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -169,7 +186,7 @@ async fn test_search_by_status() {
 
     // Search for completed transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("status", "completed")])
         .send()
         .await
@@ -188,6 +205,7 @@ async fn test_search_by_status() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_by_asset_code() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -196,7 +214,7 @@ async fn test_search_by_asset_code() {
 
     // Search for USD transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("asset_code", "USD")])
         .send()
         .await
@@ -214,6 +232,7 @@ async fn test_search_by_asset_code() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_by_date_range() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -226,7 +245,7 @@ async fn test_search_by_date_range() {
     let to = now.to_rfc3339();
 
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("from", &from), ("to", &to)])
         .send()
         .await
@@ -240,6 +259,7 @@ async fn test_search_by_date_range() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_pagination() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -248,7 +268,7 @@ async fn test_search_pagination() {
 
     // First page with limit 2
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "2")])
         .send()
         .await
@@ -264,7 +284,7 @@ async fn test_search_pagination() {
 
     // Second page using cursor
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "2"), ("cursor", cursor)])
         .send()
         .await
@@ -296,6 +316,7 @@ async fn test_search_pagination() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_empty_results() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -304,7 +325,7 @@ async fn test_search_empty_results() {
 
     // Search for non-existent asset code
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("asset_code", "XYZ")])
         .send()
         .await
@@ -319,6 +340,7 @@ async fn test_search_empty_results() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_invalid_parameters() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -327,7 +349,7 @@ async fn test_search_invalid_parameters() {
 
     // Invalid date format
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("from", "invalid-date")])
         .send()
         .await
@@ -339,7 +361,7 @@ async fn test_search_invalid_parameters() {
 
     // Invalid cursor
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("cursor", "invalid-cursor")])
         .send()
         .await
@@ -351,7 +373,7 @@ async fn test_search_invalid_parameters() {
 
     // Invalid min_amount
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("min_amount", "not-a-number")])
         .send()
         .await
@@ -363,6 +385,7 @@ async fn test_search_invalid_parameters() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_combined_filters() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -371,7 +394,7 @@ async fn test_search_combined_filters() {
 
     // Search for completed USD transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("status", "completed"), ("asset_code", "USD")])
         .send()
         .await
@@ -390,6 +413,7 @@ async fn test_search_combined_filters() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_by_stellar_account() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -398,7 +422,7 @@ async fn test_search_by_stellar_account() {
 
     // Search for specific stellar account
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("stellar_account", "GABC1111111111")])
         .send()
         .await
@@ -412,6 +436,7 @@ async fn test_search_by_stellar_account() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_with_amount_range() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -420,7 +445,7 @@ async fn test_search_with_amount_range() {
 
     // Search for transactions between 100 and 500
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("min_amount", "100"), ("max_amount", "500")])
         .send()
         .await
@@ -434,11 +459,12 @@ async fn test_search_with_amount_range() {
 
     for tx in response["results"].as_array().unwrap() {
         let amount: f64 = tx["amount"].as_str().unwrap().parse().unwrap();
-        assert!(amount >= 100.0 && amount <= 500.0);
+        assert!((100.0..=500.0).contains(&amount));
     }
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_limit_boundaries() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -447,7 +473,7 @@ async fn test_search_limit_boundaries() {
 
     // Test with limit 1
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "1")])
         .send()
         .await
@@ -460,7 +486,7 @@ async fn test_search_limit_boundaries() {
 
     // Test with limit exceeding max (should cap at 100)
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "200")])
         .send()
         .await
@@ -473,6 +499,7 @@ async fn test_search_limit_boundaries() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_no_next_cursor_on_last_page() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -481,7 +508,7 @@ async fn test_search_no_next_cursor_on_last_page() {
 
     // Request all results with high limit
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "100")])
         .send()
         .await
@@ -495,6 +522,7 @@ async fn test_search_no_next_cursor_on_last_page() {
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
 async fn test_search_ordering() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
@@ -503,7 +531,7 @@ async fn test_search_ordering() {
 
     // Get all transactions
     let res = client
-        .get(&format!("{}/transactions/search", base_url))
+        .get(format!("{}/transactions/search", base_url))
         .query(&[("limit", "100")])
         .send()
         .await

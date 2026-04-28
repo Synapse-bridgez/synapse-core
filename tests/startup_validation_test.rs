@@ -1,7 +1,7 @@
-use sqlx::{migrate::Migrator, PgPool};
+use sqlx::{migrate::Migrator, ConnectOptions, PgPool};
 use std::path::Path;
 use synapse_core::config::{AllowedIps, Config, LogFormat};
-use synapse_core::startup::{validate_environment, ValidationReport};
+use synapse_core::startup::validate_environment;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
@@ -21,6 +21,7 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
         allowed_ips: AllowedIps::Any,
         backup_dir: "./backups".to_string(),
         backup_encryption_key: None,
+        otlp_endpoint: None,
     }
 }
 
@@ -45,6 +46,7 @@ async fn setup_test_database() -> (PgPool, impl std::any::Any) {
     (pool, container)
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_all_healthy() {
     // Setup test database
@@ -75,6 +77,7 @@ async fn test_validation_all_healthy() {
     report.print();
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_database_unavailable() {
     // Use an invalid database URL
@@ -108,6 +111,7 @@ async fn test_validation_database_unavailable() {
     report.print();
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_redis_unavailable() {
     // Setup valid database
@@ -136,6 +140,7 @@ async fn test_validation_redis_unavailable() {
     report.print();
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_horizon_unavailable() {
     // Setup valid database
@@ -166,6 +171,7 @@ async fn test_validation_horizon_unavailable() {
     report.print();
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_report_generation() {
     // Setup test database
@@ -201,13 +207,14 @@ async fn test_validation_report_generation() {
     }
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_empty_database_url() {
     // Setup test database for pool
     let (pool, _container) = setup_test_database().await;
 
     // Create config with empty database URL
-    let mut config = create_test_config(
+    let config = create_test_config(
         String::new(),
         "redis://127.0.0.1:6379".to_string(),
         "https://horizon-testnet.stellar.org".to_string(),
@@ -229,6 +236,7 @@ async fn test_validation_empty_database_url() {
     report.print();
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_invalid_horizon_url_format() {
     // Setup test database
@@ -255,6 +263,7 @@ async fn test_validation_invalid_horizon_url_format() {
     report.print();
 }
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_validation_multiple_failures() {
     // Setup test database

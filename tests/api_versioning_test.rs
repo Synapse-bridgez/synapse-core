@@ -26,6 +26,7 @@ async fn test_api_versioning_headers() {
     migrator.run(&pool).await.unwrap();
 
     let (tx, _rx) = tokio::sync::broadcast::channel(100);
+    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
     // Start App
     let app_state = AppState {
@@ -41,6 +42,14 @@ async fn test_api_versioning_headers() {
         start_time: std::time::Instant::now(),
         readiness: synapse_core::ReadinessState::new(),
         tx_broadcast: tx,
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+        profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
     };
     let app = create_app(app_state);
 

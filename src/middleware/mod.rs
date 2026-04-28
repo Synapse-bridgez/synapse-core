@@ -1,4 +1,9 @@
 pub mod auth;
+pub mod error_enrichment;
 pub mod idempotency;
 pub mod ip_filter;
+pub mod panic_recovery;
+pub mod quota;
+pub mod request_logger;
+pub mod validate;
 pub mod versioning;

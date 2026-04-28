@@ -7,6 +7,7 @@ use synapse_core::services::feature_flags::FeatureFlagService;
 use synapse_core::{create_app, AppState};
 use tokio::net::TcpListener;
 
+#[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_graphql_queries() {
     let database_url = match std::env::var("DATABASE_URL") {
@@ -57,6 +58,7 @@ async fn test_graphql_queries() {
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();
+    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -69,6 +71,14 @@ async fn test_graphql_queries() {
         start_time: std::time::Instant::now(),
         tx_broadcast,
         readiness,
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+        profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
     };
     let app = create_app(app_state);
 

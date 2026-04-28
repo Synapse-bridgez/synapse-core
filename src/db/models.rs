@@ -21,6 +21,7 @@ pub struct Transaction {
     pub memo: Option<String>,
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub tenant_id: Option<Uuid>,
 }
 
 #[async_graphql::Object]
@@ -94,6 +95,7 @@ impl Transaction {
             memo,
             memo_type,
             metadata,
+            tenant_id: None,
         }
     }
 }
@@ -109,6 +111,10 @@ pub struct Settlement {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub dispute_reason: Option<String>,
+    pub original_total_amount: Option<BigDecimal>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
 }
 
 #[async_graphql::Object]
@@ -208,6 +214,7 @@ mod tests {
         pool
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_insert_and_query_transaction() {
         let pool = setup_test_db().await;
@@ -272,6 +279,7 @@ mod tests {
         assert_eq!(fetched.callback_status, callback_status);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_insert_transaction() {
         let pool = setup_test_db().await;
@@ -292,6 +300,7 @@ mod tests {
         assert_eq!(inserted.stellar_account, tx.stellar_account);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_get_transaction() {
         let pool = setup_test_db().await;
@@ -315,6 +324,7 @@ mod tests {
         assert_eq!(fetched.id, inserted.id);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_list_transactions() {
         let pool = setup_test_db().await;
