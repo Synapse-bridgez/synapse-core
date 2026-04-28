@@ -67,11 +67,7 @@ impl QueryTier {
 /// On timeout the counter `DB_QUERY_TIMEOUT_TOTAL` is incremented, the
 /// sanitised SQL label is logged (no parameter values), and the connection is
 /// dropped so the pool can reclaim it rather than leaving it in a hung state.
-pub async fn with_timeout<F, T>(
-    tier: QueryTier,
-    sql_label: &str,
-    fut: F,
-) -> Result<T>
+pub async fn with_timeout<F, T>(tier: QueryTier, sql_label: &str, fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
@@ -200,6 +196,8 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
             Ok(result)
         }),
     )
+    .await
+}
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     with_timeout(
@@ -764,6 +762,177 @@ mod tests {
             "Counter should not change for a fast query"
         );
     }
+}
+
+// --- Audit Log Search Query ---
+
+/// Parameters for searching audit logs across all entities.
+#[derive(Debug, Default)]
+pub struct AuditSearchParams<'a> {
+    pub actor: Option<&'a str>,
+    pub action: Option<&'a str>,
+    pub from_date: Option<DateTime<Utc>>,
+    pub to_date: Option<DateTime<Utc>>,
+    pub entity_type: Option<&'a str>,
+    pub limit: i64,
+    /// Cursor: (timestamp, id) of the last seen row for keyset pagination.
+    pub cursor: Option<(DateTime<Utc>, Uuid)>,
+}
+
+/// A single row returned by the audit search query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLogRow {
+    pub id: Uuid,
+    pub entity_id: Uuid,
+    pub entity_type: String,
+    pub action: String,
+    pub old_val: Option<serde_json::Value>,
+    pub new_val: Option<serde_json::Value>,
+    pub actor: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Search audit logs with optional filters and cursor-based pagination.
+/// Returns `(total_count, rows)`.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_audit_logs(
+    pool: &PgPool,
+    params: &AuditSearchParams<'_>,
+) -> Result<(i64, Vec<AuditLogRow>)> {
+    with_timeout(
+        QueryTier::Read,
+        "search_audit_logs [dynamic WHERE clause]",
+        async {
+            let mut conditions: Vec<String> = Vec::new();
+            let mut p = 1usize;
+
+            if params.actor.is_some() {
+                conditions.push(format!("actor = ${p}"));
+                p += 1;
+            }
+            if params.action.is_some() {
+                conditions.push(format!("action = ${p}"));
+                p += 1;
+            }
+            if params.from_date.is_some() {
+                conditions.push(format!("timestamp >= ${p}"));
+                p += 1;
+            }
+            if params.to_date.is_some() {
+                conditions.push(format!("timestamp <= ${p}"));
+                p += 1;
+            }
+            if params.entity_type.is_some() {
+                conditions.push(format!("entity_type = ${p}"));
+                p += 1;
+            }
+            if params.cursor.is_some() {
+                conditions.push(format!("(timestamp, id) < (${p}, ${})", p + 1));
+                p += 2;
+            }
+
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+
+            // Bind helper — avoids repeating the bind sequence twice.
+            macro_rules! bind_filters {
+                ($q:expr) => {{
+                    let mut q = $q;
+                    if let Some(v) = params.actor {
+                        q = q.bind(v);
+                    }
+                    if let Some(v) = params.action {
+                        q = q.bind(v);
+                    }
+                    if let Some(v) = params.from_date {
+                        q = q.bind(v);
+                    }
+                    if let Some(v) = params.to_date {
+                        q = q.bind(v);
+                    }
+                    if let Some(v) = params.entity_type {
+                        q = q.bind(v);
+                    }
+                    if let Some((ts, id)) = params.cursor {
+                        q = q.bind(ts).bind(id);
+                    }
+                    q
+                }};
+            }
+
+            // Total count (ignores cursor so the caller always gets the full
+            // result-set size for the given filters).
+            let count_sql = format!(
+                "SELECT COUNT(*) FROM audit_logs {}",
+                // Strip cursor condition from count query
+                if conditions.is_empty() {
+                    String::new()
+                } else {
+                    let non_cursor: Vec<_> = conditions
+                        .iter()
+                        .filter(|c| !c.contains("timestamp, id"))
+                        .cloned()
+                        .collect();
+                    if non_cursor.is_empty() {
+                        String::new()
+                    } else {
+                        format!("WHERE {}", non_cursor.join(" AND "))
+                    }
+                }
+            );
+
+            // Re-bind without cursor for count
+            let mut count_q = sqlx::query(&count_sql);
+            if let Some(v) = params.actor {
+                count_q = count_q.bind(v);
+            }
+            if let Some(v) = params.action {
+                count_q = count_q.bind(v);
+            }
+            if let Some(v) = params.from_date {
+                count_q = count_q.bind(v);
+            }
+            if let Some(v) = params.to_date {
+                count_q = count_q.bind(v);
+            }
+            if let Some(v) = params.entity_type {
+                count_q = count_q.bind(v);
+            }
+
+            let total: i64 = count_q.fetch_one(pool).await?.try_get(0)?;
+
+            // Data query with cursor + limit
+            let data_sql = format!(
+                "SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp \
+                 FROM audit_logs {where_clause} \
+                 ORDER BY timestamp DESC, id DESC \
+                 LIMIT ${p}"
+            );
+
+            let data_q = bind_filters!(sqlx::query(&data_sql)).bind(params.limit);
+            let rows = data_q.fetch_all(pool).await?;
+
+            let logs = rows
+                .into_iter()
+                .map(|row| AuditLogRow {
+                    id: row.get("id"),
+                    entity_id: row.get("entity_id"),
+                    entity_type: row.get("entity_type"),
+                    action: row.get("action"),
+                    old_val: row.get("old_val"),
+                    new_val: row.get("new_val"),
+                    actor: row.get("actor"),
+                    timestamp: row.get("timestamp"),
+                })
+                .collect();
+
+            Ok((total, logs))
+        },
+    )
+    .await
 }
 
 // --- Audit Log Queries ---
