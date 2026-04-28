@@ -33,6 +33,7 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
+use tower_http::limit::RequestBodyLimitLayer;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -124,24 +125,34 @@ pub fn create_app(app_state: AppState) -> Router {
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::api_key_auth,
+        ))
+        .layer(axum::Extension(app_state.db.clone()))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
-        ));
+        ))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MB
 
     // Webhook route with validation + quota middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::api_key_auth,
+        ))
+        .layer(axum::Extension(app_state.db.clone()))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
-        ));
+        ))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MB
 
     // Core API routes (shared between versioned and unversioned)
     let core_routes = Router::new()

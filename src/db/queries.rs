@@ -94,6 +94,18 @@ where
 
 // --- Tenant Queries --------------------------------------------------------
 
+/// Look up whether an API key exists and belongs to an active tenant.
+/// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
+pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1",
+    )
+    .bind(api_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
     let configs = sqlx::query_as::<_, TenantConfig>(
         "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
