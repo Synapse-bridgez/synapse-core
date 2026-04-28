@@ -1,5 +1,9 @@
 use redis::{AsyncCommands, Client, Script};
-use std::time::Duration;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -7,6 +11,73 @@ use uuid::Uuid;
 const LEADER_KEY: &str = "processor:leader";
 const LEADER_LEASE_SECS: u64 = 30;
 const HEARTBEAT_TTL_SECS: u64 = 45;
+
+// ---------------------------------------------------------------------------
+// Active lock registry
+// ---------------------------------------------------------------------------
+
+/// Metadata about a currently-held lock, exposed via the admin endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveLockInfo {
+    pub resource: String,
+    pub token: String,
+    pub acquired_at: u64, // Unix timestamp (secs)
+    pub ttl_secs: u64,
+    pub expected_duration_secs: u64,
+    pub overdue: bool,
+}
+
+/// Shared registry of all currently-held locks in this process.
+#[derive(Clone, Default)]
+pub struct LockRegistry {
+    inner: Arc<RwLock<HashMap<String, ActiveLockInfo>>>,
+}
+
+impl LockRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn register(&self, info: ActiveLockInfo) {
+        self.inner.write().await.insert(info.token.clone(), info);
+    }
+
+    async fn deregister(&self, token: &str) {
+        self.inner.write().await.remove(token);
+    }
+
+    /// Snapshot of all active locks, with `overdue` flag refreshed.
+    pub async fn snapshot(&self) -> Vec<ActiveLockInfo> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        self.inner
+            .read()
+            .await
+            .values()
+            .map(|info| {
+                let held_secs = now.saturating_sub(info.acquired_at);
+                ActiveLockInfo {
+                    overdue: held_secs > info.expected_duration_secs * 2,
+                    ..info.clone()
+                }
+            })
+            .collect()
+    }
+}
+
+// Global registry — shared across all LockManager instances in the process.
+static LOCK_REGISTRY: std::sync::OnceLock<LockRegistry> = std::sync::OnceLock::new();
+
+pub fn lock_registry() -> &'static LockRegistry {
+    LOCK_REGISTRY.get_or_init(LockRegistry::new)
+}
+
+// ---------------------------------------------------------------------------
+// LockManager
+// ---------------------------------------------------------------------------
 
 pub struct LockManager {
     redis_client: Client,
@@ -19,6 +90,7 @@ pub struct Lock {
     token: String,
     redis_client: Client,
     ttl: Duration,
+    acquired_at: Instant,
 }
 
 impl LockManager {
@@ -40,15 +112,41 @@ impl LockManager {
         let ttl = self.default_ttl;
 
         let start = tokio::time::Instant::now();
+        let mut attempts: u64 = 0;
 
         loop {
+            attempts += 1;
+
             if let Some(lock) = self.try_acquire(&key, &token, ttl).await? {
-                debug!("Acquired lock for {}", resource);
+                debug!(resource, attempts, "Acquired distributed lock");
+
+                // Metrics
+                crate::metrics::lock_acquired_total().add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+
+                // Register in active lock registry
+                let acquired_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                lock_registry()
+                    .register(ActiveLockInfo {
+                        resource: resource.to_string(),
+                        token: token.clone(),
+                        acquired_at: acquired_unix,
+                        ttl_secs: ttl.as_secs(),
+                        expected_duration_secs: ttl.as_secs(),
+                        overdue: false,
+                    })
+                    .await;
+
                 return Ok(Some(lock));
             }
 
+            // Each failed attempt is a contention event
+            crate::metrics::lock_contention_total().add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+
             if start.elapsed() >= timeout_duration {
-                debug!("Lock acquisition timeout for {}", resource);
+                debug!(resource, attempts, "Lock acquisition timed out");
                 return Ok(None);
             }
 
@@ -64,7 +162,6 @@ impl LockManager {
     ) -> Result<Option<Lock>, redis::RedisError> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
-        // SET key token NX EX ttl_seconds
         let result: Option<String> = conn
             .set_options(
                 key,
@@ -81,6 +178,7 @@ impl LockManager {
                 token: token.to_string(),
                 redis_client: self.redis_client.clone(),
                 ttl,
+                acquired_at: Instant::now(),
             }))
         } else {
             Ok(None)
@@ -117,9 +215,11 @@ impl LockManager {
 
 impl Lock {
     pub async fn release(self) -> Result<(), redis::RedisError> {
+        let hold_ms = self.acquired_at.elapsed().as_secs_f64() * 1000.0;
+        let resource = self.key.trim_start_matches("lock:").to_string();
+
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
-        // Lua script to ensure we only delete if token matches
         let script = Script::new(
             r#"
             if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -136,14 +236,34 @@ impl Lock {
             .invoke_async(&mut conn)
             .await?;
 
-        debug!("Released lock for {}", self.key);
+        debug!(resource, hold_ms, "Released distributed lock");
+
+        // Record hold duration metric
+        crate::metrics::lock_hold_duration_ms().record(
+            hold_ms,
+            &[opentelemetry::KeyValue::new("resource", resource.clone())],
+        );
+
+        // Alert if held longer than 2x TTL
+        let expected_ms = self.ttl.as_secs_f64() * 1000.0;
+        if hold_ms > expected_ms * 2.0 {
+            warn!(
+                resource,
+                hold_ms,
+                expected_ms,
+                "Lock held longer than 2x expected duration"
+            );
+        }
+
+        // Remove from registry
+        lock_registry().deregister(&self.token).await;
+
         Ok(())
     }
 
     pub async fn renew(&mut self) -> Result<bool, redis::RedisError> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
-        // Lua script to renew only if token matches
         let script = Script::new(
             r#"
             if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -160,6 +280,12 @@ impl Lock {
             .arg(self.ttl.as_secs() as i32)
             .invoke_async(&mut conn)
             .await?;
+
+        if result == 1 {
+            debug!(key = %self.key, "Renewed distributed lock");
+        } else {
+            warn!(key = %self.key, "Failed to renew lock — token mismatch");
+        }
 
         Ok(result == 1)
     }
@@ -187,12 +313,31 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        // Best effort release on drop
         let key = self.key.clone();
         let token = self.token.clone();
         let client = self.redis_client.clone();
+        let hold_ms = self.acquired_at.elapsed().as_secs_f64() * 1000.0;
+        let expected_ms = self.ttl.as_secs_f64() * 1000.0;
+        let resource = key.trim_start_matches("lock:").to_string();
 
         tokio::spawn(async move {
+            // Record metrics on drop (best-effort)
+            crate::metrics::lock_hold_duration_ms().record(
+                hold_ms,
+                &[opentelemetry::KeyValue::new("resource", resource.clone())],
+            );
+
+            if hold_ms > expected_ms * 2.0 {
+                warn!(
+                    resource,
+                    hold_ms,
+                    expected_ms,
+                    "Lock (dropped) held longer than 2x expected duration"
+                );
+            }
+
+            lock_registry().deregister(&token).await;
+
             if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
                 let script = Script::new(
                     r#"
@@ -213,6 +358,10 @@ impl Drop for Lock {
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// LeaderElection
+// ---------------------------------------------------------------------------
 
 /// Redis-based leader election for processor coordination.
 ///
@@ -240,7 +389,6 @@ impl LeaderElection {
     pub async fn try_acquire_leadership(&self) -> Result<bool, redis::RedisError> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
-        // Try SET NX EX first
         let result: Option<String> = conn
             .set_options(
                 LEADER_KEY,
@@ -255,7 +403,6 @@ impl LeaderElection {
             return Ok(true);
         }
 
-        // If we already hold the lease, renew it
         let script = Script::new(
             r#"
             if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -334,7 +481,6 @@ mod tests {
 
         assert!(lock1.is_some());
 
-        // Try to acquire same lock
         let lock2 = manager
             .acquire("test_resource_2", Duration::from_millis(100))
             .await
@@ -343,5 +489,40 @@ mod tests {
         assert!(lock2.is_none());
 
         lock1.unwrap().release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lock_metrics_emitted() {
+        // Verify metric instruments can be created without panicking
+        let _ = crate::metrics::lock_acquired_total();
+        let _ = crate::metrics::lock_contention_total();
+        let _ = crate::metrics::lock_hold_duration_ms();
+    }
+
+    #[tokio::test]
+    async fn test_lock_registry_snapshot() {
+        let registry = LockRegistry::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        registry
+            .register(ActiveLockInfo {
+                resource: "test".to_string(),
+                token: "tok-1".to_string(),
+                acquired_at: now,
+                ttl_secs: 30,
+                expected_duration_secs: 30,
+                overdue: false,
+            })
+            .await;
+
+        let snap = registry.snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].resource, "test");
+
+        registry.deregister("tok-1").await;
+        assert!(registry.snapshot().await.is_empty());
     }
 }

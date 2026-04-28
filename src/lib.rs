@@ -211,6 +211,8 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/admin/quotas/:tenant_id", get(handlers::admin::quota::get_tenant_quota))
         .route("/admin/quotas/:tenant_id", axum::routing::put(handlers::admin::quota::set_tenant_quota))
         .route("/admin/quotas/:tenant_id/reset", axum::routing::delete(handlers::admin::quota::reset_tenant_quota))
+        // Admin: active distributed locks
+        .route("/admin/locks", get(handlers::admin::locks::list_active_locks))
         // Admin: settlement dispute workflow
         .route("/admin/settlements/:id/status", axum::routing::patch(handlers::settlements::update_settlement_status))
         .layer(axum_middleware::from_fn(
