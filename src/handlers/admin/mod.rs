@@ -311,3 +311,208 @@ pub async fn set_asset_enabled(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Asset registry admin handlers
+// ---------------------------------------------------------------------------
+
+/// GET /admin/assets — list all assets
+pub async fn list_assets(State(state): State<crate::ApiState>) -> impl IntoResponse {
+    match crate::db::models::Asset::fetch_all(&state.app_state.db).await {
+        Ok(assets) => (StatusCode::OK, Json(serde_json::json!(assets))).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list assets: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /admin/assets — register a new asset
+pub async fn create_asset(
+    State(state): State<crate::ApiState>,
+    Json(payload): Json<CreateAssetRequest>,
+) -> impl IntoResponse {
+    let asset_code = payload.asset_code.trim().to_uppercase();
+    if asset_code.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "asset_code is required" })),
+        )
+            .into_response();
+    }
+
+    match sqlx::query_as::<_, crate::db::models::Asset>(
+        r#"
+        INSERT INTO assets (asset_code, asset_issuer, metadata, enabled, min_amount, max_amount, settlement_schedule)
+        VALUES ($1, $2, $3, TRUE, $4, $5, $6)
+        ON CONFLICT (asset_code, asset_issuer) DO UPDATE
+            SET enabled = TRUE, min_amount = EXCLUDED.min_amount,
+                max_amount = EXCLUDED.max_amount,
+                settlement_schedule = EXCLUDED.settlement_schedule,
+                updated_at = NOW()
+        RETURNING id, asset_code, asset_issuer, metadata, enabled, min_amount, max_amount, settlement_schedule, created_at, updated_at
+        "#,
+    )
+    .bind(&asset_code)
+    .bind(&payload.asset_issuer)
+    .bind(&payload.metadata)
+    .bind(&payload.min_amount)
+    .bind(&payload.max_amount)
+    .bind(&payload.settlement_schedule)
+    .fetch_one(&state.app_state.db)
+    .await
+    {
+        Ok(asset) => {
+            // Reload cache so the new asset is immediately available
+            let _ = state
+                .app_state
+                .asset_cache
+                .reload_once(&state.app_state.db)
+                .await;
+            (StatusCode::CREATED, Json(serde_json::json!(asset))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to create asset: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// DELETE /admin/assets/:id — remove an asset
+pub async fn delete_asset(
+    State(state): State<crate::ApiState>,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    match sqlx::query("DELETE FROM assets WHERE id = $1")
+        .bind(id)
+        .execute(&state.app_state.db)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 0 => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "asset not found" })),
+        )
+            .into_response(),
+        Ok(_) => {
+            let _ = state
+                .app_state
+                .asset_cache
+                .reload_once(&state.app_state.db)
+                .await;
+            (StatusCode::OK, Json(serde_json::json!({ "deleted": id }))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete asset {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// PATCH /admin/assets/:id/enabled — enable or disable an asset
+pub async fn set_asset_enabled(
+    State(state): State<crate::ApiState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<SetAssetEnabledRequest>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, crate::db::models::Asset>(
+        r#"
+        UPDATE assets SET enabled = $1, updated_at = NOW()
+        WHERE id = $2
+        RETURNING id, asset_code, asset_issuer, metadata, enabled, min_amount, max_amount, settlement_schedule, created_at, updated_at
+        "#,
+    )
+    .bind(payload.enabled)
+    .bind(id)
+    .fetch_one(&state.app_state.db)
+    .await
+    {
+        Ok(asset) => {
+            let _ = state
+                .app_state
+                .asset_cache
+                .reload_once(&state.app_state.db)
+                .await;
+            (StatusCode::OK, Json(serde_json::json!(asset))).into_response()
+        }
+        Err(sqlx::Error::RowNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "asset not found" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update asset {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Asset processing rules update
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateAssetConfigRequest {
+    pub min_amount: Option<sqlx::types::BigDecimal>,
+    pub max_amount: Option<sqlx::types::BigDecimal>,
+    pub settlement_schedule: Option<String>,
+}
+
+/// PATCH /admin/assets/:id/config — update processing rules for an asset
+pub async fn update_asset_config(
+    State(state): State<crate::ApiState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<UpdateAssetConfigRequest>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, crate::db::models::Asset>(
+        r#"
+        UPDATE assets
+        SET min_amount = COALESCE($1, min_amount),
+            max_amount = COALESCE($2, max_amount),
+            settlement_schedule = COALESCE($3, settlement_schedule),
+            updated_at = NOW()
+        WHERE id = $4
+        RETURNING id, asset_code, asset_issuer, metadata, enabled, min_amount, max_amount, settlement_schedule, created_at, updated_at
+        "#,
+    )
+    .bind(&payload.min_amount)
+    .bind(&payload.max_amount)
+    .bind(&payload.settlement_schedule)
+    .bind(id)
+    .fetch_one(&state.app_state.db)
+    .await
+    {
+        Ok(asset) => {
+            let _ = state.app_state.asset_cache.reload_once(&state.app_state.db).await;
+            (StatusCode::OK, Json(serde_json::json!(asset))).into_response()
+        }
+        Err(sqlx::Error::RowNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "asset not found" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update asset config {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
