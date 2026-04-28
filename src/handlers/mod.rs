@@ -116,19 +116,3 @@ pub async fn error_catalog() -> impl IntoResponse {
 
     (StatusCode::OK, Json(catalog))
 }
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthStatus {
-    pub status: String,
-    pub version: String,
-    pub db: String,
-    pub db_pool: DbPoolStats,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DbPoolStats {
-    pub active_connections: u32,
-    pub idle_connections: u32,
-    pub max_connections: u32,
-    pub usage_percent: f32,
-}

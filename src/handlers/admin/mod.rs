@@ -1,3 +1,5 @@
+pub mod compliance;
+
 use crate::AppState;
 use axum::{
     extract::{Path, State},

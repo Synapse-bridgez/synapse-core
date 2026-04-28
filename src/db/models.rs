@@ -341,6 +341,20 @@ mod tests {
     }
 }
 
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct ComplianceReport {
+    pub id: Uuid,
+    pub period: String,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub transaction_count: i64,
+    pub settlement_total: sqlx::types::BigDecimal,
+    pub anomaly_count: i64,
+    pub volume_by_asset: serde_json::Value,
+    pub top_accounts: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
 // Minimal Asset struct for asset cache functionality
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {

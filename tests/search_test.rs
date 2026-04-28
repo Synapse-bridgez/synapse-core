@@ -1,32 +1,42 @@
-use synapse_core::{create_app, AppState};
-use synapse_core::db::pool_manager::PoolManager;
-use synapse_core::services::feature_flags::FeatureFlagService;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers::runners::AsyncRunner;
-use sqlx::{PgPool, migrate::Migrator};
-use std::path::Path;
-use tokio::net::TcpListener;
+use chrono::{Duration, Utc};
 use reqwest::StatusCode;
 use serde_json::json;
-use chrono::{Utc, Duration};
-use uuid::Uuid;
 use sqlx::types::BigDecimal;
+use sqlx::{migrate::Migrator, PgPool};
+use std::path::Path;
+use synapse_core::db::pool_manager::PoolManager;
+use synapse_core::services::feature_flags::FeatureFlagService;
+use synapse_core::{create_app, AppState};
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres;
+use tokio::net::TcpListener;
+use uuid::Uuid;
 
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
-    let database_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", host_port);
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        host_port
+    );
 
     let pool = PgPool::connect(&database_url).await.unwrap();
-    let migrator = Migrator::new(Path::join(Path::new(env!("CARGO_MANIFEST_DIR")), "migrations")).await.unwrap();
+    let migrator = Migrator::new(Path::join(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        "migrations",
+    ))
+    .await
+    .unwrap();
     migrator.run(&pool).await.unwrap();
 
     let pool_manager = PoolManager::new(pool.clone(), None);
-    
+
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
-        horizon_client: synapse_core::stellar::HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+        horizon_client: synapse_core::stellar::HorizonClient::new(
+            "https://horizon-testnet.stellar.org".to_string(),
+        ),
         feature_flags: FeatureFlagService::new(false),
         redis_url: "redis://localhost:6379".to_string(),
         start_time: std::time::Instant::now(),
@@ -48,7 +58,7 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
 /// Seed test database with known transactions for predictable assertions
 async fn seed_test_data(pool: &PgPool) {
     let now = Utc::now();
-    
+
     // Transaction 1: USD, pending, recent
     sqlx::query!(
         r#"
@@ -154,11 +164,12 @@ async fn seed_test_data(pool: &PgPool) {
 async fn test_search_by_status() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Search for completed transactions
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("status", "completed")])
         .send()
         .await
@@ -166,10 +177,10 @@ async fn test_search_by_status() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     assert_eq!(response["total"], 3); // 3 completed transactions
     assert!(response["results"].is_array());
-    
+
     // Verify all results have completed status
     for tx in response["results"].as_array().unwrap() {
         assert_eq!(tx["status"], "completed");
@@ -180,11 +191,12 @@ async fn test_search_by_status() {
 async fn test_search_by_asset_code() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Search for USD transactions
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("asset_code", "USD")])
         .send()
         .await
@@ -192,9 +204,9 @@ async fn test_search_by_asset_code() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     assert_eq!(response["total"], 3); // 3 USD transactions
-    
+
     // Verify all results have USD asset code
     for tx in response["results"].as_array().unwrap() {
         assert_eq!(tx["asset_code"], "USD");
@@ -205,15 +217,16 @@ async fn test_search_by_asset_code() {
 async fn test_search_by_date_range() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
     let now = Utc::now();
-    
+
     // Search for transactions in the last 3 days
     let from = (now - Duration::days(3)).to_rfc3339();
     let to = now.to_rfc3339();
 
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("from", &from), ("to", &to)])
         .send()
         .await
@@ -221,7 +234,7 @@ async fn test_search_by_date_range() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     // Should return transactions from last 3 days (not the 5-day old one)
     assert_eq!(response["total"], 4);
 }
@@ -230,11 +243,12 @@ async fn test_search_by_date_range() {
 async fn test_search_pagination() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // First page with limit 2
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("limit", "2")])
         .send()
         .await
@@ -242,14 +256,15 @@ async fn test_search_pagination() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let page1: serde_json::Value = res.json().await.unwrap();
-    
+
     assert_eq!(page1["results"].as_array().unwrap().len(), 2);
     assert!(page1["next_cursor"].is_string());
-    
+
     let cursor = page1["next_cursor"].as_str().unwrap();
 
     // Second page using cursor
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("limit", "2"), ("cursor", cursor)])
         .send()
         .await
@@ -257,9 +272,9 @@ async fn test_search_pagination() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let page2: serde_json::Value = res.json().await.unwrap();
-    
+
     assert_eq!(page2["results"].as_array().unwrap().len(), 2);
-    
+
     // Verify no duplicate IDs between pages
     let page1_ids: Vec<&str> = page1["results"]
         .as_array()
@@ -267,14 +282,14 @@ async fn test_search_pagination() {
         .iter()
         .map(|tx| tx["id"].as_str().unwrap())
         .collect();
-    
+
     let page2_ids: Vec<&str> = page2["results"]
         .as_array()
         .unwrap()
         .iter()
         .map(|tx| tx["id"].as_str().unwrap())
         .collect();
-    
+
     for id in &page1_ids {
         assert!(!page2_ids.contains(id));
     }
@@ -284,11 +299,12 @@ async fn test_search_pagination() {
 async fn test_search_empty_results() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Search for non-existent asset code
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("asset_code", "XYZ")])
         .send()
         .await
@@ -296,7 +312,7 @@ async fn test_search_empty_results() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     assert_eq!(response["total"], 0);
     assert_eq!(response["results"].as_array().unwrap().len(), 0);
     assert!(response["next_cursor"].is_null());
@@ -306,11 +322,12 @@ async fn test_search_empty_results() {
 async fn test_search_invalid_parameters() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Invalid date format
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("from", "invalid-date")])
         .send()
         .await
@@ -321,7 +338,8 @@ async fn test_search_invalid_parameters() {
     assert!(error.contains("Invalid 'from' date"));
 
     // Invalid cursor
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("cursor", "invalid-cursor")])
         .send()
         .await
@@ -332,7 +350,8 @@ async fn test_search_invalid_parameters() {
     assert!(error.contains("Invalid cursor"));
 
     // Invalid min_amount
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("min_amount", "not-a-number")])
         .send()
         .await
@@ -343,16 +362,16 @@ async fn test_search_invalid_parameters() {
     assert!(error.contains("Invalid 'min_amount'"));
 }
 
-
 #[tokio::test]
 async fn test_search_combined_filters() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Search for completed USD transactions
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("status", "completed"), ("asset_code", "USD")])
         .send()
         .await
@@ -360,10 +379,10 @@ async fn test_search_combined_filters() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     // Should return only completed USD transactions
     assert_eq!(response["total"], 1);
-    
+
     for tx in response["results"].as_array().unwrap() {
         assert_eq!(tx["status"], "completed");
         assert_eq!(tx["asset_code"], "USD");
@@ -374,11 +393,12 @@ async fn test_search_combined_filters() {
 async fn test_search_by_stellar_account() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Search for specific stellar account
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("stellar_account", "GABC1111111111")])
         .send()
         .await
@@ -386,7 +406,7 @@ async fn test_search_by_stellar_account() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     assert_eq!(response["total"], 1);
     assert_eq!(response["results"][0]["stellar_account"], "GABC1111111111");
 }
@@ -395,11 +415,12 @@ async fn test_search_by_stellar_account() {
 async fn test_search_with_amount_range() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Search for transactions between 100 and 500
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("min_amount", "100"), ("max_amount", "500")])
         .send()
         .await
@@ -407,10 +428,10 @@ async fn test_search_with_amount_range() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     // Should return transactions with amounts 100, 250, and 500
     assert_eq!(response["total"], 3);
-    
+
     for tx in response["results"].as_array().unwrap() {
         let amount: f64 = tx["amount"].as_str().unwrap().parse().unwrap();
         assert!(amount >= 100.0 && amount <= 500.0);
@@ -421,11 +442,12 @@ async fn test_search_with_amount_range() {
 async fn test_search_limit_boundaries() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Test with limit 1
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("limit", "1")])
         .send()
         .await
@@ -437,7 +459,8 @@ async fn test_search_limit_boundaries() {
     assert!(response["next_cursor"].is_string());
 
     // Test with limit exceeding max (should cap at 100)
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("limit", "200")])
         .send()
         .await
@@ -453,11 +476,12 @@ async fn test_search_limit_boundaries() {
 async fn test_search_no_next_cursor_on_last_page() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Request all results with high limit
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("limit", "100")])
         .send()
         .await
@@ -465,7 +489,7 @@ async fn test_search_no_next_cursor_on_last_page() {
 
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
-    
+
     // Should have no next_cursor since all results fit in one page
     assert!(response["next_cursor"].is_null());
 }
@@ -474,11 +498,12 @@ async fn test_search_no_next_cursor_on_last_page() {
 async fn test_search_ordering() {
     let (base_url, pool, _container) = setup_test_app().await;
     seed_test_data(&pool).await;
-    
+
     let client = reqwest::Client::new();
 
     // Get all transactions
-    let res = client.get(&format!("{}/transactions/search", base_url))
+    let res = client
+        .get(&format!("{}/transactions/search", base_url))
         .query(&[("limit", "100")])
         .send()
         .await
@@ -487,11 +512,14 @@ async fn test_search_ordering() {
     assert_eq!(res.status(), StatusCode::OK);
     let response: serde_json::Value = res.json().await.unwrap();
     let results = response["results"].as_array().unwrap();
-    
+
     // Verify results are ordered by created_at DESC
     for i in 0..results.len() - 1 {
         let current_date = results[i]["created_at"].as_str().unwrap();
         let next_date = results[i + 1]["created_at"].as_str().unwrap();
-        assert!(current_date >= next_date, "Results should be ordered by created_at DESC");
+        assert!(
+            current_date >= next_date,
+            "Results should be ordered by created_at DESC"
+        );
     }
 }

@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod compliance;
 pub mod feature_flags;
 pub mod processor;
 pub mod scheduler;

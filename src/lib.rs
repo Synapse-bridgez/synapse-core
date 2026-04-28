@@ -66,5 +66,13 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
+        .route(
+            "/admin/compliance/reports",
+            get(handlers::admin::compliance::list_reports),
+        )
+        .route(
+            "/admin/compliance/reports/generate",
+            post(handlers::admin::compliance::generate_report),
+        )
         .with_state(api_state)
 }
