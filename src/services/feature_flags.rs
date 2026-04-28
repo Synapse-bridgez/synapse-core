@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 pub struct FeatureFlagService {
@@ -252,5 +252,16 @@ mod tests {
         let hash2 = FeatureFlagService::hash_tenant_flag("tenant-2", flag_name);
 
         assert_ne!(hash1, hash2, "Different tenants should produce different hashes");
+    }
+
+    /// Get dependency graph for visualization
+    pub async fn get_dependency_graph(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
+        let flags = sqlx::query_as::<_, FeatureFlag>(
+            "SELECT name, enabled, description, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(flags.into_iter().map(|f| (f.name, f.depends_on)).collect())
     }
 }

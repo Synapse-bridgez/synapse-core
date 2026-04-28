@@ -1,9 +1,17 @@
 use crate::middleware::idempotency::RedisCircuitBreaker;
+use lru::LruCache;
 use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[derive(Clone)]
+struct CacheEntry<T> {
+    value: T,
+    expires_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct QueryCache {
@@ -11,6 +19,9 @@ pub struct QueryCache {
     cb: RedisCircuitBreaker,
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
+    memory_hits: Arc<AtomicU64>,
+    memory_misses: Arc<AtomicU64>,
+    lru: Arc<Mutex<LruCache<String, String>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +29,8 @@ pub struct CacheConfig {
     pub status_counts_ttl: u64,
     pub daily_totals_ttl: u64,
     pub asset_stats_ttl: u64,
+    pub memory_cache_size: usize,
+    pub memory_cache_ttl: u64,
 }
 
 impl Default for CacheConfig {
@@ -26,6 +39,8 @@ impl Default for CacheConfig {
             status_counts_ttl: 300, // 5 minutes
             daily_totals_ttl: 3600, // 1 hour
             asset_stats_ttl: 600,   // 10 minutes
+            memory_cache_size: 1000,
+            memory_cache_ttl: 30,
         }
     }
 }
@@ -33,11 +48,21 @@ impl Default for CacheConfig {
 impl QueryCache {
     pub fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = Client::open(redis_url)?;
+        let cache_size = std::env::var("MEMORY_CACHE_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+
         Ok(Self {
             client,
             cb: RedisCircuitBreaker::from_env(),
             hits: Arc::new(AtomicU64::new(0)),
             misses: Arc::new(AtomicU64::new(0)),
+            memory_hits: Arc::new(AtomicU64::new(0)),
+            memory_misses: Arc::new(AtomicU64::new(0)),
+            lru: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(cache_size).unwrap(),
+            ))),
         })
     }
 
@@ -49,10 +74,25 @@ impl QueryCache {
         &self,
         key: &str,
     ) -> Result<Option<T>, redis::RedisError> {
+        // Try in-memory cache first
+        {
+            let mut lru = self.lru.lock().unwrap();
+            if let Some(cached) = lru.get(key) {
+                self.memory_hits.fetch_add(1, Ordering::Relaxed);
+                if let Ok(value) = serde_json::from_str::<T>(cached) {
+                    return Ok(Some(value));
+                }
+            }
+        }
+
+        self.memory_misses.fetch_add(1, Ordering::Relaxed);
+
+        // Fall back to Redis
         let client = self.client.clone();
         let key = key.to_string();
         let hits = self.hits.clone();
         let misses = self.misses.clone();
+        let lru = self.lru.clone();
 
         self.cb
             .call(|| async move {
@@ -61,6 +101,11 @@ impl QueryCache {
                 match value {
                     Some(v) => {
                         hits.fetch_add(1, Ordering::Relaxed);
+                        // Populate in-memory cache
+                        {
+                            let mut lru_cache = lru.lock().unwrap();
+                            lru_cache.put(key.clone(), v.clone());
+                        }
                         serde_json::from_str(&v).map(Some).map_err(|e| {
                             redis::RedisError::from((
                                 redis::ErrorKind::TypeError,
@@ -97,13 +142,20 @@ impl QueryCache {
                 e.to_string(),
             ))
         })?;
+
+        // Store in in-memory cache
+        {
+            let mut lru = self.lru.lock().unwrap();
+            lru.put(key.to_string(), serialized.clone());
+        }
+
         let client = self.client.clone();
         let key = key.to_string();
 
         self.cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                conn.set_ex(&key, serialized, ttl.as_secs()).await
+                conn.set_ex(&key, serialized.clone(), ttl.as_secs()).await
             })
             .await
             .map_err(|e| match e {
@@ -115,6 +167,12 @@ impl QueryCache {
     }
 
     pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
+        // Clear in-memory cache
+        {
+            let mut lru = self.lru.lock().unwrap();
+            lru.clear();
+        }
+
         let mut conn: MultiplexedConnection = self.get_connection().await?;
         let keys: Vec<String> = conn.keys(pattern).await?;
 
@@ -125,6 +183,12 @@ impl QueryCache {
     }
 
     pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
+        // Clear from in-memory cache
+        {
+            let mut lru = self.lru.lock().unwrap();
+            lru.pop(key);
+        }
+
         let mut conn: MultiplexedConnection = self.get_connection().await?;
         conn.del::<_, ()>(key).await
     }
@@ -144,11 +208,24 @@ impl QueryCache {
             0.0
         };
 
+        let memory_hits = self.memory_hits.load(Ordering::Relaxed);
+        let memory_misses = self.memory_misses.load(Ordering::Relaxed);
+        let memory_total = memory_hits + memory_misses;
+        let memory_hit_rate = if memory_total > 0 {
+            (memory_hits as f64 / memory_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
         CacheMetrics {
             hits,
             misses,
             total,
             hit_rate,
+            memory_hits,
+            memory_misses,
+            memory_total,
+            memory_hit_rate,
         }
     }
 
@@ -195,6 +272,10 @@ pub struct CacheMetrics {
     pub misses: u64,
     pub total: u64,
     pub hit_rate: f64,
+    pub memory_hits: u64,
+    pub memory_misses: u64,
+    pub memory_total: u64,
+    pub memory_hit_rate: f64,
 }
 
 pub fn cache_key_status_counts() -> String {

@@ -136,6 +136,7 @@ impl WebhookDispatcher {
     }
 
     /// Process all pending deliveries concurrently using `buffer_unordered`.
+    /// Batch-loads all endpoints in a single query to avoid N+1 pattern.
     pub async fn process_pending(&self) -> anyhow::Result<()> {
         let deliveries: Vec<WebhookDelivery> = sqlx::query_as(
             r#"
@@ -144,6 +145,7 @@ impl WebhookDispatcher {
             JOIN webhook_endpoints we ON wd.endpoint_id = we.id
             WHERE wd.status = 'pending'
               AND (wd.next_attempt_at IS NULL OR wd.next_attempt_at <= NOW())
+              AND we.enabled = true
             ORDER BY wd.created_at
             LIMIT 100
             "#,
@@ -151,12 +153,46 @@ impl WebhookDispatcher {
         .fetch_all(&self.pool)
         .await?;
 
+        if deliveries.is_empty() {
+            return Ok(());
+        }
+
+        // Batch-load all unique endpoints in a single query
+        let endpoint_ids: Vec<Uuid> = deliveries
+            .iter()
+            .map(|d| d.endpoint_id)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let endpoints: Vec<WebhookEndpoint> =
+            sqlx::query_as("SELECT * FROM webhook_endpoints WHERE id = ANY($1) AND enabled = true")
+                .bind(&endpoint_ids)
+                .fetch_all(&self.pool)
+                .await?;
+
+        // Create HashMap for O(1) lookups
+        let endpoint_map: HashMap<Uuid, WebhookEndpoint> =
+            endpoints.into_iter().map(|ep| (ep.id, ep)).collect();
+
+        let query_count = 2; // 1 for deliveries + 1 for endpoints
+        tracing::info!(
+            delivery_count = deliveries.len(),
+            endpoint_count = endpoint_map.len(),
+            query_count = query_count,
+            "Webhook dispatcher batch-loaded endpoints (N+1 optimization)"
+        );
+
         stream::iter(deliveries)
             .map(|delivery| {
                 let dispatcher = self.clone();
+                let endpoint_map = endpoint_map.clone();
                 async move {
                     let start = std::time::Instant::now();
-                    if let Err(e) = dispatcher.attempt_delivery(&delivery).await {
+                    if let Err(e) = dispatcher
+                        .attempt_delivery_with_endpoint(&delivery, &endpoint_map)
+                        .await
+                    {
                         tracing::error!(
                             delivery_id = %delivery.id,
                             "Webhook delivery attempt error: {e}"
@@ -204,14 +240,18 @@ impl WebhookDispatcher {
         Ok(allowed)
     }
 
-    async fn attempt_delivery(&self, delivery: &WebhookDelivery) -> anyhow::Result<()> {
+    async fn attempt_delivery_with_endpoint(
+        &self,
+        delivery: &WebhookDelivery,
+        endpoint_map: &HashMap<Uuid, WebhookEndpoint>,
+    ) -> anyhow::Result<()> {
         // Check rate limit first
         if !self
             .check_rate_limit(delivery.endpoint_id, delivery.max_delivery_rate)
             .await?
         {
             // Rate limit exceeded, delay this delivery to next cycle
-            let next_cycle = Utc::now() + chrono::Duration::seconds(30); // Next processing cycle
+            let next_cycle = Utc::now() + chrono::Duration::seconds(30);
             sqlx::query(
                 r#"
                 UPDATE webhook_deliveries
@@ -231,12 +271,26 @@ impl WebhookDispatcher {
             return Ok(());
         }
 
-        let endpoint: WebhookEndpoint =
-            sqlx::query_as("SELECT * FROM webhook_endpoints WHERE id = $1")
-                .bind(delivery.endpoint_id)
-                .fetch_one(&self.pool)
-                .await?;
+        let endpoint = match endpoint_map.get(&delivery.endpoint_id) {
+            Some(ep) => ep,
+            None => {
+                tracing::warn!(
+                    delivery_id = %delivery.id,
+                    endpoint_id = %delivery.endpoint_id,
+                    "Endpoint not found in batch-loaded map"
+                );
+                return Ok(());
+            }
+        };
 
+        self.send_webhook(delivery, endpoint).await
+    }
+
+    async fn send_webhook(
+        &self,
+        delivery: &WebhookDelivery,
+        endpoint: &WebhookEndpoint,
+    ) -> anyhow::Result<()> {
         let body = serde_json::to_string(&delivery.payload)?;
 
         // Extract timestamp from payload (OutgoingPayload includes timestamp field)
@@ -312,6 +366,42 @@ impl WebhookDispatcher {
         }
 
         Ok(())
+    }
+
+    async fn attempt_delivery(&self, delivery: &WebhookDelivery) -> anyhow::Result<()> {
+        // Check rate limit first
+        if !self
+            .check_rate_limit(delivery.endpoint_id, delivery.max_delivery_rate)
+            .await?
+        {
+            // Rate limit exceeded, delay this delivery to next cycle
+            let next_cycle = Utc::now() + chrono::Duration::seconds(30); // Next processing cycle
+            sqlx::query(
+                r#"
+                UPDATE webhook_deliveries
+                SET next_attempt_at = $1
+                WHERE id = $2
+                "#,
+            )
+            .bind(next_cycle)
+            .bind(delivery.id)
+            .execute(&self.pool)
+            .await?;
+            tracing::debug!(
+                delivery_id = %delivery.id,
+                endpoint_id = %delivery.endpoint_id,
+                "Rate limit exceeded, delaying delivery to next cycle"
+            );
+            return Ok(());
+        }
+
+        let endpoint: WebhookEndpoint =
+            sqlx::query_as("SELECT * FROM webhook_endpoints WHERE id = $1")
+                .bind(delivery.endpoint_id)
+                .fetch_one(&self.pool)
+                .await?;
+
+        self.send_webhook(delivery, &endpoint).await
     }
 
     async fn handle_failure(
