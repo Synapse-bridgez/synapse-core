@@ -227,7 +227,7 @@ pub mod env_secrets {
             }
 
             // Retrieve from environment
-            let value = std::env::var(key).map_err(|_| format!("Secret '{}' not found", key))?;
+            let value = std::env::var(key).map_err(|_| format!("Secret '{key}' not found"))?;
 
             // Cache the value
             {

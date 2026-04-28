@@ -86,6 +86,13 @@ pub enum BackupCommands {
         filename: String,
     },
 
+    /// Restore to a specific point in time
+    RestorePitr {
+        /// Target timestamp (ISO 8601 format, e.g., 2026-01-15T10:30:00Z)
+        #[arg(long)]
+        timestamp: String,
+    },
+
     /// Apply retention policy to clean old backups
     Cleanup,
 }
@@ -113,12 +120,12 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
             }
 
             tracing::info!("Transaction {} marked as completed", tx_id);
-            println!("✓ Transaction {} marked as completed", tx_id);
+            println!("✓ Transaction {tx_id} marked as completed");
             Ok(())
         }
         None => {
             tracing::warn!("Transaction {} not found", tx_id);
-            anyhow::bail!("Transaction {} not found", tx_id)
+            anyhow::bail!("Transaction {tx_id} not found")
         }
     }
 }
@@ -161,7 +168,7 @@ fn mask_password(url: &str) -> String {
                 let user_start = slash_pos + 2;
                 let user = &url[user_start..colon_pos];
                 let suffix = &url[at_pos..];
-                return format!("{}{}:****{}", prefix, user, suffix);
+                return format!("{prefix}{user}:****{suffix}");
             }
         }
     }
@@ -222,7 +229,7 @@ pub async fn handle_tx_reconcile(
     match format {
         "json" => {
             let json = serde_json::to_string_pretty(&report)?;
-            println!("{}", json);
+            println!("{json}");
         }
         _ => {
             println!("\n=== Reconciliation Report ===");
@@ -278,4 +285,8 @@ pub async fn handle_tx_reconcile(
     }
 
     Ok(())
+}
+
+pub async fn handle_backup_restore_pitr(_config: &Config, _timestamp_str: &str) -> anyhow::Result<()> {
+    anyhow::bail!("PITR restore service not yet implemented")
 }

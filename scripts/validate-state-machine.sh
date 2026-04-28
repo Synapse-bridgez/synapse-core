@@ -39,7 +39,7 @@ if ! grep -r "status.*=.*'pending'" "$PROJECT_ROOT/src" > /dev/null; then
     ERRORS=$((ERRORS + 1))
 fi
 
-# Check for 'completed' state
+# Check for 'completed' stategit stash
 if ! grep -r "status.*=.*'completed'" "$PROJECT_ROOT/src" > /dev/null; then
     echo "❌ Error: 'completed' state not found in code"
     ERRORS=$((ERRORS + 1))

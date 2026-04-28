@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Payment {
@@ -113,7 +114,7 @@ impl AccountMonitor {
         );
 
         if let Some(c) = cursor {
-            url.push_str(&format!("&cursor={}", c));
+            url.push_str(&format!("&cursor={c}"));
         }
 
         let response = self.horizon_client.client.get(&url).send().await?;
@@ -154,8 +155,11 @@ impl AccountMonitor {
                 info!("Matched payment {} to transaction {}", payment.id, tx_id);
 
                 // Validate status transition: pending → completed
-                crate::validation::state_machine::validate_status_transition("pending", "completed")
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                crate::validation::state_machine::validate_status_transition(
+                    "pending",
+                    "completed",
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 // Update transaction to completed
                 sqlx::query(
@@ -194,6 +198,50 @@ impl AccountMonitor {
         .bind(cursor)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    pub async fn start_streaming(&self, account: &str) -> anyhow::Result<()> {
+        info!("Starting SSE stream for account {}", account);
+
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let client = self.horizon_client.clone();
+        let account_clone = account.to_string();
+
+        // Spawn stream task
+        tokio::spawn(async move {
+            if let Err(e) = client.stream_payments(&account_clone, tx).await {
+                error!("Stream error for {}: {}", account_clone, e);
+            }
+        });
+
+        // Process stream events
+        while let Some(result) = rx.recv().await {
+            match result {
+                Ok(payment) => {
+                    let payment_obj = Payment {
+                        id: payment.id,
+                        from: payment.from,
+                        to: payment.to,
+                        amount: payment.amount,
+                        asset_code: payment.asset_code,
+                        memo: payment.memo,
+                        memo_type: payment.memo_type,
+                    };
+
+                    if let Err(e) = self.process_payment(&payment_obj).await {
+                        warn!("Failed to process streamed payment: {}", e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Stream error: {}, falling back to polling", e);
+                    // Fall back to polling
+                    return self.start().await;
+                }
+            }
+        }
 
         Ok(())
     }

@@ -1,6 +1,4 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 
 /// Counter for slow queries
 pub static SLOW_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);

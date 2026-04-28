@@ -4,10 +4,14 @@ use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use futures_util::stream::StreamExt;
+use tokio::sync::mpsc;
 
 #[derive(Error, Debug)]
 pub enum HorizonError {
@@ -43,6 +47,25 @@ pub struct Balance {
     pub asset_issuer: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamPayment {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub amount: String,
+    pub asset_code: String,
+    pub memo: Option<String>,
+    pub memo_type: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StreamMetrics {
+    pub reconnections: u64,
+    pub events_received: u64,
+    pub last_event_time: Option<std::time::Instant>,
+}
+
 /// HTTP client for interacting with the Stellar Horizon API
 #[derive(Clone)]
 pub struct HorizonClient {
@@ -53,7 +76,7 @@ pub struct HorizonClient {
 
 impl HorizonClient {
     /// Creates a new HorizonClient with the specified base URL and circuit breaker
-    pub fn new(base_url: String, circuit_breaker: CircuitBreaker) -> Self {
+    pub fn new(base_url: String) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -147,6 +170,111 @@ impl HorizonClient {
             )),
             Err(FailsafeError::Inner(e)) => Err(e),
         }
+    }
+
+    /// Stream payments for an account via SSE with automatic reconnection
+    #[instrument(name = "horizon.stream_payments", skip(self), fields(stellar.account = %account))]
+    pub async fn stream_payments(
+        &self,
+        account: &str,
+        tx: mpsc::Sender<Result<StreamPayment, HorizonError>>,
+    ) -> Result<(), HorizonError> {
+        let mut reconnect_count = 0u64;
+        let metrics = Arc::new(tokio::sync::Mutex::new(StreamMetrics {
+            reconnections: 0,
+            events_received: 0,
+            last_event_time: None,
+        }));
+
+        loop {
+            let url = format!(
+                "{}/accounts/{}/payments?order=asc&stream=true",
+                self.base_url.trim_end_matches('/'),
+                account
+            );
+
+            match self.connect_stream(&url, &tx, &metrics).await {
+                Ok(_) => {
+                    // Stream ended normally
+                    reconnect_count += 1;
+                    let mut m = metrics.lock().await;
+                    m.reconnections = reconnect_count;
+                    drop(m);
+
+                    tracing::warn!(
+                        "Stream disconnected for {}, reconnecting (attempt {})",
+                        account,
+                        reconnect_count
+                    );
+
+                    // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+                    let backoff_secs = std::cmp::min(1u64 << reconnect_count, 30);
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.clone())).await;
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    async fn connect_stream(
+        &self,
+        url: &str,
+        tx: &mpsc::Sender<Result<StreamPayment, HorizonError>>,
+        metrics: &Arc<tokio::sync::Mutex<StreamMetrics>>,
+    ) -> Result<(), HorizonError> {
+        let response = self
+            .client
+            .get(url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(HorizonError::InvalidResponse(format!(
+                "Stream connection failed: {}",
+                response.status()
+            )));
+        }
+
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let text = String::from_utf8_lossy(&chunk);
+
+            for line in text.lines() {
+                if line.starts_with("data: ") {
+                    let json_str = &line[6..];
+                    match serde_json::from_str::<StreamPayment>(json_str) {
+                        Ok(payment) => {
+                            let mut m = metrics.lock().await;
+                            m.events_received += 1;
+                            m.last_event_time = Some(std::time::Instant::now());
+                            drop(m);
+
+                            if tx.send(Ok(payment)).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse payment event: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_stream_metrics(
+        &self,
+        metrics: &Arc<tokio::sync::Mutex<StreamMetrics>>,
+    ) -> StreamMetrics {
+        metrics.lock().await.clone()
     }
 }
 

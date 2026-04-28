@@ -6,7 +6,6 @@
 //! function installs a no-op provider so the rest of the code compiles and
 //! runs unchanged.
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,

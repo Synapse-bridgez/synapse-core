@@ -48,7 +48,7 @@ impl BackupService {
         let timestamp = Utc::now();
         let filename = self.generate_filename(backup_type, timestamp);
         let backup_path = self.backup_dir.join(&filename);
-        let temp_path = self.backup_dir.join(format!("{}.tmp", filename));
+        let temp_path = self.backup_dir.join(format!("{filename}.tmp"));
 
         // Run pg_dump
         tracing::info!("Running pg_dump for {:?} backup", backup_type);
@@ -127,7 +127,7 @@ impl BackupService {
         let backup_path = self.backup_dir.join(filename);
 
         if !backup_path.exists() {
-            anyhow::bail!("Backup file not found: {}", filename);
+            anyhow::bail!("Backup file not found: {filename}");
         }
 
         // Load and verify metadata
@@ -168,7 +168,56 @@ impl BackupService {
         Ok(())
     }
 
-    pub async fn apply_retention_policy(&self) -> Result<()> {
+    pub async fn restore_to_timestamp(&self, target_time: DateTime<Utc>) -> Result<()> {
+        let backups = self.list_backups().await?;
+
+        // Find the most recent backup before target time
+        let base_backup = backups
+            .iter()
+            .filter(|b| b.timestamp <= target_time)
+            .max_by_key(|b| b.timestamp)
+            .context("No backup found before target timestamp")?;
+
+        tracing::info!(
+            "Restoring to {} using base backup from {}",
+            target_time,
+            base_backup.timestamp
+        );
+
+        // Restore base backup
+        self.restore_backup(&base_backup.filename).await?;
+
+        // Apply WAL recovery to target time
+        self.apply_wal_recovery(target_time).await?;
+
+        tracing::info!("Point-in-time recovery completed to {}", target_time);
+
+        Ok(())
+    }
+
+    async fn apply_wal_recovery(&self, target_time: DateTime<Utc>) -> Result<()> {
+        let wal_dir = self.backup_dir.join("wal_archive");
+
+        if !wal_dir.exists() {
+            tracing::warn!("WAL archive directory not found, skipping WAL recovery");
+            return Ok(());
+        }
+
+        let recovery_conf = format!(
+            "recovery_target_timeline = 'latest'\nrecovery_target_xid = '0'\nrecovery_target_time = '{}'\nrecovery_target_inclusive = true\n",
+            target_time.to_rfc3339()
+        );
+
+        let recovery_path = self.backup_dir.join("recovery.conf");
+        fs::write(&recovery_path, recovery_conf)
+            .await
+            .context("Failed to write recovery.conf")?;
+
+        tracing::info!("WAL recovery configuration written");
+
+        Ok(())
+    }
+}
         let backups = self.list_backups().await?;
 
         let mut hourly_backups = Vec::new();
@@ -234,7 +283,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("pg_dump failed: {}", stderr);
+            anyhow::bail!("pg_dump failed: {stderr}");
         }
 
         Ok(())
@@ -250,7 +299,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("psql restore failed: {}", stderr);
+            anyhow::bail!("psql restore failed: {stderr}");
         }
 
         Ok(())
@@ -267,7 +316,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("gzip failed: {}", stderr);
+            anyhow::bail!("gzip failed: {stderr}");
         }
 
         let mut file = fs::File::create(&output_path)
@@ -297,7 +346,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("gunzip failed: {}", stderr);
+            anyhow::bail!("gunzip failed: {stderr}");
         }
 
         let mut file = fs::File::create(&output_path)
@@ -329,13 +378,13 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{}", key))
+            .arg(format!("pass:{key}"))
             .output()
             .context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("openssl encryption failed: {}", stderr);
+            anyhow::bail!("openssl encryption failed: {stderr}");
         }
 
         // Remove unencrypted file
@@ -364,13 +413,13 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{}", key))
+            .arg(format!("pass:{key}"))
             .output()
             .context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("openssl decryption failed: {}", stderr);
+            anyhow::bail!("openssl decryption failed: {stderr}");
         }
 
         Ok(output_path)
@@ -384,7 +433,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("sha256sum failed: {}", stderr);
+            anyhow::bail!("sha256sum failed: {stderr}");
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -425,7 +474,7 @@ impl BackupService {
             "sql.gz"
         };
 
-        format!("backup_{}_{}.{}", type_str, date_str, extension)
+        format!("backup_{type_str}_{date_str}.{extension}")
     }
 
     async fn save_metadata(&self, metadata: &BackupMetadata) -> Result<()> {

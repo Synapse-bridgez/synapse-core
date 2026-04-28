@@ -51,7 +51,7 @@ async fn build_pool(
         .idle_timeout(Duration::from_secs(idle_timeout_secs))
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
-                sqlx::query(&format!("SET statement_timeout = {}", statement_timeout_ms))
+                sqlx::query(&format!("SET statement_timeout = {statement_timeout_ms}"))
                     .execute(conn)
                     .await?;
                 Ok(())
