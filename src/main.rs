@@ -246,8 +246,9 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tracing::warn!("Failed to warm cache on startup: {:?}", e);
     }
 
-    // Create broadcast channel for WebSocket notifications
-    // Channel capacity of 100 - slow clients will miss old messages (backpressure handling)
+    // Create broadcast channel for WebSocket notifications.
+    // Capacity of 100: slow subscribers will receive a RecvError::Lagged — the WS handler
+    // detects this, notifies the client with a "messages_dropped" frame, and offers resync.
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
     tracing::info!("WebSocket broadcast channel initialized");
 
@@ -275,6 +276,11 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         tracing::info!("Vault not configured, secrets rotation disabled");
         None
     };
+
+    // Initialize asset registry cache (refreshes every 5 minutes)
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+    tracing::info!("Asset registry cache initialized");
 
     let monitor_pool = pool.clone();
     let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -304,7 +310,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         current_batch_size: current_batch_size.clone(),
         secrets_store,
         metrics_handle,
-        asset_cache,
+        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // Load tenant configs on startup

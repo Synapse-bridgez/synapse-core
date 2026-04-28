@@ -72,9 +72,6 @@ mod tests {
             asset_issuer: issuer,
             metadata: None,
             enabled: true,
-            min_amount: None,
-            max_amount: None,
-            settlement_schedule: Some("daily".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

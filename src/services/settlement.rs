@@ -6,24 +6,6 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::AppError;
-use bigdecimal::BigDecimal;
-
-/// Valid settlement status transitions.
-fn valid_transition(from: &str, to: &str) -> bool {
-    matches!(
-        (from, to),
-        ("completed", "pending_review")
-            | ("completed", "disputed")
-            | ("pending_review", "disputed")
-            | ("pending_review", "adjusted")
-            | ("pending_review", "voided")
-            | ("disputed", "adjusted")
-            | ("disputed", "voided")
-            | ("disputed", "pending_review")
-    )
-}
-
 pub struct SettlementService {
     pool: PgPool,
     max_batch_size: usize,
@@ -67,39 +49,14 @@ impl SettlementService {
 
         let now = Utc::now();
         let mut results = Vec::new();
-
-        for asset_code in asset_codes {
-            // Check schedule eligibility
-            if let Some(asset) = asset_map.get(&asset_code) {
-                if !Self::is_schedule_due(asset, now) {
-                    tracing::info!(
-                        asset = %asset_code,
-                        schedule = ?asset.settlement_schedule,
-                        "Skipping settlement: not due per asset schedule"
-                    );
-                    continue;
-                }
-            }
-
-            match self.settle_asset(&asset_code).await {
+        for asset in assets {
+            match self.settle_asset(&asset).await {
                 Ok(settlements) => results.extend(settlements),
-                Err(e) => tracing::error!("Failed to settle asset {}: {:?}", asset_code, e),
+                Err(e) => tracing::error!("Failed to settle asset {}: {:?}", asset, e),
             }
         }
 
         Ok(results)
-    }
-
-    /// Returns true if the asset's settlement schedule is currently due.
-    /// - `"hourly"` — always due
-    /// - `"daily"` (default) — always due (caller controls frequency via cron)
-    /// - `"weekly"` — only on Monday (weekday == 1)
-    fn is_schedule_due(asset: &Asset, now: chrono::DateTime<Utc>) -> bool {
-        use chrono::Datelike;
-        match asset.settlement_schedule.as_deref().unwrap_or("daily") {
-            "weekly" => now.weekday() == chrono::Weekday::Mon,
-            _ => true, // "hourly", "daily", or any unknown value — always eligible
-        }
     }
 
     /// Settle transactions for a specific asset, splitting into multiple settlements
@@ -136,39 +93,15 @@ impl SettlementService {
             return Ok(vec![]);
         }
 
-        let tx_count = unsettled.len() as i32;
-        let total_amount: BigDecimal = unsettled
-            .iter()
-            .map(|t| t.amount.clone())
-            .fold(BigDecimal::from(0), |acc, x| acc + x);
-
-        // Find the range of transactions
-        let period_start = unsettled
-            .iter()
-            .map(|t| t.created_at)
-            .min()
-            .unwrap_or(end_time);
-        let period_end = unsettled
-            .iter()
-            .map(|t| t.updated_at)
-            .max()
-            .unwrap_or(end_time);
-
-        let settlement = Settlement {
-            id: Uuid::new_v4(),
-            asset_code: asset_code.to_string(),
-            total_amount,
-            tx_count,
-            period_start,
-            period_end,
-            status: "completed".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            dispute_reason: None,
-            original_total_amount: None,
-            reviewed_by: None,
-            reviewed_at: None,
-        };
+        let total_tx = unsettled.len();
+        let batch_count = total_tx.div_ceil(self.max_batch_size);
+        tracing::info!(
+            asset = %asset_code,
+            total_transactions = total_tx,
+            batch_size = self.max_batch_size,
+            batches = batch_count,
+            "Starting settlement"
+        );
 
         let mut settlements = Vec::with_capacity(batch_count);
 

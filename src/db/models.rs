@@ -3,6 +3,46 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use sqlx::FromRow;
 use uuid::Uuid;
+use std::str::FromStr;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "text")]
+pub enum TransactionStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "processing")]
+    Processing,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+impl std::fmt::Display for TransactionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionStatus::Pending => write!(f, "pending"),
+            TransactionStatus::Processing => write!(f, "processing"),
+            TransactionStatus::Completed => write!(f, "completed"),
+            TransactionStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl FromStr for TransactionStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(TransactionStatus::Pending),
+            "processing" => Ok(TransactionStatus::Processing),
+            "completed" => Ok(TransactionStatus::Completed),
+            "failed" => Ok(TransactionStatus::Failed),
+            _ => Err(format!("Invalid transaction status: {}", s)),
+        }
+    }
+}
 
 #[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -85,7 +125,7 @@ impl Transaction {
             stellar_account,
             amount,
             asset_code,
-            status: "pending".to_string(),
+            status: TransactionStatus::Pending.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             anchor_transaction_id,
@@ -351,17 +391,28 @@ mod tests {
     }
 }
 
-/// Asset registered in the asset registry.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct ComplianceReport {
+    pub id: Uuid,
+    pub period: String,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub transaction_count: i64,
+    pub settlement_total: sqlx::types::BigDecimal,
+    pub anomaly_count: i64,
+    pub volume_by_asset: serde_json::Value,
+    pub top_accounts: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+// Minimal Asset struct for asset cache functionality
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub id: Uuid,
     pub asset_code: String,
     pub asset_issuer: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub enabled: bool,
-    pub min_amount: Option<BigDecimal>,
-    pub max_amount: Option<BigDecimal>,
-    pub settlement_schedule: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -369,13 +420,9 @@ pub struct Asset {
 impl Asset {
     /// Fetch all assets from the database.
     pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>(
-            "SELECT id, asset_code, asset_issuer, metadata, enabled, \
-             min_amount, max_amount, settlement_schedule, created_at, updated_at \
-             FROM assets ORDER BY asset_code",
-        )
-        .fetch_all(pool)
-        .await
+        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
+            .fetch_all(pool)
+            .await
     }
 
     /// Check whether a given asset code is registered and enabled.

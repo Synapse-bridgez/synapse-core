@@ -33,7 +33,7 @@ pub struct CombinedCacheMetrics {
     pub idempotency_fallback_count: u64,
 }
 
-pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn status_counts(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_status_counts();
     let config = CacheConfig::default();
 
@@ -76,12 +76,13 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
                 .into_response()
         }
     }
+    Ok(response)
 }
 
 pub async fn daily_totals(
     State(state): State<ApiState>,
     axum::extract::Query(query): axum::extract::Query<DailyTotalsQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_daily_totals(query.days);
     let config = CacheConfig::default();
 
@@ -124,9 +125,10 @@ pub async fn daily_totals(
                 .into_response()
         }
     }
+    Ok(response)
 }
 
-pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn asset_stats(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_asset_stats();
     let config = CacheConfig::default();
 
@@ -169,9 +171,10 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
                 .into_response()
         }
     }
+    Ok(response)
 }
 
-pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn cache_metrics(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let query_cache_metrics = state.app_state.query_cache.metrics();
     let combined_metrics = CombinedCacheMetrics {
         query_cache: query_cache_metrics,
@@ -182,5 +185,5 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> impl IntoResponse {
         idempotency_errors: 0,
         idempotency_fallback_count: 0,
     };
-    (StatusCode::OK, Json(combined_metrics))
+    Ok((StatusCode::OK, Json(combined_metrics)))
 }
