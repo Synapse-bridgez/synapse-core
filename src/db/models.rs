@@ -408,13 +408,31 @@ pub struct ComplianceReport {
 // Minimal Asset struct for asset cache functionality
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
+    pub id: Uuid,
     pub asset_code: String,
-    pub issuer: Option<String>,
+    pub asset_issuer: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Asset {
-    pub async fn fetch_all(_pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        // Placeholder implementation - returns empty vec for now
-        Ok(vec![])
+    /// Fetch all assets from the database.
+    pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Check whether a given asset code is registered and enabled.
+    pub async fn is_registered(pool: &sqlx::PgPool, code: &str) -> Result<bool, sqlx::Error> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assets WHERE asset_code = $1 AND enabled = TRUE)",
+        )
+        .bind(code)
+        .fetch_one(pool)
+        .await?;
+        Ok(exists)
     }
 }

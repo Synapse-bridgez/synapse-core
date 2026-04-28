@@ -343,6 +343,18 @@ pub async fn callback(
 
     validate_memo_type(&payload.memo_type)?;
 
+    // Validate asset is registered and enabled
+    if !state
+        .app_state
+        .asset_cache
+        .is_registered(&payload.asset_code)
+    {
+        return Err(AppError::Validation(format!(
+            "asset_code '{}' is not a registered or enabled asset",
+            payload.asset_code
+        )));
+    }
+
     let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
         .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
 
@@ -421,10 +433,9 @@ pub async fn get_transaction(
 
     let mut response: Response = Json(transaction).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)
@@ -524,10 +535,9 @@ pub async fn list_transactions(
 
     let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)
@@ -601,10 +611,9 @@ pub async fn list_transactions_api(
 
     let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)

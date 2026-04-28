@@ -18,6 +18,8 @@ pub mod tenant;
 pub mod utils;
 pub mod validation;
 
+pub use config::assets::AssetCache;
+
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
 use crate::handlers::profiling::ProfilingManager;
@@ -81,6 +83,8 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
+        let asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)

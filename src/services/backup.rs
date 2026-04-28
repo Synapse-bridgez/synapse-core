@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tokio::fs;
@@ -118,7 +119,7 @@ impl BackupService {
         }
 
         // Sort by timestamp descending
-        backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        backups.sort_by_key(|b| Reverse(b.timestamp));
 
         Ok(backups)
     }

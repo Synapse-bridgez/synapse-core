@@ -277,6 +277,11 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         None
     };
 
+    // Initialize asset registry cache (refreshes every 5 minutes)
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+    tracing::info!("Asset registry cache initialized");
+
     let monitor_pool = pool.clone();
     let pending_queue_depth = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
