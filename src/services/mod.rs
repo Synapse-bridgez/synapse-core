@@ -15,6 +15,7 @@ pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
 pub use feature_flags::FeatureFlagService;
 pub use lock_manager::LeaderElection;
+pub use lock_manager::{FairLockConfig, FairLockManager};
 pub use query_cache::{CacheConfig, QueryCache};
 pub use reconciliation::ReconciliationService;
 pub use scheduler::{Job, JobScheduler, JobStatus};
