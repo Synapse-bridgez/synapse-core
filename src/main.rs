@@ -410,6 +410,41 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
 
+    // Clone readiness state for the shutdown signal handler
+    let readiness_for_shutdown = app_state.readiness.clone();
+
+    // Build the shutdown signal: fires on SIGTERM or SIGINT, then drains
+    let shutdown_signal = async move {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install CTRL+C handler");
+        };
+
+        #[cfg(unix)]
+        let sigterm = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let sigterm = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("Received SIGINT, starting graceful shutdown"),
+            _ = sigterm => tracing::info!("Received SIGTERM, starting graceful shutdown"),
+        }
+
+        // Mark service as not ready so /ready returns 503 immediately
+        readiness_for_shutdown.set_not_ready();
+        tracing::info!("Readiness set to not_ready; waiting for in-flight requests to drain");
+
+        // Wait for the configured drain timeout (default 30s)
+        readiness_for_shutdown.wait_for_drain().await;
+    };
+
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
