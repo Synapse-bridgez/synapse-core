@@ -9,6 +9,9 @@ use crate::db::models::Transaction;
 use crate::services::lock_manager::LeaderElection;
 use crate::stellar::HorizonClient;
 
+const LEADER_HEARTBEAT_SECS: u64 = 15;
+const POLL_INTERVAL_SECS: u64 = 5;
+
 /// Exponential moving average tracker for adaptive batch sizing.
 pub struct BatchSizer {
     ema: f64,
@@ -57,6 +60,7 @@ pub struct ProcessorPool {
 }
 
 impl ProcessorPool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         horizon_client: HorizonClient,
@@ -332,7 +336,7 @@ pub async fn run_processor_with_leader_election(
             }
             _ = process_tick.tick() => {
                 // All instances process transactions (SKIP LOCKED handles concurrency)
-                if let Err(e) = process_batch(&pool, &horizon_client).await {
+                if let Err(e) = process_batch(&pool, &horizon_client, 10).await {
                     error!("Processor batch error: {e}");
                 }
             }

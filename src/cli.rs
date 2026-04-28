@@ -113,12 +113,12 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
             }
 
             tracing::info!("Transaction {} marked as completed", tx_id);
-            println!("✓ Transaction {} marked as completed", tx_id);
+            println!("✓ Transaction {tx_id} marked as completed");
             Ok(())
         }
         None => {
             tracing::warn!("Transaction {} not found", tx_id);
-            anyhow::bail!("Transaction {} not found", tx_id)
+            anyhow::bail!("Transaction {tx_id} not found")
         }
     }
 }
@@ -161,7 +161,7 @@ fn mask_password(url: &str) -> String {
                 let user_start = slash_pos + 2;
                 let user = &url[user_start..colon_pos];
                 let suffix = &url[at_pos..];
-                return format!("{}{}:****{}", prefix, user, suffix);
+                return format!("{prefix}{user}:****{suffix}");
             }
         }
     }
@@ -222,7 +222,7 @@ pub async fn handle_tx_reconcile(
     match format {
         "json" => {
             let json = serde_json::to_string_pretty(&report)?;
-            println!("{}", json);
+            println!("{json}");
         }
         _ => {
             println!("\n=== Reconciliation Report ===");

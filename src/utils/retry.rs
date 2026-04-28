@@ -17,7 +17,7 @@ pub fn is_transient_db_error(err: &sqlx::Error) -> bool {
                 || msg.contains("serialization failure")
                 || msg.contains("connection reset")
                 || msg.contains("could not connect")
-                || db_err.code().map_or(false, |c| {
+                || db_err.code().is_some_and(|c| {
                     matches!(c.as_ref(), "40P01" | "40001" | "08006" | "08001" | "08004")
                 })
         }
