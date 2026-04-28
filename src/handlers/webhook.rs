@@ -343,8 +343,38 @@ pub async fn callback(
 
     validate_memo_type(&payload.memo_type)?;
 
+    // Validate asset is registered and enabled
+    if !state
+        .app_state
+        .asset_cache
+        .is_registered(&payload.asset_code)
+    {
+        return Err(AppError::Validation(format!(
+            "asset_code '{}' is not a registered or enabled asset",
+            payload.asset_code
+        )));
+    }
+
     let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
         .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
+
+    // Validate amount against asset-level min/max
+    if let Some(ref min) = asset.min_amount {
+        if &amount < min {
+            return Err(AppError::Validation(format!(
+                "amount {} is below the minimum {} for asset {}",
+                amount, min, asset.asset_code
+            )));
+        }
+    }
+    if let Some(ref max) = asset.max_amount {
+        if &amount > max {
+            return Err(AppError::Validation(format!(
+                "amount {} exceeds the maximum {} for asset {}",
+                amount, max, asset.asset_code
+            )));
+        }
+    }
 
     let tx = Transaction::new(
         payload.stellar_account,
@@ -358,9 +388,7 @@ pub async fn callback(
         payload.metadata,
     );
 
-    let inserted = queries::insert_transaction(&state.app_state.db, &tx)
-        .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    let inserted = queries::insert_transaction(&state.app_state.db, &tx).await?;
 
     Ok((StatusCode::CREATED, Json(inserted)).into_response())
 }
@@ -380,7 +408,7 @@ pub async fn callback(
 pub async fn handle_webhook(
     State(_state): State<ApiState>,
     Json(payload): Json<WebhookPayload>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     tracing::info!("Processing webhook with id: {}", payload.id);
 
     let response = WebhookResponse {
@@ -388,7 +416,7 @@ pub async fn handle_webhook(
         message: format!("Webhook {} processed successfully", payload.id),
     };
 
-    (StatusCode::OK, Json(response))
+    Ok((StatusCode::OK, Json(response)))
 }
 
 /// Get a specific transaction
@@ -507,16 +535,7 @@ pub async fn list_transactions(
     // fetch one extra to determine has_more
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered(
-        pool,
-        fetch_limit,
-        decoded_cursor,
-        backward,
-        from_date,
-        to_date,
-    )
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date).await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {
@@ -597,16 +616,7 @@ pub async fn list_transactions_api(
 
     let fetch_limit = limit + 1;
     let (pool, replica_used) = app_state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered(
-        pool,
-        fetch_limit,
-        decoded_cursor,
-        backward,
-        from_date,
-        to_date,
-    )
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date).await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {

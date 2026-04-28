@@ -154,7 +154,7 @@ impl ProfilingManager {
                 Err(e) => {
                     tracing::error!("CPU profiling failed: {}", e);
                     if let Some(session) = current_session.lock().await.as_mut() {
-                        session.status = format!("failed: {}", e);
+                        session.status = format!("failed: {e}");
                         session.end_time = Some(
                             SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -234,7 +234,7 @@ impl ProfilingManager {
                 Err(e) => {
                     tracing::error!("Memory profiling failed: {}", e);
                     if let Some(session) = current_session.lock().await.as_mut() {
-                        session.status = format!("failed: {}", e);
+                        session.status = format!("failed: {e}");
                         session.end_time = Some(
                             SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -285,7 +285,7 @@ async fn run_cpu_profiling(
     // Stop profiling
     match guard.report().build() {
         Ok(report) => {
-            let flamegraph_path = profile_dir.join(format!("{}.svg", session_id));
+            let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
             let flamegraph_file =
                 std::fs::File::create(&flamegraph_path).map_err(|e| e.to_string())?;
 
@@ -295,7 +295,7 @@ async fn run_cpu_profiling(
 
             Ok(flamegraph_path.to_string_lossy().to_string())
         }
-        Err(e) => Err(format!("Failed to build profiling report: {}", e)),
+        Err(e) => Err(format!("Failed to build profiling report: {e}")),
     }
 }
 
@@ -309,19 +309,18 @@ async fn run_memory_profiling(session_id: &str, duration_secs: u64) -> Result<St
     // This is a placeholder that creates a dummy SVG file
     tokio::time::sleep(tokio::time::Duration::from_secs(duration_secs)).await;
 
-    let flamegraph_path = profile_dir.join(format!("{}.svg", session_id));
+    let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
     let placeholder_svg = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <svg viewBox=\"0 0 1024 512\" xmlns=\"http://www.w3.org/2000/svg\">\n  \
          <rect width=\"1024\" height=\"512\" fill=\"#f0f0f0\"/>\n  \
          <text x=\"512\" y=\"256\" font-size=\"24\" text-anchor=\"middle\" dominant-baseline=\"middle\">\n    \
-         Memory Profiling Session: {}\n  \
+         Memory Profiling Session: {session_id}\n  \
          </text>\n  \
          <text x=\"512\" y=\"300\" font-size=\"14\" text-anchor=\"middle\" fill=\"#666\">\n    \
          Memory profiling data would appear here\n  \
          </text>\n\
-         </svg>",
-        session_id
+         </svg>"
     );
 
     fs::write(&flamegraph_path, placeholder_svg).map_err(|e| e.to_string())?;
@@ -333,7 +332,7 @@ async fn run_memory_profiling(session_id: &str, duration_secs: u64) -> Result<St
 pub async fn start_profiling(
     State(state): State<AppState>,
     Json(req): Json<StartProfilingRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let profile_type = req.profile_type.to_lowercase();
 
     let result = match profile_type.as_str() {
@@ -351,59 +350,45 @@ pub async fn start_profiling(
                 .await
         }
         _ => Err(format!(
-            "Unknown profile type '{}'. Supported types: cpu, memory",
-            profile_type
+            "Unknown profile type '{profile_type}'. Supported types: cpu, memory"
         )),
     };
 
     match result {
-        Ok(session) => (StatusCode::OK, Json(session)).into_response(),
+        Ok(session) => Ok((StatusCode::OK, Json(session))),
         Err(e) => {
             tracing::error!("Failed to start profiling: {}", e);
-            (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": e
-                })),
-            )
-                .into_response()
+            Err(AppError::Internal(e))
         }
     }
 }
 
 /// HTTP handler to get current profiling status
-pub async fn get_profiling_status(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_profiling_status(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let session = state.profiling_manager.get_current_session().await;
     let is_profiling = state.profiling_manager.is_profiling();
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "is_profiling": is_profiling,
             "current_session": session
         })),
-    )
+    ))
 }
 
 /// HTTP handler to stop profiling
-pub async fn stop_profiling(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn stop_profiling(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     match state.profiling_manager.stop_profiling().await {
-        Ok(_) => (
+        Ok(_) => Ok((
             StatusCode::OK,
             Json(json!({
                 "message": "Profiling stopped successfully"
             })),
-        )
-            .into_response(),
+        )),
         Err(e) => {
             tracing::error!("Failed to stop profiling: {}", e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": e
-                })),
-            )
-                .into_response()
+            Err(AppError::BadRequest(e))
         }
     }
 }
@@ -412,24 +397,17 @@ pub async fn stop_profiling(State(state): State<AppState>) -> impl IntoResponse 
 pub async fn get_flamegraph(
     State(_state): State<AppState>,
     Path(session_id): Path<String>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let profile_dir = PathBuf::from("./profiling_data");
-    let flamegraph_path = profile_dir.join(format!("{}.svg", session_id));
+    let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
 
     match tokio::fs::read_to_string(&flamegraph_path).await {
-        Ok(content) => (
+        Ok(content) => Ok((
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
             content,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("Flamegraph '{}' not found", session_id)
-            })),
-        )
-            .into_response(),
+        )),
+        Err(_) => Err(AppError::NotFound(format!("Flamegraph '{}' not found", session_id))),
     }
 }
 

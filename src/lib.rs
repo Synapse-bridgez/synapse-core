@@ -17,6 +17,8 @@ pub mod tenant;
 pub mod utils;
 pub mod validation;
 
+pub use config::assets::AssetCache;
+
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
 use crate::handlers::profiling::ProfilingManager;
@@ -33,7 +35,7 @@ use axum::{
     Router,
 };
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -58,6 +60,8 @@ pub struct AppState {
     pub current_batch_size: Arc<AtomicU64>,
     /// Prometheus metrics handle
     pub metrics_handle: crate::metrics::MetricsHandle,
+    /// Active WebSocket connection count
+    pub ws_connection_count: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -78,6 +82,8 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
+        let asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)
@@ -96,6 +102,7 @@ impl AppState {
             pending_queue_depth: Arc::new(AtomicU64::new(0)),
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
+            ws_connection_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -206,31 +213,25 @@ pub fn create_app(app_state: AppState) -> Router {
             get(handlers::admin::get_webhook_health),
         )
         // Admin: per-tenant quota management
-        .route(
-            "/admin/quotas",
-            get(handlers::admin::quota::list_tenant_quotas),
-        )
-        .route(
-            "/admin/quotas/:tenant_id",
-            get(handlers::admin::quota::get_tenant_quota),
-        )
-        .route(
-            "/admin/quotas/:tenant_id",
-            axum::routing::put(handlers::admin::quota::set_tenant_quota),
-        )
-        .route(
-            "/admin/quotas/:tenant_id/reset",
-            axum::routing::delete(handlers::admin::quota::reset_tenant_quota),
-        )
+        .route("/admin/quotas", get(handlers::admin::quota::list_tenant_quotas))
+        .route("/admin/quotas/:tenant_id", get(handlers::admin::quota::get_tenant_quota))
+        .route("/admin/quotas/:tenant_id", axum::routing::put(handlers::admin::quota::set_tenant_quota))
+        .route("/admin/quotas/:tenant_id/reset", axum::routing::delete(handlers::admin::quota::reset_tenant_quota))
+        // Admin: active distributed locks
+        .route("/admin/locks", get(handlers::admin::locks::list_active_locks))
         // Admin: settlement dispute workflow
-        .route(
-            "/admin/settlements/:id/status",
-            axum::routing::patch(handlers::settlements::update_settlement_status),
-        )
+        .route("/admin/settlements/:id/status", axum::routing::patch(handlers::settlements::update_settlement_status))
+        // Admin: reconciliation reports
+        .nest("/admin/reconciliation", handlers::admin::reconciliation::reconciliation_routes())
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
         .with_state(api_state)
+        .merge(
+            Router::new()
+                .route("/ws", get(handlers::ws::ws_handler))
+                .with_state(app_state),
+        )
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))

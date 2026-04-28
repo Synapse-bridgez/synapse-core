@@ -22,8 +22,7 @@ use uuid::Uuid;
 
 use crate::error::RequestId;
 
-#[allow(dead_code)]
-const MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
+const _MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 
 /// Axum middleware function.
 ///

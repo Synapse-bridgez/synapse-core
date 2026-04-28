@@ -51,7 +51,7 @@ pub struct HorizonClient {
 }
 
 impl HorizonClient {
-    /// Creates a new HorizonClient with the specified base URL
+    /// Creates a new HorizonClient with the specified base URL and circuit breaker
     pub fn new(base_url: String) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))

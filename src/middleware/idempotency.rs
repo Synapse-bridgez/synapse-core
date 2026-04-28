@@ -133,18 +133,15 @@ struct LockValue {
     locked_at: u64,
 }
 
-#[allow(dead_code)]
-fn cache_key(tenant_id: &str, key: &str) -> String {
-    format!("idempotency:{}:{}", tenant_id, key)
+fn _cache_key(tenant_id: &str, key: &str) -> String {
+    format!("idempotency:{tenant_id}:{key}")
 }
 
-#[allow(dead_code)]
-fn lock_key(tenant_id: &str, key: &str) -> String {
-    format!("idempotency:lock:{}:{}", tenant_id, key)
+fn _lock_key(tenant_id: &str, key: &str) -> String {
+    format!("idempotency:lock:{tenant_id}:{key}")
 }
 
-#[allow(dead_code)]
-fn lock_value() -> String {
+fn _lock_value() -> String {
     let instance_id =
         std::env::var("INSTANCE_ID").unwrap_or_else(|_| std::process::id().to_string());
     let locked_at = std::time::SystemTime::now()
@@ -156,6 +153,27 @@ fn lock_value() -> String {
         locked_at,
     })
     .unwrap_or_else(|_| "processing".to_string())
+}
+
+pub const IDEMPOTENCY_KEY_MAX_LENGTH: usize = 255;
+
+pub fn validate_idempotency_key(key: &str) -> Result<String, String> {
+    let trimmed = key.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Idempotency key must not be empty".to_string());
+    }
+    if trimmed.len() > IDEMPOTENCY_KEY_MAX_LENGTH {
+        return Err(format!(
+            "Idempotency key must not exceed {IDEMPOTENCY_KEY_MAX_LENGTH} characters"
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || c == ' ' || c == '@' || c == '/')
+    {
+        return Err("Idempotency key contains invalid characters".to_string());
+    }
+    Ok(trimmed)
 }
 
 impl IdempotencyService {
@@ -188,8 +206,8 @@ impl IdempotencyService {
         _tenant_id: &str,
         key: &str,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
-        let cache_key = format!("idempotency:{}", key);
-        let lock_key = format!("idempotency:lock:{}", key);
+        let cache_key = format!("idempotency:{key}");
+        let lock_key = format!("idempotency:lock:{key}");
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
@@ -305,8 +323,8 @@ impl IdempotencyService {
         body: String,
         content_type: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let cache_key = format!("idempotency:{}", key);
-        let lock_key = format!("idempotency:lock:{}", key);
+        let cache_key = format!("idempotency:{key}");
+        let lock_key = format!("idempotency:lock:{key}");
 
         let cached = CachedResponse {
             status,
@@ -345,7 +363,6 @@ impl IdempotencyService {
                     "body": body,
                     "content_type": content_type
                 });
-                let _expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
 
                 crate::db::queries::update_idempotency_key_response(
                     &self.pool,
@@ -363,7 +380,7 @@ impl IdempotencyService {
         &self,
         key: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let lock_key = format!("idempotency:lock:{}", key);
+        let lock_key = format!("idempotency:lock:{key}");
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
@@ -387,7 +404,11 @@ impl IdempotencyService {
         value: &str,
         ttl: Duration,
     ) -> Result<bool, RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(RedisError::Redis)?;
         let acquired: bool = redis::cmd("SET")
             .arg(key)
             .arg(value)
@@ -395,7 +416,8 @@ impl IdempotencyService {
             .arg("EX")
             .arg(ttl.as_secs())
             .query_async(&mut conn)
-            .await?;
+            .await
+            .map_err(RedisError::Redis)?;
         Ok(acquired)
     }
 
@@ -407,12 +429,17 @@ impl IdempotencyService {
     /// Background task: scan for stale locks (older than 2 minutes with no cached response)
     /// and delete them so the next request can reprocess.
     pub async fn recover_stale_locks(&self) -> Result<(), RedisError> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(RedisError::Redis)?;
 
         let lock_keys: Vec<String> = redis::cmd("KEYS")
             .arg("idempotency:lock:*")
             .query_async(&mut conn)
-            .await?;
+            .await
+            .map_err(RedisError::Redis)?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -420,7 +447,11 @@ impl IdempotencyService {
             .as_secs();
 
         for lk in lock_keys {
-            let raw: Option<String> = redis::cmd("GET").arg(&lk).query_async(&mut conn).await?;
+            let raw: Option<String> = redis::cmd("GET")
+                .arg(&lk)
+                .query_async(&mut conn)
+                .await
+                .map_err(RedisError::Redis)?;
 
             let Some(raw) = raw else { continue };
 
@@ -432,17 +463,20 @@ impl IdempotencyService {
                 continue;
             }
 
-            // Lock key: idempotency:lock:{tenant_id}:{key}
-            // Cache key: idempotency:{tenant_id}:{key}
             let ck = lk.replacen("idempotency:lock:", "idempotency:", 1);
-            let cached: Option<String> = redis::cmd("GET").arg(&ck).query_async(&mut conn).await?;
+            let cached: Option<String> = redis::cmd("GET")
+                .arg(&ck)
+                .query_async(&mut conn)
+                .await
+                .map_err(RedisError::Redis)?;
 
             if cached.is_none() {
                 tracing::warn!(lock_key = %lk, "Recovering stale idempotency lock");
                 redis::cmd("DEL")
                     .arg(&lk)
                     .query_async::<_, ()>(&mut conn)
-                    .await?;
+                    .await
+                    .map_err(RedisError::Redis)?;
             }
         }
 
@@ -537,7 +571,7 @@ pub async fn idempotency_middleware(
                         "content-type",
                         content_type.as_deref().unwrap_or("application/json"),
                     )
-                    .body(axum::body::boxed(hyper::Body::from(body_bytes)))
+                    .body(axum::body::boxed(Body::from(body_bytes)))
                     .unwrap();
 
                 if let Err(e) = service
@@ -599,13 +633,14 @@ pub async fn idempotency_middleware(
             }
 
             response_builder
-                .body(axum::body::boxed(hyper::Body::from(body_bytes)))
+                .body(axum::body::boxed(Body::from(body_bytes)))
                 .unwrap_or_else(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": "Failed to reconstruct cached response"})),
-                    )
-                        .into_response()
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(axum::body::boxed(Body::from(
+                            r#"{"error":"Failed to reconstruct cached response"}"#,
+                        )))
+                        .unwrap()
                 })
         }
         Err(e) => {

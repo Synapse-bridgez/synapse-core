@@ -7,13 +7,11 @@
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
-use redis::AsyncCommands;
-use redis::Client;
+use redis::{AsyncCommands, Client};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
-use sqlx::PgPool;
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 const MAX_ATTEMPTS: i32 = 5;
@@ -181,7 +179,7 @@ impl WebhookDispatcher {
 
     async fn check_rate_limit(&self, endpoint_id: Uuid, max_rate: i32) -> anyhow::Result<bool> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
-        let key = format!("webhook_rate:{}", endpoint_id);
+        let key = format!("webhook_rate:{endpoint_id}");
 
         // Use Redis INCR to atomically increment the counter
         // If the key doesn't exist, INCR sets it to 1
@@ -519,8 +517,14 @@ impl WebhookDispatcher {
         .fetch_one(&self.pool)
         .await?;
 
-        let total: i64 = row.try_get("total").unwrap_or(0);
-        let successes: i64 = row.try_get("successes").unwrap_or(0);
+        let total = row
+            .try_get::<Option<i64>, _>("total")
+            .unwrap_or(None)
+            .unwrap_or(0) as i32;
+        let successes = row
+            .try_get::<Option<i64>, _>("successes")
+            .unwrap_or(None)
+            .unwrap_or(0) as f64;
         let success_rate = if total > 0 {
             (successes as f64 / total as f64) * 100.0
         } else {
@@ -602,9 +606,9 @@ const SIGNATURE_VERSION: &str = "v1";
 /// The signed content is formatted as: `timestamp.body`
 /// where timestamp is included in the X-Webhook-Timestamp header.
 fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> String {
-    let signed_content = format!("{}.{}", timestamp, body);
+    let signed_content = format!("{timestamp}.{body}");
     let signature_hex = sign_payload_v1(secret, &signed_content);
-    format!("{}={}", SIGNATURE_VERSION, signature_hex)
+    format!("{SIGNATURE_VERSION}={signature_hex}")
 }
 
 /// Compute HMAC-SHA256 hex signature (v1).
@@ -654,8 +658,8 @@ mod tests {
         );
         assert_eq!(
             signature.len(),
-            68,
-            "v1 signature should be 68 chars (4 for 'v1=' + 64 for sha256 hex)"
+            67,
+            "v1 signature should be 67 chars (3 for 'v1=' + 64 for sha256 hex)"
         );
     }
 
@@ -745,10 +749,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_filter_no_rules_accepts_all() {
-        let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
+    #[tokio::test]
+    async fn test_filter_no_rules_accepts_all() {
+        let dispatcher = WebhookDispatcher::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+            "redis://dummy",
+        )
+        .unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -768,10 +777,15 @@ mod tests {
         assert!(dispatcher.matches_filters(&endpoint, &transaction_data));
     }
 
-    #[test]
-    fn test_filter_asset_codes_matches() {
-        let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
+    #[tokio::test]
+    async fn test_filter_asset_codes_matches() {
+        let dispatcher = WebhookDispatcher::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+            "redis://dummy",
+        )
+        .unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -802,10 +816,15 @@ mod tests {
         assert!(!dispatcher.matches_filters(&endpoint, &btc_transaction));
     }
 
-    #[test]
-    fn test_filter_min_amount() {
-        let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
+    #[tokio::test]
+    async fn test_filter_min_amount() {
+        let dispatcher = WebhookDispatcher::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+            "redis://dummy",
+        )
+        .unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -831,10 +850,15 @@ mod tests {
         assert!(!dispatcher.matches_filters(&endpoint, &small_transaction));
     }
 
-    #[test]
-    fn test_filter_combined_rules() {
-        let dispatcher =
-            WebhookDispatcher::new(sqlx::PgPool::connect_lazy("dummy").unwrap(), "redis://dummy").unwrap();
+    #[tokio::test]
+    async fn test_filter_combined_rules() {
+        let dispatcher = WebhookDispatcher::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+            "redis://dummy",
+        )
+        .unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -912,20 +936,20 @@ pub async fn list_endpoint_health(
 
     Ok(rows
         .into_iter()
-        .map(|r: sqlx::postgres::PgRow| {
-            use sqlx::Row;
-            EndpointHealth {
-                id: r.get("id"),
-                url: r.get("url"),
-                enabled: r.get("enabled"),
-                success_rate: r
-                    .try_get::<sqlx::types::BigDecimal, _>("success_rate")
-                    .ok()
-                    .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
-                    .unwrap_or(100.0),
-                total_deliveries: r.try_get("total_deliveries").unwrap_or(0),
-                last_success_at: r.try_get("last_success_at").ok(),
-            }
+        .map(|r: sqlx::postgres::PgRow| EndpointHealth {
+            id: r.get("id"),
+            url: r.get("url"),
+            enabled: r.get("enabled"),
+            success_rate: r
+                .try_get::<sqlx::types::BigDecimal, _>("success_rate")
+                .ok()
+                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(100.0),
+            total_deliveries: r
+                .try_get::<Option<i32>, _>("total_deliveries")
+                .unwrap_or(None)
+                .unwrap_or(0),
+            last_success_at: r.try_get("last_success_at").unwrap_or(None),
         })
         .collect())
 }
@@ -946,9 +970,7 @@ pub async fn get_endpoint_health(
     .fetch_optional(pool)
     .await
     .map_err(crate::error::AppError::Database)?
-    .ok_or_else(|| {
-        crate::error::AppError::NotFound(format!("Endpoint {} not found", endpoint_id))
-    })?;
+    .ok_or_else(|| crate::error::AppError::NotFound(format!("Endpoint {endpoint_id} not found")))?;
 
     use sqlx::Row;
     Ok(EndpointHealth {
@@ -960,7 +982,10 @@ pub async fn get_endpoint_health(
             .ok()
             .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
             .unwrap_or(100.0),
-        total_deliveries: r.try_get("total_deliveries").unwrap_or(0),
-        last_success_at: r.try_get("last_success_at").ok(),
+        total_deliveries: r
+            .try_get::<Option<i32>, _>("total_deliveries")
+            .unwrap_or(None)
+            .unwrap_or(0),
+        last_success_at: r.try_get("last_success_at").unwrap_or(None),
     })
 }

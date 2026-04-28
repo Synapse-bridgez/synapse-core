@@ -146,13 +146,13 @@ impl ReadinessState {
     async fn check_redis(&self, redis_url: &str) -> Result<(), String> {
         match redis::Client::open(redis_url) {
             Ok(client) => match client.get_connection() {
-                Ok(mut conn) => match redis::cmd("PING").query::<()>(&mut conn) {
+                Ok(mut conn) => match redis::cmd("PING").query::<String>(&mut conn) {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(format!("Redis PING failed: {}", e)),
+                    Err(e) => Err(format!("Redis PING failed: {e}")),
                 },
-                Err(e) => Err(format!("Redis connection failed: {}", e)),
+                Err(e) => Err(format!("Redis connection failed: {e}")),
             },
-            Err(e) => Err(format!("Redis client initialization failed: {}", e)),
+            Err(e) => Err(format!("Redis client initialization failed: {e}")),
         }
     }
 
@@ -171,7 +171,7 @@ impl ReadinessState {
                     Err(format!("Horizon returned status: {}", response.status()))
                 }
             }
-            Err(e) => Err(format!("Horizon connectivity check failed: {}", e)),
+            Err(e) => Err(format!("Horizon connectivity check failed: {e}")),
         }
     }
 }
@@ -185,7 +185,7 @@ pub enum InitializationError {
 impl std::fmt::Display for InitializationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InitializationError::DatabaseCheck(msg) => write!(f, "Database check failed: {}", msg),
+            InitializationError::DatabaseCheck(msg) => write!(f, "Database check failed: {msg}"),
         }
     }
 }

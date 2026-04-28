@@ -113,7 +113,7 @@ impl AccountMonitor {
         );
 
         if let Some(c) = cursor {
-            url.push_str(&format!("&cursor={}", c));
+            url.push_str(&format!("&cursor={c}"));
         }
 
         let response = self.horizon_client.client.get(&url).send().await?;
@@ -158,7 +158,7 @@ impl AccountMonitor {
                     "pending",
                     "completed",
                 )
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 // Update transaction to completed
                 sqlx::query(

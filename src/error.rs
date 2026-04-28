@@ -83,6 +83,10 @@ pub mod codes {
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
         ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
+
+    // Redis errors
+    pub const REDIS_001: (&str, u16, &str) =
+        ("ERR_REDIS_001", 500, "Redis operation failed");
 }
 
 /// Get all error codes as a vector for catalog generation
@@ -183,6 +187,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
         },
+        ErrorCode {
+            code: codes::REDIS_001.0,
+            http_status: codes::REDIS_001.1,
+            description: codes::REDIS_001.2,
+        },
     ]
 }
 
@@ -251,6 +260,12 @@ pub enum AppError {
 
     #[error("Insufficient permissions: {0}")]
     InsufficientPermissions(String),
+
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
+
+    #[error("Internal error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
 
 impl AppError {
@@ -277,6 +292,8 @@ impl AppError {
             AppError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
+            AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -305,6 +322,8 @@ impl AppError {
             AppError::RateLimitExceeded => codes::RATE_LIMIT_001.0,
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
+            AppError::Redis(_) => codes::REDIS_001.0,
+            AppError::Anyhow(_) => codes::INTERNAL_001.0,
         }
     }
 }
@@ -318,27 +337,24 @@ impl IntoResponse for AppError {
         let status = self.status_code();
         let timestamp = chrono::Utc::now().to_rfc3339();
         let code = self.code();
-        let docs_url = format!("/errors#{}", code);
+        let docs_url = format!("/errors#{code}");
 
         // Generate actionable detail message
         let detail = match &self {
             AppError::InvalidTransactionAmount(msg) => {
-                format!("Amount must be a positive number. {}", msg)
+                format!("Amount must be a positive number. {msg}")
             }
             AppError::AmountBelowMinimum(msg) => {
-                format!("Amount is below the minimum threshold. {}", msg)
+                format!("Amount is below the minimum threshold. {msg}")
             }
             AppError::InvalidStellarAddress(msg) => {
-                format!(
-                    "Stellar address must be 56 characters starting with 'G'. {}",
-                    msg
-                )
+                format!("Stellar address must be 56 characters starting with 'G'. {msg}")
             }
             AppError::InvalidStatusTransition(msg) => {
-                format!("Status transition is not allowed. {}", msg)
+                format!("Status transition is not allowed. {msg}")
             }
             AppError::Validation(msg) => {
-                format!("Validation failed. {}", msg)
+                format!("Validation failed. {msg}")
             }
             _ => self.to_string(),
         };
@@ -351,13 +367,6 @@ impl IntoResponse for AppError {
             "detail": detail,
             "docs_url": docs_url,
         });
-
-        // The request_logger middleware injects the correlation ID as the
-        // X-Request-Id header and as a RequestId extension. We can't read
-        // extensions here (we don't have the request), so the header is
-        // attached by the middleware layer after the response is built.
-        // We leave a placeholder that the middleware can fill in if needed.
-        let _ = body; // suppress unused warning if correlation_id is absent
 
         (status, Json(body)).into_response()
     }

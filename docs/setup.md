@@ -6,6 +6,32 @@ This guide walks through setting up a local development environment, running the
 
 ---
 
+## Automated Setup (Recommended)
+
+The fastest way to get started is the setup script, which handles prerequisites checking, environment configuration, Docker services, migrations, and a health check in one command:
+
+```bash
+./scripts/setup.sh
+```
+
+To wipe all existing data and start completely fresh:
+
+```bash
+./scripts/setup.sh --reset
+```
+
+The script will:
+- Verify Rust, Docker, and `psql` are installed
+- Copy `.env.example.failover` → `.env` if no `.env` exists
+- Start PostgreSQL and Redis via Docker Compose
+- Wait for both services to pass their health checks
+- Install `sqlx-cli` if needed and run all migrations
+- Print next steps to start the server
+
+If you prefer to set things up manually, follow the steps below.
+
+---
+
 ## Prerequisites
 
 | Tool        | Version        | Installation                               |

@@ -9,7 +9,7 @@ use crate::db::models::Transaction;
 use crate::services::lock_manager::LeaderElection;
 use crate::stellar::HorizonClient;
 
-const LEADER_HEARTBEAT_SECS: u64 = 10;
+const LEADER_HEARTBEAT_SECS: u64 = 15;
 const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Exponential moving average tracker for adaptive batch sizing.
