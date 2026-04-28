@@ -48,7 +48,7 @@ impl BackupService {
         let timestamp = Utc::now();
         let filename = self.generate_filename(backup_type, timestamp);
         let backup_path = self.backup_dir.join(&filename);
-        let temp_path = self.backup_dir.join(format!("{}.tmp", filename));
+        let temp_path = self.backup_dir.join(format!("{filename}.tmp"));
 
         // Run pg_dump
         tracing::info!("Running pg_dump for {:?} backup", backup_type);
@@ -127,7 +127,7 @@ impl BackupService {
         let backup_path = self.backup_dir.join(filename);
 
         if !backup_path.exists() {
-            anyhow::bail!("Backup file not found: {}", filename);
+            anyhow::bail!("Backup file not found: {filename}");
         }
 
         // Load and verify metadata
@@ -234,7 +234,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("pg_dump failed: {}", stderr);
+            anyhow::bail!("pg_dump failed: {stderr}");
         }
 
         Ok(())
@@ -250,7 +250,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("psql restore failed: {}", stderr);
+            anyhow::bail!("psql restore failed: {stderr}");
         }
 
         Ok(())
@@ -267,7 +267,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("gzip failed: {}", stderr);
+            anyhow::bail!("gzip failed: {stderr}");
         }
 
         let mut file = fs::File::create(&output_path)
@@ -297,7 +297,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("gunzip failed: {}", stderr);
+            anyhow::bail!("gunzip failed: {stderr}");
         }
 
         let mut file = fs::File::create(&output_path)
@@ -329,13 +329,13 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{}", key))
+            .arg(format!("pass:{key}"))
             .output()
             .context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("openssl encryption failed: {}", stderr);
+            anyhow::bail!("openssl encryption failed: {stderr}");
         }
 
         // Remove unencrypted file
@@ -364,13 +364,13 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{}", key))
+            .arg(format!("pass:{key}"))
             .output()
             .context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("openssl decryption failed: {}", stderr);
+            anyhow::bail!("openssl decryption failed: {stderr}");
         }
 
         Ok(output_path)
@@ -384,7 +384,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("sha256sum failed: {}", stderr);
+            anyhow::bail!("sha256sum failed: {stderr}");
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -425,7 +425,7 @@ impl BackupService {
             "sql.gz"
         };
 
-        format!("backup_{}_{}.{}", type_str, date_str, extension)
+        format!("backup_{type_str}_{date_str}.{extension}")
     }
 
     async fn save_metadata(&self, metadata: &BackupMetadata) -> Result<()> {
