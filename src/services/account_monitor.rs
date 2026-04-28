@@ -113,7 +113,7 @@ impl AccountMonitor {
         );
 
         if let Some(c) = cursor {
-            url.push_str(&format!("&cursor={}", c));
+            url.push_str(&format!("&cursor={c}"));
         }
 
         let response = self.horizon_client.client.get(&url).send().await?;
@@ -154,8 +154,11 @@ impl AccountMonitor {
                 info!("Matched payment {} to transaction {}", payment.id, tx_id);
 
                 // Validate status transition: pending → completed
-                crate::validation::state_machine::validate_status_transition("pending", "completed")
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                crate::validation::state_machine::validate_status_transition(
+                    "pending",
+                    "completed",
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
                 // Update transaction to completed
                 sqlx::query(

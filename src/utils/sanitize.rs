@@ -54,7 +54,7 @@ fn mask_value(value: &Value) -> Value {
             let visible = &s[..4];
             let masked = "****";
             let end = &s[s.len() - 4..];
-            Value::String(format!("{}{}{}", visible, masked, end))
+            Value::String(format!("{visible}{masked}{end}"))
         }
         Value::String(_s) => Value::String("****".to_string()),
         _ => Value::String("****".to_string()),
