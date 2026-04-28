@@ -5,6 +5,7 @@ use axum::{
     },
     response::IntoResponse,
 };
+use crate::error::AppError;
 use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -74,7 +75,7 @@ pub async fn ws_handler(
     if let Some(token) = params.token {
         if !validate_token(&token) {
             tracing::warn!("Invalid WebSocket authentication token");
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            return Err(AppError::Unauthorized("Invalid authentication token".to_string()));
         }
     }
 
