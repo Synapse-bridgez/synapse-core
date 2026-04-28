@@ -215,6 +215,8 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/admin/locks", get(handlers::admin::locks::list_active_locks))
         // Admin: settlement dispute workflow
         .route("/admin/settlements/:id/status", axum::routing::patch(handlers::settlements::update_settlement_status))
+        // Admin: reconciliation reports
+        .nest("/admin/reconciliation", handlers::admin::reconciliation::reconciliation_routes())
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
