@@ -145,7 +145,7 @@ impl ProfilingManager {
                         session.flamegraph_path = Some(flamegraph_path);
 
                         if let Ok(metadata) =
-                            fs::metadata(&session.flamegraph_path.as_ref().unwrap())
+                            fs::metadata(session.flamegraph_path.as_ref().unwrap())
                         {
                             session.data_size_bytes = Some(metadata.len());
                         }
@@ -154,7 +154,7 @@ impl ProfilingManager {
                 Err(e) => {
                     tracing::error!("CPU profiling failed: {}", e);
                     if let Some(session) = current_session.lock().await.as_mut() {
-                        session.status = format!("failed: {}", e);
+                        session.status = format!("failed: {e}");
                         session.end_time = Some(
                             SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -225,7 +225,7 @@ impl ProfilingManager {
                         session.flamegraph_path = Some(flamegraph_path);
 
                         if let Ok(metadata) =
-                            fs::metadata(&session.flamegraph_path.as_ref().unwrap())
+                            fs::metadata(session.flamegraph_path.as_ref().unwrap())
                         {
                             session.data_size_bytes = Some(metadata.len());
                         }
@@ -234,7 +234,7 @@ impl ProfilingManager {
                 Err(e) => {
                     tracing::error!("Memory profiling failed: {}", e);
                     if let Some(session) = current_session.lock().await.as_mut() {
-                        session.status = format!("failed: {}", e);
+                        session.status = format!("failed: {e}");
                         session.end_time = Some(
                             SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -285,7 +285,7 @@ async fn run_cpu_profiling(
     // Stop profiling
     match guard.report().build() {
         Ok(report) => {
-            let flamegraph_path = profile_dir.join(format!("{}.svg", session_id));
+            let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
             let flamegraph_file =
                 std::fs::File::create(&flamegraph_path).map_err(|e| e.to_string())?;
 
@@ -295,7 +295,7 @@ async fn run_cpu_profiling(
 
             Ok(flamegraph_path.to_string_lossy().to_string())
         }
-        Err(e) => Err(format!("Failed to build profiling report: {}", e)),
+        Err(e) => Err(format!("Failed to build profiling report: {e}")),
     }
 }
 
@@ -309,19 +309,18 @@ async fn run_memory_profiling(session_id: &str, duration_secs: u64) -> Result<St
     // This is a placeholder that creates a dummy SVG file
     tokio::time::sleep(tokio::time::Duration::from_secs(duration_secs)).await;
 
-    let flamegraph_path = profile_dir.join(format!("{}.svg", session_id));
+    let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
     let placeholder_svg = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <svg viewBox=\"0 0 1024 512\" xmlns=\"http://www.w3.org/2000/svg\">\n  \
          <rect width=\"1024\" height=\"512\" fill=\"#f0f0f0\"/>\n  \
          <text x=\"512\" y=\"256\" font-size=\"24\" text-anchor=\"middle\" dominant-baseline=\"middle\">\n    \
-         Memory Profiling Session: {}\n  \
+         Memory Profiling Session: {session_id}\n  \
          </text>\n  \
          <text x=\"512\" y=\"300\" font-size=\"14\" text-anchor=\"middle\" fill=\"#666\">\n    \
          Memory profiling data would appear here\n  \
          </text>\n\
-         </svg>",
-        session_id
+         </svg>"
     );
 
     fs::write(&flamegraph_path, placeholder_svg).map_err(|e| e.to_string())?;
@@ -351,8 +350,7 @@ pub async fn start_profiling(
                 .await
         }
         _ => Err(format!(
-            "Unknown profile type '{}'. Supported types: cpu, memory",
-            profile_type
+            "Unknown profile type '{profile_type}'. Supported types: cpu, memory"
         )),
     };
 
@@ -414,7 +412,7 @@ pub async fn get_flamegraph(
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     let profile_dir = PathBuf::from("./profiling_data");
-    let flamegraph_path = profile_dir.join(format!("{}.svg", session_id));
+    let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
 
     match tokio::fs::read_to_string(&flamegraph_path).await {
         Ok(content) => (
