@@ -230,12 +230,10 @@ fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) ->
 
     for (_name, status) in dependencies {
         match status {
-            DependencyStatus::Unhealthy { severity, .. } => {
-                match severity {
-                    DependencySeverity::Critical => has_critical_failure = true,
-                    DependencySeverity::NonCritical => has_non_critical_failure = true,
-                }
-            }
+            DependencyStatus::Unhealthy { severity, .. } => match severity {
+                DependencySeverity::Critical => has_critical_failure = true,
+                DependencySeverity::NonCritical => has_non_critical_failure = true,
+            },
             DependencyStatus::Healthy { .. } => {}
         }
     }

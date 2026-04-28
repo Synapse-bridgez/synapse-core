@@ -360,9 +360,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             tracing::warn!("Failed to register reconciliation job: {}", e);
         }
     } else {
-        tracing::info!(
-            "RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled"
-        );
+        tracing::info!("RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled");
     }
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
@@ -372,10 +370,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let app = synapse_core::create_app(app_state);
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
-    let app = app.merge(
-        SwaggerUi::new("/api/docs")
-            .url("/api/docs/openapi.json", ApiDoc::openapi()),
-    );
+    let app =
+        app.merge(SwaggerUi::new("/api/docs").url("/api/docs/openapi.json", ApiDoc::openapi()));
 
     // Configure CORS if allowed origins are specified.
     let app = if !config.cors_allowed_origins.is_empty() {

@@ -3,7 +3,12 @@ use crate::services::query_cache::{
     cache_key_asset_stats, cache_key_daily_totals, cache_key_status_counts, CacheConfig,
 };
 use crate::ApiState;
-use axum::{extract::State, http::{HeaderValue, StatusCode}, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::State,
+    http::{HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -60,10 +65,9 @@ pub async fn status_counts(State(state): State<ApiState>) -> impl IntoResponse {
 
             let mut response: Response = (StatusCode::OK, Json(counts)).into_response();
             if replica_used {
-                response.headers_mut().insert(
-                    "X-Read-Consistency",
-                    HeaderValue::from_static("eventual"),
-                );
+                response
+                    .headers_mut()
+                    .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
             }
             return response;
         }
@@ -111,10 +115,9 @@ pub async fn daily_totals(
 
             let mut response: Response = (StatusCode::OK, Json(totals)).into_response();
             if replica_used {
-                response.headers_mut().insert(
-                    "X-Read-Consistency",
-                    HeaderValue::from_static("eventual"),
-                );
+                response
+                    .headers_mut()
+                    .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
             }
             return response;
         }
@@ -159,10 +162,9 @@ pub async fn asset_stats(State(state): State<ApiState>) -> impl IntoResponse {
 
             let mut response: Response = (StatusCode::OK, Json(stats)).into_response();
             if replica_used {
-                response.headers_mut().insert(
-                    "X-Read-Consistency",
-                    HeaderValue::from_static("eventual"),
-                );
+                response
+                    .headers_mut()
+                    .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
             }
             return response;
         }

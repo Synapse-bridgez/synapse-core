@@ -31,9 +31,7 @@ use opentelemetry::{
 };
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
-    metrics::{
-        reader::DefaultTemporalitySelector, MeterProvider, PeriodicReader,
-    },
+    metrics::{reader::DefaultTemporalitySelector, MeterProvider, PeriodicReader},
     runtime,
 };
 use std::sync::OnceLock;
@@ -54,7 +52,8 @@ fn meter() -> &'static Meter {
 
 /// HTTP request duration histogram (milliseconds).
 pub fn http_request_duration_ms() -> Histogram<f64> {
-    meter().f64_histogram("http_request_duration_ms")
+    meter()
+        .f64_histogram("http_request_duration_ms")
         .with_description("End-to-end HTTP request latency in milliseconds")
         .with_unit("ms")
         .init()
@@ -62,7 +61,8 @@ pub fn http_request_duration_ms() -> Histogram<f64> {
 
 /// Database query duration histogram (milliseconds).
 pub fn db_query_duration_ms() -> Histogram<f64> {
-    meter().f64_histogram("db_query_duration_ms")
+    meter()
+        .f64_histogram("db_query_duration_ms")
         .with_description("Database query latency in milliseconds")
         .with_unit("ms")
         .init()
@@ -70,7 +70,8 @@ pub fn db_query_duration_ms() -> Histogram<f64> {
 
 /// Webhook delivery duration histogram (milliseconds).
 pub fn webhook_delivery_duration_ms() -> Histogram<f64> {
-    meter().f64_histogram("webhook_delivery_duration_ms")
+    meter()
+        .f64_histogram("webhook_delivery_duration_ms")
         .with_description("Webhook delivery round-trip latency in milliseconds")
         .with_unit("ms")
         .init()
@@ -78,42 +79,48 @@ pub fn webhook_delivery_duration_ms() -> Histogram<f64> {
 
 /// Cache hit counter.
 pub fn cache_hits_total() -> Counter<u64> {
-    meter().u64_counter("cache_hits_total")
+    meter()
+        .u64_counter("cache_hits_total")
         .with_description("Number of cache hits")
         .init()
 }
 
 /// Cache miss counter.
 pub fn cache_misses_total() -> Counter<u64> {
-    meter().u64_counter("cache_misses_total")
+    meter()
+        .u64_counter("cache_misses_total")
         .with_description("Number of cache misses")
         .init()
 }
 
 /// Active DB connection gauge.
 pub fn db_pool_active_connections() -> Gauge<u64> {
-    meter().u64_gauge("db_pool_active_connections")
+    meter()
+        .u64_gauge("db_pool_active_connections")
         .with_description("Number of active database connections in the pool")
         .init()
 }
 
 /// Idle DB connection gauge.
 pub fn db_pool_idle_connections() -> Gauge<u64> {
-    meter().u64_gauge("db_pool_idle_connections")
+    meter()
+        .u64_gauge("db_pool_idle_connections")
         .with_description("Number of idle database connections in the pool")
         .init()
 }
 
 /// DB query timeout counter (mirrors `DB_QUERY_TIMEOUT_TOTAL` atomic).
 pub fn db_query_timeout_total() -> Counter<u64> {
-    meter().u64_counter("db_query_timeout_total")
+    meter()
+        .u64_counter("db_query_timeout_total")
         .with_description("Number of database queries that timed out")
         .init()
 }
 
 /// Pending transaction queue depth gauge.
 pub fn pending_queue_depth() -> Gauge<u64> {
-    meter().u64_gauge("pending_queue_depth")
+    meter()
+        .u64_gauge("pending_queue_depth")
         .with_description("Depth of the pending transaction processing queue")
         .init()
 }
@@ -127,11 +134,11 @@ pub fn pending_queue_depth() -> Gauge<u64> {
 ///
 /// Call this once at startup, before any instruments are used.
 pub fn init_metrics_provider() -> Result<MeterProvider, Box<dyn std::error::Error>> {
-    let endpoint = std::env::var("OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+    let endpoint =
+        std::env::var("OTLP_ENDPOINT").unwrap_or_else(|_| "http://localhost:4317".to_string());
 
-    let service_name = std::env::var("OTEL_SERVICE_NAME")
-        .unwrap_or_else(|_| "synapse-core".to_string());
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "synapse-core".to_string());
 
     let exporter = opentelemetry_otlp::new_exporter()
         .tonic()
@@ -147,9 +154,10 @@ pub fn init_metrics_provider() -> Result<MeterProvider, Box<dyn std::error::Erro
 
     let provider = MeterProvider::builder()
         .with_reader(reader)
-        .with_resource(opentelemetry_sdk::Resource::new(vec![
-            KeyValue::new("service.name", service_name),
-        ]))
+        .with_resource(opentelemetry_sdk::Resource::new(vec![KeyValue::new(
+            "service.name",
+            service_name,
+        )]))
         .build();
 
     global::set_meter_provider(provider.clone());
@@ -191,8 +199,7 @@ pub fn init_metrics() -> Result<MetricsHandle, Box<dyn std::error::Error>> {
 /// The task runs every `interval` seconds and reads from the provided pool.
 pub fn spawn_pool_metrics_task(pool: sqlx::PgPool, interval_secs: u64) {
     tokio::spawn(async move {
-        let mut ticker =
-            tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         loop {
             ticker.tick().await;
 
@@ -259,5 +266,3 @@ mod tests {
         // Queue depth should be recorded
     }
 }
-
-

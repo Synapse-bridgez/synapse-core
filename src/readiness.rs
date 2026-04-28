@@ -145,15 +145,13 @@ impl ReadinessState {
     /// Check Redis connectivity by sending PING
     async fn check_redis(&self, redis_url: &str) -> Result<(), String> {
         use redis::Commands;
-        
+
         match redis::Client::open(redis_url) {
             Ok(client) => match client.get_connection() {
-                Ok(mut conn) => {
-                    match conn.ping::<()>() {
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(format!("Redis PING failed: {}", e)),
-                    }
-                }
+                Ok(mut conn) => match conn.ping::<()>() {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(format!("Redis PING failed: {}", e)),
+                },
                 Err(e) => Err(format!("Redis connection failed: {}", e)),
             },
             Err(e) => Err(format!("Redis client initialization failed: {}", e)),

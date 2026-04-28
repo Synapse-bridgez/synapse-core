@@ -201,9 +201,7 @@ pub async fn list_webhook_health(State(state): State<crate::ApiState>) -> impl I
 }
 
 /// POST /admin/tenants/reload — immediately reload tenant configs from DB
-pub async fn reload_tenant_configs(
-    State(state): State<crate::ApiState>,
-) -> impl IntoResponse {
+pub async fn reload_tenant_configs(State(state): State<crate::ApiState>) -> impl IntoResponse {
     match state.app_state.load_tenant_configs().await {
         Ok(()) => {
             let count = state.app_state.tenant_configs.read().await.len();

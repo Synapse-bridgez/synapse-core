@@ -331,7 +331,10 @@ impl IntoResponse for AppError {
                 format!("Amount is below the minimum threshold. {}", msg)
             }
             AppError::InvalidStellarAddress(msg) => {
-                format!("Stellar address must be 56 characters starting with 'G'. {}", msg)
+                format!(
+                    "Stellar address must be 56 characters starting with 'G'. {}",
+                    msg
+                )
             }
             AppError::InvalidStatusTransition(msg) => {
                 format!("Status transition is not allowed. {}", msg)

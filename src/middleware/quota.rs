@@ -399,10 +399,7 @@ pub async fn rate_limit_middleware(
             "X-RateLimit-Reset",
             HeaderValue::from_str(&status.reset_in_seconds.to_string()).unwrap(),
         );
-        headers.insert(
-            "Retry-After",
-            HeaderValue::from_str(&retry_after).unwrap(),
-        );
+        headers.insert("Retry-After", HeaderValue::from_str(&retry_after).unwrap());
         return response;
     }
 

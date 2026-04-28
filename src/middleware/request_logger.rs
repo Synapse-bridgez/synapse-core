@@ -90,16 +90,13 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
                     path = %uri.path(),
                     "Request body too large or failed to read"
                 );
-                return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large")
-                    .into_response();
+                return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
             }
         };
 
         request_body_size = bytes.len();
 
-        let sanitized_body = if let Ok(json) =
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-        {
+        let sanitized_body = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             let sanitized = crate::utils::sanitize::sanitize_json(&json);
             serde_json::to_string(&sanitized).unwrap_or_else(|_| "[invalid json]".to_string())
         } else {
@@ -177,8 +174,8 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, routing::post, Router};
     use axum::http::Request;
+    use axum::{body::Body, routing::post, Router};
     use tower::ServiceExt;
 
     #[tokio::test]

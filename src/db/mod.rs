@@ -81,4 +81,4 @@ async fn warm_up(pool: &PgPool, min_connections: u32) -> Result<(), sqlx::Error>
         "Pool warm-up complete"
     );
     Ok(())
-
+}

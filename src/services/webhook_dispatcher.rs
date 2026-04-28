@@ -366,7 +366,11 @@ impl WebhookDispatcher {
         Ok(())
     }
 
-    async fn endpoints_for_event(&self, event_type: &str, transaction_data: &serde_json::Value) -> anyhow::Result<Vec<WebhookEndpoint>> {
+    async fn endpoints_for_event(
+        &self,
+        event_type: &str,
+        transaction_data: &serde_json::Value,
+    ) -> anyhow::Result<Vec<WebhookEndpoint>> {
         let all_endpoints: Vec<WebhookEndpoint> = sqlx::query_as(
             r#"
             SELECT * FROM webhook_endpoints
@@ -389,7 +393,11 @@ impl WebhookDispatcher {
         Ok(filtered_endpoints)
     }
 
-    pub fn matches_filters(&self, endpoint: &WebhookEndpoint, transaction_data: &serde_json::Value) -> bool {
+    pub fn matches_filters(
+        &self,
+        endpoint: &WebhookEndpoint,
+        transaction_data: &serde_json::Value,
+    ) -> bool {
         // If no filter rules, accept all
         let Some(filter_rules) = &endpoint.filter_rules else {
             return true;
@@ -404,7 +412,8 @@ impl WebhookDispatcher {
         if let Some(asset_codes) = filter_rules.get("asset_codes") {
             if let Some(asset_codes_array) = asset_codes.as_array() {
                 if let Some(asset_code) = asset_code {
-                    let allowed = asset_codes_array.iter()
+                    let allowed = asset_codes_array
+                        .iter()
                         .filter_map(|v| v.as_str())
                         .any(|allowed_code| allowed_code == asset_code);
                     if !allowed {
@@ -736,7 +745,8 @@ mod tests {
 
     #[test]
     fn test_filter_no_rules_accepts_all() {
-        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let dispatcher =
+            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -758,7 +768,8 @@ mod tests {
 
     #[test]
     fn test_filter_asset_codes_matches() {
-        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let dispatcher =
+            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -791,7 +802,8 @@ mod tests {
 
     #[test]
     fn test_filter_min_amount() {
-        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let dispatcher =
+            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -819,7 +831,8 @@ mod tests {
 
     #[test]
     fn test_filter_combined_rules() {
-        let dispatcher = WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
+        let dispatcher =
+            WebhookDispatcher::new(sqlx::PgPool::new("dummy").unwrap(), "redis://dummy").unwrap();
         let endpoint = WebhookEndpoint {
             id: Uuid::new_v4(),
             url: "http://example.com".to_string(),
@@ -881,7 +894,9 @@ pub struct EndpointHealth {
 }
 
 /// Return health scores for all webhook endpoints.
-pub async fn list_endpoint_health(pool: &PgPool) -> Result<Vec<EndpointHealth>, crate::error::AppError> {
+pub async fn list_endpoint_health(
+    pool: &PgPool,
+) -> Result<Vec<EndpointHealth>, crate::error::AppError> {
     let rows = sqlx::query!(
         r#"
         SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
@@ -899,7 +914,8 @@ pub async fn list_endpoint_health(pool: &PgPool) -> Result<Vec<EndpointHealth>, 
             id: r.id,
             url: r.url,
             enabled: r.enabled,
-            success_rate: r.success_rate
+            success_rate: r
+                .success_rate
                 .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
                 .unwrap_or(100.0),
             total_deliveries: r.total_deliveries.unwrap_or(0),
@@ -924,13 +940,16 @@ pub async fn get_endpoint_health(
     .fetch_optional(pool)
     .await
     .map_err(crate::error::AppError::Database)?
-    .ok_or_else(|| crate::error::AppError::NotFound(format!("Endpoint {} not found", endpoint_id)))?;
+    .ok_or_else(|| {
+        crate::error::AppError::NotFound(format!("Endpoint {} not found", endpoint_id))
+    })?;
 
     Ok(EndpointHealth {
         id: r.id,
         url: r.url,
         enabled: r.enabled,
-        success_rate: r.success_rate
+        success_rate: r
+            .success_rate
             .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
             .unwrap_or(100.0),
         total_deliveries: r.total_deliveries.unwrap_or(0),
