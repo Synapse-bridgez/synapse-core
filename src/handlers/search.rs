@@ -89,8 +89,7 @@ pub async fn search_transactions(
         limit,
         decoded_cursor,
     )
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .await?;
 
     let resp = serde_json::json!({
         "total": total,
@@ -111,6 +110,6 @@ pub async fn search_transactions(
 pub async fn search_transactions_wrapper(
     State(api_state): State<crate::ApiState>,
     Query(params): Query<SearchQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     search_transactions(State(api_state.app_state.pool_manager), Query(params)).await
 }
