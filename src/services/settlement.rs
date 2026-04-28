@@ -6,24 +6,6 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::AppError;
-use bigdecimal::BigDecimal;
-
-/// Valid settlement status transitions.
-fn valid_transition(from: &str, to: &str) -> bool {
-    matches!(
-        (from, to),
-        ("completed", "pending_review")
-            | ("completed", "disputed")
-            | ("pending_review", "disputed")
-            | ("pending_review", "adjusted")
-            | ("pending_review", "voided")
-            | ("disputed", "adjusted")
-            | ("disputed", "voided")
-            | ("disputed", "pending_review")
-    )
-}
-
 pub struct SettlementService {
     pool: PgPool,
     max_batch_size: usize,
