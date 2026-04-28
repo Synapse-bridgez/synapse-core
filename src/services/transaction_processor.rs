@@ -1,5 +1,4 @@
 use crate::services::webhook_dispatcher::WebhookDispatcher;
-use async_trait::async_trait;
 use sqlx::PgPool;
 use tracing::instrument;
 
@@ -81,7 +80,7 @@ impl ProcessingStage for CompleteStage {
 
         // Validate status transition: current status → completed
         crate::validation::state_machine::validate_status_transition(&tx.status, "completed")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         sqlx::query(
             "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1",
@@ -186,7 +185,7 @@ impl TransactionProcessor {
                         e
                     );
                     // Move to DLQ on failure
-                    self.move_to_dlq(tx_id, &format!("{} stage failed: {}", stage_name, e))
+                    self.move_to_dlq(tx_id, &format!("{stage_name} stage failed: {e}"))
                         .await?;
                     return Err(e);
                 }
@@ -224,7 +223,7 @@ impl TransactionProcessor {
 
         // Validate status transition: current status → pending
         crate::validation::state_machine::validate_status_transition(&current_status, "pending")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         sqlx::query("UPDATE transactions SET status = 'pending', updated_at = NOW() WHERE id = $1")
             .bind(tx_id)

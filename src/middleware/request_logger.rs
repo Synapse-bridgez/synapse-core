@@ -12,8 +12,8 @@
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Request},
-    http::{HeaderValue, StatusCode},
+    extract::ConnectInfo,
+    http::{HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::error::RequestId;
 
-const MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
+const _MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 
 /// Axum middleware function.
 ///
@@ -31,7 +31,7 @@ const MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 /// Router::new()
 ///     .layer(axum::middleware::from_fn(request_logger_middleware))
 /// ```
-pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response {
+pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>) -> Response {
     // -----------------------------------------------------------------------
     // 1. Resolve correlation ID
     // -----------------------------------------------------------------------
@@ -81,7 +81,7 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
 
     if log_body {
         let (parts, body) = req.into_parts();
-        let bytes = match axum::body::to_bytes(body, MAX_BODY_LOG_SIZE).await {
+        let bytes = match hyper::body::to_bytes(body).await {
             Ok(b) => b,
             Err(_) => {
                 tracing::warn!(
@@ -90,16 +90,13 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
                     path = %uri.path(),
                     "Request body too large or failed to read"
                 );
-                return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large")
-                    .into_response();
+                return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
             }
         };
 
         request_body_size = bytes.len();
 
-        let sanitized_body = if let Ok(json) =
-            serde_json::from_slice::<serde_json::Value>(&bytes)
-        {
+        let sanitized_body = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             let sanitized = crate::utils::sanitize::sanitize_json(&json);
             serde_json::to_string(&sanitized).unwrap_or_else(|_| "[invalid json]".to_string())
         } else {
@@ -177,8 +174,8 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, routing::post, Router};
     use axum::http::Request;
+    use axum::{body::Body, routing::post, Router};
     use tower::ServiceExt;
 
     #[tokio::test]

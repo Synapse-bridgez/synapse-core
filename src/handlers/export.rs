@@ -123,14 +123,14 @@ type JsonStream = Pin<Box<dyn Stream<Item = Result<String, sqlx::Error>> + Send>
 fn parse_date(date_str: &str) -> Result<DateTime<Utc>, String> {
     // Handle both YYYY-MM-DD and YYYY-MM-DDTHH:MM:SSZ formats
     let date_str = if date_str.len() == 10 {
-        format!("{}T00:00:00Z", date_str)
+        format!("{date_str}T00:00:00Z")
     } else {
         date_str.to_string()
     };
 
     DateTime::parse_from_rfc3339(&date_str)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| format!("Invalid date format: {}", e))
+        .map_err(|e| format!("Invalid date format: {e}"))
 }
 
 /// Build SQL filter conditions based on query parameters
@@ -146,7 +146,7 @@ fn build_filter_conditions(
 
     if let Some(ref from_date) = from {
         if let Ok(parsed) = parse_date(from_date) {
-            conditions.push(format!("created_at >= ${}", param_count));
+            conditions.push(format!("created_at >= ${param_count}"));
             params.push(FilterValue::DateTime(parsed));
             param_count += 1;
         }
@@ -156,20 +156,20 @@ fn build_filter_conditions(
         if let Ok(parsed) = parse_date(to_date) {
             // Add one day to include the entire end date
             let end_of_day = parsed + chrono::Duration::days(1);
-            conditions.push(format!("created_at < ${}", param_count));
+            conditions.push(format!("created_at < ${param_count}"));
             params.push(FilterValue::DateTime(end_of_day));
             param_count += 1;
         }
     }
 
     if let Some(ref status_val) = status {
-        conditions.push(format!("status = ${}", param_count));
+        conditions.push(format!("status = ${param_count}"));
         params.push(FilterValue::String(status_val.clone()));
         param_count += 1;
     }
 
     if let Some(ref asset) = asset_code {
-        conditions.push(format!("asset_code = ${}", param_count));
+        conditions.push(format!("asset_code = ${param_count}"));
         params.push(FilterValue::String(asset.clone()));
     }
 
@@ -213,19 +213,18 @@ fn create_csv_stream(
                 "SELECT id, stellar_account, amount, asset_code, status, created_at, updated_at,
                         anchor_transaction_id, callback_type, callback_status, settlement_id,
                         memo, memo_type, metadata
-                 FROM transactions {}",
-                where_clause
+                 FROM transactions {where_clause}"
             );
 
             // Add cursor and limit
             if let Some(id) = last_id {
                 if where_clause.is_empty() {
-                    sql = format!("{} WHERE id > '{}' ORDER BY id ASC LIMIT {}", sql, id, BATCH_SIZE);
+                    sql = format!("{sql} WHERE id > '{id}' ORDER BY id ASC LIMIT {BATCH_SIZE}");
                 } else {
-                    sql = format!("{} AND id > '{}' ORDER BY id ASC LIMIT {}", sql, id, BATCH_SIZE);
+                    sql = format!("{sql} AND id > '{id}' ORDER BY id ASC LIMIT {BATCH_SIZE}");
                 }
             } else {
-                sql = format!("{} ORDER BY id ASC LIMIT {}", sql, BATCH_SIZE);
+                sql = format!("{sql} ORDER BY id ASC LIMIT {BATCH_SIZE}");
             }
 
             // Execute query
@@ -311,19 +310,18 @@ fn create_json_stream(
                 "SELECT id, stellar_account, amount, asset_code, status, created_at, updated_at,
                         anchor_transaction_id, callback_type, callback_status, settlement_id,
                         memo, memo_type, metadata
-                 FROM transactions {}",
-                where_clause
+                 FROM transactions {where_clause}"
             );
 
             // Add cursor and limit
             if let Some(id) = last_id {
                 if where_clause.is_empty() {
-                    sql = format!("{} WHERE id > '{}' ORDER BY id ASC LIMIT {}", sql, id, BATCH_SIZE);
+                    sql = format!("{sql} WHERE id > '{id}' ORDER BY id ASC LIMIT {BATCH_SIZE}");
                 } else {
-                    sql = format!("{} AND id > '{}' ORDER BY id ASC LIMIT {}", sql, id, BATCH_SIZE);
+                    sql = format!("{sql} AND id > '{id}' ORDER BY id ASC LIMIT {BATCH_SIZE}");
                 }
             } else {
-                sql = format!("{} ORDER BY id ASC LIMIT {}", sql, BATCH_SIZE);
+                sql = format!("{sql} ORDER BY id ASC LIMIT {BATCH_SIZE}");
             }
 
             let mut query = sqlx::query(&sql);
@@ -389,7 +387,7 @@ fn create_json_stream(
 /// Note: For production with 100k+ rows, you'd want to use true streaming.
 /// This implementation uses cursor-based pagination in the query but collects
 /// the final result. For true streaming, you'd need to use a different approach.
-async fn stream_to_response<S>(stream: S, content_type: &str, filename: &str) -> impl IntoResponse
+async fn stream_to_response<S>(stream: S, content_type: &str, filename: &str) -> Result<impl IntoResponse, AppError>
 where
     S: Stream<Item = Result<String, sqlx::Error>> + Send + 'static,
 {
@@ -413,17 +411,17 @@ where
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename)).unwrap(),
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
     );
 
-    (StatusCode::OK, headers, all_data)
+    Ok((StatusCode::OK, headers, all_data))
 }
 
 /// Export transactions as CSV with true streaming
 pub async fn export_transactions_csv(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -442,7 +440,7 @@ pub async fn export_transactions_csv(
 pub async fn export_transactions_json(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -461,7 +459,7 @@ pub async fn export_transactions_json(
 pub async fn export_transactions(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();

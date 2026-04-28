@@ -12,6 +12,7 @@ pub mod webhook;
 pub mod ws;
 
 use crate::ApiState;
+use crate::error::AppError;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -25,7 +26,7 @@ use utoipa::ToSchema;
     ),
     tag = "Health"
 )]
-pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn health(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     // Check database connectivity with SELECT 1 query
     let db_status = match sqlx::query("SELECT 1").execute(&state.app_state.db).await {
         Ok(_) => "connected",
@@ -54,6 +55,10 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         .app_state
         .current_batch_size
         .load(std::sync::atomic::Ordering::Relaxed);
+    let ws_connection_count = state
+        .app_state
+        .ws_connection_count
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let health_response = HealthStatus {
         status: if db_status == "connected" {
@@ -66,6 +71,7 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         db_pool: pool_stats,
         pending_queue_depth,
         current_batch_size,
+        ws_connection_count,
     };
 
     // Return 503 if database is down, 200 otherwise
@@ -75,24 +81,24 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         StatusCode::SERVICE_UNAVAILABLE
     };
 
-    (status_code, Json(health_response))
+    Ok((status_code, Json(health_response)))
 }
 
 /// Readiness probe endpoint for Kubernetes
 /// Returns 200 when ready to accept traffic, 503 when draining or not ready
-pub async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
+pub async fn ready(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     if state.app_state.readiness.is_ready() {
         let response = ReadinessResponse {
             status: "ready".to_string(),
             draining: state.app_state.readiness.is_draining(),
         };
-        (StatusCode::OK, Json(response))
+        Ok((StatusCode::OK, Json(response)))
     } else {
         let response = ReadinessResponse {
             status: "not_ready".to_string(),
             draining: state.app_state.readiness.is_draining(),
         };
-        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
+        Ok((StatusCode::SERVICE_UNAVAILABLE, Json(response)))
     }
 }
 
@@ -110,6 +116,7 @@ pub struct HealthStatus {
     pub db_pool: DbPoolStats,
     pub pending_queue_depth: u64,
     pub current_batch_size: u64,
+    pub ws_connection_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -122,12 +129,12 @@ pub struct DbPoolStats {
 
 /// Error catalog endpoint
 /// Returns all available error codes and their descriptions
-pub async fn error_catalog() -> impl IntoResponse {
+pub async fn error_catalog() -> Result<impl IntoResponse, AppError> {
     let errors = crate::error::get_all_error_codes();
     let catalog = crate::error::ErrorCatalogResponse {
         errors,
         version: "1.0.0".to_string(),
     };
 
-    (StatusCode::OK, Json(catalog))
+    Ok((StatusCode::OK, Json(catalog)))
 }

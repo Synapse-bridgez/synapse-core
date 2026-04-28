@@ -78,7 +78,7 @@ impl QuotaManager {
             .custom_limit
             .unwrap_or_else(|| quota.tier.requests_per_hour());
 
-        let usage_key = format!("quota:usage:{}", key);
+        let usage_key = format!("quota:usage:{key}");
         let client = self.redis_client.clone();
         let usage_key2 = usage_key.clone();
 
@@ -107,7 +107,7 @@ impl QuotaManager {
             .custom_limit
             .unwrap_or_else(|| quota.tier.requests_per_hour());
 
-        let usage_key = format!("quota:usage:{}", key);
+        let usage_key = format!("quota:usage:{key}");
         let ttl = quota.reset_schedule.ttl_seconds() as i64;
         let client = self.redis_client.clone();
         let usage_key2 = usage_key.clone();
@@ -129,14 +129,14 @@ impl QuotaManager {
     }
 
     pub async fn get_quota_config(&self, key: &str) -> Result<Quota, redis::RedisError> {
-        let config_key = format!("quota:config:{}", key);
+        let config_key = format!("quota:config:{key}");
         let client = self.redis_client.clone();
 
         let config_json: Option<String> = self
             .cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                Ok::<Option<String>, redis::RedisError>(conn.get(&config_key).await?)
+                conn.get(&config_key).await
             })
             .await
             .map_err(redis_cb_err)?;
@@ -162,7 +162,7 @@ impl QuotaManager {
         key: &str,
         quota: &Quota,
     ) -> Result<(), redis::RedisError> {
-        let config_key = format!("quota:config:{}", key);
+        let config_key = format!("quota:config:{key}");
         let json = serde_json::to_string(quota).map_err(|e| {
             redis::RedisError::from((
                 redis::ErrorKind::TypeError,
@@ -182,7 +182,7 @@ impl QuotaManager {
     }
 
     pub async fn reset_quota(&self, key: &str) -> Result<(), redis::RedisError> {
-        let usage_key = format!("quota:usage:{}", key);
+        let usage_key = format!("quota:usage:{key}");
         let client = self.redis_client.clone();
         self.cb
             .call(|| async move {
@@ -200,7 +200,7 @@ impl QuotaManager {
             .cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                Ok::<i64, redis::RedisError>(conn.ttl(&key).await?)
+                conn.ttl(&key).await
             })
             .await
             .map_err(redis_cb_err)?;
@@ -215,7 +215,7 @@ impl QuotaManager {
         limit: u32,
         window_secs: i64,
     ) -> Result<bool, redis::RedisError> {
-        let usage_key = format!("quota:usage:{}", key);
+        let usage_key = format!("quota:usage:{key}");
         let client = self.redis_client.clone();
         let usage_key2 = usage_key.clone();
 
@@ -241,7 +241,7 @@ impl QuotaManager {
         key: &str,
         limit: u32,
     ) -> Result<QuotaStatus, redis::RedisError> {
-        let usage_key = format!("quota:usage:{}", key);
+        let usage_key = format!("quota:usage:{key}");
         let client = self.redis_client.clone();
         let usage_key2 = usage_key.clone();
 
@@ -399,10 +399,7 @@ pub async fn rate_limit_middleware(
             "X-RateLimit-Reset",
             HeaderValue::from_str(&status.reset_in_seconds.to_string()).unwrap(),
         );
-        headers.insert(
-            "Retry-After",
-            HeaderValue::from_str(&retry_after).unwrap(),
-        );
+        headers.insert("Retry-After", HeaderValue::from_str(&retry_after).unwrap());
         return response;
     }
 
