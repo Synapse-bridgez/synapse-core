@@ -221,6 +221,11 @@ pub fn create_app(app_state: AppState) -> Router {
             middleware::panic_recovery::panic_recovery_middleware,
         ))
         .with_state(api_state)
+        .merge(
+            Router::new()
+                .route("/ws", get(handlers::ws::ws_handler))
+                .with_state(app_state),
+        )
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))

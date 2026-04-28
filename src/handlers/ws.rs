@@ -3,10 +3,12 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Query, State,
     },
+    http::HeaderMap,
     response::IntoResponse,
 };
 use crate::error::AppError;
 use futures::{sink::SinkExt, stream::StreamExt};
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -34,6 +36,7 @@ const RESYNC_MAX_LIMIT: i64 = 100;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionStatusUpdate {
     pub transaction_id: Uuid,
+    pub tenant_id: Uuid,
     pub status: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub message: Option<String>,
@@ -77,7 +80,25 @@ pub async fn ws_handler(
             tracing::warn!("Invalid WebSocket authentication token");
             return Err(AppError::Unauthorized("Invalid authentication token".to_string()));
         }
-    }
+    };
+
+    // Validate token against tenant API keys.
+    let tenant_id = match authenticate_token(&state.db, &token).await {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                client_ip = %client_ip,
+                "WebSocket connection rejected: invalid token"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+
+    tracing::info!(
+        tenant_id = %tenant_id,
+        client_ip = %client_ip,
+        "WebSocket connection authenticated"
+    );
 
     let client_addr = connect_info
         .map(|ci| ci.0.to_string())
