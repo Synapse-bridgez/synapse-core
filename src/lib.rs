@@ -18,6 +18,8 @@ pub mod tenant;
 pub mod utils;
 pub mod validation;
 
+pub use config::assets::AssetCache;
+
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
 use crate::handlers::profiling::ProfilingManager;
@@ -59,6 +61,8 @@ pub struct AppState {
     pub current_batch_size: Arc<AtomicU64>,
     /// Prometheus metrics handle
     pub metrics_handle: crate::metrics::MetricsHandle,
+    /// Asset registry cache — refreshed in the background.
+    pub asset_cache: Arc<AssetCache>,
 }
 
 impl AppState {
@@ -79,6 +83,8 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
+        let asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)
@@ -97,6 +103,7 @@ impl AppState {
             pending_queue_depth: Arc::new(AtomicU64::new(0)),
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
+            asset_cache,
         }
     }
 }
@@ -170,8 +177,31 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/stats/assets", get(handlers::stats::asset_stats))
         .route("/cache/metrics", get(handlers::stats::cache_metrics))
         // Admin: webhook endpoint health scores
-        .route("/admin/webhooks/health", get(handlers::admin::list_webhook_health))
-        .route("/admin/webhooks/health/:id", get(handlers::admin::get_webhook_health))
+        .route(
+            "/admin/webhooks/health",
+            get(handlers::admin::list_webhook_health),
+        )
+        .route(
+            "/admin/webhooks/health/:id",
+            get(handlers::admin::get_webhook_health),
+        )
+        // Admin: asset registry
+        .route(
+            "/admin/assets",
+            get(handlers::admin::list_assets).post(handlers::admin::create_asset),
+        )
+        .route(
+            "/admin/assets/:id",
+            axum::routing::delete(handlers::admin::delete_asset),
+        )
+        .route(
+            "/admin/assets/:id/enabled",
+            axum::routing::patch(handlers::admin::set_asset_enabled),
+        )
+        .route(
+            "/admin/assets/:id/config",
+            axum::routing::patch(handlers::admin::update_asset_config),
+        )
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))

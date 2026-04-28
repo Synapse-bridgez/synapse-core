@@ -343,8 +343,38 @@ pub async fn callback(
 
     validate_memo_type(&payload.memo_type)?;
 
+    // Validate asset is registered and enabled
+    let asset = state
+        .app_state
+        .asset_cache
+        .get(&payload.asset_code)
+        .ok_or_else(|| {
+            AppError::Validation(format!(
+                "asset_code '{}' is not a registered or enabled asset",
+                payload.asset_code
+            ))
+        })?;
+
     let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
         .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
+
+    // Validate amount against asset-level min/max
+    if let Some(ref min) = asset.min_amount {
+        if &amount < min {
+            return Err(AppError::Validation(format!(
+                "amount {} is below the minimum {} for asset {}",
+                amount, min, asset.asset_code
+            )));
+        }
+    }
+    if let Some(ref max) = asset.max_amount {
+        if &amount > max {
+            return Err(AppError::Validation(format!(
+                "amount {} exceeds the maximum {} for asset {}",
+                amount, max, asset.asset_code
+            )));
+        }
+    }
 
     let tx = Transaction::new(
         payload.stellar_account,
@@ -423,10 +453,9 @@ pub async fn get_transaction(
 
     let mut response: Response = Json(transaction).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)
@@ -497,10 +526,9 @@ pub async fn list_transactions(
 
     let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)
@@ -551,10 +579,9 @@ pub async fn list_transactions_api(
 
     let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
     if replica_used {
-        response.headers_mut().insert(
-            "X-Read-Consistency",
-            HeaderValue::from_static("eventual"),
-        );
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
     }
 
     Ok(response)

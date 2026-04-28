@@ -1,6 +1,5 @@
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
-use crate::db::slow_query;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,11 +66,7 @@ impl QueryTier {
 /// On timeout the counter `DB_QUERY_TIMEOUT_TOTAL` is incremented, the
 /// sanitised SQL label is logged (no parameter values), and the connection is
 /// dropped so the pool can reclaim it rather than leaving it in a hung state.
-pub async fn with_timeout<F, T>(
-    tier: QueryTier,
-    sql_label: &str,
-    fut: F,
-) -> Result<T>
+pub async fn with_timeout<F, T>(tier: QueryTier, sql_label: &str, fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
@@ -168,6 +163,8 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
             Ok(result)
         }),
     )
+    .await
+}
 
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     with_timeout(
@@ -784,7 +781,7 @@ pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
 
 // --- Idempotency Fallback Queries ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct IdempotencyKey {
     pub key: String,
     pub status: String,

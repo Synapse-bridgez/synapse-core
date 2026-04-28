@@ -1,4 +1,4 @@
-use crate::db::models::Settlement;
+use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
 use crate::error::AppError;
 use bigdecimal::BigDecimal;
@@ -30,20 +30,58 @@ impl SettlementService {
     }
 
     /// Run settlement for all assets with completed, unsettled transactions.
+    /// Respects each asset's `settlement_schedule` — assets configured as
+    /// `"hourly"` are always eligible; `"daily"` assets only settle once per day;
+    /// `"weekly"` assets only settle on Mondays.
     pub async fn run_settlements(&self) -> Result<Vec<Settlement>, AppError> {
-        let assets = queries::get_unique_assets_to_settle(&self.pool)
+        let asset_codes = queries::get_unique_assets_to_settle(&self.pool)
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        // Load asset configs so we can apply per-asset schedules
+        let assets = Asset::fetch_all(&self.pool)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        let asset_map: std::collections::HashMap<String, Asset> = assets
+            .into_iter()
+            .map(|a| (a.asset_code.clone(), a))
+            .collect();
+
+        let now = Utc::now();
         let mut results = Vec::new();
-        for asset in assets {
-            match self.settle_asset(&asset).await {
+
+        for asset_code in asset_codes {
+            // Check schedule eligibility
+            if let Some(asset) = asset_map.get(&asset_code) {
+                if !Self::is_schedule_due(asset, now) {
+                    tracing::info!(
+                        asset = %asset_code,
+                        schedule = ?asset.settlement_schedule,
+                        "Skipping settlement: not due per asset schedule"
+                    );
+                    continue;
+                }
+            }
+
+            match self.settle_asset(&asset_code).await {
                 Ok(settlements) => results.extend(settlements),
-                Err(e) => tracing::error!("Failed to settle asset {}: {:?}", asset, e),
+                Err(e) => tracing::error!("Failed to settle asset {}: {:?}", asset_code, e),
             }
         }
 
         Ok(results)
+    }
+
+    /// Returns true if the asset's settlement schedule is currently due.
+    /// - `"hourly"` — always due
+    /// - `"daily"` (default) — always due (caller controls frequency via cron)
+    /// - `"weekly"` — only on Monday (weekday == 1)
+    fn is_schedule_due(asset: &Asset, now: chrono::DateTime<Utc>) -> bool {
+        use chrono::Datelike;
+        match asset.settlement_schedule.as_deref().unwrap_or("daily") {
+            "weekly" => now.weekday() == chrono::Weekday::Mon,
+            _ => true, // "hourly", "daily", or any unknown value — always eligible
+        }
     }
 
     /// Settle transactions for a specific asset, splitting into multiple settlements

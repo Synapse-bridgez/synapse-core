@@ -14,28 +14,20 @@ pub struct AssetCache {
 impl AssetCache {
     pub async fn start(pool: PgPool, refresh_interval: Duration) -> Arc<Self> {
         let initial_vec = Asset::fetch_all(&pool).await.unwrap_or_default();
-        let mut map: HashMap<String, Asset> = HashMap::new();
-        for a in initial_vec {
-            map.insert(a.asset_code.clone(), a);
-        }
-        let arc_map = Arc::new(map);
-
+        let map = Self::build_map(initial_vec);
         let cache = Arc::new(AssetCache {
-            inner: ArcSwap::from(arc_map.clone()),
+            inner: ArcSwap::from(Arc::new(map)),
         });
 
-        // spawn background refresher
         let cache_clone = cache.clone();
         let pool_clone = pool.clone();
         tokio::spawn(async move {
             loop {
                 sleep(refresh_interval).await;
                 if let Ok(new_assets) = Asset::fetch_all(&pool_clone).await {
-                    let mut new_map = HashMap::new();
-                    for a in new_assets {
-                        new_map.insert(a.asset_code.clone(), a);
-                    }
-                    cache_clone.inner.store(Arc::new(new_map));
+                    cache_clone
+                        .inner
+                        .store(Arc::new(Self::build_map(new_assets)));
                 }
             }
         });
@@ -43,18 +35,27 @@ impl AssetCache {
         cache
     }
 
+    fn build_map(assets: Vec<Asset>) -> HashMap<String, Asset> {
+        assets
+            .into_iter()
+            .map(|a| (a.asset_code.clone(), a))
+            .collect()
+    }
+
+    /// Returns the asset if it is registered and enabled.
     pub fn get(&self, code: &str) -> Option<Asset> {
         let arc = self.inner.load_full();
-        arc.get(code).cloned()
+        arc.get(code).filter(|a| a.enabled).cloned()
+    }
+
+    /// Returns true if the asset code is registered and enabled.
+    pub fn is_registered(&self, code: &str) -> bool {
+        self.get(code).is_some()
     }
 
     pub async fn reload_once(&self, pool: &PgPool) -> anyhow::Result<()> {
         let new_assets = Asset::fetch_all(pool).await?;
-        let mut new_map = HashMap::new();
-        for a in new_assets {
-            new_map.insert(a.asset_code.clone(), a);
-        }
-        self.inner.store(Arc::new(new_map));
+        self.inner.store(Arc::new(Self::build_map(new_assets)));
         Ok(())
     }
 }
@@ -66,8 +67,16 @@ mod tests {
 
     fn create_test_asset(code: &str, issuer: Option<String>) -> Asset {
         Asset {
+            id: uuid::Uuid::new_v4(),
             asset_code: code.to_string(),
-            issuer,
+            asset_issuer: issuer,
+            metadata: None,
+            enabled: true,
+            min_amount: None,
+            max_amount: None,
+            settlement_schedule: Some("daily".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         }
     }
 

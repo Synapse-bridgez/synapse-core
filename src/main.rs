@@ -279,6 +279,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
         config.processor_min_batch as u64,
     ));
+    // Initialize asset registry cache (refreshes every 5 minutes)
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+    tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -297,6 +301,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         current_batch_size: current_batch_size.clone(),
         secrets_store,
         metrics_handle,
+        asset_cache,
     };
 
     tokio::spawn(async move {
