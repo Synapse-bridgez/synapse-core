@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use cron::Schedule;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -222,6 +222,75 @@ pub struct JobStatus {
     pub schedule: String,
     pub next_run: Option<DateTime<Utc>>,
     pub is_active: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Audit log retention job
+// ---------------------------------------------------------------------------
+
+/// Monthly background job that archives and deletes audit logs older than the
+/// configured retention period.
+///
+/// Schedule: first day of every month at 02:00 UTC (`0 0 2 1 * * *`).
+/// Override with `AUDIT_LOG_RETENTION_DAYS` (default 365).
+/// Archive files are written to `AUDIT_LOG_ARCHIVE_DIR` (default `/tmp/audit_archives`).
+pub struct AuditLogRetentionJob {
+    pool: sqlx::PgPool,
+}
+
+impl AuditLogRetentionJob {
+    pub fn new(pool: sqlx::PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Archive directory — reads `AUDIT_LOG_ARCHIVE_DIR`, falls back to `/tmp/audit_archives`.
+    fn archive_dir() -> String {
+        std::env::var("AUDIT_LOG_ARCHIVE_DIR").unwrap_or_else(|_| "/tmp/audit_archives".to_string())
+    }
+}
+
+#[async_trait]
+impl Job for AuditLogRetentionJob {
+    fn name(&self) -> &str {
+        "audit_log_retention"
+    }
+
+    /// Run on the 1st of every month at 02:00 UTC.
+    fn schedule(&self) -> &str {
+        "0 0 2 1 * * *"
+    }
+
+    async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let days = crate::db::audit::retention_days();
+        let cutoff = Utc::now() - Duration::days(days);
+        let archive_dir = Self::archive_dir();
+
+        // Ensure the archive directory exists.
+        std::fs::create_dir_all(&archive_dir)?;
+
+        info!(
+            retention_days = days,
+            cutoff = %cutoff.to_rfc3339(),
+            archive_dir = %archive_dir,
+            "Starting audit log retention run"
+        );
+
+        match crate::db::audit::run_retention(&self.pool, cutoff, &archive_dir).await? {
+            None => {
+                info!("Audit log retention: no logs older than cutoff, nothing to do");
+            }
+            Some(result) => {
+                info!(
+                    exported = result.exported,
+                    deleted = result.deleted,
+                    archive = %result.archive_path,
+                    "Audit log retention complete"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

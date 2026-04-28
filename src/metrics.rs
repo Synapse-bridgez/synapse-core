@@ -128,6 +128,28 @@ pub fn pending_queue_depth() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Total number of locks successfully acquired.
+pub fn lock_acquired_total() -> Counter<u64> {
+    meter().u64_counter("lock_acquired_total")
+        .with_description("Total number of distributed locks successfully acquired")
+        .init()
+}
+
+/// Total number of lock contention events (failed acquire attempts).
+pub fn lock_contention_total() -> Counter<u64> {
+    meter().u64_counter("lock_contention_total")
+        .with_description("Total number of distributed lock contention events")
+        .init()
+}
+
+/// Lock hold duration histogram (milliseconds).
+pub fn lock_hold_duration_ms() -> Histogram<f64> {
+    meter().f64_histogram("lock_hold_duration_ms")
+        .with_description("Duration a distributed lock was held in milliseconds")
+        .with_unit("ms")
+        .init()
+}
+
 // ---------------------------------------------------------------------------
 // Provider initialisation
 // ---------------------------------------------------------------------------
