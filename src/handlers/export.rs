@@ -387,7 +387,7 @@ fn create_json_stream(
 /// Note: For production with 100k+ rows, you'd want to use true streaming.
 /// This implementation uses cursor-based pagination in the query but collects
 /// the final result. For true streaming, you'd need to use a different approach.
-async fn stream_to_response<S>(stream: S, content_type: &str, filename: &str) -> impl IntoResponse
+async fn stream_to_response<S>(stream: S, content_type: &str, filename: &str) -> Result<impl IntoResponse, AppError>
 where
     S: Stream<Item = Result<String, sqlx::Error>> + Send + 'static,
 {
@@ -414,14 +414,14 @@ where
         HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
     );
 
-    (StatusCode::OK, headers, all_data)
+    Ok((StatusCode::OK, headers, all_data))
 }
 
 /// Export transactions as CSV with true streaming
 pub async fn export_transactions_csv(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -440,7 +440,7 @@ pub async fn export_transactions_csv(
 pub async fn export_transactions_json(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();
@@ -459,7 +459,7 @@ pub async fn export_transactions_json(
 pub async fn export_transactions(
     State(state): State<crate::ApiState>,
     Query(query): Query<ExportQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = Arc::new(state.app_state.db);
     let from = query.from.clone();
     let to = query.to.clone();

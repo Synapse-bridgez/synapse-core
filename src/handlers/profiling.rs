@@ -332,7 +332,7 @@ async fn run_memory_profiling(session_id: &str, duration_secs: u64) -> Result<St
 pub async fn start_profiling(
     State(state): State<AppState>,
     Json(req): Json<StartProfilingRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let profile_type = req.profile_type.to_lowercase();
 
     let result = match profile_type.as_str() {
@@ -355,53 +355,40 @@ pub async fn start_profiling(
     };
 
     match result {
-        Ok(session) => (StatusCode::OK, Json(session)).into_response(),
+        Ok(session) => Ok((StatusCode::OK, Json(session))),
         Err(e) => {
             tracing::error!("Failed to start profiling: {}", e);
-            (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": e
-                })),
-            )
-                .into_response()
+            Err(AppError::Internal(e))
         }
     }
 }
 
 /// HTTP handler to get current profiling status
-pub async fn get_profiling_status(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_profiling_status(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let session = state.profiling_manager.get_current_session().await;
     let is_profiling = state.profiling_manager.is_profiling();
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "is_profiling": is_profiling,
             "current_session": session
         })),
-    )
+    ))
 }
 
 /// HTTP handler to stop profiling
-pub async fn stop_profiling(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn stop_profiling(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     match state.profiling_manager.stop_profiling().await {
-        Ok(_) => (
+        Ok(_) => Ok((
             StatusCode::OK,
             Json(json!({
                 "message": "Profiling stopped successfully"
             })),
-        )
-            .into_response(),
+        )),
         Err(e) => {
             tracing::error!("Failed to stop profiling: {}", e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": e
-                })),
-            )
-                .into_response()
+            Err(AppError::BadRequest(e))
         }
     }
 }
@@ -410,24 +397,17 @@ pub async fn stop_profiling(State(state): State<AppState>) -> impl IntoResponse 
 pub async fn get_flamegraph(
     State(_state): State<AppState>,
     Path(session_id): Path<String>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let profile_dir = PathBuf::from("./profiling_data");
     let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
 
     match tokio::fs::read_to_string(&flamegraph_path).await {
-        Ok(content) => (
+        Ok(content) => Ok((
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
             content,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("Flamegraph '{}' not found", session_id)
-            })),
-        )
-            .into_response(),
+        )),
+        Err(_) => Err(AppError::NotFound(format!("Flamegraph '{}' not found", session_id))),
     }
 }
 

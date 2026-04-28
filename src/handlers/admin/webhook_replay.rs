@@ -148,10 +148,7 @@ pub async fn list_failed_webhooks(
     query_builder.push_bind(params.offset);
 
     let query = query_builder.build();
-    let rows = query.fetch_all(&pool).await.map_err(|e| {
-        tracing::error!("Failed to fetch failed webhooks: {}", e);
-        AppError::DatabaseError(e.to_string())
-    })?;
+    let rows = query.fetch_all(&pool).await?;
 
     let webhooks: Vec<FailedWebhookInfo> = rows
         .iter()
@@ -239,8 +236,7 @@ pub async fn replay_webhook(
                     })),
                     "admin",
                 )
-                .await
-                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+                .await?;
 
                 db_tx.commit().await.map_err(|e| {
                     AppError::DatabaseError(format!("Failed to commit transaction: {e}"))
@@ -419,8 +415,7 @@ async fn reprocess_webhook(pool: &PgPool, transaction: &Transaction) -> Result<(
     )
     .bind(transaction.id)
     .execute(pool)
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .await?;
 
     tracing::info!(
         "Transaction {} status updated to pending for reprocessing",
@@ -451,8 +446,7 @@ async fn track_replay_attempt(
     .bind(success)
     .bind(error_message)
     .execute(pool)
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .await?;
 
     Ok(())
 }

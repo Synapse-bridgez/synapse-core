@@ -65,8 +65,7 @@ async fn run_bulk_update(
         payload.reason.as_deref(),
         "admin",
     )
-    .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .await?;
 
     Ok(Json(BulkStatusResponse {
         updated: result.updated,

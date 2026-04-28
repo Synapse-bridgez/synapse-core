@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json},
 };
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -30,22 +31,13 @@ fn parse_tier(s: &str) -> Tier {
     }
 }
 
-fn make_manager(redis_url: &str) -> Result<QuotaManager, String> {
-    QuotaManager::new(redis_url).map_err(|e| format!("Redis unavailable: {e}"))
+fn make_manager(redis_url: &str) -> Result<QuotaManager, AppError> {
+    QuotaManager::new(redis_url).map_err(|e| AppError::Redis(e))
 }
 
 /// GET /admin/quotas — list quota usage for all active tenants.
-pub async fn list_tenant_quotas(State(state): State<ApiState>) -> impl IntoResponse {
-    let manager = match make_manager(&state.app_state.redis_url) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
-    };
+pub async fn list_tenant_quotas(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
+    let manager = make_manager(&state.app_state.redis_url)?;
 
     let configs = state.app_state.tenant_configs.read().await;
     let mut views = Vec::new();
@@ -65,35 +57,18 @@ pub async fn list_tenant_quotas(State(state): State<ApiState>) -> impl IntoRespo
         });
     }
 
-    (StatusCode::OK, Json(views)).into_response()
+    Ok((StatusCode::OK, Json(views)))
 }
 
 /// GET /admin/quotas/:tenant_id — quota usage for a single tenant.
 pub async fn get_tenant_quota(
     State(state): State<ApiState>,
     Path(tenant_id): Path<Uuid>,
-) -> impl IntoResponse {
-    let cfg = match state.app_state.get_tenant_config(tenant_id).await {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "tenant not found"})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let cfg = state.app_state.get_tenant_config(tenant_id).await
+        .ok_or_else(|| AppError::NotFound("tenant not found".to_string()))?;
 
-    let manager = match make_manager(&state.app_state.redis_url) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
-    };
+    let manager = make_manager(&state.app_state.redis_url)?;
 
     let key = format!("tenant:{tenant_id}");
     let quota_status = manager
@@ -101,7 +76,7 @@ pub async fn get_tenant_quota(
         .await
         .ok();
 
-    (
+    Ok((
         StatusCode::OK,
         Json(TenantQuotaView {
             tenant_id,
@@ -109,8 +84,7 @@ pub async fn get_tenant_quota(
             rate_limit_per_minute: cfg.rate_limit_per_minute,
             quota_status,
         }),
-    )
-        .into_response()
+    ))
 }
 
 /// PUT /admin/quotas/:tenant_id — override quota config for a tenant.
@@ -118,25 +92,12 @@ pub async fn set_tenant_quota(
     State(state): State<ApiState>,
     Path(tenant_id): Path<Uuid>,
     Json(payload): Json<SetQuotaRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     if state.app_state.get_tenant_config(tenant_id).await.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "tenant not found"})),
-        )
-            .into_response();
+        return Err(AppError::NotFound("tenant not found".to_string()));
     }
 
-    let manager = match make_manager(&state.app_state.redis_url) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
-    };
+    let manager = make_manager(&state.app_state.redis_url)?;
 
     let tier = payload
         .tier
@@ -151,47 +112,26 @@ pub async fn set_tenant_quota(
     };
 
     let key = format!("tenant:{tenant_id}");
-    match manager.set_quota_config(&key, &quota).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"message": "quota updated", "tenant_id": tenant_id})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    manager.set_quota_config(&key, &quota).await?;
+    
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"message": "quota updated", "tenant_id": tenant_id})),
+    ))
 }
 
 /// DELETE /admin/quotas/:tenant_id/reset — reset current usage counter.
 pub async fn reset_tenant_quota(
     State(state): State<ApiState>,
     Path(tenant_id): Path<Uuid>,
-) -> impl IntoResponse {
-    let manager = match make_manager(&state.app_state.redis_url) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let manager = make_manager(&state.app_state.redis_url)?;
 
     let key = format!("tenant:{tenant_id}");
-    match manager.reset_quota(&key).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"message": "quota reset", "tenant_id": tenant_id})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    manager.reset_quota(&key).await?;
+    
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"message": "quota reset", "tenant_id": tenant_id})),
+    ))
 }
