@@ -4,8 +4,8 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::panic::AssertUnwindSafe;
 use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 
 /// Middleware that catches handler panics and returns a 500 response instead of
 /// dropping the connection. Logs the panic with a backtrace and increments the

@@ -202,7 +202,7 @@ pub fn cache_key_status_counts() -> String {
 }
 
 pub fn cache_key_daily_totals(days: i32) -> String {
-    format!("query:daily_totals:{}", days)
+    format!("query:daily_totals:{days}")
 }
 
 pub fn cache_key_asset_stats() -> String {
@@ -210,7 +210,7 @@ pub fn cache_key_asset_stats() -> String {
 }
 
 pub fn cache_key_asset_total(asset_code: &str) -> String {
-    format!("query:asset_total:{}", asset_code)
+    format!("query:asset_total:{asset_code}")
 }
 
 #[cfg(test)]
