@@ -1,5 +1,6 @@
 use failsafe::futures::CircuitBreaker as FuturesCircuitBreaker;
 use failsafe::{backoff, failure_policy, Config, Error as FailsafeError, StateMachine};
+use futures_util::stream::StreamExt;
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use reqwest::Client;
@@ -8,10 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use futures_util::stream::StreamExt;
-use tokio::sync::mpsc;
 
 #[derive(Error, Debug)]
 pub enum HorizonError {

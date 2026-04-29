@@ -138,7 +138,13 @@ pub async fn update_settlement_status(
     let service = crate::services::SettlementService::new(state.app_state.db.clone());
 
     match service
-        .update_status(id, &payload.status, payload.reason.as_deref(), new_total.as_ref(), actor)
+        .update_status(
+            id,
+            &payload.status,
+            payload.reason.as_deref(),
+            new_total.as_ref(),
+            actor,
+        )
         .await
     {
         Ok(settlement) => (StatusCode::OK, Json(settlement)).into_response(),

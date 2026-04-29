@@ -16,9 +16,12 @@ async fn setup_db() -> (PgPool, impl std::any::Any) {
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
     let pool = PgPool::connect(&url).await.unwrap();
-    let migrator = Migrator::new(Path::join(Path::new(env!("CARGO_MANIFEST_DIR")), "migrations"))
-        .await
-        .unwrap();
+    let migrator = Migrator::new(Path::join(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        "migrations",
+    ))
+    .await
+    .unwrap();
     migrator.run(&pool).await.unwrap();
 
     // Create current-month partition
@@ -76,7 +79,9 @@ async fn test_tenant_a_cannot_see_tenant_b_transactions() {
 
     // Query as tenant A — should not see tenant B's transaction
     let mut conn = pool.acquire().await.unwrap();
-    set_tenant_context(&mut conn, Some(tenant_a), false).await.unwrap();
+    set_tenant_context(&mut conn, Some(tenant_a), false)
+        .await
+        .unwrap();
 
     let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM transactions WHERE id = $1")
         .bind(tx_b)
@@ -84,7 +89,10 @@ async fn test_tenant_a_cannot_see_tenant_b_transactions() {
         .await
         .unwrap();
 
-    assert!(row.is_none(), "tenant A should not see tenant B's transaction via RLS");
+    assert!(
+        row.is_none(),
+        "tenant A should not see tenant B's transaction via RLS"
+    );
 }
 
 #[tokio::test]
@@ -113,7 +121,11 @@ async fn test_admin_can_see_all_transactions() {
         .await
         .unwrap();
 
-    assert_eq!(rows.len(), 2, "admin should see transactions from all tenants");
+    assert_eq!(
+        rows.len(),
+        2,
+        "admin should see transactions from all tenants"
+    );
 }
 
 #[tokio::test]
@@ -141,5 +153,8 @@ async fn test_null_tenant_id_rows_visible_to_admin() {
         .await
         .unwrap();
 
-    assert!(row.is_some(), "admin should see legacy rows with NULL tenant_id");
+    assert!(
+        row.is_some(),
+        "admin should see legacy rows with NULL tenant_id"
+    );
 }

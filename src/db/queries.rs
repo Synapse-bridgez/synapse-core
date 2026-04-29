@@ -93,12 +93,10 @@ where
 /// Look up whether an API key exists and belongs to an active tenant.
 /// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
 pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
-    let row = sqlx::query(
-        "SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1",
-    )
-    .bind(api_key)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query("SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1")
+        .bind(api_key)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.is_some())
 }
 
@@ -466,11 +464,12 @@ pub async fn update_settlement_status(
 ) -> Result<Settlement> {
     let mut db_tx = pool.begin().await?;
 
-    let current = sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1 FOR UPDATE")
-        .bind(id)
-        .fetch_optional(&mut *db_tx)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
+    let current =
+        sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *db_tx)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
 
     // Preserve original amount on first adjustment
     let original_total = if current.original_total_amount.is_none() && new_total.is_some() {
@@ -1032,12 +1031,10 @@ pub async fn bulk_update_transaction_status(
     use crate::validation::state_machine::validate_status_transition;
 
     // Fetch current statuses for all requested IDs in one query
-    let rows = sqlx::query(
-        "SELECT id, status FROM transactions WHERE id = ANY($1)",
-    )
-    .bind(transaction_ids)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query("SELECT id, status FROM transactions WHERE id = ANY($1)")
+        .bind(transaction_ids)
+        .fetch_all(pool)
+        .await?;
 
     let current: std::collections::HashMap<Uuid, String> = rows
         .into_iter()
@@ -1045,7 +1042,8 @@ pub async fn bulk_update_transaction_status(
         .collect();
 
     let mut valid_ids: Vec<Uuid> = Vec::new();
-    let mut old_statuses: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    let mut old_statuses: std::collections::HashMap<Uuid, String> =
+        std::collections::HashMap::new();
     let mut errors: Vec<BulkUpdateError> = Vec::new();
 
     for &id in transaction_ids {
@@ -1077,16 +1075,17 @@ pub async fn bulk_update_transaction_status(
 
     let mut db_tx = pool.begin().await?;
 
-    sqlx::query(
-        "UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)",
-    )
-    .bind(new_status)
-    .bind(&valid_ids)
-    .execute(&mut *db_tx)
-    .await?;
+    sqlx::query("UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)")
+        .bind(new_status)
+        .bind(&valid_ids)
+        .execute(&mut *db_tx)
+        .await?;
 
     for &id in &valid_ids {
-        let old_status = old_statuses.get(&id).map(|s| s.as_str()).unwrap_or("unknown");
+        let old_status = old_statuses
+            .get(&id)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let mut new_val = serde_json::json!({ "status": new_status });
         if let Some(r) = reason {
             new_val["reason"] = serde_json::json!(r);

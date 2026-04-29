@@ -110,30 +110,29 @@ impl TransactionSubscription {
         let state = ctx.data::<AppState>()?;
         let rx = state.tx_broadcast.subscribe();
 
-        let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
-            .filter_map(move |result| {
-                match result {
-                    Ok(update) => {
-                        // Apply optional filters
-                        let id_match = transaction_id
-                            .map(|id| update.transaction_id == id)
-                            .unwrap_or(true);
-                        let asset_match = asset_code
-                            .as_deref()
-                            .map(|a| update.message.as_deref() == Some(a))
-                            .unwrap_or(true);
-                        if id_match && asset_match {
-                            Some(update)
-                        } else {
-                            None
-                        }
-                    }
-                    Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                        tracing::warn!("GraphQL subscription lagged by {} messages", n);
+        let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
+            match result {
+                Ok(update) => {
+                    // Apply optional filters
+                    let id_match = transaction_id
+                        .map(|id| update.transaction_id == id)
+                        .unwrap_or(true);
+                    let asset_match = asset_code
+                        .as_deref()
+                        .map(|a| update.message.as_deref() == Some(a))
+                        .unwrap_or(true);
+                    if id_match && asset_match {
+                        Some(update)
+                    } else {
                         None
                     }
                 }
-            });
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                    tracing::warn!("GraphQL subscription lagged by {} messages", n);
+                    None
+                }
+            }
+        });
 
         Ok(Box::pin(stream))
     }

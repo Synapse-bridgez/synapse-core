@@ -287,6 +287,9 @@ pub async fn handle_tx_reconcile(
     Ok(())
 }
 
-pub async fn handle_backup_restore_pitr(_config: &Config, _timestamp_str: &str) -> anyhow::Result<()> {
+pub async fn handle_backup_restore_pitr(
+    _config: &Config,
+    _timestamp_str: &str,
+) -> anyhow::Result<()> {
     anyhow::bail!("PITR restore service not yet implemented")
 }
