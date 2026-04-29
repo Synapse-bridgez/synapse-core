@@ -55,6 +55,10 @@ Scans ONLY transactions_y2025m02
 (Ignores all other partitions)
 ```
 
+Partition pruning requires the planner to see explicit bounds on the partition key. Queries that use expressions such as `created_at >= NOW() - INTERVAL ...` can prevent pruning because the boundary is not a fixed timestamp at plan time. For date-range queries, the application should compute an exact `start` and `end` timestamp and send them as explicit bounds in the `WHERE` clause.
+
+In development builds, we also log `EXPLAIN ANALYZE` output for date-range queries like daily totals so engineers can verify that only the expected partitions are scanned.
+
 ## Maintenance Workflow
 
 ```

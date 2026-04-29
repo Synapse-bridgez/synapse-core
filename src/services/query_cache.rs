@@ -1,440 +1,316 @@
-use redis::{AsyncCommands, Client};
-use serde::{de::DeserializeOwned, Serialize};
-use sqlx::PgPool;
-use std::future::Future;
-use std::time::Duration;
+use crate::middleware::idempotency::RedisCircuitBreaker;
+use lru::LruCache;
+use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-/// Fraction of TTL remaining that triggers an early refresh (10% before expiry).
-const EARLY_REFRESH_FRACTION: f64 = 0.10;
-
-/// How long the refresh lock is held (prevents multiple refreshers).
-const LOCK_TTL_SECS: i64 = 30;
-
-/// TTL for warmed cache entries (5 minutes).
-const WARM_TTL: Duration = Duration::from_secs(300);
+#[derive(Clone)]
+struct CacheEntry<T> {
+    value: T,
+    expires_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct QueryCache {
     client: Client,
+    cb: RedisCircuitBreaker,
+    hits: Arc<AtomicU64>,
+    misses: Arc<AtomicU64>,
+    memory_hits: Arc<AtomicU64>,
+    memory_misses: Arc<AtomicU64>,
+    lru: Arc<Mutex<LruCache<String, String>>>,
 }
 
-/// Build a namespaced cache key.
-///
-/// - With tenant: `tenant:{tenant_id}:{base_key}`
-/// - Without tenant: `{base_key}` (backward-compatible)
-pub fn make_key(base_key: &str, tenant_id: Option<&str>) -> String {
-    match tenant_id {
-        Some(id) => format!("tenant:{}:{}", id, base_key),
-        None => base_key.to_owned(),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    pub status_counts_ttl: u64,
+    pub daily_totals_ttl: u64,
+    pub asset_stats_ttl: u64,
+    pub memory_cache_size: usize,
+    pub memory_cache_ttl: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            status_counts_ttl: 300, // 5 minutes
+            daily_totals_ttl: 3600, // 1 hour
+            asset_stats_ttl: 600,   // 10 minutes
+            memory_cache_size: 1000,
+            memory_cache_ttl: 30,
+        }
     }
 }
 
 impl QueryCache {
     pub fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = Client::open(redis_url)?;
-        Ok(Self { client })
-    }
+        let cache_size = std::env::var("MEMORY_CACHE_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
 
-    /// Get a cached value or compute it, with stampede prevention.
-    ///
-    /// Pass `tenant_id = Some("t1")` for tenant-scoped caching, or `None` for
-    /// global (single-tenant / backward-compatible) mode.
-    pub async fn get_or_compute<T, F, Fut>(
-        &self,
-        base_key: &str,
-        tenant_id: Option<&str>,
-        ttl: Duration,
-        loader: F,
-    ) -> Result<T, anyhow::Error>
-    where
-        T: Serialize + DeserializeOwned + Clone + Send + 'static,
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
-    {
-        let key = make_key(base_key, tenant_id);
-        self.get_or_compute_raw(&key, ttl, loader).await
-    }
-
-    /// Invalidate a cache entry for both the tenant-specific and global keys.
-    pub async fn invalidate(
-        &self,
-        base_key: &str,
-        tenant_id: Option<&str>,
-    ) -> Result<(), redis::RedisError> {
-        let mut conn = self.client.get_async_connection().await?;
-        let global_key = make_key(base_key, None);
-        let _: Result<(), _> = conn.del(&global_key).await;
-        if let Some(id) = tenant_id {
-            let tenant_key = make_key(base_key, Some(id));
-            let _: Result<(), _> = conn.del(&tenant_key).await;
-        }
-        Ok(())
-    }
-
-    /// Pre-warm the cache after a partition rotation.
-    ///
-    /// Populates:
-    /// - `query:status_counts`  — count of transactions per status
-    /// - `query:daily_totals`   — transaction counts for the last 7 days
-    /// - `query:asset_stats`    — distinct asset codes with transaction counts
-    pub async fn warm_cache(
-        &self,
-        pool: &PgPool,
-        tenant_id: Option<&str>,
-    ) -> Result<(), anyhow::Error> {
-        // status counts
-        self.get_or_compute("query:status_counts", tenant_id, WARM_TTL, {
-            let pool = pool.clone();
-            move || {
-                let pool = pool.clone();
-                async move {
-                    let rows = sqlx::query_as::<_, (String, i64)>(
-                        "SELECT status, COUNT(*) FROM transactions GROUP BY status",
-                    )
-                    .fetch_all(&pool)
-                    .await?;
-                    Ok::<Vec<(String, i64)>, anyhow::Error>(rows)
-                }
-            }
+        Ok(Self {
+            client,
+            cb: RedisCircuitBreaker::from_env(),
+            hits: Arc::new(AtomicU64::new(0)),
+            misses: Arc::new(AtomicU64::new(0)),
+            memory_hits: Arc::new(AtomicU64::new(0)),
+            memory_misses: Arc::new(AtomicU64::new(0)),
+            lru: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(cache_size).unwrap(),
+            ))),
         })
-        .await?;
-
-        // daily totals — last 7 days
-        self.get_or_compute("query:daily_totals", tenant_id, WARM_TTL, {
-            let pool = pool.clone();
-            move || {
-                let pool = pool.clone();
-                async move {
-                    let rows = sqlx::query_as::<_, (chrono::NaiveDate, i64)>(
-                        "SELECT created_at::date AS day, COUNT(*) \
-                             FROM transactions \
-                             WHERE created_at >= NOW() - INTERVAL '7 days' \
-                             GROUP BY day ORDER BY day",
-                    )
-                    .fetch_all(&pool)
-                    .await?;
-                    Ok::<Vec<(chrono::NaiveDate, i64)>, anyhow::Error>(rows)
-                }
-            }
-        })
-        .await?;
-
-        // asset stats
-        self.get_or_compute("query:asset_stats", tenant_id, WARM_TTL, {
-            let pool = pool.clone();
-            move || {
-                let pool = pool.clone();
-                async move {
-                    let rows = sqlx::query_as::<_, (String, i64)>(
-                        "SELECT asset_code, COUNT(*) FROM transactions GROUP BY asset_code",
-                    )
-                    .fetch_all(&pool)
-                    .await?;
-                    Ok::<Vec<(String, i64)>, anyhow::Error>(rows)
-                }
-            }
-        })
-        .await?;
-
-        tracing::info!(tenant_id = ?tenant_id, "cache warmed after partition rotation");
-        Ok(())
     }
 
-    /// Internal: stampede-safe fetch/compute on a fully-resolved key.
-    async fn get_or_compute_raw<T, F, Fut>(
+    async fn get_connection(&self) -> Result<MultiplexedConnection, redis::RedisError> {
+        self.client.get_multiplexed_async_connection().await
+    }
+
+    pub async fn get<T: DeserializeOwned + Send>(
         &self,
         key: &str,
-        ttl: Duration,
-        loader: F,
-    ) -> Result<T, anyhow::Error>
-    where
-        T: Serialize + DeserializeOwned + Clone + Send + 'static,
-        F: Fn() -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<T, anyhow::Error>> + Send + 'static,
-    {
-        let mut conn = self.client.get_async_connection().await?;
-        let lock_key = format!("{}:refresh_lock", key);
+    ) -> Result<Option<T>, redis::RedisError> {
+        // Try in-memory cache first
+        {
+            let mut lru = self.lru.lock().unwrap();
+            if let Some(cached) = lru.get(key) {
+                self.memory_hits.fetch_add(1, Ordering::Relaxed);
+                if let Ok(value) = serde_json::from_str::<T>(cached) {
+                    return Ok(Some(value));
+                }
+            }
+        }
 
-        let cached_bytes: Option<Vec<u8>> = conn.get(key).await?;
-        let remaining_ttl_ms: i64 = conn.pttl(key).await?;
+        self.memory_misses.fetch_add(1, Ordering::Relaxed);
 
-        let ttl_ms = ttl.as_millis() as i64;
-        let early_threshold_ms = (ttl_ms as f64 * EARLY_REFRESH_FRACTION) as i64;
+        // Fall back to Redis
+        let client = self.client.clone();
+        let key = key.to_string();
+        let hits = self.hits.clone();
+        let misses = self.misses.clone();
+        let lru = self.lru.clone();
 
-        if let Some(bytes) = cached_bytes {
-            let value: T = serde_json::from_slice(&bytes)?;
-
-            if remaining_ttl_ms > 0 && remaining_ttl_ms <= early_threshold_ms {
-                let acquired: bool = conn
-                    .set_nx::<_, _, bool>(&lock_key, "1")
-                    .await
-                    .unwrap_or(false);
-
-                if acquired {
-                    let _: Result<bool, _> = conn.expire(&lock_key, LOCK_TTL_SECS).await;
-
-                    let client = self.client.clone();
-                    let key_owned = key.to_owned();
-                    let lock_key_owned = lock_key.clone();
-                    tokio::spawn(async move {
-                        match loader().await {
-                            Ok(fresh) => {
-                                if let Ok(serialized) = serde_json::to_vec(&fresh) {
-                                    if let Ok(mut bg_conn) = client.get_async_connection().await {
-                                        let _: Result<(), _> = bg_conn
-                                            .set_ex(&key_owned, serialized, ttl.as_secs())
-                                            .await;
-                                        tracing::debug!(
-                                            key = %key_owned,
-                                            "cache refreshed (early expiry)"
-                                        );
-                                        increment_stampede_prevented(&mut bg_conn, &key_owned)
-                                            .await;
-                                        let _: Result<(), _> = bg_conn.del(&lock_key_owned).await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    key = %key_owned,
-                                    error = %e,
-                                    "background cache refresh failed"
-                                );
-                                if let Ok(mut bg_conn) = client.get_async_connection().await {
-                                    let _: Result<(), _> = bg_conn.del(&lock_key_owned).await;
-                                }
-                            }
+        self.cb
+            .call(|| async move {
+                let mut conn = client.get_multiplexed_async_connection().await?;
+                let value: Option<String> = conn.get(&key).await?;
+                match value {
+                    Some(v) => {
+                        hits.fetch_add(1, Ordering::Relaxed);
+                        // Populate in-memory cache
+                        {
+                            let mut lru_cache = lru.lock().unwrap();
+                            lru_cache.put(key.clone(), v.clone());
                         }
-                    });
+                        serde_json::from_str(&v).map(Some).map_err(|e| {
+                            redis::RedisError::from((
+                                redis::ErrorKind::TypeError,
+                                "deserialization failed",
+                                e.to_string(),
+                            ))
+                        })
+                    }
+                    None => {
+                        misses.fetch_add(1, Ordering::Relaxed);
+                        Ok(None)
+                    }
                 }
-            }
-
-            return Ok(value);
-        }
-
-        let acquired: bool = conn
-            .set_nx::<_, _, bool>(&lock_key, "1")
+            })
             .await
-            .unwrap_or(false);
+            .map_err(|e| match e {
+                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
+                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
+                ),
+                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            })
+    }
 
-        if acquired {
-            let _: Result<bool, _> = conn.expire(&lock_key, LOCK_TTL_SECS).await;
+    pub async fn set<T: Serialize + Send>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl: Duration,
+    ) -> Result<(), redis::RedisError> {
+        let serialized = serde_json::to_string(value).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::TypeError,
+                "serialization failed",
+                e.to_string(),
+            ))
+        })?;
 
-            let result = loader().await;
-            let _: Result<(), _> = conn.del(&lock_key).await;
-
-            match result {
-                Ok(value) => {
-                    let serialized = serde_json::to_vec(&value)?;
-                    let _: Result<(), _> = conn.set_ex(key, serialized, ttl.as_secs()).await;
-                    Ok(value)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            for _ in 0..10u8 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                let cached: Option<Vec<u8>> = conn.get(key).await.unwrap_or(None);
-                if let Some(bytes) = cached {
-                    let value: T = serde_json::from_slice(&bytes)?;
-                    return Ok(value);
-                }
-            }
-            loader().await
+        // Store in in-memory cache
+        {
+            let mut lru = self.lru.lock().unwrap();
+            lru.put(key.to_string(), serialized.clone());
         }
+
+        let client = self.client.clone();
+        let key = key.to_string();
+
+        self.cb
+            .call(|| async move {
+                let mut conn = client.get_multiplexed_async_connection().await?;
+                conn.set_ex(&key, serialized.clone(), ttl.as_secs()).await
+            })
+            .await
+            .map_err(|e| match e {
+                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
+                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
+                ),
+                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            })
+    }
+
+    pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
+        // Clear in-memory cache
+        {
+            let mut lru = self.lru.lock().unwrap();
+            lru.clear();
+        }
+
+        let mut conn: MultiplexedConnection = self.get_connection().await?;
+        let keys: Vec<String> = conn.keys(pattern).await?;
+
+        if !keys.is_empty() {
+            conn.del::<_, ()>(keys).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
+        // Clear from in-memory cache
+        {
+            let mut lru = self.lru.lock().unwrap();
+            lru.pop(key);
+        }
+
+        let mut conn: MultiplexedConnection = self.get_connection().await?;
+        conn.del::<_, ()>(key).await
+    }
+
+    /// Returns the circuit breaker state: `"open"` or `"closed"`.
+    pub fn circuit_state(&self) -> String {
+        self.cb.state()
+    }
+
+    pub fn metrics(&self) -> CacheMetrics {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        let hit_rate = if total > 0 {
+            (hits as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let memory_hits = self.memory_hits.load(Ordering::Relaxed);
+        let memory_misses = self.memory_misses.load(Ordering::Relaxed);
+        let memory_total = memory_hits + memory_misses;
+        let memory_hit_rate = if memory_total > 0 {
+            (memory_hits as f64 / memory_total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        CacheMetrics {
+            hits,
+            misses,
+            total,
+            hit_rate,
+            memory_hits,
+            memory_misses,
+            memory_total,
+            memory_hit_rate,
+        }
+    }
+
+    pub async fn warm_cache(
+        &self,
+        pool: &sqlx::PgPool,
+        config: &CacheConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Warm status counts
+        let status_counts = crate::db::queries::get_status_counts(pool).await?;
+        self.set(
+            "query:status_counts",
+            &status_counts,
+            Duration::from_secs(config.status_counts_ttl),
+        )
+        .await?;
+
+        // Warm daily totals for last 7 days
+        let daily_totals = crate::db::queries::get_daily_totals(pool, 7).await?;
+        self.set(
+            "query:daily_totals:7",
+            &daily_totals,
+            Duration::from_secs(config.daily_totals_ttl),
+        )
+        .await?;
+
+        // Warm asset stats
+        let asset_stats = crate::db::queries::get_asset_stats(pool).await?;
+        self.set(
+            "query:asset_stats",
+            &asset_stats,
+            Duration::from_secs(config.asset_stats_ttl),
+        )
+        .await?;
+
+        tracing::info!("Cache warming completed");
+        Ok(())
     }
 }
 
-async fn increment_stampede_prevented(conn: &mut redis::aio::Connection, key: &str) {
-    let metric_key = format!("metrics:cache_stampede_prevented:{}", key);
-    let _: Result<i64, _> = conn.incr(&metric_key, 1i64).await;
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheMetrics {
+    pub hits: u64,
+    pub misses: u64,
+    pub total: u64,
+    pub hit_rate: f64,
+    pub memory_hits: u64,
+    pub memory_misses: u64,
+    pub memory_total: u64,
+    pub memory_hit_rate: f64,
+}
+
+pub fn cache_key_status_counts() -> String {
+    "query:status_counts".to_string()
+}
+
+pub fn cache_key_daily_totals(days: i32) -> String {
+    format!("query:daily_totals:{days}")
+}
+
+pub fn cache_key_asset_stats() -> String {
+    "query:asset_stats".to_string()
+}
+
+pub fn cache_key_asset_total(asset_code: &str) -> String {
+    format!("query:asset_total:{asset_code}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
 
-    fn make_cache() -> Option<QueryCache> {
-        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        QueryCache::new(&url).ok()
-    }
-
-    // ── key generation ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_make_key_no_tenant() {
-        assert_eq!(make_key("query:status_counts", None), "query:status_counts");
+    #[tokio::test]
+    async fn test_cache_metrics() {
+        let cache = QueryCache::new("redis://localhost:6379").unwrap();
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 0);
     }
 
     #[test]
-    fn test_make_key_with_tenant() {
-        assert_eq!(
-            make_key("query:status_counts", Some("acme")),
-            "tenant:acme:query:status_counts"
-        );
-    }
-
-    // ── multi-tenant isolation ────────────────────────────────────────────────
-
-    /// Two tenants must receive independent cached results.
-    #[tokio::test]
-    async fn test_two_tenants_get_independent_results() {
-        let Some(cache) = make_cache() else {
-            eprintln!("Skipping: no Redis available");
-            return;
-        };
-
-        let base = format!("test:mt:{}", uuid::Uuid::new_v4());
-        let ttl = Duration::from_secs(60);
-
-        let v1: String = cache
-            .get_or_compute(&base, Some("tenant_a"), ttl, || async {
-                Ok("value_a".to_string())
-            })
-            .await
-            .unwrap();
-
-        let v2: String = cache
-            .get_or_compute(&base, Some("tenant_b"), ttl, || async {
-                Ok("value_b".to_string())
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(v1, "value_a");
-        assert_eq!(v2, "value_b");
-        assert_ne!(v1, v2);
-    }
-
-    /// Single-tenant (no tenant_id) mode must work without change.
-    #[tokio::test]
-    async fn test_single_tenant_mode_no_prefix() {
-        let Some(cache) = make_cache() else {
-            eprintln!("Skipping: no Redis available");
-            return;
-        };
-
-        let base = format!("test:st:{}", uuid::Uuid::new_v4());
-        let ttl = Duration::from_secs(60);
-
-        let val: String = cache
-            .get_or_compute(&base, None, ttl, || async { Ok("global".to_string()) })
-            .await
-            .unwrap();
-
-        assert_eq!(val, "global");
-
-        // Verify the key stored in Redis has no tenant prefix.
-        let mut conn = cache.client.get_async_connection().await.unwrap();
-        let raw: Option<Vec<u8>> = conn.get(&base).await.unwrap();
-        assert!(raw.is_some(), "key should be stored without prefix");
-    }
-
-    /// Invalidation clears both tenant-specific and global keys.
-    #[tokio::test]
-    async fn test_invalidate_clears_both_keys() {
-        let Some(cache) = make_cache() else {
-            eprintln!("Skipping: no Redis available");
-            return;
-        };
-
-        let base = format!("test:inv:{}", uuid::Uuid::new_v4());
-        let ttl = Duration::from_secs(60);
-
-        // Populate both global and tenant-scoped entries.
-        cache
-            .get_or_compute(&base, None, ttl, || async { Ok("global".to_string()) })
-            .await
-            .unwrap();
-        cache
-            .get_or_compute(&base, Some("t1"), ttl, || async {
-                Ok("t1_val".to_string())
-            })
-            .await
-            .unwrap();
-
-        cache.invalidate(&base, Some("t1")).await.unwrap();
-
-        let mut conn = cache.client.get_async_connection().await.unwrap();
-        let global: Option<Vec<u8>> = conn.get(&base).await.unwrap();
-        let tenant: Option<Vec<u8>> = conn.get(make_key(&base, Some("t1"))).await.unwrap();
-
-        assert!(global.is_none(), "global key should be cleared");
-        assert!(tenant.is_none(), "tenant key should be cleared");
-    }
-
-    // ── stampede prevention (carried over) ───────────────────────────────────
-
-    #[tokio::test]
-    async fn test_100_concurrent_requests_single_db_query() {
-        let Some(cache) = make_cache() else {
-            eprintln!("Skipping: no Redis available");
-            return;
-        };
-
-        let base = format!("test:stampede:{}", uuid::Uuid::new_v4());
-        let db_calls = Arc::new(AtomicUsize::new(0));
-        let ttl = Duration::from_secs(60);
-
-        let mut handles = Vec::with_capacity(100);
-        for _ in 0..100 {
-            let cache = cache.clone();
-            let base = base.clone();
-            let db_calls = db_calls.clone();
-            handles.push(tokio::spawn(async move {
-                cache
-                    .get_or_compute(&base, None, ttl, move || {
-                        let db_calls = db_calls.clone();
-                        async move {
-                            db_calls.fetch_add(1, Ordering::SeqCst);
-                            tokio::time::sleep(Duration::from_millis(20)).await;
-                            Ok::<String, anyhow::Error>("result".to_string())
-                        }
-                    })
-                    .await
-            }));
-        }
-
-        for h in handles {
-            h.await.unwrap().unwrap();
-        }
-
-        let calls = db_calls.load(Ordering::SeqCst);
-        assert_eq!(calls, 1, "expected 1 DB call, got {calls}");
-    }
-
-    #[tokio::test]
-    async fn test_stale_value_served_during_early_refresh() {
-        let Some(cache) = make_cache() else {
-            eprintln!("Skipping: no Redis available");
-            return;
-        };
-
-        let base = format!("test:early_refresh:{}", uuid::Uuid::new_v4());
-        let ttl = Duration::from_secs(10);
-
-        {
-            let mut conn = cache.client.get_async_connection().await.unwrap();
-            let bytes = serde_json::to_vec("stale").unwrap();
-            let _: () = conn.set_ex(&base, bytes, 1u64).await.unwrap();
-        }
-
-        let val: String = cache
-            .get_or_compute(&base, None, ttl, || async { Ok("fresh".to_string()) })
-            .await
-            .unwrap();
-        assert_eq!(val, "stale");
-
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let val2: String = cache
-            .get_or_compute(&base, None, ttl, || async { Ok("fresh".to_string()) })
-            .await
-            .unwrap();
-        assert_eq!(val2, "fresh");
+    fn test_cache_key_generation() {
+        assert_eq!(cache_key_status_counts(), "query:status_counts");
+        assert_eq!(cache_key_daily_totals(7), "query:daily_totals:7");
+        assert_eq!(cache_key_asset_stats(), "query:asset_stats");
+        assert_eq!(cache_key_asset_total("USD"), "query:asset_total:USD");
     }
 }

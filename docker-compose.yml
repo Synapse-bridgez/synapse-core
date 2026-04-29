@@ -6,10 +6,12 @@ services:
       POSTGRES_USER: synapse
       POSTGRES_PASSWORD: synapse
       POSTGRES_DB: synapse
+      POSTGRES_INITDB_ARGS: "-c wal_level=replica -c max_wal_senders=3 -c max_replication_slots=3"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - postgres_wal:/var/lib/postgresql/wal_archive
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U synapse"]
       interval: 5s
@@ -66,4 +68,5 @@ services:
 
 volumes:
   postgres_data:
+  postgres_wal:
   redis_data:

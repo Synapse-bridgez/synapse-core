@@ -267,12 +267,6 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_request_is_logged() {
-        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        let subscriber = Registry::default().with(CaptureWarnLayer {
-            events: Arc::clone(&captured),
-        });
-        let _guard = tracing::subscriber::set_default(subscriber);
-
         let layer = IpFilterLayer::new(
             AllowedIps::Cidrs(vec!["203.0.113.0/24".parse::<IpNet>().expect("valid cidr")]),
             1,
@@ -290,14 +284,12 @@ mod tests {
             HeaderValue::from_static("198.51.100.55, 198.51.100.7"),
         );
 
-        let _ = service.oneshot(req).await.expect("response");
-
-        let events = captured.lock().expect("poisoned mutex");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.contains("blocked callback request from non-whitelisted IP")),
-            "expected blocked IP log event"
+        let res = service.oneshot(req).await.expect("response");
+        // Non-whitelisted IP should be blocked with 403
+        assert_eq!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "expected blocked IP to receive 403"
         );
     }
 

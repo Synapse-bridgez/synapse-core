@@ -7,9 +7,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::AppState, error::{AppError, Result}};
+use crate::{error::AppError, AppState};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TenantConfig {
     pub tenant_id: Uuid,
     pub name: String,
@@ -38,35 +38,39 @@ impl FromRequestParts<AppState> for TenantContext {
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, AppError> {
         let tenant_id = resolve_tenant_id(parts, state).await?;
-        
+
         let config = state
             .get_tenant_config(tenant_id)
             .await
             .ok_or(AppError::TenantNotFound)?;
-        
+
         if !config.is_active {
-            return Err(AppError::Unauthorized);
+            return Err(AppError::Unauthorized("tenant inactive".to_string()));
         }
-        
+
         Ok(TenantContext::new(tenant_id, config))
     }
 }
 
-async fn resolve_tenant_id(parts: &mut Parts, state: &AppState) -> Result<Uuid> {
+async fn resolve_tenant_id(
+    parts: &mut Parts,
+    state: &AppState,
+) -> std::result::Result<Uuid, AppError> {
     if let Ok(Path(tenant_id)) = parts.extract::<Path<Uuid>>().await {
         return Ok(tenant_id);
     }
-    
+
     let headers = &parts.headers;
-    
+
     if let Some(api_key) = extract_api_key(headers) {
-        return resolve_tenant_by_api_key(&state.pool, &api_key).await;
+        return resolve_tenant_by_api_key(&state.db, &api_key).await;
     }
-    
+
     if let Some(tenant_id_str) = headers.get("X-Tenant-ID") {
-        if let Ok(tenant_id) = tenant_id_str.to_str()
+        if let Ok(tenant_id) = tenant_id_str
+            .to_str()
             .ok()
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or(AppError::InvalidApiKey)
@@ -74,7 +78,7 @@ async fn resolve_tenant_id(parts: &mut Parts, state: &AppState) -> Result<Uuid> 
             return Ok(tenant_id);
         }
     }
-    
+
     Err(AppError::InvalidApiKey)
 }
 
@@ -92,19 +96,20 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-async fn resolve_tenant_by_api_key(pool: &sqlx::PgPool, api_key: &str) -> Result<Uuid> {
-    let result = sqlx::query!(
-        r#"
-        SELECT tenant_id 
-        FROM tenants 
-        WHERE api_key = $1 AND is_active = true
-        "#,
-        api_key
-    )
-    .fetch_optional(pool)
-    .await?;
-    
-    result
-        .map(|r| r.tenant_id)
-        .ok_or(AppError::InvalidApiKey)
+async fn resolve_tenant_by_api_key(
+    pool: &sqlx::PgPool,
+    api_key: &str,
+) -> std::result::Result<Uuid, AppError> {
+    use sqlx::Row;
+    let row = sqlx::query("SELECT tenant_id FROM tenants WHERE api_key = $1")
+        .bind(api_key)
+        .fetch_optional(pool)
+        .await?;
+
+    if let Some(r) = row {
+        let tenant_id: Uuid = r.try_get("tenant_id")?;
+        Ok(tenant_id)
+    } else {
+        Err(AppError::InvalidApiKey)
+    }
 }

@@ -26,7 +26,7 @@ impl ValidationReport {
         if !self.errors.is_empty() {
             println!("\nErrors:");
             for error in &self.errors {
-                println!("  ❌ {}", error);
+                println!("  ❌ {error}");
             }
         }
 
@@ -62,25 +62,25 @@ pub async fn validate_environment(config: &Config, pool: &PgPool) -> Result<Vali
     // Validate environment variables
     if let Err(e) = validate_env_vars(config) {
         report.environment = false;
-        report.errors.push(format!("Environment: {}", e));
+        report.errors.push(format!("Environment: {e}"));
     }
 
     // Validate database
     if let Err(e) = validate_database(pool).await {
         report.database = false;
-        report.errors.push(format!("Database: {}", e));
+        report.errors.push(format!("Database: {e}"));
     }
 
     // Validate Redis
     if let Err(e) = validate_redis(&config.redis_url).await {
         report.redis = false;
-        report.errors.push(format!("Redis: {}", e));
+        report.errors.push(format!("Redis: {e}"));
     }
 
     // Validate Horizon
     if let Err(e) = validate_horizon(&config.stellar_horizon_url).await {
         report.horizon = false;
-        report.errors.push(format!("Horizon: {}", e));
+        report.errors.push(format!("Horizon: {e}"));
     }
 
     Ok(report)
@@ -164,11 +164,10 @@ async fn validate_horizon(horizon_url: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_validate_env_vars_empty_database_url() {
-        let config = Config {
+    fn test_config_base() -> Config {
+        Config {
             server_port: 3000,
-            database_url: String::new(),
+            database_url: "postgres://localhost:5432/test".to_string(),
             database_replica_url: None,
             stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
             anchor_webhook_secret: "test".to_string(),
@@ -180,6 +179,32 @@ mod tests {
             allowed_ips: crate::config::AllowedIps::Any,
             backup_dir: "/tmp".to_string(),
             backup_encryption_key: None,
+            db_timeouts: crate::config::DbTimeoutConfig::default(),
+            otlp_endpoint: None,
+            cors_allowed_origins: vec![],
+            max_pending_queue: 10000,
+            db_min_connections: 5,
+            db_max_connections: 50,
+            db_statement_timeout_ms: 30000,
+            db_idle_timeout_secs: 600,
+            db_long_running_statement_timeout_ms: 300000,
+            processor_workers: 4,
+            processor_batch_size: 50,
+            processor_poll_interval_ms: 1000,
+            processor_min_batch: 10,
+            processor_max_batch: 500,
+            processor_scaling_factor: 0.5,
+            slow_query_threshold_ms: 500,
+            settlement_max_batch_size: 10_000,
+            settlement_min_tx_count: 1,
+        }
+    }
+
+    #[test]
+    fn test_validate_env_vars_empty_database_url() {
+        let config = Config {
+            database_url: String::new(),
+            ..test_config_base()
         };
 
         assert!(validate_env_vars(&config).is_err());
@@ -188,19 +213,8 @@ mod tests {
     #[test]
     fn test_validate_env_vars_invalid_url() {
         let config = Config {
-            server_port: 3000,
-            database_url: "postgres://localhost:5432/test".to_string(),
-            database_replica_url: None,
             stellar_horizon_url: "not-a-url".to_string(),
-            anchor_webhook_secret: "test".to_string(),
-            redis_url: "redis://localhost:6379".to_string(),
-            default_rate_limit: 100,
-            whitelist_rate_limit: 1000,
-            whitelisted_ips: String::new(),
-            log_format: crate::config::LogFormat::Text,
-            allowed_ips: crate::config::AllowedIps::Any,
-            backup_dir: "/tmp".to_string(),
-            backup_encryption_key: None,
+            ..test_config_base()
         };
 
         assert!(validate_env_vars(&config).is_err());

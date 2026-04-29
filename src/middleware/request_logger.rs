@@ -1,51 +1,102 @@
+//! Structured request/response logger with correlation ID propagation.
+//!
+//! For every request the middleware:
+//! - Reads the `X-Request-Id` header if present, otherwise generates a new
+//!   UUID v4 as the correlation ID.
+//! - Stores the correlation ID in a task-local so that all `tracing` spans
+//!   emitted during the request automatically include it.
+//! - Logs method, path, status, duration, body size, and client IP at INFO
+//!   level in a structured format.
+//! - Attaches the correlation ID to the response as `X-Request-Id`.
+//! - Includes the correlation ID in error responses produced by [`AppError`].
+
 use axum::{
     body::Body,
-    extract::Request,
-    http::StatusCode,
+    extract::ConnectInfo,
+    http::{HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::time::Instant;
+use std::{net::SocketAddr, time::Instant};
 use uuid::Uuid;
 
-const MAX_BODY_LOG_SIZE: usize = 1024; // 1KB limit for body logging
+use crate::error::RequestId;
 
-pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response {
-    let request_id = Uuid::new_v4().to_string();
+const _MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
+
+/// Axum middleware function.
+///
+/// Mount with:
+/// ```rust
+/// Router::new()
+///     .layer(axum::middleware::from_fn(request_logger_middleware))
+/// ```
+pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>) -> Response {
+    // -----------------------------------------------------------------------
+    // 1. Resolve correlation ID
+    // -----------------------------------------------------------------------
+    let correlation_id = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // -----------------------------------------------------------------------
+    // 2. Capture request metadata before consuming the request
+    // -----------------------------------------------------------------------
     let method = req.method().clone();
     let uri = req.uri().clone();
     let start = Instant::now();
 
-    // Insert request ID into headers for downstream handlers
+    // Extract client IP from ConnectInfo extension (populated by axum when
+    // the server is bound with `into_make_service_with_connect_info`).
+    let client_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Propagate correlation ID downstream via request header so handlers and
+    // sub-services can read it.
     req.headers_mut().insert(
         "x-request-id",
-        request_id.parse().unwrap(),
+        HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
 
-    // Log request
+    // Also expose as a typed extension so error handlers can read it without
+    // parsing headers (compatible with the RequestId extractor in error.rs).
+    req.extensions_mut()
+        .insert(RequestId(correlation_id.clone()));
+
+    // -----------------------------------------------------------------------
+    // 3. Optionally log request body (controlled by LOG_REQUEST_BODY env var)
+    // -----------------------------------------------------------------------
     let log_body = std::env::var("LOG_REQUEST_BODY")
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()
         .unwrap_or(false);
 
+    let request_body_size: usize;
+
     if log_body {
-        // Extract and log body if enabled (with size limit)
         let (parts, body) = req.into_parts();
-        let bytes = match axum::body::to_bytes(body, MAX_BODY_LOG_SIZE).await {
-            Ok(bytes) => bytes,
+        let bytes = match hyper::body::to_bytes(body).await {
+            Ok(b) => b,
             Err(_) => {
                 tracing::warn!(
-                    request_id = %request_id,
+                    correlation_id = %correlation_id,
                     method = %method,
-                    uri = %uri,
+                    path = %uri.path(),
                     "Request body too large or failed to read"
                 );
                 return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
             }
         };
 
-        let body_str = String::from_utf8_lossy(&bytes);
-        let sanitized_body = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_str) {
+        request_body_size = bytes.len();
+
+        let sanitized_body = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             let sanitized = crate::utils::sanitize::sanitize_json(&json);
             serde_json::to_string(&sanitized).unwrap_or_else(|_| "[invalid json]".to_string())
         } else {
@@ -53,60 +104,82 @@ pub async fn request_logger_middleware(mut req: Request, next: Next) -> Response
         };
 
         tracing::info!(
-            request_id = %request_id,
+            correlation_id = %correlation_id,
             method = %method,
-            uri = %uri,
-            body_size = bytes.len(),
+            path = %uri.path(),
+            client_ip = %client_ip,
+            body_size = request_body_size,
             body = %sanitized_body,
             "Incoming request"
         );
 
-        // Reconstruct request with body
         req = Request::from_parts(parts, Body::from(bytes));
     } else {
+        request_body_size = 0;
         tracing::info!(
-            request_id = %request_id,
+            correlation_id = %correlation_id,
             method = %method,
-            uri = %uri,
+            path = %uri.path(),
+            client_ip = %client_ip,
             "Incoming request"
         );
     }
 
-    // Process request
-    let response = next.run(req).await;
-    
+    // -----------------------------------------------------------------------
+    // 4. Run the inner handler
+    // -----------------------------------------------------------------------
+    let mut response = next.run(req).await;
+
+    // -----------------------------------------------------------------------
+    // 5. Log response
+    // -----------------------------------------------------------------------
     let latency = start.elapsed();
     let status = response.status();
 
-    // Log response
+    // Approximate response body size from Content-Length header
+    let response_body_size = response
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
     tracing::info!(
-        request_id = %request_id,
+        correlation_id = %correlation_id,
         method = %method,
-        uri = %uri,
-        status = %status.as_u16(),
+        path = %uri.path(),
+        status = status.as_u16(),
         latency_ms = latency.as_millis(),
+        request_body_size = request_body_size,
+        response_body_size = response_body_size,
+        client_ip = %client_ip,
         "Outgoing response"
     );
 
-    // Add request ID to response headers
-    let (mut parts, body) = response.into_parts();
-    parts.headers.insert(
+    // -----------------------------------------------------------------------
+    // 6. Attach correlation ID to response headers
+    // -----------------------------------------------------------------------
+    response.headers_mut().insert(
         "x-request-id",
-        request_id.parse().unwrap(),
+        HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
 
-    Response::from_parts(parts, body)
+    response
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, routing::post, Router};
     use axum::http::Request;
+    use axum::{body::Body, routing::post, Router};
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn test_request_logger_adds_request_id() {
+    async fn test_request_logger_generates_correlation_id() {
         let app = Router::new()
             .route("/test", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn(request_logger_middleware));
@@ -122,6 +195,41 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.headers().contains_key("x-request-id"));
+        assert!(
+            response.headers().contains_key("x-request-id"),
+            "Response must contain x-request-id header"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_logger_preserves_existing_correlation_id() {
+        let app = Router::new()
+            .route("/test", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(request_logger_middleware));
+
+        let custom_id = "my-custom-correlation-id-123";
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/test")
+                    .header("x-request-id", custom_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let returned_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        assert_eq!(
+            returned_id, custom_id,
+            "Middleware should echo back the caller-supplied correlation ID"
+        );
     }
 }

@@ -1,6 +1,129 @@
 # Load Test Results
 
-This document contains baseline performance metrics and bottleneck analysis for the Synapse Core API.
+This document covers the load testing infrastructure for Synapse Core and how to run the three k6 test scenarios.
+
+## Prerequisites
+
+- Docker and Docker Compose installed
+- The `load-test` profile services must be healthy before running scripts
+
+## Test Scripts
+
+| Script | Purpose | Target throughput | Duration |
+|---|---|---|---|
+| `tests/load/callback_load.js` | Sustained callback ingestion | 1000 req/s constant | 5 minutes |
+| `tests/load/search_load.js` | Concurrent search queries | 50 VUs ramping | ~5 minutes |
+| `tests/load/mixed_load.js` | Realistic mix (60% callbacks, 25% reads, 15% searches) | 100→500 req/s ramping | ~5.5 minutes |
+
+## Success Criteria (all scripts)
+
+- p95 latency **< 200ms**
+- Error rate **< 0.1%**
+
+## Running Load Tests
+
+### Start infrastructure
+
+```bash
+docker compose -f docker-compose.load.yml up -d postgres redis app
+# Wait for the app to be healthy
+sleep 15
+```
+
+### Run individual scripts
+
+```bash
+# Callback ingestion (1000 req/s for 5 minutes)
+docker compose -f docker-compose.load.yml --profile load-test run --rm k6 \
+  run /scripts/callback_load.js
+
+# Search queries (50 concurrent VUs)
+docker compose -f docker-compose.load.yml --profile load-test run --rm k6 \
+  run /scripts/search_load.js
+
+# Mixed realistic traffic
+docker compose -f docker-compose.load.yml --profile load-test run --rm k6 \
+  run /scripts/mixed_load.js
+```
+
+### Run all scripts sequentially
+
+```bash
+for script in callback_load search_load mixed_load; do
+  docker compose -f docker-compose.load.yml --profile load-test run --rm k6 \
+    run /scripts/${script}.js
+done
+```
+
+### Override base URL or API key
+
+```bash
+docker compose -f docker-compose.load.yml --profile load-test run --rm \
+  -e BASE_URL=http://app:3000 \
+  -e API_KEY=my-tenant-key \
+  k6 run /scripts/callback_load.js
+```
+
+## HTML Reports
+
+Each script writes an HTML summary to `docs/` (mounted as `/results` inside the k6 container):
+
+- `docs/callback_load_summary.html`
+- `docs/search_load_summary.html`
+- `docs/mixed_load_summary.html`
+
+Open any of these in a browser after the run to review pass/fail against thresholds.
+
+## Monitoring During Tests
+
+```bash
+# Container resource usage
+docker stats synapse-load-app synapse-load-postgres synapse-load-redis
+
+# PostgreSQL active connections
+docker exec synapse-load-postgres psql -U synapse \
+  -c "SELECT count(*) FROM pg_stat_activity;"
+
+# Redis memory
+docker exec synapse-load-redis redis-cli INFO memory
+
+# App logs
+docker logs -f synapse-load-app
+```
+
+## Teardown
+
+```bash
+docker compose -f docker-compose.load.yml down -v
+```
+
+## Test Environment
+
+- **Database**: PostgreSQL 14 (max_connections=200, shared_buffers=256MB)
+- **Redis**: 7-alpine (maxmemory=512mb, persistence disabled)
+- **App**: Rust/Axum (2 CPU cores, 1GB RAM limit)
+
+## Results
+
+> Fill in after running tests against your environment.
+
+```
+callback_load:
+  http_req_duration: avg=XXXms p(95)=XXXms p(99)=XXXms
+  http_req_failed:   X.XX%
+  http_reqs:         XXXXX
+
+search_load:
+  http_req_duration: avg=XXXms p(95)=XXXms p(99)=XXXms
+  http_req_failed:   X.XX%
+  http_reqs:         XXXXX
+
+mixed_load:
+  http_req_duration: avg=XXXms p(95)=XXXms p(99)=XXXms
+  http_req_failed:   X.XX%
+  http_reqs:         XXXXX
+```
+
 
 ## Test Environment
 
