@@ -146,9 +146,7 @@ pub async fn update_settlement_status(
     let new_total: Option<sqlx::types::BigDecimal> = match payload.new_total.as_deref() {
         Some(s) => match s.parse() {
             Ok(v) => Some(v),
-            Err(_) => {
-                return Err(AppError::BadRequest("invalid new_total".to_string()))
-            }
+            Err(_) => return Err(AppError::BadRequest("invalid new_total".to_string())),
         },
         None => None,
     };
@@ -157,8 +155,14 @@ pub async fn update_settlement_status(
     let service = crate::services::SettlementService::new(state.app_state.db.clone());
 
     let settlement = service
-        .update_status(id, &payload.status, payload.reason.as_deref(), new_total.as_ref(), actor)
+        .update_status(
+            id,
+            &payload.status,
+            payload.reason.as_deref(),
+            new_total.as_ref(),
+            actor,
+        )
         .await?;
-    
+
     Ok((StatusCode::OK, Json(settlement)))
 }

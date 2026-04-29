@@ -1,5 +1,5 @@
-use chrono::{Duration, Utc};
 use bigdecimal::BigDecimal;
+use chrono::{Duration, Utc};
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
 use synapse_core::db::models::Transaction;

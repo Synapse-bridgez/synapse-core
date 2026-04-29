@@ -535,7 +535,15 @@ pub async fn list_transactions(
     // fetch one extra to determine has_more
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date).await?;
+    let mut rows = queries::list_transactions_filtered(
+        pool,
+        fetch_limit,
+        decoded_cursor,
+        backward,
+        from_date,
+        to_date,
+    )
+    .await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {
@@ -616,7 +624,15 @@ pub async fn list_transactions_api(
 
     let fetch_limit = limit + 1;
     let (pool, replica_used) = app_state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date).await?;
+    let mut rows = queries::list_transactions_filtered(
+        pool,
+        fetch_limit,
+        decoded_cursor,
+        backward,
+        from_date,
+        to_date,
+    )
+    .await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {

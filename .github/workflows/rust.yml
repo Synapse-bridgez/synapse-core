@@ -45,6 +45,9 @@ jobs:
         toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
 
+    - name: Install sccache
+      run: cargo install sccache --locked
+
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
       with:

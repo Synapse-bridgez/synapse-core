@@ -4,6 +4,7 @@ pub mod quota;
 pub mod reconciliation;
 pub mod webhook_replay;
 
+use crate::error::AppError;
 use crate::AppState;
 use axum::{
     extract::{Path, State},
@@ -12,7 +13,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use uuid;
 
@@ -66,7 +66,9 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
 }
 
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
-pub async fn list_active_instances(State(state): State<crate::ApiState>) -> Result<impl IntoResponse, AppError> {
+pub async fn list_active_instances(
+    State(state): State<crate::ApiState>,
+) -> Result<impl IntoResponse, AppError> {
     let election = crate::services::LeaderElection::new(&state.app_state.redis_url)?;
 
     let (instances, leader) =
@@ -92,9 +94,12 @@ pub async fn update_flag(
     Path(name): Path<String>,
     Json(payload): Json<UpdateFlagRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let flag = state.feature_flags.update(&name, payload.enabled).await
+    let flag = state
+        .feature_flags
+        .update(&name, payload.enabled)
+        .await
         .map_err(|_| AppError::NotFound(format!("Feature flag '{}' not found", name)))?;
-    
+
     Ok((StatusCode::OK, Json(flag)))
 }
 
@@ -104,7 +109,9 @@ pub async fn update_webhook_rate_limit(
     Json(payload): Json<UpdateWebhookRateLimitRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if payload.max_delivery_rate <= 0 {
-        return Err(AppError::BadRequest("max_delivery_rate must be greater than 0".to_string()));
+        return Err(AppError::BadRequest(
+            "max_delivery_rate must be greater than 0".to_string(),
+        ));
     }
 
     let result = sqlx::query(
@@ -138,8 +145,11 @@ pub async fn update_webhook_rate_limit(
 // ---------------------------------------------------------------------------
 
 /// GET /admin/webhooks/health
-pub async fn list_webhook_health(State(state): State<crate::ApiState>) -> Result<impl IntoResponse, AppError> {
-    let health = crate::services::webhook_dispatcher::list_endpoint_health(&state.app_state.db).await?;
+pub async fn list_webhook_health(
+    State(state): State<crate::ApiState>,
+) -> Result<impl IntoResponse, AppError> {
+    let health =
+        crate::services::webhook_dispatcher::list_endpoint_health(&state.app_state.db).await?;
     Ok((StatusCode::OK, Json(health)))
 }
 
@@ -164,7 +174,8 @@ pub async fn get_webhook_health(
     State(state): State<crate::ApiState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let health = crate::services::webhook_dispatcher::get_endpoint_health(&state.app_state.db, id).await?;
+    let health =
+        crate::services::webhook_dispatcher::get_endpoint_health(&state.app_state.db, id).await?;
     Ok((StatusCode::OK, Json(health)))
 }
 

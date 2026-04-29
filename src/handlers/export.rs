@@ -389,7 +389,11 @@ fn create_json_stream(
 /// Note: For production with 100k+ rows, you'd want to use true streaming.
 /// This implementation uses cursor-based pagination in the query but collects
 /// the final result. For true streaming, you'd need to use a different approach.
-async fn stream_to_response<S>(stream: S, content_type: &str, filename: &str) -> Result<impl IntoResponse, AppError>
+async fn stream_to_response<S>(
+    stream: S,
+    content_type: &str,
+    filename: &str,
+) -> Result<impl IntoResponse, AppError>
 where
     S: Stream<Item = Result<String, sqlx::Error>> + Send + 'static,
 {

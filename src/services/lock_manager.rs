@@ -73,10 +73,7 @@ impl FairLockManager {
 
     /// Enqueue this worker and wait until it reaches the front of the queue.
     /// Returns `None` if `max_wait` is exceeded.
-    pub async fn acquire(
-        &self,
-        resource: &str,
-    ) -> Result<Option<FairLock>, redis::RedisError> {
+    pub async fn acquire(&self, resource: &str) -> Result<Option<FairLock>, redis::RedisError> {
         let queue_key = format!("lock:queue:{}", resource);
         let token = Uuid::new_v4().to_string();
         let heartbeat_key = format!("lock:waiter:{}:{}", resource, token);
@@ -100,8 +97,13 @@ impl FairLockManager {
             .await?;
 
         debug!(resource, %token, "Enqueued in fair lock queue");
-        crate::metrics::lock_contention_total()
-            .add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+        crate::metrics::lock_contention_total().add(
+            1,
+            &[opentelemetry::KeyValue::new(
+                "resource",
+                resource.to_string(),
+            )],
+        );
 
         let deadline = tokio::time::Instant::now() + self.config.max_wait;
 
@@ -125,9 +127,9 @@ impl FairLockManager {
                         &token,
                         redis::SetOptions::default()
                             .conditional_set(redis::ExistenceCheck::NX)
-                            .with_expiration(redis::SetExpiry::EX(
-                                self.lock_ttl.as_secs() as usize,
-                            )),
+                            .with_expiration(
+                                redis::SetExpiry::EX(self.lock_ttl.as_secs() as usize),
+                            ),
                     )
                     .await?;
 
@@ -139,7 +141,10 @@ impl FairLockManager {
                     debug!(resource, %token, "Fair lock acquired");
                     crate::metrics::lock_acquired_total().add(
                         1,
-                        &[opentelemetry::KeyValue::new("resource", resource.to_string())],
+                        &[opentelemetry::KeyValue::new(
+                            "resource",
+                            resource.to_string(),
+                        )],
                     );
 
                     // Register in active lock registry
@@ -230,7 +235,10 @@ impl FairLock {
 
         crate::metrics::lock_hold_duration_ms().record(
             hold_ms,
-            &[opentelemetry::KeyValue::new("resource", self.resource.clone())],
+            &[opentelemetry::KeyValue::new(
+                "resource",
+                self.resource.clone(),
+            )],
         );
 
         let expected_ms = self.lock_ttl.as_secs_f64() * 1000.0;
@@ -263,7 +271,12 @@ impl Drop for FairLock {
                 &[opentelemetry::KeyValue::new("resource", resource.clone())],
             );
             if hold_ms > expected_ms * 2.0 {
-                warn!(resource, hold_ms, expected_ms, "Fair lock (dropped) held longer than 2x expected duration");
+                warn!(
+                    resource,
+                    hold_ms,
+                    expected_ms,
+                    "Fair lock (dropped) held longer than 2x expected duration"
+                );
             }
             lock_registry().deregister(&token).await;
 
@@ -404,7 +417,13 @@ impl LockManager {
                 debug!(resource, attempts, "Acquired distributed lock");
 
                 // Metrics
-                crate::metrics::lock_acquired_total().add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+                crate::metrics::lock_acquired_total().add(
+                    1,
+                    &[opentelemetry::KeyValue::new(
+                        "resource",
+                        resource.to_string(),
+                    )],
+                );
 
                 // Register in active lock registry
                 let acquired_unix = std::time::SystemTime::now()
@@ -426,7 +445,13 @@ impl LockManager {
             }
 
             // Each failed attempt is a contention event
-            crate::metrics::lock_contention_total().add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+            crate::metrics::lock_contention_total().add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "resource",
+                    resource.to_string(),
+                )],
+            );
 
             if start.elapsed() >= timeout_duration {
                 debug!(resource, attempts, "Lock acquisition timed out");
@@ -532,9 +557,7 @@ impl Lock {
         if hold_ms > expected_ms * 2.0 {
             warn!(
                 resource,
-                hold_ms,
-                expected_ms,
-                "Lock held longer than 2x expected duration"
+                hold_ms, expected_ms, "Lock held longer than 2x expected duration"
             );
         }
 
@@ -613,9 +636,7 @@ impl Drop for Lock {
             if hold_ms > expected_ms * 2.0 {
                 warn!(
                     resource,
-                    hold_ms,
-                    expected_ms,
-                    "Lock (dropped) held longer than 2x expected duration"
+                    hold_ms, expected_ms, "Lock (dropped) held longer than 2x expected duration"
                 );
             }
 
@@ -868,7 +889,10 @@ mod tests {
         }
 
         // All workers should have acquired the lock exactly once
-        assert_eq!(acquired.load(std::sync::atomic::Ordering::SeqCst), n_workers);
+        assert_eq!(
+            acquired.load(std::sync::atomic::Ordering::SeqCst),
+            n_workers
+        );
     }
 
     /// A crashed waiter (no heartbeat) should be pruned from the queue.

@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -6,7 +7,6 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use crate::error::AppError;
 use futures::{sink::SinkExt, stream::StreamExt};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,9 @@ enum ServerMessage<'a> {
     /// Notification that messages were dropped due to the client being slow.
     MessagesDropped { count: u64 },
     /// Response to a client `resync` request — latest N events from the DB.
-    Resync { events: Vec<crate::db::models::Transaction> },
+    Resync {
+        events: Vec<crate::db::models::Transaction>,
+    },
 }
 
 /// Messages the client may send to the server.
@@ -78,7 +80,9 @@ pub async fn ws_handler(
     if let Some(token) = params.token {
         if !validate_token(&token) {
             tracing::warn!("Invalid WebSocket authentication token");
-            return Err(AppError::Unauthorized("Invalid authentication token".to_string()));
+            return Err(AppError::Unauthorized(
+                "Invalid authentication token".to_string(),
+            ));
         }
     };
 
@@ -280,14 +284,15 @@ async fn handle_client_message(
                 "Client requested resync"
             );
 
-            let events =
-                match crate::db::queries::list_transactions(&state.db, limit, None, false).await {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        tracing::error!(client_addr = %client_addr, "Resync DB query failed: {}", e);
-                        return;
-                    }
-                };
+            let events = match crate::db::queries::list_transactions(&state.db, limit, None, false)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!(client_addr = %client_addr, "Resync DB query failed: {}", e);
+                    return;
+                }
+            };
 
             let response = ServerMessage::Resync { events };
             if let Ok(json) = serde_json::to_string(&response) {

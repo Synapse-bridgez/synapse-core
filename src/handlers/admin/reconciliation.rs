@@ -38,8 +38,19 @@ pub struct ReconciliationReportSummary {
     pub has_discrepancies: bool,
 }
 
-impl From<(Uuid, DateTime<Utc>, DateTime<Utc>, DateTime<Utc>, i32, i32, i32, i32, i32, bool)>
-    for ReconciliationReportSummary
+impl
+    From<(
+        Uuid,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        bool,
+    )> for ReconciliationReportSummary
 {
     fn from(
         fields: (
@@ -107,18 +118,21 @@ pub async fn list_reconciliation_reports(
 
     let pool = &state.app_state.db;
 
-    let reports = sqlx::query_as::<_, (
-        Uuid,
-        DateTime<Utc>,
-        DateTime<Utc>,
-        DateTime<Utc>,
-        i32,
-        i32,
-        i32,
-        i32,
-        i32,
-        bool,
-    )>(
+    let reports = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            bool,
+        ),
+    >(
         r#"
         SELECT id, generated_at, period_start, period_end,
                total_db_transactions, total_chain_payments,
@@ -202,7 +216,7 @@ pub async fn get_reconciliation_report(
                             "error": "Failed to parse reconciliation report"
                         })),
                     )
-                    .into_response()
+                        .into_response()
                 }
             };
 
@@ -334,7 +348,7 @@ pub async fn get_reconciliation_report(
                 "error": "Reconciliation report not found"
             })),
         )
-        .into_response(),
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to get reconciliation report {}: {}", id, e);
             (
@@ -343,7 +357,7 @@ pub async fn get_reconciliation_report(
                     "error": "Failed to retrieve reconciliation report"
                 })),
             )
-            .into_response()
+                .into_response()
         }
     }
 }
@@ -362,12 +376,10 @@ pub async fn run_reconciliation(
                 "error": "account is required"
             })),
         )
-        .into_response();
+            .into_response();
     }
 
-    let horizon_client = HorizonClient::new(
-        state.app_state.horizon_client.base_url.clone(),
-    );
+    let horizon_client = HorizonClient::new(state.app_state.horizon_client.base_url.clone());
     let pool = state.app_state.db.clone();
 
     let svc = ReconciliationService::new(horizon_client.clone(), pool.clone());
@@ -385,7 +397,7 @@ pub async fn run_reconciliation(
                     "error": format!("Reconciliation failed: {}", e)
                 })),
             )
-            .into_response();
+                .into_response();
         }
     };
 
@@ -397,7 +409,7 @@ pub async fn run_reconciliation(
                 "error": "Failed to store reconciliation report"
             })),
         )
-        .into_response();
+            .into_response();
     }
 
     let summary = ReconciliationReportSummary::from((
