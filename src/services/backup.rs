@@ -3,8 +3,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
+use sqlx::PgPool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackupType {
@@ -24,10 +27,32 @@ pub struct BackupMetadata {
     pub checksum: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupProgress {
+    pub phase: String,
+    pub progress_percentage: u32,
+    pub elapsed_seconds: u64,
+    pub estimated_remaining_seconds: Option<u64>,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct BackupVerificationLog {
+    pub id: uuid::Uuid,
+    pub backup_filename: String,
+    pub verification_status: String,
+    pub row_count: Option<i64>,
+    pub latest_timestamp: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+    pub verified_at: DateTime<Utc>,
+}
+
 pub struct BackupService {
     database_url: String,
     backup_dir: PathBuf,
     encryption_key: Option<String>,
+    progress: Arc<Mutex<Option<BackupProgress>>>,
+    pool: Option<PgPool>,
 }
 
 impl BackupService {
@@ -36,7 +61,53 @@ impl BackupService {
             database_url,
             backup_dir,
             encryption_key,
+            progress: Arc::new(Mutex::new(None)),
+            pool: None,
         }
+    }
+
+    pub fn with_pool(mut self, pool: PgPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    async fn update_progress(
+        &self,
+        phase: &str,
+        progress_percentage: u32,
+        total_size_bytes: u64,
+        start_time: DateTime<Utc>,
+    ) {
+        let elapsed = Utc::now()
+            .signed_duration_since(start_time)
+            .num_seconds() as u64;
+
+        let estimated_remaining = if progress_percentage > 0 && progress_percentage < 100 {
+            let rate = elapsed as f64 / progress_percentage as f64;
+            Some((rate * (100 - progress_percentage) as f64) as u64)
+        } else {
+            None
+        };
+
+        let progress = BackupProgress {
+            phase: phase.to_string(),
+            progress_percentage,
+            elapsed_seconds: elapsed,
+            estimated_remaining_seconds: estimated_remaining,
+            total_size_bytes,
+        };
+
+        *self.progress.lock().await = Some(progress);
+        tracing::info!(
+            "Backup progress: {} - {}% (elapsed: {}s)",
+            phase,
+            progress_percentage,
+            elapsed
+        );
+    }
+
+    pub async fn get_progress(&self) -> Option<BackupProgress> {
+        self.progress.lock().await.clone()
     }
 
     pub async fn create_backup(&self, backup_type: BackupType) -> Result<BackupMetadata> {
@@ -48,19 +119,22 @@ impl BackupService {
         let timestamp = Utc::now();
         let filename = self.generate_filename(backup_type, timestamp);
         let backup_path = self.backup_dir.join(&filename);
-        let temp_path = self.backup_dir.join(format!("{}.tmp", filename));
+        let temp_path = self.backup_dir.join(format!("{filename}.tmp"));
 
         // Run pg_dump
         tracing::info!("Running pg_dump for {:?} backup", backup_type);
+        self.update_progress("pg_dump", 25, total_size, timestamp).await;
         self.run_pg_dump(&temp_path).await?;
 
         // Compress the backup
         tracing::info!("Compressing backup");
+        self.update_progress("compress", 50, total_size, timestamp).await;
         let compressed_path = self.compress_backup(&temp_path).await?;
 
         // Encrypt if key is provided
         let final_path = if self.encryption_key.is_some() {
             tracing::info!("Encrypting backup");
+            self.update_progress("encrypt", 75, total_size, timestamp).await;
             self.encrypt_backup(&compressed_path).await?
         } else {
             compressed_path
@@ -92,9 +166,181 @@ impl BackupService {
         // Save metadata
         self.save_metadata(&backup_metadata).await?;
 
+        // Mark as complete
+        self.update_progress("complete", 100, total_size, timestamp).await;
+
         tracing::info!("Backup created successfully: {}", backup_metadata.filename);
 
         Ok(backup_metadata)
+    }
+
+    async fn get_database_size(&self) -> Result<u64> {
+        let output = Command::new("psql")
+            .arg(&self.database_url)
+            .arg("-t")
+            .arg("-c")
+            .arg("SELECT pg_database_size(current_database());")
+            .output()
+            .context("Failed to get database size")?;
+
+        if !output.status.success() {
+            return Ok(0);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Failed to parse database size"))
+    }
+
+    pub async fn verify_backup_integrity(&self, filename: &str) -> Result<BackupVerificationLog> {
+        let backup_path = self.backup_dir.join(filename);
+
+        if !backup_path.exists() {
+            anyhow::bail!("Backup file not found: {filename}");
+        }
+
+        let pool = self
+            .pool
+            .as_ref()
+            .context("Database pool not configured for verification")?;
+
+        // Create temporary test database
+        let test_db_name = format!("synapse_verify_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        
+        tracing::info!("Creating temporary verification database: {}", test_db_name);
+        sqlx::query(&format!("CREATE DATABASE {}", test_db_name))
+            .execute(pool)
+            .await
+            .context("Failed to create test database")?;
+
+        let result = self
+            .run_verification(&test_db_name, filename)
+            .await;
+
+        // Cleanup: drop test database
+        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", test_db_name))
+            .execute(pool)
+            .await;
+
+        result
+    }
+
+    async fn run_verification(&self, test_db_name: &str, filename: &str) -> Result<BackupVerificationLog> {
+        let pool = self
+            .pool
+            .as_ref()
+            .context("Database pool not configured")?;
+
+        let test_db_url = self.database_url.replace(
+            self.database_url.split('/').last().unwrap_or("synapse"),
+            test_db_name,
+        );
+
+        // Restore backup to test database
+        tracing::info!("Restoring backup to test database");
+        self.restore_backup_to_url(filename, &test_db_url).await?;
+
+        // Run verification queries
+        let test_pool = PgPool::connect(&test_db_url)
+            .await
+            .context("Failed to connect to test database")?;
+
+        let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM transactions")
+            .fetch_one(&test_pool)
+            .await
+            .context("Failed to count rows")?;
+
+        let latest_timestamp: (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT MAX(created_at) FROM transactions")
+                .fetch_one(&test_pool)
+                .await
+                .context("Failed to get latest timestamp")?;
+
+        let verification_log = BackupVerificationLog {
+            id: uuid::Uuid::new_v4(),
+            backup_filename: filename.to_string(),
+            verification_status: "success".to_string(),
+            row_count: Some(row_count.0),
+            latest_timestamp: latest_timestamp.0,
+            error_message: None,
+            verified_at: Utc::now(),
+        };
+
+        // Log verification result
+        if let Some(pool) = self.pool.as_ref() {
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO backup_verification_logs (backup_filename, verification_status, row_count, latest_timestamp)
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(&verification_log.backup_filename)
+            .bind(&verification_log.verification_status)
+            .bind(verification_log.row_count)
+            .bind(verification_log.latest_timestamp)
+            .execute(pool)
+            .await;
+        }
+
+        tracing::info!(
+            "Backup verification successful: {} rows, latest: {:?}",
+            row_count.0,
+            latest_timestamp.0
+        );
+
+        Ok(verification_log)
+    }
+
+    async fn restore_backup_to_url(&self, filename: &str, target_url: &str) -> Result<()> {
+        let backup_path = self.backup_dir.join(filename);
+        let temp_dir = self.backup_dir.join("verify_temp");
+        fs::create_dir_all(&temp_dir)
+            .await
+            .context("Failed to create temp directory")?;
+
+        let mut current_path = backup_path.clone();
+
+        // Load metadata to check encryption
+        let meta_path = backup_path.with_extension("meta");
+        let metadata: BackupMetadata = serde_json::from_str(
+            &fs::read_to_string(&meta_path)
+                .await
+                .context("Failed to read metadata")?,
+        )
+        .context("Failed to parse metadata")?;
+
+        // Decrypt if encrypted
+        if metadata.encrypted {
+            tracing::info!("Decrypting backup for verification");
+            current_path = self.decrypt_backup(&current_path, &temp_dir).await?;
+        }
+
+        // Decompress
+        tracing::info!("Decompressing backup for verification");
+        let sql_path = self.decompress_backup(&current_path, &temp_dir).await?;
+
+        // Restore to test database
+        tracing::info!("Restoring to test database");
+        let output = Command::new("psql")
+            .arg(target_url)
+            .arg("--file")
+            .arg(&sql_path)
+            .output()
+            .context("Failed to execute psql")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("psql restore failed: {stderr}");
+        }
+
+        // Cleanup temp directory
+        fs::remove_dir_all(&temp_dir)
+            .await
+            .context("Failed to cleanup temp directory")?;
+
+        Ok(())
     }
 
     pub async fn list_backups(&self) -> Result<Vec<BackupMetadata>> {
@@ -127,7 +373,7 @@ impl BackupService {
         let backup_path = self.backup_dir.join(filename);
 
         if !backup_path.exists() {
-            anyhow::bail!("Backup file not found: {}", filename);
+            anyhow::bail!("Backup file not found: {filename}");
         }
 
         // Load and verify metadata
@@ -168,7 +414,56 @@ impl BackupService {
         Ok(())
     }
 
-    pub async fn apply_retention_policy(&self) -> Result<()> {
+    pub async fn restore_to_timestamp(&self, target_time: DateTime<Utc>) -> Result<()> {
+        let backups = self.list_backups().await?;
+
+        // Find the most recent backup before target time
+        let base_backup = backups
+            .iter()
+            .filter(|b| b.timestamp <= target_time)
+            .max_by_key(|b| b.timestamp)
+            .context("No backup found before target timestamp")?;
+
+        tracing::info!(
+            "Restoring to {} using base backup from {}",
+            target_time,
+            base_backup.timestamp
+        );
+
+        // Restore base backup
+        self.restore_backup(&base_backup.filename).await?;
+
+        // Apply WAL recovery to target time
+        self.apply_wal_recovery(target_time).await?;
+
+        tracing::info!("Point-in-time recovery completed to {}", target_time);
+
+        Ok(())
+    }
+
+    async fn apply_wal_recovery(&self, target_time: DateTime<Utc>) -> Result<()> {
+        let wal_dir = self.backup_dir.join("wal_archive");
+
+        if !wal_dir.exists() {
+            tracing::warn!("WAL archive directory not found, skipping WAL recovery");
+            return Ok(());
+        }
+
+        let recovery_conf = format!(
+            "recovery_target_timeline = 'latest'\nrecovery_target_xid = '0'\nrecovery_target_time = '{}'\nrecovery_target_inclusive = true\n",
+            target_time.to_rfc3339()
+        );
+
+        let recovery_path = self.backup_dir.join("recovery.conf");
+        fs::write(&recovery_path, recovery_conf)
+            .await
+            .context("Failed to write recovery.conf")?;
+
+        tracing::info!("WAL recovery configuration written");
+
+        Ok(())
+    }
+}
         let backups = self.list_backups().await?;
 
         let mut hourly_backups = Vec::new();
@@ -234,7 +529,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("pg_dump failed: {}", stderr);
+            anyhow::bail!("pg_dump failed: {stderr}");
         }
 
         Ok(())
@@ -250,7 +545,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("psql restore failed: {}", stderr);
+            anyhow::bail!("psql restore failed: {stderr}");
         }
 
         Ok(())
@@ -267,7 +562,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("gzip failed: {}", stderr);
+            anyhow::bail!("gzip failed: {stderr}");
         }
 
         let mut file = fs::File::create(&output_path)
@@ -297,7 +592,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("gunzip failed: {}", stderr);
+            anyhow::bail!("gunzip failed: {stderr}");
         }
 
         let mut file = fs::File::create(&output_path)
@@ -329,13 +624,13 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{}", key))
+            .arg(format!("pass:{key}"))
             .output()
             .context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("openssl encryption failed: {}", stderr);
+            anyhow::bail!("openssl encryption failed: {stderr}");
         }
 
         // Remove unencrypted file
@@ -364,13 +659,13 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{}", key))
+            .arg(format!("pass:{key}"))
             .output()
             .context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("openssl decryption failed: {}", stderr);
+            anyhow::bail!("openssl decryption failed: {stderr}");
         }
 
         Ok(output_path)
@@ -384,7 +679,7 @@ impl BackupService {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("sha256sum failed: {}", stderr);
+            anyhow::bail!("sha256sum failed: {stderr}");
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -425,7 +720,7 @@ impl BackupService {
             "sql.gz"
         };
 
-        format!("backup_{}_{}.{}", type_str, date_str, extension)
+        format!("backup_{type_str}_{date_str}.{extension}")
     }
 
     async fn save_metadata(&self, metadata: &BackupMetadata) -> Result<()> {

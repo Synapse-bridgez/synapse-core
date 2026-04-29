@@ -1,10 +1,92 @@
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tokio::sync::RwLock;
 use vaultrs::auth::approle;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
 use vaultrs::kv2;
+
+/// Grace period during which the previous secret remains valid after rotation.
+const ROTATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
+/// How often to poll Vault for updated secrets.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// A double-buffered secret: keeps current and previous value.
+/// During the grace period both are accepted for signature validation.
+#[derive(Clone, Debug)]
+pub struct RotatingSecret {
+    pub current: String,
+    pub previous: Option<(String, Instant)>,
+}
+
+impl RotatingSecret {
+    pub fn new(value: String) -> Self {
+        Self {
+            current: value,
+            previous: None,
+        }
+    }
+
+    /// Returns all currently-valid values: current first, then previous if still in grace period.
+    pub fn valid_values(&self) -> Vec<&str> {
+        let mut values = vec![self.current.as_str()];
+        if let Some((prev, rotated_at)) = &self.previous {
+            if rotated_at.elapsed() < ROTATION_GRACE_PERIOD {
+                values.push(prev.as_str());
+            }
+        }
+        values
+    }
+
+    /// Rotate to a new value, demoting current to previous.
+    pub fn rotate(&mut self, new_value: String) {
+        let old = std::mem::replace(&mut self.current, new_value);
+        self.previous = Some((old, Instant::now()));
+    }
+}
+
+/// Thread-safe store of rotating secrets shared across the application.
+#[derive(Clone)]
+pub struct SecretsStore {
+    pub anchor_webhook_secret: Arc<RwLock<RotatingSecret>>,
+    pub admin_api_key: Arc<RwLock<RotatingSecret>>,
+}
+
+impl SecretsStore {
+    pub fn new(anchor_webhook_secret: String, admin_api_key: String) -> Self {
+        Self {
+            anchor_webhook_secret: Arc::new(RwLock::new(RotatingSecret::new(
+                anchor_webhook_secret,
+            ))),
+            admin_api_key: Arc::new(RwLock::new(RotatingSecret::new(admin_api_key))),
+        }
+    }
+
+    /// Returns all valid anchor webhook secret values (current + grace-period previous).
+    pub async fn valid_webhook_secrets(&self) -> Vec<String> {
+        self.anchor_webhook_secret
+            .read()
+            .await
+            .valid_values()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Returns all valid admin API key values (current + grace-period previous).
+    pub async fn valid_admin_keys(&self) -> Vec<String> {
+        self.admin_api_key
+            .read()
+            .await
+            .valid_values()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
 
 pub struct SecretsManager {
     client: VaultClient,
@@ -58,6 +140,64 @@ impl SecretsManager {
             .cloned()
             .context("secret key not found in Vault secret/anchor")
     }
+
+    pub async fn get_admin_api_key(&self) -> Result<String> {
+        let secret: HashMap<String, String> = kv2::read(&self.client, &self.kv_mount, "admin")
+            .await
+            .context("failed to read secret/admin from Vault")?;
+
+        secret
+            .get("api_key")
+            .cloned()
+            .context("api_key not found in Vault secret/admin")
+    }
+
+    /// Spawn a background task that refreshes secrets from Vault every 5 minutes.
+    /// Rotated secrets remain valid for a grace period so in-flight requests are not rejected.
+    pub fn start_refresh_task(self, store: SecretsStore) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REFRESH_INTERVAL);
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                tracing::info!("secrets_rotation: refreshing secrets from Vault");
+
+                match self.get_anchor_secret().await {
+                    Ok(new_secret) => {
+                        let mut lock = store.anchor_webhook_secret.write().await;
+                        if lock.current != new_secret {
+                            lock.rotate(new_secret);
+                            tracing::info!(
+                                "secrets_rotation: anchor_webhook_secret rotated; \
+                                 previous value valid for {}s grace period",
+                                ROTATION_GRACE_PERIOD.as_secs()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("secrets_rotation: failed to refresh anchor secret: {e}");
+                    }
+                }
+
+                match self.get_admin_api_key().await {
+                    Ok(new_key) => {
+                        let mut lock = store.admin_api_key.write().await;
+                        if lock.current != new_key {
+                            lock.rotate(new_key);
+                            tracing::info!(
+                                "secrets_rotation: admin_api_key rotated; \
+                                 previous value valid for {}s grace period",
+                                ROTATION_GRACE_PERIOD.as_secs()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("secrets_rotation: failed to refresh admin key: {e}");
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Simple secret retrieval from environment variables with caching
@@ -87,7 +227,7 @@ pub mod env_secrets {
             }
 
             // Retrieve from environment
-            let value = std::env::var(key).map_err(|_| format!("Secret '{}' not found", key))?;
+            let value = std::env::var(key).map_err(|_| format!("Secret '{key}' not found"))?;
 
             // Cache the value
             {

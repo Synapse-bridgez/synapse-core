@@ -10,13 +10,15 @@ use crate::validation::{
 use crate::{ApiState, AppState};
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
+use tracing::instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -117,6 +119,7 @@ fn validate_webhook_payload(
     })
 }
 
+#[instrument(name = "webhook.transaction_callback", skip(state, payload))]
 pub async fn transaction_callback(
     State(state): State<AppState>,
     Json(payload): Json<WebhookTransactionRequest>,
@@ -309,10 +312,35 @@ fn validate_memo_type(memo_type: &Option<String>) -> Result<(), AppError> {
     ),
     tag = "Webhooks"
 )]
+#[instrument(name = "webhook.callback", skip(state, payload))]
 pub async fn callback(
     State(state): State<ApiState>,
     Json(payload): Json<CallbackPayload>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Back-pressure: reject if pending queue exceeds threshold
+    let depth = state.app_state.pending_queue_depth.load(Ordering::Relaxed);
+    let max_pending = std::env::var("MAX_PENDING_QUEUE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10_000);
+    if depth >= max_pending {
+        tracing::warn!(
+            depth,
+            max_pending,
+            "callback_rejected_backpressure: queue depth exceeded"
+        );
+        // Emit metric counter via tracing event (metrics crate not available)
+        tracing::info!(counter.callback_rejected_backpressure = 1u64);
+        let mut response = axum::response::Response::new(axum::body::boxed(
+            axum::body::Full::from(r#"{"error":"service busy, retry later"}"#),
+        ));
+        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        response
+            .headers_mut()
+            .insert("Retry-After", HeaderValue::from_static("30"));
+        return Ok(response.into_response());
+    }
+
     validate_memo_type(&payload.memo_type)?;
 
     let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
@@ -334,7 +362,7 @@ pub async fn callback(
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-    Ok((StatusCode::CREATED, Json(inserted)))
+    Ok((StatusCode::CREATED, Json(inserted)).into_response())
 }
 
 #[utoipa::path(
@@ -348,6 +376,7 @@ pub async fn callback(
     ),
     tag = "Webhooks"
 )]
+#[instrument(name = "webhook.handle_webhook", skip(payload))]
 pub async fn handle_webhook(
     State(_state): State<ApiState>,
     Json(payload): Json<WebhookPayload>,
@@ -378,18 +407,29 @@ pub async fn handle_webhook(
     ),
     tag = "Transactions"
 )]
+#[instrument(name = "webhook.get_transaction", skip(state), fields(transaction.id = %id))]
 pub async fn get_transaction(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let transaction = queries::get_transaction(&state.app_state.db, id)
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+
+    let transaction = queries::get_transaction(pool, id)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
             _ => AppError::DatabaseError(e.to_string()),
         })?;
 
-    Ok(Json(transaction))
+    let mut response: Response = Json(transaction).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,6 +438,10 @@ pub struct ListQuery {
     pub limit: Option<i64>,
     /// direction: "forward" (older items) or "backward" (newer items)
     pub direction: Option<String>,
+    /// ISO 8601 start date filter (inclusive): e.g. 2024-01-01T00:00:00Z
+    pub from_date: Option<String>,
+    /// ISO 8601 end date filter (exclusive): e.g. 2024-02-01T00:00:00Z
+    pub to_date: Option<String>,
 }
 
 #[utoipa::path(
@@ -430,9 +474,37 @@ pub async fn list_transactions(
         None
     };
 
+    // Parse optional date range filters
+    let from_date = if let Some(ref s) = params.from_date {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| AppError::BadRequest(format!("invalid from_date: '{}', expected ISO 8601", s)))?,
+        )
+    } else {
+        None
+    };
+    let to_date = if let Some(ref s) = params.to_date {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| AppError::BadRequest(format!("invalid to_date: '{}', expected ISO 8601", s)))?,
+        )
+    } else {
+        None
+    };
+    if let (Some(from), Some(to)) = (from_date, to_date) {
+        if from >= to {
+            return Err(AppError::BadRequest(
+                "from_date must be before to_date".to_string(),
+            ));
+        }
+    }
+
     // fetch one extra to determine has_more
     let fetch_limit = limit + 1;
-    let mut rows = queries::list_transactions(&state.db, fetch_limit, decoded_cursor, backward)
+    let (pool, replica_used) = state.pool_manager.read_pool().await;
+    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
@@ -454,7 +526,15 @@ pub async fn list_transactions(
         }
     });
 
-    Ok(Json(resp))
+    let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }
 
 /// Wrapper to accept the router's ApiState without forcing all handlers to change.
@@ -464,7 +544,6 @@ pub async fn list_transactions_api(
 ) -> Result<impl IntoResponse, AppError> {
     // forward to the AppState-based handler
     let app_state = api_state.app_state;
-    // call the inner logic directly to avoid extractor conflicts
     let limit = params.limit.unwrap_or(25).min(100);
     let backward = params.direction.as_deref() == Some("backward");
 
@@ -477,8 +556,35 @@ pub async fn list_transactions_api(
         None
     };
 
+    let from_date = if let Some(ref s) = params.from_date {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| AppError::BadRequest(format!("invalid from_date: '{}', expected ISO 8601", s)))?,
+        )
+    } else {
+        None
+    };
+    let to_date = if let Some(ref s) = params.to_date {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| AppError::BadRequest(format!("invalid to_date: '{}', expected ISO 8601", s)))?,
+        )
+    } else {
+        None
+    };
+    if let (Some(from), Some(to)) = (from_date, to_date) {
+        if from >= to {
+            return Err(AppError::BadRequest(
+                "from_date must be before to_date".to_string(),
+            ));
+        }
+    }
+
     let fetch_limit = limit + 1;
-    let mut rows = queries::list_transactions(&app_state.db, fetch_limit, decoded_cursor, backward)
+    let (pool, replica_used) = app_state.pool_manager.read_pool().await;
+    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
@@ -499,5 +605,13 @@ pub async fn list_transactions_api(
         }
     });
 
-    Ok(Json(resp))
+    let mut response: Response = (StatusCode::OK, Json(resp)).into_response();
+    if replica_used {
+        response.headers_mut().insert(
+            "X-Read-Consistency",
+            HeaderValue::from_static("eventual"),
+        );
+    }
+
+    Ok(response)
 }

@@ -12,8 +12,8 @@ pub fn encode(created_at: DateTime<Utc>, id: Uuid) -> String {
 pub fn decode(cursor: &str) -> Result<(DateTime<Utc>, Uuid), String> {
     let decoded = general_purpose::STANDARD
         .decode(cursor)
-        .map_err(|e| format!("base64 decode error: {}", e))?;
-    let s = String::from_utf8(decoded).map_err(|e| format!("utf8 error: {}", e))?;
+        .map_err(|e| format!("base64 decode error: {e}"))?;
+    let s = String::from_utf8(decoded).map_err(|e| format!("utf8 error: {e}"))?;
     let mut parts = s.splitn(2, '|');
     let ts_str = parts
         .next()
@@ -22,16 +22,16 @@ pub fn decode(cursor: &str) -> Result<(DateTime<Utc>, Uuid), String> {
         .next()
         .ok_or_else(|| "missing id in cursor".to_string())?;
     let ts = DateTime::parse_from_rfc3339(ts_str)
-        .map_err(|e| format!("timestamp parse error: {}", e))?
+        .map_err(|e| format!("timestamp parse error: {e}"))?
         .with_timezone(&Utc);
-    let id = Uuid::parse_str(id_str).map_err(|e| format!("uuid parse error: {}", e))?;
+    let id = Uuid::parse_str(id_str).map_err(|e| format!("uuid parse error: {e}"))?;
     Ok((ts, id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
+    use chrono::Utc;
 
     #[test]
     fn test_cursor_encode_decode_roundtrip() {
@@ -63,7 +63,7 @@ mod tests {
     fn test_cursor_decode_invalid_uuid() {
         // Valid timestamp, invalid UUID
         let data = "2023-01-01T00:00:00+00:00|invalid-uuid";
-        let cursor = base64::encode(data);
+        let cursor = general_purpose::STANDARD.encode(data);
         let result = decode(&cursor);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("uuid parse error"));
@@ -73,7 +73,7 @@ mod tests {
     fn test_cursor_decode_invalid_timestamp() {
         // Invalid timestamp, valid UUID
         let data = "invalid-timestamp|12345678-1234-1234-1234-123456789012";
-        let cursor = base64::encode(data);
+        let cursor = general_purpose::STANDARD.encode(data);
         let result = decode(&cursor);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("timestamp parse error"));

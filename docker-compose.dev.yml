@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: synapse-postgres-dev
+    environment:
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: synapse
+      POSTGRES_DB: synapse
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: synapse-redis-dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer:latest
+    container_name: synapse-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+
+  app:
+    image: rust:latest
+    container_name: synapse-app-dev
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      SERVER_PORT: 3000
+      DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      REDIS_URL: redis://redis:6379
+      ANCHOR_WEBHOOK_SECRET: dev-secret
+      RUST_LOG: debug
+      LOG_FORMAT: text
+      # Relaxed limits for development
+      DEFAULT_RATE_LIMIT: "10000"
+      WHITELIST_RATE_LIMIT: "100000"
+    ports:
+      - "3000:3000"
+      # Debug port for IDE debugger attachment (lldb-server / rust-gdb)
+      - "9229:9229"
+    volumes:
+      - ./src:/app/src
+      - ./migrations:/app/migrations
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_git:/usr/local/cargo/git
+      - target_cache:/app/target
+    command: >
+      bash -c "cargo install cargo-watch --locked 2>/dev/null || true &&
+               cargo watch -x 'run -- serve' -w src -w migrations"
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  cargo_registry:
+  cargo_git:
+  target_cache:

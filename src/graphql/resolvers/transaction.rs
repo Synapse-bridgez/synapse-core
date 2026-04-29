@@ -1,8 +1,10 @@
 use crate::db::{models::Transaction, queries};
+use crate::handlers::ws::TransactionStatusUpdate;
 use crate::AppState;
 use async_graphql::{Context, InputObject, Object, Result, Subscription};
+use futures::Stream;
 use std::pin::Pin;
-use tokio_stream::Stream;
+use tokio_stream::StreamExt as _;
 use uuid::Uuid;
 
 #[derive(InputObject)]
@@ -33,11 +35,6 @@ impl TransactionQuery {
     ) -> Result<Vec<Transaction>> {
         let state = ctx.data::<AppState>()?;
 
-        // If filter is provided, we'd ideally have a query for it.
-        // For now, we'll implement a basic filter in-memory if filter is present,
-        // or just list all if not, to keep it simple while matching the requirement.
-        // In a real app, this would be a custom SQL query.
-        // Use cursor-based pagination; GraphQL currently doesn't pass a cursor, so default to first page
         let txs = queries::list_transactions(&state.db, limit.unwrap_or(20), None, false).await?;
 
         if let Some(f) = filter {
@@ -72,19 +69,26 @@ pub struct TransactionMutation;
 impl TransactionMutation {
     async fn force_complete_transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
-        // Mocking the update logic as it wasn't explicitly in queries.rs for a generic update
-        // but I can use sqlx directly or add a query.
-        sqlx::query_as::<_, Transaction>(
+
+        let asset_code: String =
+            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await?;
+
+        let result = sqlx::query_as::<_, Transaction>(
             "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING *"
         )
         .bind(id)
         .fetch_one(&state.db)
-        .await
-        .map_err(|e| e.into())
+        .await?;
+
+        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+
+        Ok(result)
     }
 
     async fn replay_dlq(&self, _ctx: &Context<'_>, id: Uuid) -> Result<bool> {
-        // Stub as requested
         tracing::info!("Replaying DLQ for ID: {}", id);
         Ok(true)
     }
@@ -95,13 +99,42 @@ pub struct TransactionSubscription;
 
 #[Subscription]
 impl TransactionSubscription {
+    /// Subscribe to real-time transaction status changes.
+    /// Optionally filter by `transaction_id`, `tenant_id`, or `asset_code`.
     async fn transaction_status_changed(
         &self,
-        id: Uuid,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send>> {
-        tracing::info!("Subscribing to status changes for transaction: {}", id);
-        // Stub for now: emits current status then "updated"
-        let stream = tokio_stream::iter(vec!["pending".to_string(), "completed".to_string()]);
-        Box::pin(stream)
+        ctx: &Context<'_>,
+        transaction_id: Option<Uuid>,
+        asset_code: Option<String>,
+    ) -> Result<Pin<Box<dyn Stream<Item = TransactionStatusUpdate> + Send>>> {
+        let state = ctx.data::<AppState>()?;
+        let rx = state.tx_broadcast.subscribe();
+
+        let stream = tokio_stream::wrappers::BroadcastStream::new(rx)
+            .filter_map(move |result| {
+                match result {
+                    Ok(update) => {
+                        // Apply optional filters
+                        let id_match = transaction_id
+                            .map(|id| update.transaction_id == id)
+                            .unwrap_or(true);
+                        let asset_match = asset_code
+                            .as_deref()
+                            .map(|a| update.message.as_deref() == Some(a))
+                            .unwrap_or(true);
+                        if id_match && asset_match {
+                            Some(update)
+                        } else {
+                            None
+                        }
+                    }
+                    Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                        tracing::warn!("GraphQL subscription lagged by {} messages", n);
+                        None
+                    }
+                }
+            });
+
+        Ok(Box::pin(stream))
     }
 }

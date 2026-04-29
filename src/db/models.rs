@@ -3,6 +3,46 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use sqlx::FromRow;
 use uuid::Uuid;
+use std::str::FromStr;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "text")]
+pub enum TransactionStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "processing")]
+    Processing,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+impl std::fmt::Display for TransactionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionStatus::Pending => write!(f, "pending"),
+            TransactionStatus::Processing => write!(f, "processing"),
+            TransactionStatus::Completed => write!(f, "completed"),
+            TransactionStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl FromStr for TransactionStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(TransactionStatus::Pending),
+            "processing" => Ok(TransactionStatus::Processing),
+            "completed" => Ok(TransactionStatus::Completed),
+            "failed" => Ok(TransactionStatus::Failed),
+            _ => Err(format!("Invalid transaction status: {}", s)),
+        }
+    }
+}
 
 #[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +61,7 @@ pub struct Transaction {
     pub memo: Option<String>,
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    pub tenant_id: Option<Uuid>,
 }
 
 #[async_graphql::Object]
@@ -84,7 +125,7 @@ impl Transaction {
             stellar_account,
             amount,
             asset_code,
-            status: "pending".to_string(),
+            status: TransactionStatus::Pending.to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             anchor_transaction_id,
@@ -94,6 +135,7 @@ impl Transaction {
             memo,
             memo_type,
             metadata,
+            tenant_id: None,
         }
     }
 }
@@ -109,6 +151,10 @@ pub struct Settlement {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub dispute_reason: Option<String>,
+    pub original_total_amount: Option<BigDecimal>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
 }
 
 #[async_graphql::Object]
@@ -208,6 +254,7 @@ mod tests {
         pool
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_insert_and_query_transaction() {
         let pool = setup_test_db().await;
@@ -272,6 +319,7 @@ mod tests {
         assert_eq!(fetched.callback_status, callback_status);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_insert_transaction() {
         let pool = setup_test_db().await;
@@ -292,6 +340,7 @@ mod tests {
         assert_eq!(inserted.stellar_account, tx.stellar_account);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_get_transaction() {
         let pool = setup_test_db().await;
@@ -315,6 +364,7 @@ mod tests {
         assert_eq!(fetched.id, inserted.id);
     }
 
+    #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
     async fn test_list_transactions() {
         let pool = setup_test_db().await;

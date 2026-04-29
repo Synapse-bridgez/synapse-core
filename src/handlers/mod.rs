@@ -2,8 +2,10 @@ pub mod admin;
 pub mod dlq;
 pub mod export;
 pub mod graphql;
+pub mod profiling;
 pub mod search;
 pub mod settlements;
+pub mod stats;
 pub mod v1;
 pub mod v2;
 pub mod webhook;
@@ -13,22 +15,6 @@ use crate::ApiState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthStatus {
-    pub status: String,
-    pub version: String,
-    pub db: String,
-    pub db_pool: DbPoolStats,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DbPoolStats {
-    pub active_connections: u32,
-    pub idle_connections: u32,
-    pub max_connections: u32,
-    pub usage_percent: f32,
-}
 
 #[utoipa::path(
     get,
@@ -60,6 +46,19 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         usage_percent,
     };
 
+    let pending_queue_depth = state
+        .app_state
+        .pending_queue_depth
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let current_batch_size = state
+        .app_state
+        .current_batch_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let ws_connection_count = state
+        .app_state
+        .ws_connection_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     let health_response = HealthStatus {
         status: if db_status == "connected" {
             "healthy".to_string()
@@ -69,6 +68,9 @@ pub async fn health(State(state): State<ApiState>) -> impl IntoResponse {
         version: "0.1.0".to_string(),
         db: db_status.to_string(),
         db_pool: pool_stats,
+        pending_queue_depth,
+        current_batch_size,
+        ws_connection_count,
     };
 
     // Return 503 if database is down, 200 otherwise
@@ -105,6 +107,25 @@ pub struct ReadinessResponse {
     pub draining: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HealthStatus {
+    pub status: String,
+    pub version: String,
+    pub db: String,
+    pub db_pool: DbPoolStats,
+    pub pending_queue_depth: u64,
+    pub current_batch_size: u64,
+    pub ws_connection_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DbPoolStats {
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
+    pub usage_percent: f32,
+}
+
 /// Error catalog endpoint
 /// Returns all available error codes and their descriptions
 pub async fn error_catalog() -> impl IntoResponse {
@@ -115,20 +136,4 @@ pub async fn error_catalog() -> impl IntoResponse {
     };
 
     (StatusCode::OK, Json(catalog))
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthStatus {
-    pub status: String,
-    pub version: String,
-    pub db: String,
-    pub db_pool: DbPoolStats,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DbPoolStats {
-    pub active_connections: u32,
-    pub idle_connections: u32,
-    pub max_connections: u32,
-    pub usage_percent: f32,
 }

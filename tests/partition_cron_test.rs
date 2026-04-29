@@ -49,6 +49,7 @@ async fn get_partition_count(pool: &PgPool) -> i64 {
     row.get("cnt")
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_create_month_partition() {
     let (pool, _container) = setup_test_db().await;
@@ -68,6 +69,7 @@ async fn test_create_month_partition() {
     assert!(partition_exists(&pool, &idx2).await);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_create_month_partition_idempotent() {
     let (pool, _container) = setup_test_db().await;
@@ -83,6 +85,7 @@ async fn test_create_month_partition_idempotent() {
     assert!(partition_exists(&pool, &partition_name).await);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_ensure_future_partitions() {
     let (pool, _container) = setup_test_db().await;
@@ -100,6 +103,7 @@ async fn test_ensure_future_partitions() {
     assert!(partition_exists(&pool, &partition_name).await);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_detach_old_partitions() {
     let (pool, _container) = setup_test_db().await;
@@ -129,6 +133,7 @@ async fn test_detach_old_partitions() {
     assert!(archived_count >= 2);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_parse_partition_name() {
     let (pool, _container) = setup_test_db().await;
@@ -150,6 +155,7 @@ async fn test_parse_partition_name() {
     assert_eq!(child, "transactions_y2025m05");
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_partition_error_handling_invalid_month() {
     let (pool, _container) = setup_test_db().await;
@@ -158,6 +164,7 @@ async fn test_partition_error_handling_invalid_month() {
     assert!(result.is_err());
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_partition_december_rollover() {
     let (pool, _container) = setup_test_db().await;
@@ -169,6 +176,7 @@ async fn test_partition_december_rollover() {
     assert!(partition_exists(&pool, partition_name).await);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_ensure_future_partitions_multiple_years() {
     let (pool, _container) = setup_test_db().await;
@@ -180,6 +188,7 @@ async fn test_ensure_future_partitions_multiple_years() {
     assert!(count >= 15);
 }
 
+#[ignore = "Requires Docker"]
 #[tokio::test]
 async fn test_partition_retention_boundary() {
     let (pool, _container) = setup_test_db().await;

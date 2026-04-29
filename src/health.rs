@@ -4,6 +4,16 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
+/// Severity level for a dependency
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DependencySeverity {
+    /// Critical dependency - if unhealthy, the overall service is unhealthy
+    Critical,
+    /// Non-critical dependency - if unhealthy, the service is degraded
+    NonCritical,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -15,8 +25,16 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DependencyStatus {
-    Healthy { status: String, latency_ms: u64 },
-    Unhealthy { status: String, error: String },
+    Healthy {
+        status: String,
+        severity: DependencySeverity,
+        latency_ms: u64,
+    },
+    Unhealthy {
+        status: String,
+        severity: DependencySeverity,
+        error: String,
+    },
 }
 
 #[async_trait]
@@ -41,10 +59,12 @@ impl DependencyChecker for PostgresChecker {
         match sqlx::query("SELECT 1").execute(&self.pool).await {
             Ok(_) => DependencyStatus::Healthy {
                 status: "healthy".to_string(),
+                severity: DependencySeverity::Critical,
                 latency_ms: start.elapsed().as_millis() as u64,
             },
             Err(e) => DependencyStatus::Unhealthy {
                 status: "unhealthy".to_string(),
+                severity: DependencySeverity::Critical,
                 error: e.to_string(),
             },
         }
@@ -53,11 +73,22 @@ impl DependencyChecker for PostgresChecker {
 
 pub struct RedisChecker {
     url: String,
+    circuit_state: Option<String>,
 }
 
 impl RedisChecker {
     pub fn new(url: String) -> Self {
-        Self { url }
+        Self {
+            url,
+            circuit_state: None,
+        }
+    }
+
+    pub fn with_circuit_state(url: String, circuit_state: String) -> Self {
+        Self {
+            url,
+            circuit_state: Some(circuit_state),
+        }
     }
 }
 
@@ -65,27 +96,43 @@ impl RedisChecker {
 impl DependencyChecker for RedisChecker {
     async fn check(&self) -> DependencyStatus {
         let start = Instant::now();
+
+        // If circuit is open, report immediately without connecting
+        if let Some(ref state) = self.circuit_state {
+            if state == "open" {
+                return DependencyStatus::Unhealthy {
+                    status: "unhealthy".to_string(),
+                    severity: DependencySeverity::NonCritical,
+                    error: "Redis circuit breaker is open".to_string(),
+                };
+            }
+        }
+
         match redis::Client::open(self.url.as_str()) {
             Ok(client) => match client.get_multiplexed_async_connection().await {
                 Ok(mut conn) => {
                     match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
                         Ok(_) => DependencyStatus::Healthy {
                             status: "healthy".to_string(),
+                            severity: DependencySeverity::NonCritical,
                             latency_ms: start.elapsed().as_millis() as u64,
                         },
                         Err(e) => DependencyStatus::Unhealthy {
                             status: "unhealthy".to_string(),
+                            severity: DependencySeverity::NonCritical,
                             error: e.to_string(),
                         },
                     }
                 }
                 Err(e) => DependencyStatus::Unhealthy {
                     status: "unhealthy".to_string(),
+                    severity: DependencySeverity::NonCritical,
                     error: e.to_string(),
                 },
             },
             Err(e) => DependencyStatus::Unhealthy {
                 status: "unhealthy".to_string(),
+                severity: DependencySeverity::NonCritical,
                 error: e.to_string(),
             },
         }
@@ -111,11 +158,13 @@ impl DependencyChecker for HorizonChecker {
             Ok(_) | Err(crate::stellar::HorizonError::AccountNotFound(_)) => {
                 DependencyStatus::Healthy {
                     status: "healthy".to_string(),
+                    severity: DependencySeverity::NonCritical,
                     latency_ms: start.elapsed().as_millis() as u64,
                 }
             }
             Err(e) => DependencyStatus::Unhealthy {
                 status: "unhealthy".to_string(),
+                severity: DependencySeverity::NonCritical,
                 error: e.to_string(),
             },
         }
@@ -142,6 +191,7 @@ pub async fn check_health(
         "postgres".to_string(),
         postgres_result.unwrap_or_else(|_| DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: DependencySeverity::Critical,
             error: "timeout".to_string(),
         }),
     );
@@ -150,6 +200,7 @@ pub async fn check_health(
         "redis".to_string(),
         redis_result.unwrap_or_else(|_| DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: DependencySeverity::NonCritical,
             error: "timeout".to_string(),
         }),
     );
@@ -158,6 +209,7 @@ pub async fn check_health(
         "horizon".to_string(),
         horizon_result.unwrap_or_else(|_| DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: DependencySeverity::NonCritical,
             error: "timeout".to_string(),
         }),
     );
@@ -173,17 +225,16 @@ pub async fn check_health(
 }
 
 fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) -> String {
-    let critical_deps = ["postgres"];
     let mut has_critical_failure = false;
     let mut has_non_critical_failure = false;
 
-    for (name, status) in dependencies {
-        if matches!(status, DependencyStatus::Unhealthy { .. }) {
-            if critical_deps.contains(&name.as_str()) {
-                has_critical_failure = true;
-            } else {
-                has_non_critical_failure = true;
-            }
+    for status in dependencies.values() {
+        match status {
+            DependencyStatus::Unhealthy { severity, .. } => match severity {
+                DependencySeverity::Critical => has_critical_failure = true,
+                DependencySeverity::NonCritical => has_non_critical_failure = true,
+            },
+            DependencyStatus::Healthy { .. } => {}
         }
     }
 

@@ -21,8 +21,10 @@ pub fn sanitize_json(value: &Value) -> Value {
 }
 
 fn is_sensitive_field(key: &str) -> bool {
-    matches!(
-        key.to_lowercase().as_str(),
+    let key_lower = key.to_lowercase();
+    // Exact matches
+    if matches!(
+        key_lower.as_str(),
         "stellar_account"
             | "account"
             | "password"
@@ -30,7 +32,20 @@ fn is_sensitive_field(key: &str) -> bool {
             | "token"
             | "api_key"
             | "authorization"
-    )
+    ) {
+        return true;
+    }
+
+    // Pattern matches for fields like "account_0", "user_password", etc.
+    // But not "accounts" or "tokens" (plurals)
+    key_lower.starts_with("account_")
+        || key_lower.starts_with("password_")
+        || key_lower.starts_with("secret_")
+        || key_lower.starts_with("token_")
+        || key_lower.ends_with("_account")
+        || key_lower.ends_with("_password")
+        || key_lower.ends_with("_secret")
+        || key_lower.ends_with("_token")
 }
 
 fn mask_value(value: &Value) -> Value {
@@ -39,7 +54,7 @@ fn mask_value(value: &Value) -> Value {
             let visible = &s[..4];
             let masked = "****";
             let end = &s[s.len() - 4..];
-            Value::String(format!("{}{}{}", visible, masked, end))
+            Value::String(format!("{visible}{masked}{end}"))
         }
         Value::String(_s) => Value::String("****".to_string()),
         _ => Value::String("****".to_string()),
@@ -96,14 +111,20 @@ mod tests {
         });
 
         let sanitized = sanitize_json(&input);
-        
-        assert!(sanitized["stellar_account"].as_str().unwrap().contains("****"));
+
+        assert!(sanitized["stellar_account"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert!(sanitized["account"].as_str().unwrap().contains("****"));
         assert!(sanitized["password"].as_str().unwrap().contains("****"));
         assert!(sanitized["secret"].as_str().unwrap().contains("****"));
         assert!(sanitized["token"].as_str().unwrap().contains("****"));
         assert!(sanitized["api_key"].as_str().unwrap().contains("****"));
-        assert!(sanitized["authorization"].as_str().unwrap().contains("****"));
+        assert!(sanitized["authorization"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert_eq!(sanitized["public_field"], "visible_data");
     }
 
@@ -126,11 +147,23 @@ mod tests {
         });
 
         let sanitized = sanitize_json(&input);
-        
-        assert!(sanitized["level1"]["level2"]["level3"]["password"].as_str().unwrap().contains("****"));
-        assert!(sanitized["level1"]["level2"]["level3"]["level4"]["token"].as_str().unwrap().contains("****"));
-        assert_eq!(sanitized["level1"]["level2"]["level3"]["level4"]["data"], "public");
-        assert!(sanitized["level1"]["level2"]["account"].as_str().unwrap().contains("****"));
+
+        assert!(sanitized["level1"]["level2"]["level3"]["password"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
+        assert!(sanitized["level1"]["level2"]["level3"]["level4"]["token"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
+        assert_eq!(
+            sanitized["level1"]["level2"]["level3"]["level4"]["data"],
+            "public"
+        );
+        assert!(sanitized["level1"]["level2"]["account"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert_eq!(sanitized["level1"]["public"], "visible");
     }
 
@@ -147,12 +180,21 @@ mod tests {
         });
 
         let sanitized = sanitize_json(&input);
-        
-        assert!(sanitized["users"][0]["account"].as_str().unwrap().contains("****"));
+
+        assert!(sanitized["users"][0]["account"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert_eq!(sanitized["users"][0]["name"], "Alice");
-        assert!(sanitized["users"][1]["account"].as_str().unwrap().contains("****"));
+        assert!(sanitized["users"][1]["account"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert_eq!(sanitized["users"][1]["name"], "Bob");
-        assert!(sanitized["users"][2]["password"].as_str().unwrap().contains("****"));
+        assert!(sanitized["users"][2]["password"]
+            .as_str()
+            .unwrap()
+            .contains("****"));
         assert_eq!(sanitized["users"][2]["email"], "test@example.com");
         assert_eq!(sanitized["tokens"], json!(["token1", "token2", "token3"]));
         assert_eq!(sanitized["numbers"], json!([1, 2, 3]));
@@ -172,7 +214,7 @@ mod tests {
         });
 
         let sanitized = sanitize_json(&input);
-        
+
         assert_eq!(sanitized["account"], "****");
         assert_eq!(sanitized["password"], "****");
         assert_eq!(sanitized["token"], "****");
@@ -188,7 +230,10 @@ mod tests {
         let mut large_object = serde_json::Map::new();
         for i in 0..1000 {
             large_object.insert(format!("field_{}", i), json!(format!("value_{}", i)));
-            large_object.insert(format!("account_{}", i), json!(format!("secret_account_{}", i)));
+            large_object.insert(
+                format!("account_{}", i),
+                json!(format!("secret_account_{}", i)),
+            );
         }
         let input = Value::Object(large_object);
 
@@ -196,8 +241,78 @@ mod tests {
         let sanitized = sanitize_json(&input);
         let duration = start.elapsed();
 
-        assert!(duration.as_millis() < 1000, "Sanitization took too long: {:?}", duration);
+        assert!(
+            duration.as_millis() < 1000,
+            "Sanitization took too long: {:?}",
+            duration
+        );
         assert!(sanitized["account_0"].as_str().unwrap().contains("****"));
         assert_eq!(sanitized["field_0"], "value_0");
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// sanitize_json must be idempotent: applying it twice gives the same result.
+        #[test]
+        fn prop_sanitize_json_idempotent(
+            key in "[a-zA-Z_]{1,20}",
+            value in "[a-zA-Z0-9 ]{0,100}",
+        ) {
+            let input = serde_json::json!({ key: value });
+            let once = sanitize_json(&input);
+            let twice = sanitize_json(&once);
+            prop_assert_eq!(once, twice, "sanitize_json is not idempotent");
+        }
+
+        /// Non-sensitive fields must never be masked.
+        #[test]
+        fn prop_non_sensitive_fields_not_masked(
+            // Use field names that are clearly not sensitive
+            key in "data|info|result|value|name|count|total",
+            value in "[a-zA-Z0-9]{5,20}",
+        ) {
+            let input = serde_json::json!({ key.clone(): value.clone() });
+            let sanitized = sanitize_json(&input);
+            prop_assert_eq!(
+                sanitized[&key].as_str().unwrap_or(""),
+                value.as_str(),
+                "Non-sensitive field '{}' was unexpectedly masked",
+                key
+            );
+        }
+
+        /// Sensitive fields must always be masked.
+        #[test]
+        fn prop_sensitive_fields_always_masked(
+            value in "[a-zA-Z0-9]{5,50}",
+        ) {
+            for key in &["password", "secret", "token", "api_key", "account", "authorization"] {
+                let input = serde_json::json!({ *key: value.clone() });
+                let sanitized = sanitize_json(&input);
+                let sanitized_val = sanitized[key].as_str().unwrap_or("");
+                prop_assert!(
+                    sanitized_val.contains("****"),
+                    "Sensitive field '{}' was not masked, got: {}",
+                    key,
+                    sanitized_val
+                );
+            }
+        }
+
+        /// sanitize_json must not panic on deeply nested or large inputs.
+        #[test]
+        fn prop_sanitize_json_handles_arrays(
+            values in prop::collection::vec("[a-zA-Z0-9]{1,20}", 0..50),
+        ) {
+            let input = serde_json::Value::Array(
+                values.iter().map(|v| serde_json::json!(v)).collect()
+            );
+            let _ = sanitize_json(&input);
+        }
     }
 }

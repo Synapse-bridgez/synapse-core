@@ -4,7 +4,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 
 /// Error codes for programmatic error handling
@@ -210,6 +209,12 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("Tenant not found")]
+    TenantNotFound,
+
+    #[error("Invalid API key or tenant header")]
+    InvalidApiKey,
+
     // Custom errors with specific codes
     #[error("Invalid transaction amount: {0}")]
     InvalidTransactionAmount(String),
@@ -258,6 +263,8 @@ impl AppError {
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            AppError::TenantNotFound => StatusCode::NOT_FOUND,
+            AppError::InvalidApiKey => StatusCode::UNAUTHORIZED,
             AppError::InvalidTransactionAmount(_) => StatusCode::BAD_REQUEST,
             AppError::AmountBelowMinimum(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidStellarAddress(_) => StatusCode::BAD_REQUEST,
@@ -284,6 +291,8 @@ impl AppError {
             AppError::Internal(_) => codes::INTERNAL_001.0,
             AppError::BadRequest(_) => codes::BAD_REQUEST_001.0,
             AppError::Unauthorized(_) => codes::UNAUTHORIZED_001.0,
+            AppError::TenantNotFound => codes::NOT_FOUND_001.0,
+            AppError::InvalidApiKey => codes::UNAUTHORIZED_001.0,
             AppError::InvalidTransactionAmount(_) => codes::TRANSACTION_001.0,
             AppError::AmountBelowMinimum(_) => codes::TRANSACTION_002.0,
             AppError::InvalidStellarAddress(_) => codes::TRANSACTION_003.0,
@@ -300,16 +309,47 @@ impl AppError {
     }
 }
 
+/// Extension type to carry request ID through the request lifecycle.
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let body = Json(json!({
-            "error": self.to_string(),
-            "code": self.code(),
-            "status": status.as_u16(),
-        }));
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let code = self.code();
+        let docs_url = format!("/errors#{code}");
 
-        (status, body).into_response()
+        // Generate actionable detail message
+        let detail = match &self {
+            AppError::InvalidTransactionAmount(msg) => {
+                format!("Amount must be a positive number. {msg}")
+            }
+            AppError::AmountBelowMinimum(msg) => {
+                format!("Amount is below the minimum threshold. {msg}")
+            }
+            AppError::InvalidStellarAddress(msg) => {
+                format!("Stellar address must be 56 characters starting with 'G'. {msg}")
+            }
+            AppError::InvalidStatusTransition(msg) => {
+                format!("Status transition is not allowed. {msg}")
+            }
+            AppError::Validation(msg) => {
+                format!("Validation failed. {msg}")
+            }
+            _ => self.to_string(),
+        };
+
+        let body = serde_json::json!({
+            "error": self.to_string(),
+            "code": code,
+            "status": status.as_u16(),
+            "timestamp": timestamp,
+            "detail": detail,
+            "docs_url": docs_url,
+        });
+
+        (status, Json(body)).into_response()
     }
 }
 
