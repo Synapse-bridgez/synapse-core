@@ -166,6 +166,7 @@ mod tests {
 
     fn test_config_base() -> Config {
         Config {
+            app_env: crate::config::AppEnv::Development,
             server_port: 3000,
             database_url: "postgres://localhost:5432/test".to_string(),
             database_replica_url: None,

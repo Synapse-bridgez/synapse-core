@@ -284,10 +284,7 @@ impl ReconciliationService {
 
 impl ReconciliationService {
     /// Persist a reconciliation report to the database.
-    pub async fn store_report(
-        pool: &PgPool,
-        report: &ReconciliationReport,
-    ) -> anyhow::Result<()> {
+    pub async fn store_report(pool: &PgPool, report: &ReconciliationReport) -> anyhow::Result<()> {
         let report_json = serde_json::to_value(report)?;
         sqlx::query(
             r#"

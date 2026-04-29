@@ -24,6 +24,21 @@ pub struct SettlementListResponse {
     pub has_more: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/settlements",
+    params(
+        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
+        ("limit" = Option<i64>, Query, description = "Page size (1-100, default 10)"),
+        ("direction" = Option<String>, Query, description = "\"forward\" (default) or \"backward\""),
+    ),
+    responses(
+        (status = 200, description = "List of settlements", body = SettlementListResponse),
+        (status = 400, description = "Invalid cursor"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "Settlements"
+)]
 pub async fn list_settlements(
     State(state): State<ApiState>,
     Query(params): Query<SettlementListQuery>,
@@ -71,6 +86,19 @@ pub async fn list_settlements(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/settlements/{id}",
+    params(
+        ("id" = Uuid, Path, description = "Settlement ID"),
+    ),
+    responses(
+        (status = 200, description = "Settlement details", body = crate::db::models::Settlement),
+        (status = 404, description = "Settlement not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "Settlements"
+)]
 pub async fn get_settlement(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
@@ -118,9 +146,7 @@ pub async fn update_settlement_status(
     let new_total: Option<sqlx::types::BigDecimal> = match payload.new_total.as_deref() {
         Some(s) => match s.parse() {
             Ok(v) => Some(v),
-            Err(_) => {
-                return Err(AppError::BadRequest("invalid new_total".to_string()))
-            }
+            Err(_) => return Err(AppError::BadRequest("invalid new_total".to_string())),
         },
         None => None,
     };
@@ -129,8 +155,14 @@ pub async fn update_settlement_status(
     let service = crate::services::SettlementService::new(state.app_state.db.clone());
 
     let settlement = service
-        .update_status(id, &payload.status, payload.reason.as_deref(), new_total.as_ref(), actor)
+        .update_status(
+            id,
+            &payload.status,
+            payload.reason.as_deref(),
+            new_total.as_ref(),
+            actor,
+        )
         .await?;
-    
+
     Ok((StatusCode::OK, Json(settlement)))
 }

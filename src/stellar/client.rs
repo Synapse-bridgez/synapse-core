@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Error, Debug)]
 pub enum HorizonError {
@@ -119,7 +118,7 @@ impl HorizonClient {
         // Inject W3C traceparent / tracestate into outgoing request headers.
         let mut headers = std::collections::HashMap::new();
         let propagator = TraceContextPropagator::new();
-        let cx = tracing::Span::current().context();
+        let cx = opentelemetry::Context::current();
         propagator.inject_context(&cx, &mut headers);
 
         let result = self

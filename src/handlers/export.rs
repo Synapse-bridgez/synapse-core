@@ -265,6 +265,7 @@ fn create_csv_stream(
                             memo: row.get("memo"),
                             memo_type: row.get("memo_type"),
                             metadata: row.get("metadata"),
+                            tenant_id: None,
                         };
 
                         last_id = Some(tx.id);
@@ -361,6 +362,7 @@ fn create_json_stream(
                             memo: row.get("memo"),
                             memo_type: row.get("memo_type"),
                             metadata: row.get("metadata"),
+                            tenant_id: None,
                         };
 
                         last_id = Some(tx.id);
@@ -387,7 +389,11 @@ fn create_json_stream(
 /// Note: For production with 100k+ rows, you'd want to use true streaming.
 /// This implementation uses cursor-based pagination in the query but collects
 /// the final result. For true streaming, you'd need to use a different approach.
-async fn stream_to_response<S>(stream: S, content_type: &str, filename: &str) -> Result<impl IntoResponse, AppError>
+async fn stream_to_response<S>(
+    stream: S,
+    content_type: &str,
+    filename: &str,
+) -> Result<impl IntoResponse, AppError>
 where
     S: Stream<Item = Result<String, sqlx::Error>> + Send + 'static,
 {
@@ -517,6 +523,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
+            tenant_id: None,
         };
 
         let csv_row = TransactionCsvRow::from(&tx);
@@ -544,6 +551,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
+            tenant_id: None,
         };
 
         let json_row = TransactionJsonRow::from(&tx);

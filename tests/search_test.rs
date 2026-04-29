@@ -52,6 +52,7 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
+        secrets_store: None,
     };
     let app = create_app(app_state);
 

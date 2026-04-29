@@ -506,7 +506,9 @@ pub async fn list_transactions(
         Some(
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| AppError::BadRequest(format!("invalid from_date: '{}', expected ISO 8601", s)))?,
+                .map_err(|_| {
+                    AppError::BadRequest(format!("invalid from_date: '{}', expected ISO 8601", s))
+                })?,
         )
     } else {
         None
@@ -515,7 +517,9 @@ pub async fn list_transactions(
         Some(
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| AppError::BadRequest(format!("invalid to_date: '{}', expected ISO 8601", s)))?,
+                .map_err(|_| {
+                    AppError::BadRequest(format!("invalid to_date: '{}', expected ISO 8601", s))
+                })?,
         )
     } else {
         None
@@ -531,7 +535,15 @@ pub async fn list_transactions(
     // fetch one extra to determine has_more
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date).await?;
+    let mut rows = queries::list_transactions_filtered(
+        pool,
+        fetch_limit,
+        decoded_cursor,
+        backward,
+        from_date,
+        to_date,
+    )
+    .await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {
@@ -584,7 +596,9 @@ pub async fn list_transactions_api(
         Some(
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| AppError::BadRequest(format!("invalid from_date: '{}', expected ISO 8601", s)))?,
+                .map_err(|_| {
+                    AppError::BadRequest(format!("invalid from_date: '{}', expected ISO 8601", s))
+                })?,
         )
     } else {
         None
@@ -593,7 +607,9 @@ pub async fn list_transactions_api(
         Some(
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| AppError::BadRequest(format!("invalid to_date: '{}', expected ISO 8601", s)))?,
+                .map_err(|_| {
+                    AppError::BadRequest(format!("invalid to_date: '{}', expected ISO 8601", s))
+                })?,
         )
     } else {
         None
@@ -608,7 +624,15 @@ pub async fn list_transactions_api(
 
     let fetch_limit = limit + 1;
     let (pool, replica_used) = app_state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered(pool, fetch_limit, decoded_cursor, backward, from_date, to_date).await?;
+    let mut rows = queries::list_transactions_filtered(
+        pool,
+        fetch_limit,
+        decoded_cursor,
+        backward,
+        from_date,
+        to_date,
+    )
+    .await?;
 
     let has_more = rows.len() as i64 > limit;
     if has_more {

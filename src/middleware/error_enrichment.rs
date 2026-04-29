@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde_json::{json, Value};
 

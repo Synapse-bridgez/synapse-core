@@ -85,8 +85,7 @@ pub mod codes {
         ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
 
     // Redis errors
-    pub const REDIS_001: (&str, u16, &str) =
-        ("ERR_REDIS_001", 500, "Redis operation failed");
+    pub const REDIS_001: (&str, u16, &str) = ("ERR_REDIS_001", 500, "Redis operation failed");
 }
 
 /// Get all error codes as a vector for catalog generation

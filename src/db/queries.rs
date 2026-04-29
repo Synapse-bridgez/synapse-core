@@ -253,6 +253,63 @@ pub async fn list_transactions(
     .await
 }
 
+pub async fn list_transactions_filtered(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+) -> Result<Vec<Transaction>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions [filtered cursor-paginated]",
+        async {
+            // Build dynamic query with optional date filters
+            let mut conditions: Vec<String> = Vec::new();
+            if let Some(from) = from_date {
+                conditions.push(format!("created_at >= '{}'", from.to_rfc3339()));
+            }
+            if let Some(to) = to_date {
+                conditions.push(format!("created_at <= '{}'", to.to_rfc3339()));
+            }
+            if let Some((ts, id)) = cursor {
+                if !backward {
+                    conditions.push(format!(
+                        "(created_at, id) < ('{}', '{}')",
+                        ts.to_rfc3339(),
+                        id
+                    ));
+                } else {
+                    conditions.push(format!(
+                        "(created_at, id) > ('{}', '{}')",
+                        ts.to_rfc3339(),
+                        id
+                    ));
+                }
+            }
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+            let order = if backward { "ASC" } else { "DESC" };
+            let sql = format!(
+                "SELECT * FROM transactions {} ORDER BY created_at {}, id {} LIMIT {}",
+                where_clause, order, order, limit
+            );
+            let mut rows = sqlx::query_as::<_, Transaction>(&sql)
+                .fetch_all(pool)
+                .await?;
+            if backward {
+                rows.reverse();
+            }
+            Ok(rows)
+        },
+    )
+    .await
+}
+
 pub async fn get_unsettled_transactions(
     executor: &mut SqlxTransaction<'_, Postgres>,
     asset_code: &str,
@@ -453,11 +510,12 @@ pub async fn update_settlement_status(
 ) -> Result<Settlement> {
     let mut db_tx = pool.begin().await?;
 
-    let current = sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1 FOR UPDATE")
-        .bind(id)
-        .fetch_optional(&mut *db_tx)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
+    let current =
+        sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *db_tx)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
 
     // Preserve original amount on first adjustment
     let original_total = if current.original_total_amount.is_none() && new_total.is_some() {
@@ -848,12 +906,10 @@ pub async fn bulk_update_transaction_status(
     use crate::validation::state_machine::validate_status_transition;
 
     // Fetch current statuses for all requested IDs in one query
-    let rows = sqlx::query(
-        "SELECT id, status FROM transactions WHERE id = ANY($1)",
-    )
-    .bind(transaction_ids)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query("SELECT id, status FROM transactions WHERE id = ANY($1)")
+        .bind(transaction_ids)
+        .fetch_all(pool)
+        .await?;
 
     let current: std::collections::HashMap<Uuid, String> = rows
         .into_iter()
@@ -861,7 +917,8 @@ pub async fn bulk_update_transaction_status(
         .collect();
 
     let mut valid_ids: Vec<Uuid> = Vec::new();
-    let mut old_statuses: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    let mut old_statuses: std::collections::HashMap<Uuid, String> =
+        std::collections::HashMap::new();
     let mut errors: Vec<BulkUpdateError> = Vec::new();
 
     for &id in transaction_ids {
@@ -893,16 +950,17 @@ pub async fn bulk_update_transaction_status(
 
     let mut db_tx = pool.begin().await?;
 
-    sqlx::query(
-        "UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)",
-    )
-    .bind(new_status)
-    .bind(&valid_ids)
-    .execute(&mut *db_tx)
-    .await?;
+    sqlx::query("UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)")
+        .bind(new_status)
+        .bind(&valid_ids)
+        .execute(&mut *db_tx)
+        .await?;
 
     for &id in &valid_ids {
-        let old_status = old_statuses.get(&id).map(|s| s.as_str()).unwrap_or("unknown");
+        let old_status = old_statuses
+            .get(&id)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
         let mut new_val = serde_json::json!({ "status": new_status });
         if let Some(r) = reason {
             new_val["reason"] = serde_json::json!(r);

@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::middleware::quota::{Quota, QuotaManager, QuotaStatus, ResetSchedule, Tier};
 use crate::ApiState;
 use axum::{
@@ -5,7 +6,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Json},
 };
-use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -36,7 +36,9 @@ fn make_manager(redis_url: &str) -> Result<QuotaManager, AppError> {
 }
 
 /// GET /admin/quotas — list quota usage for all active tenants.
-pub async fn list_tenant_quotas(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
+pub async fn list_tenant_quotas(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, AppError> {
     let manager = make_manager(&state.app_state.redis_url)?;
 
     let configs = state.app_state.tenant_configs.read().await;
@@ -65,7 +67,10 @@ pub async fn get_tenant_quota(
     State(state): State<ApiState>,
     Path(tenant_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    let cfg = state.app_state.get_tenant_config(tenant_id).await
+    let cfg = state
+        .app_state
+        .get_tenant_config(tenant_id)
+        .await
         .ok_or_else(|| AppError::NotFound("tenant not found".to_string()))?;
 
     let manager = make_manager(&state.app_state.redis_url)?;
@@ -113,7 +118,7 @@ pub async fn set_tenant_quota(
 
     let key = format!("tenant:{tenant_id}");
     manager.set_quota_config(&key, &quota).await?;
-    
+
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"message": "quota updated", "tenant_id": tenant_id})),
@@ -129,7 +134,7 @@ pub async fn reset_tenant_quota(
 
     let key = format!("tenant:{tenant_id}");
     manager.reset_quota(&key).await?;
-    
+
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({"message": "quota reset", "tenant_id": tenant_id})),

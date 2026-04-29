@@ -364,7 +364,9 @@ pub async fn start_profiling(
 }
 
 /// HTTP handler to get current profiling status
-pub async fn get_profiling_status(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+pub async fn get_profiling_status(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
     let session = state.profiling_manager.get_current_session().await;
     let is_profiling = state.profiling_manager.is_profiling();
 
@@ -407,7 +409,10 @@ pub async fn get_flamegraph(
             [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
             content,
         )),
-        Err(_) => Err(AppError::NotFound(format!("Flamegraph '{}' not found", session_id))),
+        Err(_) => Err(AppError::NotFound(format!(
+            "Flamegraph '{}' not found",
+            session_id
+        ))),
     }
 }
 

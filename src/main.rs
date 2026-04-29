@@ -1,5 +1,4 @@
 use clap::Parser;
-use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
 use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
@@ -17,7 +16,6 @@ use synapse_core::{
 };
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -71,26 +69,21 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let tracer_provider = telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
-        .expect("failed to initialise OpenTelemetry tracer");
+    let _tracer_provider =
+        synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
+            .expect("failed to initialise OpenTelemetry tracer");
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(OpenTelemetryLayer::new(
-                    tracer_provider.tracer("synapse-core"),
-                ))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(OpenTelemetryLayer::new(
-                    tracer_provider.tracer("synapse-core"),
-                ))
                 .init();
         }
     }
@@ -353,7 +346,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     // Concurrent processor pool
     let processor_pool = synapse_core::services::processor::ProcessorPool::new(
         pool.clone(),
-        horizon_client,
+        horizon_client.clone(),
         config.processor_workers,
         config.processor_poll_interval_ms,
         config.processor_min_batch,
@@ -378,22 +371,19 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             tracing::warn!("Failed to register reconciliation job: {}", e);
         }
     } else {
-        tracing::info!(
-            "RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled"
-        );
+        tracing::info!("RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled");
     }
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
     tracing::info!("Job scheduler started");
 
-    let app = synapse_core::create_app(app_state);
+    let app = synapse_core::create_app(app_state.clone());
+    let readiness = app_state.readiness.clone();
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
-    let app = app.merge(
-        SwaggerUi::new("/api/docs")
-            .url("/api/docs/openapi.json", ApiDoc::openapi()),
-    );
+    let app =
+        app.merge(SwaggerUi::new("/api/docs").url("/api/docs/openapi.json", ApiDoc::openapi()));
 
     // Configure CORS if allowed origins are specified.
     let app = if !config.cors_allowed_origins.is_empty() {

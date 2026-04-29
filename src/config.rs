@@ -13,6 +13,7 @@ pub enum AppEnv {
 }
 
 impl AppEnv {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "production" | "prod" => AppEnv::Production,

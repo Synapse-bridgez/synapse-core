@@ -72,13 +72,18 @@ pub async fn graphql_handler(
             .await?;
 
             let t = queries::get_transaction(&state.app_state.db, id).await?;
-            return Ok((StatusCode::OK, Json(json!({
-                "data": { "forceCompleteTransaction": { "id": t.id.to_string(), "status": t.status } }
-            }))));
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "data": { "forceCompleteTransaction": { "id": t.id.to_string(), "status": t.status } }
+                })),
+            ));
         }
     }
 
-    Err(AppError::BadRequest("Unsupported GraphQL query".to_string()))
+    Err(AppError::BadRequest(
+        "Unsupported GraphQL query".to_string(),
+    ))
 }
 
 fn extract_id(query: &str) -> Option<Uuid> {

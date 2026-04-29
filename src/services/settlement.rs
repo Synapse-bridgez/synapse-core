@@ -233,15 +233,13 @@ mod tests {
         new_total: Option<&BigDecimal>,
         actor: &str,
     ) -> Result<Settlement, AppError> {
-        let current = queries::get_settlement(&self.pool, id)
-            .await
-            .map_err(|e| {
-                if matches!(e, sqlx::Error::RowNotFound) {
-                    AppError::NotFound(format!("settlement {id}"))
-                } else {
-                    AppError::DatabaseError(e.to_string())
-                }
-            })?;
+        let current = queries::get_settlement(&self.pool, id).await.map_err(|e| {
+            if matches!(e, sqlx::Error::RowNotFound) {
+                AppError::NotFound(format!("settlement {id}"))
+            } else {
+                AppError::DatabaseError(e.to_string())
+            }
+        })?;
 
         if !valid_transition(&current.status, new_status) {
             return Err(AppError::BadRequest(format!(

@@ -11,8 +11,8 @@ pub mod v2;
 pub mod webhook;
 pub mod ws;
 
-use crate::ApiState;
 use crate::error::AppError;
+use crate::ApiState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;

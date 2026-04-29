@@ -142,8 +142,6 @@ mod tests {
     use tower::ServiceExt;
     use tracing::Subscriber;
     use tracing_subscriber::layer::{Context as LayerContext, Layer as TracingLayer};
-    use tracing_subscriber::prelude::*;
-    use tracing_subscriber::registry::Registry;
 
     #[test]
     fn xff_uses_client_ip_with_single_trusted_proxy() {
