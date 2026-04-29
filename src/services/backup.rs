@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use sqlx::PgPool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackupType {
@@ -78,9 +78,7 @@ impl BackupService {
         total_size_bytes: u64,
         start_time: DateTime<Utc>,
     ) {
-        let elapsed = Utc::now()
-            .signed_duration_since(start_time)
-            .num_seconds() as u64;
+        let elapsed = Utc::now().signed_duration_since(start_time).num_seconds() as u64;
 
         let estimated_remaining = if progress_percentage > 0 && progress_percentage < 100 {
             let rate = elapsed as f64 / progress_percentage as f64;
@@ -121,20 +119,26 @@ impl BackupService {
         let backup_path = self.backup_dir.join(&filename);
         let temp_path = self.backup_dir.join(format!("{filename}.tmp"));
 
+        // Get estimated database size for progress tracking
+        let total_size = self.get_database_size().await.unwrap_or(0);
+
         // Run pg_dump
         tracing::info!("Running pg_dump for {:?} backup", backup_type);
-        self.update_progress("pg_dump", 25, total_size, timestamp).await;
+        self.update_progress("pg_dump", 25, total_size, timestamp)
+            .await;
         self.run_pg_dump(&temp_path).await?;
 
         // Compress the backup
         tracing::info!("Compressing backup");
-        self.update_progress("compress", 50, total_size, timestamp).await;
+        self.update_progress("compress", 50, total_size, timestamp)
+            .await;
         let compressed_path = self.compress_backup(&temp_path).await?;
 
         // Encrypt if key is provided
         let final_path = if self.encryption_key.is_some() {
             tracing::info!("Encrypting backup");
-            self.update_progress("encrypt", 75, total_size, timestamp).await;
+            self.update_progress("encrypt", 75, total_size, timestamp)
+                .await;
             self.encrypt_backup(&compressed_path).await?
         } else {
             compressed_path
@@ -167,7 +171,8 @@ impl BackupService {
         self.save_metadata(&backup_metadata).await?;
 
         // Mark as complete
-        self.update_progress("complete", 100, total_size, timestamp).await;
+        self.update_progress("complete", 100, total_size, timestamp)
+            .await;
 
         tracing::info!("Backup created successfully: {}", backup_metadata.filename);
 
@@ -207,31 +212,36 @@ impl BackupService {
             .context("Database pool not configured for verification")?;
 
         // Create temporary test database
-        let test_db_name = format!("synapse_verify_{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
-        
+        let test_db_name = format!(
+            "synapse_verify_{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_string()
+        );
+
         tracing::info!("Creating temporary verification database: {}", test_db_name);
         sqlx::query(&format!("CREATE DATABASE {}", test_db_name))
             .execute(pool)
             .await
             .context("Failed to create test database")?;
 
-        let result = self
-            .run_verification(&test_db_name, filename)
-            .await;
+        let result = self.run_verification(&test_db_name, filename).await;
 
         // Cleanup: drop test database
-        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", test_db_name))
-            .execute(pool)
-            .await;
+        let _ = sqlx::query(&format!(
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            test_db_name
+        ))
+        .execute(pool)
+        .await;
 
         result
     }
 
-    async fn run_verification(&self, test_db_name: &str, filename: &str) -> Result<BackupVerificationLog> {
-        let pool = self
-            .pool
-            .as_ref()
-            .context("Database pool not configured")?;
+    async fn run_verification(
+        &self,
+        test_db_name: &str,
+        filename: &str,
+    ) -> Result<BackupVerificationLog> {
+        let pool = self.pool.as_ref().context("Database pool not configured")?;
 
         let test_db_url = self.database_url.replace(
             self.database_url.split('/').last().unwrap_or("synapse"),
@@ -463,7 +473,8 @@ impl BackupService {
 
         Ok(())
     }
-}
+
+    pub async fn apply_retention_policy(&self) -> Result<()> {
         let backups = self.list_backups().await?;
 
         let mut hourly_backups = Vec::new();

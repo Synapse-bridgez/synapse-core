@@ -1,6 +1,6 @@
+use crate::services::{backup::BackupService, scheduler::Job};
 use async_trait::async_trait;
 use std::sync::Arc;
-use crate::services::{backup::BackupService, scheduler::Job};
 
 pub struct BackupVerificationJob {
     backup_service: Arc<BackupService>,
@@ -29,7 +29,11 @@ impl Job for BackupVerificationJob {
             Ok(backups) => {
                 if let Some(latest) = backups.first() {
                     tracing::info!("Verifying latest backup: {}", latest.filename);
-                    match self.backup_service.verify_backup_integrity(&latest.filename).await {
+                    match self
+                        .backup_service
+                        .verify_backup_integrity(&latest.filename)
+                        .await
+                    {
                         Ok(result) => {
                             tracing::info!(
                                 "Backup verification completed: status={}, rows={:?}",

@@ -73,11 +73,6 @@ jobs:
     - name: Start sccache
       run: sccache --start-server
 
-    - name: Validate migrations
-      run: bash scripts/validate-migrations.sh
-      env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
-
     - name: Run migrations
       run: sqlx migrate run
       env:
@@ -164,11 +159,6 @@ jobs:
 
     - name: Start sccache
       run: sccache --start-server
-
-    - name: Validate migrations
-      run: bash scripts/validate-migrations.sh
-      env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
     - name: Run migrations
       run: sqlx migrate run

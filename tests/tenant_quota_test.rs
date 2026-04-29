@@ -7,7 +7,8 @@
 use synapse_core::middleware::quota::{Quota, QuotaManager, ResetSchedule, Tier};
 
 fn make_manager() -> QuotaManager {
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     QuotaManager::new(&redis_url).expect("QuotaManager::new")
 }
 
@@ -24,8 +25,16 @@ async fn test_two_tenants_have_independent_quotas() {
     let k2 = key("tenant_b");
 
     // Tenant A: limit 2, Tenant B: limit 5
-    let q1 = Quota { tier: Tier::Free, custom_limit: Some(2), reset_schedule: ResetSchedule::Hourly };
-    let q2 = Quota { tier: Tier::Free, custom_limit: Some(5), reset_schedule: ResetSchedule::Hourly };
+    let q1 = Quota {
+        tier: Tier::Free,
+        custom_limit: Some(2),
+        reset_schedule: ResetSchedule::Hourly,
+    };
+    let q2 = Quota {
+        tier: Tier::Free,
+        custom_limit: Some(5),
+        reset_schedule: ResetSchedule::Hourly,
+    };
     mgr.set_quota_config(&k1, &q1).await.unwrap();
     mgr.set_quota_config(&k2, &q2).await.unwrap();
 
@@ -33,11 +42,17 @@ async fn test_two_tenants_have_independent_quotas() {
     assert!(mgr.consume_quota_with_window(&k1, 2, 60).await.unwrap()); // 1
     assert!(mgr.consume_quota_with_window(&k1, 2, 60).await.unwrap()); // 2
     let a_blocked = !mgr.consume_quota_with_window(&k1, 2, 60).await.unwrap(); // 3 → over limit
-    assert!(a_blocked, "tenant A should be rate-limited after 2 requests");
+    assert!(
+        a_blocked,
+        "tenant A should be rate-limited after 2 requests"
+    );
 
     // Tenant B should still have capacity
     let b_allowed = mgr.consume_quota_with_window(&k2, 5, 60).await.unwrap();
-    assert!(b_allowed, "tenant B should not be affected by tenant A's exhaustion");
+    assert!(
+        b_allowed,
+        "tenant B should not be affected by tenant A's exhaustion"
+    );
 }
 
 #[tokio::test]
@@ -65,12 +80,21 @@ async fn test_custom_limit_overrides_tier_default() {
     let k = key("custom_limit_tenant");
 
     // Free tier default is 100 req/hour; override to 3
-    let quota = Quota { tier: Tier::Free, custom_limit: Some(3), reset_schedule: ResetSchedule::Hourly };
+    let quota = Quota {
+        tier: Tier::Free,
+        custom_limit: Some(3),
+        reset_schedule: ResetSchedule::Hourly,
+    };
     mgr.set_quota_config(&k, &quota).await.unwrap();
 
     let loaded = mgr.get_quota_config(&k).await.unwrap();
-    let effective_limit = loaded.custom_limit.unwrap_or_else(|| loaded.tier.requests_per_hour());
-    assert_eq!(effective_limit, 3, "custom_limit should override tier default");
+    let effective_limit = loaded
+        .custom_limit
+        .unwrap_or_else(|| loaded.tier.requests_per_hour());
+    assert_eq!(
+        effective_limit, 3,
+        "custom_limit should override tier default"
+    );
 }
 
 #[tokio::test]

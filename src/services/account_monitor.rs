@@ -2,10 +2,10 @@ use crate::stellar::client::HorizonClient;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Payment {

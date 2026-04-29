@@ -121,7 +121,13 @@ impl LockManager {
                 debug!(resource, attempts, "Acquired distributed lock");
 
                 // Metrics
-                crate::metrics::lock_acquired_total().add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+                crate::metrics::lock_acquired_total().add(
+                    1,
+                    &[opentelemetry::KeyValue::new(
+                        "resource",
+                        resource.to_string(),
+                    )],
+                );
 
                 // Register in active lock registry
                 let acquired_unix = std::time::SystemTime::now()
@@ -143,7 +149,13 @@ impl LockManager {
             }
 
             // Each failed attempt is a contention event
-            crate::metrics::lock_contention_total().add(1, &[opentelemetry::KeyValue::new("resource", resource.to_string())]);
+            crate::metrics::lock_contention_total().add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "resource",
+                    resource.to_string(),
+                )],
+            );
 
             if start.elapsed() >= timeout_duration {
                 debug!(resource, attempts, "Lock acquisition timed out");
@@ -249,9 +261,7 @@ impl Lock {
         if hold_ms > expected_ms * 2.0 {
             warn!(
                 resource,
-                hold_ms,
-                expected_ms,
-                "Lock held longer than 2x expected duration"
+                hold_ms, expected_ms, "Lock held longer than 2x expected duration"
             );
         }
 
@@ -330,9 +340,7 @@ impl Drop for Lock {
             if hold_ms > expected_ms * 2.0 {
                 warn!(
                     resource,
-                    hold_ms,
-                    expected_ms,
-                    "Lock (dropped) held longer than 2x expected duration"
+                    hold_ms, expected_ms, "Lock (dropped) held longer than 2x expected duration"
                 );
             }
 

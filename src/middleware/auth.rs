@@ -12,10 +12,7 @@ use crate::secrets::SecretsStore;
 /// API key authentication middleware for callback/webhook endpoints.
 /// Requires `X-API-Key` header matching a key in the `tenants` table.
 /// Returns 401 on missing or invalid key and logs the source IP.
-pub async fn api_key_auth(
-    req: Request<Body>,
-    next: Next<Body>,
-) -> Result<Response, StatusCode> {
+pub async fn api_key_auth(req: Request<Body>, next: Next<Body>) -> Result<Response, StatusCode> {
     let api_key = req
         .headers()
         .get("X-API-Key")
@@ -37,10 +34,7 @@ pub async fn api_key_auth(
     };
 
     // Extract the DB pool from extensions (injected via AppState layer)
-    let pool = req
-        .extensions()
-        .get::<sqlx::PgPool>()
-        .cloned();
+    let pool = req.extensions().get::<sqlx::PgPool>().cloned();
 
     let pool = match pool {
         Some(p) => p,
@@ -140,6 +134,9 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
-        assert!(key.is_none(), "Empty X-API-Key should be treated as missing");
+        assert!(
+            key.is_none(),
+            "Empty X-API-Key should be treated as missing"
+        );
     }
 }

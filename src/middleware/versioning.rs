@@ -5,10 +5,7 @@ use axum::{
 };
 use std::str::FromStr;
 
-pub async fn inject_deprecation_headers<B>(
-    req: Request<B>,
-    next: Next<B>,
-) -> AxumResponse {
+pub async fn inject_deprecation_headers<B>(req: Request<B>, next: Next<B>) -> AxumResponse {
     let mut response = next.run(req).await;
 
     // Set Deprecation header to true

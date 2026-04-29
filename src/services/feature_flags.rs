@@ -220,7 +220,10 @@ mod tests {
         let hash1 = FeatureFlagService::hash_tenant_flag(tenant_id, flag_name);
         let hash2 = FeatureFlagService::hash_tenant_flag(tenant_id, flag_name);
 
-        assert_eq!(hash1, hash2, "Same tenant and flag should produce same hash");
+        assert_eq!(
+            hash1, hash2,
+            "Same tenant and flag should produce same hash"
+        );
     }
 
     #[test]
@@ -251,7 +254,10 @@ mod tests {
         let hash1 = FeatureFlagService::hash_tenant_flag("tenant-1", flag_name);
         let hash2 = FeatureFlagService::hash_tenant_flag("tenant-2", flag_name);
 
-        assert_ne!(hash1, hash2, "Different tenants should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different tenants should produce different hashes"
+        );
     }
 
     /// Get dependency graph for visualization

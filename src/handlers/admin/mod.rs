@@ -44,7 +44,10 @@ pub fn admin_routes() -> Router<sqlx::PgPool> {
         .route("/flags/:name/rollout", post(update_rollout_percentage))
         .route("/feature-flags/history", get(get_flag_history))
         .route("/backup/status", get(get_backup_status))
-        .route("/backup/verification-history", get(get_backup_verification_history))
+        .route(
+            "/backup/verification-history",
+            get(get_backup_verification_history),
+        )
 }
 
 /// Create webhook replay admin routes
@@ -208,11 +211,7 @@ pub async fn update_rollout_percentage(
     {
         Ok(flag) => (StatusCode::OK, Json(flag)).into_response(),
         Err(e) => {
-            tracing::error!(
-                "Failed to update rollout percentage for '{}': {}",
-                name,
-                e
-            );
+            tracing::error!("Failed to update rollout percentage for '{}': {}", name, e);
             (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
@@ -335,9 +334,7 @@ pub async fn list_webhook_health(State(state): State<crate::ApiState>) -> impl I
 }
 
 /// POST /admin/tenants/reload — immediately reload tenant configs from DB
-pub async fn reload_tenant_configs(
-    State(state): State<crate::ApiState>,
-) -> impl IntoResponse {
+pub async fn reload_tenant_configs(State(state): State<crate::ApiState>) -> impl IntoResponse {
     match state.app_state.load_tenant_configs().await {
         Ok(()) => {
             let count = state.app_state.tenant_configs.read().await.len();

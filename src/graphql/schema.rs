@@ -34,12 +34,9 @@ fn count_aliases(items: &[async_graphql::Positioned<Selection>]) -> usize {
         .map(|sel| match &sel.node {
             Selection::Field(f) => {
                 let self_alias = if f.node.alias.is_some() { 1 } else { 0 };
-                self_alias
-                    + count_aliases(&f.node.selection_set.node.items)
+                self_alias + count_aliases(&f.node.selection_set.node.items)
             }
-            Selection::InlineFragment(frag) => {
-                count_aliases(&frag.node.selection_set.node.items)
-            }
+            Selection::InlineFragment(frag) => count_aliases(&frag.node.selection_set.node.items),
             Selection::FragmentSpread(_) => 0,
         })
         .sum()
