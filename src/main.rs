@@ -145,7 +145,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Database migrations completed");
 
     // Initialize partition manager (runs every 24 hours)
-    let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24);
+    let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24, None);
     partition_manager.start();
     tracing::info!("Partition manager started");
 
