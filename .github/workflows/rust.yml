@@ -70,6 +70,10 @@ jobs:
       if: matrix.rust == 'stable'
       run: cargo install cargo-deny --locked
 
+    - name: Check migration safety
+      if: matrix.rust == 'stable'
+      run: ./scripts/check-migration-safety.sh migrations
+
     - name: Start sccache
       run: sccache --start-server
 
