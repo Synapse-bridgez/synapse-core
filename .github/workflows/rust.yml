@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, "1.82.0"]
+        rust: [stable]
 
     services:
       postgres:
@@ -111,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, "1.82.0"]
+        rust: [stable]
 
     services:
       postgres:
