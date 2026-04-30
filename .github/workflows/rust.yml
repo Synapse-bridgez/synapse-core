@@ -67,7 +67,9 @@ jobs:
       run: cargo fmt --all -- --check
 
     - name: Install sqlx-cli
-      run: cargo install sqlx-cli --no-default-features --features postgres
+      uses: taiki-e/install-action@v2
+      with:
+        tool: sqlx-cli@0.7.4
 
     - name: Install cargo-deny
       if: matrix.rust == 'stable'
@@ -77,8 +79,6 @@ jobs:
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
-    - name: Start sccache
-      run: sccache --start-server
 
     - name: Run migrations
       run: sqlx migrate run
@@ -105,8 +105,7 @@ jobs:
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
-    - name: Stop sccache
-      run: sccache --stop-server
+
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -165,10 +164,10 @@ jobs:
       uses: taiki-e/install-action@sccache
 
     - name: Install sqlx-cli
-      run: cargo install sqlx-cli --no-default-features --features postgres
+      uses: taiki-e/install-action@v2
+      with:
+        tool: sqlx-cli@0.7.4
 
-    - name: Start sccache
-      run: sccache --start-server
 
     - name: Run migrations
       run: sqlx migrate run
@@ -181,8 +180,7 @@ jobs:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
 
-    - name: Stop sccache
-      run: sccache --stop-server
+
 
   coverage:
     runs-on: ubuntu-latest
@@ -244,13 +242,13 @@ jobs:
       uses: taiki-e/install-action@sccache
 
     - name: Install sqlx-cli
-      run: cargo install sqlx-cli --no-default-features --features postgres
+      uses: taiki-e/install-action@v2
+      with:
+        tool: sqlx-cli@0.7.4
 
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
-    - name: Start sccache
-      run: sccache --start-server
 
     - name: Run migrations
       run: sqlx migrate run
@@ -304,9 +302,7 @@ jobs:
           echo "::warning::Coverage ${coverage}% is below the warning threshold of 60%."
         fi
 
-    - name: Stop sccache
-      if: always()
-      run: sccache --stop-server
+
 
   build:
     runs-on: ubuntu-latest
