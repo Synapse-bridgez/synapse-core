@@ -46,7 +46,7 @@ jobs:
         components: rustfmt, clippy
 
     - name: Install sccache
-      run: cargo install sccache --locked
+      uses: taiki-e/install-action@sccache
 
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
@@ -161,6 +161,9 @@ jobs:
           ${{ runner.os }}-${{ matrix.rust }}-cargo-
           ${{ runner.os }}-cargo-
 
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
+
     - name: Install sqlx-cli
       run: cargo install sqlx-cli --no-default-features --features postgres
 
@@ -236,6 +239,9 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-coverage-cargo-
           ${{ runner.os }}-cargo-
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
 
     - name: Install sqlx-cli
       run: cargo install sqlx-cli --no-default-features --features postgres
