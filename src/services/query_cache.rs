@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct CacheEntry<T> {
     value: T,
     expires_at: Instant,

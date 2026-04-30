@@ -149,7 +149,7 @@ pub fn lock_hold_duration_ms() -> Histogram<f64> {
     meter()
         .f64_histogram("lock_hold_duration_ms")
         .with_description("Duration a distributed lock was held in milliseconds")
-        .with_unit("ms")
+        .with_unit(opentelemetry::metrics::Unit::new("ms"))
         .init()
 }
 

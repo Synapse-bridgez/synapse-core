@@ -72,7 +72,13 @@ impl PartitionManager {
         if created {
             info!(partition = %partition_name, "new partition created, warming cache");
             if let Some(cache) = &self.cache {
-                if let Err(e) = cache.warm_cache(&self.pool, None).await {
+                if let Err(e) = cache
+                    .warm_cache(
+                        &self.pool,
+                        &crate::services::query_cache::CacheConfig::default(),
+                    )
+                    .await
+                {
                     error!("cache warming after partition creation failed: {}", e);
                 }
             }
@@ -121,9 +127,9 @@ mod tests {
         let cache = QueryCache::new(&redis_url).expect("redis must be available");
 
         // Pre-clear any existing warm keys so we can detect a fresh write.
-        cache.invalidate("query:status_counts", None).await.ok();
-        cache.invalidate("query:daily_totals", None).await.ok();
-        cache.invalidate("query:asset_stats", None).await.ok();
+        cache.invalidate("query:status_counts").await.ok();
+        cache.invalidate("query:daily_totals").await.ok();
+        cache.invalidate("query:asset_stats").await.ok();
 
         let manager = PartitionManager::new(pool.clone(), 24, Some(cache.clone()));
 
@@ -132,10 +138,12 @@ mod tests {
 
         if created {
             // Cache should now be warm.
-            let mut conn = cache.client.get_async_connection().await.unwrap();
-            let status: Option<Vec<u8>> = conn.get("query:status_counts").await.unwrap();
-            let daily: Option<Vec<u8>> = conn.get("query:daily_totals").await.unwrap();
-            let assets: Option<Vec<u8>> = conn.get("query:asset_stats").await.unwrap();
+            let status: Option<serde_json::Value> =
+                cache.get("query:status_counts").await.unwrap_or(None);
+            let daily: Option<serde_json::Value> =
+                cache.get("query:daily_totals").await.unwrap_or(None);
+            let assets: Option<serde_json::Value> =
+                cache.get("query:asset_stats").await.unwrap_or(None);
             assert!(status.is_some(), "status_counts should be cached");
             assert!(daily.is_some(), "daily_totals should be cached");
             assert!(assets.is_some(), "asset_stats should be cached");

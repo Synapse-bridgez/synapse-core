@@ -1,6 +1,6 @@
 use crate::config::Config;
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub mod audit;
 pub mod cron;
@@ -67,4 +67,18 @@ async fn build_pool(
         })
         .connect(url)
         .await
+}
+
+async fn warm_up(pool: &PgPool, min_connections: u32) -> Result<(), sqlx::Error> {
+    let mut handles = Vec::with_capacity(min_connections as usize);
+    for _ in 0..min_connections {
+        let pool = pool.clone();
+        handles.push(tokio::spawn(async move {
+            sqlx::query("SELECT 1").execute(&pool).await
+        }));
+    }
+    for handle in handles {
+        handle.await.ok();
+    }
+    Ok(())
 }

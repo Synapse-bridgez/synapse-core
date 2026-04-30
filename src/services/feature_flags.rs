@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct FeatureFlagService {
@@ -14,6 +14,7 @@ pub struct FeatureFlag {
     pub enabled: bool,
     pub description: Option<String>,
     pub rollout_percentage: Option<i32>,
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -84,7 +85,7 @@ impl FeatureFlagService {
 
     pub async fn get_all_flags(&self) -> Result<HashMap<String, bool>, sqlx::Error> {
         let flags = sqlx::query_as::<_, FeatureFlag>(
-            "SELECT name, enabled, description, rollout_percentage FROM feature_flags",
+            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -98,14 +99,14 @@ impl FeatureFlagService {
 
     pub async fn update(&self, name: &str, enabled: bool) -> Result<FeatureFlag, sqlx::Error> {
         let old_flag = sqlx::query_as::<_, FeatureFlag>(
-            "SELECT name, enabled, description, rollout_percentage FROM feature_flags WHERE name = $1",
+            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
 
         let flag = sqlx::query_as::<_, FeatureFlag>(
-            "UPDATE feature_flags SET enabled = $2 WHERE name = $1 RETURNING name, enabled, description, rollout_percentage",
+            "UPDATE feature_flags SET enabled = $2 WHERE name = $1 RETURNING name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on",
         )
         .bind(name)
         .bind(enabled)
@@ -137,14 +138,14 @@ impl FeatureFlagService {
         percentage: i32,
     ) -> Result<FeatureFlag, sqlx::Error> {
         let old_flag = sqlx::query_as::<_, FeatureFlag>(
-            "SELECT name, enabled, description, rollout_percentage FROM feature_flags WHERE name = $1",
+            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
 
         let flag = sqlx::query_as::<_, FeatureFlag>(
-            "UPDATE feature_flags SET rollout_percentage = $2 WHERE name = $1 RETURNING name, enabled, description, rollout_percentage",
+            "UPDATE feature_flags SET rollout_percentage = $2 WHERE name = $1 RETURNING name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on",
         )
         .bind(name)
         .bind(percentage)
@@ -206,6 +207,16 @@ impl FeatureFlagService {
             .await
         }
     }
+
+    pub async fn get_dependency_graph(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
+        let flags: Vec<FeatureFlag> = sqlx::query_as::<_, FeatureFlag>(
+            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(flags.into_iter().map(|f| (f.name, f.depends_on)).collect())
+    }
 }
 
 #[cfg(test)]
@@ -258,16 +269,5 @@ mod tests {
             hash1, hash2,
             "Different tenants should produce different hashes"
         );
-    }
-
-    /// Get dependency graph for visualization
-    pub async fn get_dependency_graph(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
-        let flags = sqlx::query_as::<_, FeatureFlag>(
-            "SELECT name, enabled, description, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(flags.into_iter().map(|f| (f.name, f.depends_on)).collect())
     }
 }

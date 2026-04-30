@@ -265,6 +265,7 @@ fn create_csv_stream(
                             memo: row.get("memo"),
                             memo_type: row.get("memo_type"),
                             metadata: row.get("metadata"),
+                            tenant_id: row.get("tenant_id"),
                         };
 
                         last_id = Some(tx.id);
@@ -361,6 +362,7 @@ fn create_json_stream(
                             memo: row.get("memo"),
                             memo_type: row.get("memo_type"),
                             metadata: row.get("metadata"),
+                            tenant_id: row.get("tenant_id"),
                         };
 
                         last_id = Some(tx.id);
@@ -517,6 +519,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
+            tenant_id: None,
         };
 
         let csv_row = TransactionCsvRow::from(&tx);
@@ -544,6 +547,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
+            tenant_id: None,
         };
 
         let json_row = TransactionJsonRow::from(&tx);

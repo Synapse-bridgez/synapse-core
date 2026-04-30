@@ -121,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
                 cli::handle_backup_restore(&config, &filename).await
             }
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
+            BackupCommands::RestorePitr { .. } => {
+                eprintln!("PITR restore not yet implemented");
+                Ok(())
+            }
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
     }
@@ -299,7 +303,6 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         secrets_store,
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
-        secrets_store,
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
@@ -344,7 +347,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     // Concurrent processor pool
     let processor_pool = synapse_core::services::processor::ProcessorPool::new(
         pool.clone(),
-        horizon_client,
+        horizon_client.clone(),
         config.processor_workers,
         config.processor_poll_interval_ms,
         config.processor_min_batch,
@@ -376,7 +379,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     }
     tracing::info!("Job scheduler started");
 
-    let app = synapse_core::create_app(app_state);
+    let app = synapse_core::create_app(app_state.clone());
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =
@@ -445,34 +448,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async move {
-            // Wait for SIGTERM or SIGINT
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{signal, SignalKind};
-                let mut sigterm =
-                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-                let mut sigint =
-                    signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
-                tokio::select! {
-                    _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
-                    _ = sigint.recv() => tracing::info!("Received SIGINT"),
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                tokio::signal::ctrl_c()
-                    .await
-                    .expect("failed to register Ctrl-C handler");
-                tracing::info!("Received Ctrl-C");
-            }
-
-            // If not already draining (e.g. /admin/drain was not called), start drain now
-            if !readiness.is_draining() {
-                readiness.start_drain();
-            }
-            readiness.wait_for_drain().await;
-        })
+        .with_graceful_shutdown(shutdown_signal)
         .await?;
 
     // Flush and shut down the OTel exporter on clean exit.

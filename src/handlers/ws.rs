@@ -30,7 +30,7 @@ const RESYNC_MAX_LIMIT: i64 = 100;
 
 // ── Wire types ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct TransactionStatusUpdate {
     pub transaction_id: Uuid,
     pub status: String,
@@ -251,8 +251,7 @@ async fn handle_client_message(
         ClientMessage::Resync { limit } => {
             let limit = limit
                 .unwrap_or(RESYNC_DEFAULT_LIMIT)
-                .min(RESYNC_MAX_LIMIT)
-                .max(1);
+                .clamp(1, RESYNC_MAX_LIMIT);
 
             tracing::info!(
                 client_addr = %client_addr,

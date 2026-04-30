@@ -287,6 +287,7 @@ pub async fn handle_tx_reconcile(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn handle_backup_restore_pitr(
     _config: &Config,
     _timestamp_str: &str,

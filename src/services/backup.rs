@@ -212,10 +212,7 @@ impl BackupService {
             .context("Database pool not configured for verification")?;
 
         // Create temporary test database
-        let test_db_name = format!(
-            "synapse_verify_{}",
-            uuid::Uuid::new_v4().to_string()[..8].to_string()
-        );
+        let test_db_name = format!("synapse_verify_{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
         tracing::info!("Creating temporary verification database: {}", test_db_name);
         sqlx::query(&format!("CREATE DATABASE {}", test_db_name))
@@ -241,10 +238,13 @@ impl BackupService {
         test_db_name: &str,
         filename: &str,
     ) -> Result<BackupVerificationLog> {
-        let pool = self.pool.as_ref().context("Database pool not configured")?;
+        let _pool = self.pool.as_ref().context("Database pool not configured")?;
 
         let test_db_url = self.database_url.replace(
-            self.database_url.split('/').last().unwrap_or("synapse"),
+            self.database_url
+                .split('/')
+                .next_back()
+                .unwrap_or("synapse"),
             test_db_name,
         );
 

@@ -37,7 +37,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -139,7 +138,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
         ))
-        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MB
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)); // 1 MB
 
     // Webhook route with validation + quota middleware
     let webhook_routes = Router::new()
@@ -155,7 +154,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
         ))
-        .layer(RequestBodyLimitLayer::new(1024 * 1024)); // 1 MB
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)); // 1 MB
 
     // Core API routes (shared between versioned and unversioned)
     let core_routes = Router::new()

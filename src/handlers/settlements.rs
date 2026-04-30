@@ -28,7 +28,7 @@ pub async fn list_settlements(
     State(state): State<ApiState>,
     Query(params): Query<SettlementListQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let limit = params.limit.unwrap_or(10).min(100).max(1);
+    let limit = params.limit.unwrap_or(10).clamp(1, 100);
     let backward = params.direction.as_deref() == Some("backward");
 
     let decoded_cursor = if let Some(ref c) = params.cursor {

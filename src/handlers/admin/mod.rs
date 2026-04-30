@@ -37,7 +37,7 @@ pub struct HistoryQuery {
 }
 
 /// Create admin routes for queue management
-pub fn admin_routes() -> Router<sqlx::PgPool> {
+pub fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/flags", get(get_flags))
         .route("/flags/:name", post(update_flag))
@@ -47,6 +47,10 @@ pub fn admin_routes() -> Router<sqlx::PgPool> {
         .route(
             "/backup/verification-history",
             get(get_backup_verification_history),
+        )
+        .route(
+            "/webhooks/endpoints/:id/rate-limit",
+            post(update_webhook_rate_limit),
         )
 }
 
@@ -62,31 +66,24 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
             "/webhooks/replay/batch",
             post(webhook_replay::batch_replay_webhooks),
         )
-        .route(
-            "/webhooks/endpoints/:id/rate-limit",
-            post(update_webhook_rate_limit),
-        )
 }
 
-pub async fn get_backup_status(State(state): State<AppState>) -> impl IntoResponse {
-    match state.backup_service.get_progress().await {
-        Some(progress) => (StatusCode::OK, Json(progress)).into_response(),
-        None => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "phase": "idle",
-                "progress_percentage": 0,
-                "elapsed_seconds": 0,
-                "estimated_remaining_seconds": null,
-                "total_size_bytes": 0
-            })),
-        )
-            .into_response(),
-    }
+pub async fn get_backup_status(State(_state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "phase": "idle",
+            "progress_percentage": 0,
+            "elapsed_seconds": 0,
+            "estimated_remaining_seconds": null,
+            "total_size_bytes": 0
+        })),
+    )
+        .into_response()
 }
 
 pub async fn get_backup_verification_history(
-    State(pool): State<sqlx::PgPool>,
+    State(state): State<AppState>,
     Query(params): Query<HistoryQuery>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(50).min(1000);
@@ -102,7 +99,7 @@ pub async fn get_backup_verification_history(
     )
     .bind(limit)
     .bind(offset)
-    .fetch_all(&pool)
+    .fetch_all(&state.db)
     .await
     {
         Ok(history) => (StatusCode::OK, Json(history)).into_response(),
@@ -224,7 +221,7 @@ pub async fn update_rollout_percentage(
 }
 
 pub async fn update_webhook_rate_limit(
-    State(pool): State<sqlx::PgPool>,
+    State(state): State<AppState>,
     Path(endpoint_id): Path<uuid::Uuid>,
     Json(payload): Json<UpdateWebhookRateLimitRequest>,
 ) -> impl IntoResponse {
@@ -247,7 +244,7 @@ pub async fn update_webhook_rate_limit(
     )
     .bind(payload.max_delivery_rate)
     .bind(endpoint_id)
-    .execute(&pool)
+    .execute(&state.db)
     .await
     {
         Ok(result) => {

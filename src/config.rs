@@ -12,15 +12,19 @@ pub enum AppEnv {
     Production,
 }
 
-impl AppEnv {
-    pub fn from_str(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
+impl std::str::FromStr for AppEnv {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.trim().to_ascii_lowercase().as_str() {
             "production" | "prod" => AppEnv::Production,
             "staging" => AppEnv::Staging,
             _ => AppEnv::Development,
-        }
+        })
     }
+}
 
+impl AppEnv {
     pub fn as_str(&self) -> &'static str {
         match self {
             AppEnv::Development => "development",
@@ -163,9 +167,10 @@ pub mod assets;
 impl Config {
     pub async fn load() -> anyhow::Result<Self> {
         // Determine profile before loading env files
-        let app_env = AppEnv::from_str(
-            &std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string()),
-        );
+        let app_env: AppEnv = std::env::var("APP_ENV")
+            .unwrap_or_else(|_| "development".to_string())
+            .parse()
+            .unwrap_or(AppEnv::Development);
 
         // Load base .env then profile-specific .env.{profile}
         load_env_profile(&app_env);

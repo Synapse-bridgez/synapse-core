@@ -238,7 +238,10 @@ impl AccountMonitor {
                 Err(e) => {
                     warn!("Stream error: {}, falling back to polling", e);
                     // Fall back to polling
-                    return self.start().await;
+                    return {
+                        self.start().await;
+                        Ok(())
+                    };
                 }
             }
         }

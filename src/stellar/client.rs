@@ -5,7 +5,6 @@ use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -23,6 +22,17 @@ pub enum HorizonError {
     InvalidResponse(String),
     #[error("Circuit breaker open: {0}")]
     CircuitBreakerOpen(String),
+}
+
+impl Clone for HorizonError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::RequestError(e) => Self::InvalidResponse(e.to_string()),
+            Self::AccountNotFound(s) => Self::AccountNotFound(s.clone()),
+            Self::InvalidResponse(s) => Self::InvalidResponse(s.clone()),
+            Self::CircuitBreakerOpen(s) => Self::CircuitBreakerOpen(s.clone()),
+        }
+    }
 }
 
 /// Response from Horizon /accounts endpoint
@@ -242,12 +252,11 @@ impl HorizonClient {
         let mut stream = response.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk: bytes::Bytes = chunk?;
             let text = String::from_utf8_lossy(&chunk);
 
             for line in text.lines() {
-                if line.starts_with("data: ") {
-                    let json_str = &line[6..];
+                if let Some(json_str) = line.strip_prefix("data: ") {
                     match serde_json::from_str::<StreamPayment>(json_str) {
                         Ok(payment) => {
                             let mut m = metrics.lock().await;
@@ -274,7 +283,7 @@ impl HorizonClient {
         &self,
         metrics: &Arc<tokio::sync::Mutex<StreamMetrics>>,
     ) -> StreamMetrics {
-        metrics.lock().await.clone()
+        *metrics.lock().await
     }
 }
 
