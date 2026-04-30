@@ -94,7 +94,8 @@ async fn test_settlement_dispute_review_resolution_flow() {
     insert_tx(&pool, &tx).await;
 
     // Create settlement
-    let settlement = svc.settle_asset("USD").await.unwrap().unwrap();
+    let settlements = svc.settle_asset("USD").await.unwrap();
+    let settlement = settlements.first().unwrap().clone();
     assert_eq!(settlement.status, "completed");
 
     // completed → pending_review
@@ -158,7 +159,8 @@ async fn test_voided_settlement_releases_transactions() {
     let tx_id = tx.id;
     insert_tx(&pool, &tx).await;
 
-    let settlement = svc.settle_asset("EUR").await.unwrap().unwrap();
+    let settlements = svc.settle_asset("EUR").await.unwrap();
+    let settlement = settlements.first().unwrap().clone();
 
     // Verify transaction is linked
     let linked: (Option<Uuid>,) =
@@ -209,7 +211,8 @@ async fn test_invalid_settlement_transition_rejected() {
         .build();
     insert_tx(&pool, &tx).await;
 
-    let settlement = svc.settle_asset("GBP").await.unwrap().unwrap();
+    let settlements = svc.settle_asset("GBP").await.unwrap();
+    let settlement = settlements.first().unwrap().clone();
 
     // completed → adjusted is not a valid direct transition
     let result = svc
@@ -234,7 +237,8 @@ async fn test_settlement_status_change_is_audit_logged() {
         .build();
     insert_tx(&pool, &tx).await;
 
-    let settlement = svc.settle_asset("JPY").await.unwrap().unwrap();
+    let settlements = svc.settle_asset("JPY").await.unwrap();
+    let settlement = settlements.first().unwrap().clone();
     svc.update_status(
         settlement.id,
         "pending_review",

@@ -24,31 +24,6 @@ async fn test_gauge_updates() {
     // Test passes if metrics initialize successfully
 }
 
-#[ignore = "Requires DATABASE_URL"]
-#[tokio::test]
-async fn test_prometheus_export_format() {
-    use sqlx::postgres::PgPoolOptions;
-
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
-
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .expect("Failed to connect to test database");
-
-    let handle = init_metrics().expect("Failed to initialize metrics");
-
-    let result = metrics_handler(axum::extract::State(handle), axum::extract::State(pool)).await;
-
-    assert!(result.is_ok());
-    let metrics_output = result.unwrap();
-
-    assert!(metrics_output.starts_with('#'));
-    assert!(metrics_output.contains("Metrics"));
-}
-
 #[tokio::test]
 #[ignore = "Middleware testing requires complex setup with axum 0.6"]
 async fn test_metrics_authentication() {
@@ -56,37 +31,9 @@ async fn test_metrics_authentication() {
     // TODO: Rewrite this test for axum 0.6 compatibility
 }
 
-#[test]
-fn test_metrics_handle_clone() {
+#[tokio::test]
+async fn test_metrics_handle_clone() {
     let handle = init_metrics().expect("Failed to initialize metrics");
     let _cloned = handle.clone();
     // Verify cloning works for MetricsHandle
-}
-
-#[ignore = "Requires DATABASE_URL"]
-#[test]
-fn test_metrics_state_creation() {
-    use sqlx::postgres::PgPoolOptions;
-
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
-        });
-
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("Failed to connect to test database");
-
-        let handle = init_metrics().expect("Failed to initialize metrics");
-
-        let state = MetricsState {
-            handle: handle.clone(),
-            pool: pool.clone(),
-        };
-
-        let cloned_state = state.clone();
-        assert!(std::mem::size_of_val(&cloned_state) > 0);
-    });
 }

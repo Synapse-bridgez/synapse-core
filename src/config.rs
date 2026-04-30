@@ -12,15 +12,14 @@ pub enum AppEnv {
     Production,
 }
 
-impl std::str::FromStr for AppEnv {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.trim().to_ascii_lowercase().as_str() {
+impl AppEnv {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
             "production" | "prod" => AppEnv::Production,
             "staging" => AppEnv::Staging,
             _ => AppEnv::Development,
-        })
+        }
     }
 }
 
@@ -167,10 +166,9 @@ pub mod assets;
 impl Config {
     pub async fn load() -> anyhow::Result<Self> {
         // Determine profile before loading env files
-        let app_env: AppEnv = std::env::var("APP_ENV")
-            .unwrap_or_else(|_| "development".to_string())
-            .parse()
-            .unwrap_or(AppEnv::Development);
+        let app_env = AppEnv::from_str(
+            &std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string()),
+        );
 
         // Load base .env then profile-specific .env.{profile}
         load_env_profile(&app_env);

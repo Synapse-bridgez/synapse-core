@@ -253,7 +253,7 @@ mod tests {
 
         // Should be approximately 50% (allow 10% variance)
         assert!(
-            activated >= 40 && activated <= 60,
+            (40..=60).contains(&activated),
             "Expected ~50% activation, got {}%",
             activated
         );

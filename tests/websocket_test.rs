@@ -37,7 +37,7 @@ async fn setup_test_app() -> (
 
     let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
-    let query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
+    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -57,7 +57,9 @@ async fn setup_test_app() -> (
         )),
         pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        secrets_store: None,
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
+        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = create_app(app_state);
@@ -141,6 +143,7 @@ async fn test_ws_receives_transaction_updates() {
     let transaction_id = Uuid::new_v4();
     let update = TransactionStatusUpdate {
         transaction_id,
+        tenant_id: Uuid::default(),
         status: "completed".to_string(),
         timestamp: Utc::now(),
         message: Some("Transaction processed successfully".to_string()),
@@ -187,6 +190,7 @@ async fn test_ws_multiple_clients_receive_broadcast() {
     let transaction_id = Uuid::new_v4();
     let update = TransactionStatusUpdate {
         transaction_id,
+        tenant_id: Uuid::default(),
         status: "pending".to_string(),
         timestamp: Utc::now(),
         message: None,
@@ -246,6 +250,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
     let update = TransactionStatusUpdate {
         transaction_id: Uuid::new_v4(),
         status: "test".to_string(),
+        tenant_id: Uuid::default(),
         timestamp: Utc::now(),
         message: None,
     };
@@ -263,6 +268,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
     let update2 = TransactionStatusUpdate {
         transaction_id: Uuid::new_v4(),
         status: "test2".to_string(),
+        tenant_id: Uuid::default(),
         timestamp: Utc::now(),
         message: None,
     };
@@ -347,6 +353,7 @@ async fn test_ws_handles_rapid_broadcasts() {
 
         let update = TransactionStatusUpdate {
             transaction_id,
+            tenant_id: Uuid::default(),
             status: format!("status_{}", i),
             timestamp: Utc::now(),
             message: Some(format!("Update {}", i)),

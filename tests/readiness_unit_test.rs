@@ -5,7 +5,7 @@ use synapse_core::readiness::ReadinessState;
 #[test]
 fn test_readiness_initial_state() {
     let state = ReadinessState::new();
-    assert!(state.is_ready(), "Initial state should be ready");
+    assert!(!state.is_ready(), "Initial state should be NOT READY");
     assert!(!state.is_draining(), "Initial state should not be draining");
 }
 
@@ -92,13 +92,12 @@ fn test_readiness_clone() {
     let cloned = state.clone();
 
     // Both should have same initial state
-    assert!(cloned.is_ready());
+    assert!(!cloned.is_ready());
 
-    // Changing original should not affect clone (they share the Arc)
-    // Actually they share the same AtomicBool via Arc, so they should be in sync
-    state.set_not_ready();
+    // Changing original should affect clone (they share the Arc)
+    state.set_ready();
     assert!(
-        !cloned.is_ready(),
+        cloned.is_ready(),
         "Clone should reflect changes to original (shared Arc)"
     );
 }

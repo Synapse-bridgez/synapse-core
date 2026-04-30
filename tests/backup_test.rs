@@ -109,39 +109,6 @@ async fn test_backup_restore() -> Result<()> {
 
 #[ignore = "Requires pg_dump binary"]
 #[tokio::test]
-#[ignore = "Flaky test - retention policy behavior needs investigation"]
-async fn test_retention_policy() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let backup_dir = temp_dir.path().to_path_buf();
-
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
-
-    let service =
-        synapse_core::services::backup::BackupService::new(database_url, backup_dir.clone(), None);
-
-    // Create 5 hourly backups
-    for _ in 0..5 {
-        service
-            .create_backup(synapse_core::services::backup::BackupType::Hourly)
-            .await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-
-    let backups_before = service.list_backups().await?;
-    assert_eq!(backups_before.len(), 5);
-
-    // Apply retention policy (keep last 24 hourly, but we only have 5)
-    service.apply_retention_policy().await?;
-
-    let backups_after = service.list_backups().await?;
-    assert_eq!(backups_after.len(), 5); // All should remain
-
-    Ok(())
-}
-
-#[ignore = "Requires pg_dump binary"]
-#[tokio::test]
 async fn test_backup_without_encryption() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let backup_dir = temp_dir.path().to_path_buf();

@@ -8,6 +8,7 @@ use testcontainers_modules::postgres::Postgres;
 /// Helper function to create a test config with valid defaults
 fn create_test_config(database_url: String, redis_url: String, horizon_url: String) -> Config {
     Config {
+        app_env: synapse_core::config::AppEnv::Development,
         server_port: 3000,
         database_url,
         database_replica_url: None,
@@ -21,7 +22,24 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
         allowed_ips: AllowedIps::Any,
         backup_dir: "./backups".to_string(),
         backup_encryption_key: None,
+        db_timeouts: synapse_core::config::DbTimeoutConfig::default(),
         otlp_endpoint: None,
+        cors_allowed_origins: vec![],
+        max_pending_queue: 10000,
+        db_min_connections: 5,
+        db_max_connections: 50,
+        db_statement_timeout_ms: 30000,
+        db_idle_timeout_secs: 600,
+        db_long_running_statement_timeout_ms: 300000,
+        processor_workers: 4,
+        processor_batch_size: 50,
+        processor_poll_interval_ms: 1000,
+        processor_min_batch: 10,
+        processor_max_batch: 500,
+        processor_scaling_factor: 0.5,
+        slow_query_threshold_ms: 500,
+        settlement_max_batch_size: 10000,
+        settlement_min_tx_count: 1,
     }
 }
 

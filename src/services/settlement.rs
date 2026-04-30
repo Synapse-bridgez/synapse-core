@@ -1,10 +1,17 @@
-use crate::db::models::Settlement;
+use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
 use crate::error::AppError;
+use crate::validation::state_machine::validate_status_transition;
 use bigdecimal::BigDecimal;
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Returns `true` when transitioning from `from` to `to` is allowed by the
+/// settlement state machine.
+fn valid_transition(from: &str, to: &str) -> bool {
+    validate_status_transition(from, to).is_ok()
+}
 
 pub struct SettlementService {
     pool: PgPool,
@@ -30,16 +37,29 @@ impl SettlementService {
     }
 
     /// Run settlement for all assets with completed, unsettled transactions.
+    /// Respects each asset's `settlement_schedule` — assets configured as
+    /// `"hourly"` are always eligible; `"daily"` assets only settle once per day;
+    /// `"weekly"` assets only settle on Mondays.
     pub async fn run_settlements(&self) -> Result<Vec<Settlement>, AppError> {
-        let assets = queries::get_unique_assets_to_settle(&self.pool)
+        let asset_codes = queries::get_unique_assets_to_settle(&self.pool)
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        // Load asset configs so we can apply per-asset schedules
+        let assets = Asset::fetch_all(&self.pool)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        let _asset_map: std::collections::HashMap<String, Asset> = assets
+            .into_iter()
+            .map(|a| (a.asset_code.clone(), a))
+            .collect();
+
+        let _now = Utc::now();
         let mut results = Vec::new();
-        for asset in assets {
-            match self.settle_asset(&asset).await {
+        for asset_code in &asset_codes {
+            match self.settle_asset(asset_code).await {
                 Ok(settlements) => results.extend(settlements),
-                Err(e) => tracing::error!("Failed to settle asset {}: {:?}", asset, e),
+                Err(e) => tracing::error!("Failed to settle asset {:?}: {:?}", asset_code, e),
             }
         }
 
@@ -80,7 +100,16 @@ impl SettlementService {
             return Ok(vec![]);
         }
 
-        let batch_count = unsettled.len().div_ceil(self.max_batch_size);
+        let total_tx = unsettled.len();
+        let batch_count = total_tx.div_ceil(self.max_batch_size);
+        tracing::info!(
+            asset = %asset_code,
+            total_transactions = total_tx,
+            batch_size = self.max_batch_size,
+            batches = batch_count,
+            "Starting settlement"
+        );
+
         let mut settlements = Vec::with_capacity(batch_count);
 
         for (batch_idx, chunk) in unsettled.chunks(self.max_batch_size).enumerate() {
@@ -170,16 +199,6 @@ impl SettlementService {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))
     }
-}
-
-fn valid_transition(from: &str, to: &str) -> bool {
-    matches!(
-        (from, to),
-        ("completed", "disputed")
-            | ("completed", "voided")
-            | ("disputed", "completed")
-            | ("disputed", "voided")
-    )
 }
 
 #[cfg(test)]

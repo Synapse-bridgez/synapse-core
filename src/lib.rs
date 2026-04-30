@@ -13,10 +13,11 @@ pub mod services;
 pub mod startup;
 pub mod stellar;
 pub mod telemetry;
-#[path = "Multi-Tenant Isolation Layer (Architecture)/src/tenant/mod.rs"]
 pub mod tenant;
 pub mod utils;
 pub mod validation;
+
+pub use config::assets::AssetCache;
 
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
@@ -81,6 +82,8 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
+        let _asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)
@@ -127,34 +130,24 @@ pub fn create_app(app_state: AppState) -> Router {
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::auth::api_key_auth,
-        ))
-        .layer(axum::Extension(app_state.db.clone()))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
-        ))
-        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)); // 1 MB
+        ));
 
     // Webhook route with validation + quota middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::auth::api_key_auth,
-        ))
-        .layer(axum::Extension(app_state.db.clone()))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
-        ))
-        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)); // 1 MB
+        ));
 
     // Core API routes (shared between versioned and unversioned)
     let core_routes = Router::new()
@@ -246,10 +239,20 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/settlements/:id/status",
             axum::routing::patch(handlers::settlements::update_settlement_status),
         )
+        // Admin: reconciliation reports
+        .nest(
+            "/admin/reconciliation",
+            handlers::admin::reconciliation::reconciliation_routes(),
+        )
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
         .with_state(api_state)
+        .merge(
+            Router::new()
+                .route("/ws", get(handlers::ws::ws_handler))
+                .with_state(app_state),
+        )
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))

@@ -28,7 +28,7 @@ pub async fn error_enrichment_middleware(
         let bytes = match hyper::body::to_bytes(body).await {
             Ok(b) => b,
             Err(_) => {
-                return Ok((parts.status, "").into_response());
+                return Ok(parts.status.into_response());
             }
         };
 
@@ -37,12 +37,18 @@ pub async fn error_enrichment_middleware(
                 obj.insert("request_id".to_string(), json!(request_id));
             }
             let new_body = serde_json::to_vec(&json_value).unwrap_or_else(|_| bytes.to_vec());
-            let mut resp = (parts.status, axum::body::Full::from(new_body)).into_response();
+            let mut resp = Response::builder()
+                .status(parts.status)
+                .body(axum::body::boxed(axum::body::Full::from(new_body)))
+                .unwrap();
             *resp.headers_mut() = parts.headers;
             return Ok(resp);
         }
 
-        let mut resp = (parts.status, axum::body::Full::from(bytes)).into_response();
+        let mut resp = Response::builder()
+            .status(parts.status)
+            .body(axum::body::boxed(axum::body::Full::from(bytes)))
+            .unwrap();
         *resp.headers_mut() = parts.headers;
         Ok(resp)
     } else {

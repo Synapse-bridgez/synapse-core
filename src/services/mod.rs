@@ -1,6 +1,6 @@
 pub mod account_monitor;
 pub mod backup;
-pub mod backup_verification_job;
+pub mod compliance;
 pub mod feature_flags;
 pub mod lock_manager;
 pub mod processor;
@@ -14,12 +14,12 @@ pub mod webhook_dispatcher;
 
 pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
-pub use backup_verification_job::BackupVerificationJob;
 pub use feature_flags::FeatureFlagService;
 pub use lock_manager::LeaderElection;
+pub use lock_manager::{FairLockConfig, FairLockManager};
 pub use query_cache::{CacheConfig, QueryCache};
 pub use reconciliation::ReconciliationService;
-pub use scheduler::{Job, JobScheduler, JobStatus};
+pub use scheduler::{AuditLogRetentionJob, Job, JobScheduler, JobStatus};
 pub use settlement::SettlementService;
 pub use transaction_processor::TransactionProcessor;
 pub use transaction_processor_job::TransactionProcessorJob;

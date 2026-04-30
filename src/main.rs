@@ -1,5 +1,4 @@
 use clap::Parser;
-use opentelemetry::trace::TracerProvider as _;
 use sqlx::migrate::Migrator;
 use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
 use synapse_core::{
@@ -13,11 +12,10 @@ use synapse_core::{
     secrets::SecretsStore,
     services::{FeatureFlagService, SettlementService, WebhookDispatcher},
     stellar::HorizonClient,
-    telemetry, AppState, ReadinessState,
+    AppState, ReadinessState,
 };
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -71,26 +69,21 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let tracer_provider = telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
-        .expect("failed to initialise OpenTelemetry tracer");
+    let _tracer_provider =
+        synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
+            .expect("failed to initialise OpenTelemetry tracer");
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(OpenTelemetryLayer::new(
-                    tracer_provider.tracer("synapse-core"),
-                ))
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(OpenTelemetryLayer::new(
-                    tracer_provider.tracer("synapse-core"),
-                ))
                 .init();
         }
     }
@@ -120,11 +113,10 @@ async fn main() -> anyhow::Result<()> {
             BackupCommands::Restore { filename } => {
                 cli::handle_backup_restore(&config, &filename).await
             }
-            BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
-            BackupCommands::RestorePitr { .. } => {
-                eprintln!("PITR restore not yet implemented");
-                Ok(())
+            BackupCommands::RestorePitr { timestamp } => {
+                cli::handle_backup_restore_pitr(&config, &timestamp).await
             }
+            BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
     }
@@ -286,6 +278,10 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
         config.processor_min_batch as u64,
     ));
+    // Initialize asset registry cache (refreshes every 5 minutes)
+    let _asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+    tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -380,6 +376,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Job scheduler started");
 
     let app = synapse_core::create_app(app_state.clone());
+    let readiness = app_state.readiness.clone();
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =
@@ -411,44 +408,36 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
 
-    // Clone readiness state for the shutdown signal handler
-    let readiness_for_shutdown = app_state.readiness.clone();
-
-    // Build the shutdown signal: fires on SIGTERM or SIGINT, then drains
-    let shutdown_signal = async move {
-        let ctrl_c = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("failed to install CTRL+C handler");
-        };
-
-        #[cfg(unix)]
-        let sigterm = async {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
-        };
-
-        #[cfg(not(unix))]
-        let sigterm = std::future::pending::<()>();
-
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("Received SIGINT, starting graceful shutdown"),
-            _ = sigterm => tracing::info!("Received SIGTERM, starting graceful shutdown"),
-        }
-
-        // Mark service as not ready so /ready returns 503 immediately
-        readiness_for_shutdown.set_not_ready();
-        tracing::info!("Readiness set to not_ready; waiting for in-flight requests to drain");
-
-        // Wait for the configured drain timeout (default 30s)
-        readiness_for_shutdown.wait_for_drain().await;
-    };
-
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal)
+        .with_graceful_shutdown(async move {
+            // Wait for SIGTERM or SIGINT
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
+                tokio::select! {
+                    _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+                    _ = sigint.recv() => tracing::info!("Received SIGINT"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to register Ctrl-C handler");
+                tracing::info!("Received Ctrl-C");
+            }
+
+            // If not already draining (e.g. /admin/drain was not called), start drain now
+            if !readiness.is_draining() {
+                readiness.start_drain();
+            }
+            readiness.wait_for_drain().await;
+        })
         .await?;
 
     // Flush and shut down the OTel exporter on clean exit.

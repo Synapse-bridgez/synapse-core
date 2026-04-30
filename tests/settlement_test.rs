@@ -1,6 +1,8 @@
+use bigdecimal::BigDecimal;
 use chrono::{Duration, Utc};
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
+use synapse_core::db::models::Transaction;
 use synapse_core::error::AppError;
 use synapse_core::services::SettlementService;
 use testcontainers::runners::AsyncRunner;
@@ -104,8 +106,8 @@ async fn test_settle_single_asset() {
     let inserted = insert_tx(&pool, &tx).await;
 
     let result = service.settle_asset("USD").await.unwrap();
-    assert!(result.is_some());
-    let settlement = result.unwrap();
+    assert!(!result.is_empty());
+    let settlement = result.first().unwrap();
     assert_eq!(settlement.asset_code, "USD");
     assert_eq!(settlement.tx_count, 1);
     assert_eq!(settlement.total_amount, BigDecimal::from(100));
@@ -149,7 +151,8 @@ async fn test_settle_multiple_transactions() {
     let inserted1 = insert_tx(&pool, &tx1).await;
     let inserted2 = insert_tx(&pool, &tx2).await;
 
-    let settlement = service.settle_asset("EUR").await.unwrap().unwrap();
+    let settlements = service.settle_asset("EUR").await.unwrap();
+    let settlement = settlements.first().unwrap();
     assert_eq!(settlement.tx_count, 2);
     assert_eq!(settlement.total_amount, BigDecimal::from(100));
     assert_eq!(
@@ -183,7 +186,7 @@ async fn test_settle_no_unsettled_transactions() {
     let service = SettlementService::new(pool.clone());
 
     let result = service.settle_asset("NONEXISTENT").await.unwrap();
-    assert!(result.is_none());
+    assert!(result.is_empty());
 }
 
 #[tokio::test]

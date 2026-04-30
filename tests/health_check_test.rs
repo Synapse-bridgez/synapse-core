@@ -12,11 +12,13 @@ async fn test_health_check_response_structure() {
     // Verify DependencyStatus variants
     let healthy = DependencyStatus::Healthy {
         status: "healthy".to_string(),
+        severity: synapse_core::health::DependencySeverity::Critical,
         latency_ms: 10,
     };
 
     let unhealthy = DependencyStatus::Unhealthy {
         status: "unhealthy".to_string(),
+        severity: synapse_core::health::DependencySeverity::NonCritical,
         error: "connection refused".to_string(),
     };
 
@@ -35,6 +37,7 @@ fn test_dependency_status_serialization() {
     // Test that DependencyStatus serializes to the correct JSON format
     let healthy = DependencyStatus::Healthy {
         status: "healthy".to_string(),
+        severity: synapse_core::health::DependencySeverity::Critical,
         latency_ms: 42,
     };
 
@@ -45,6 +48,7 @@ fn test_dependency_status_serialization() {
 
     let unhealthy = DependencyStatus::Unhealthy {
         status: "unhealthy".to_string(),
+        severity: synapse_core::health::DependencySeverity::NonCritical,
         error: "timeout".to_string(),
     };
 
@@ -63,6 +67,7 @@ fn test_health_response_structure() {
         "postgres".to_string(),
         DependencyStatus::Healthy {
             status: "healthy".to_string(),
+            severity: synapse_core::health::DependencySeverity::Critical,
             latency_ms: 5,
         },
     );
@@ -70,6 +75,7 @@ fn test_health_response_structure() {
         "redis".to_string(),
         DependencyStatus::Unhealthy {
             status: "unhealthy".to_string(),
+            severity: synapse_core::health::DependencySeverity::NonCritical,
             error: "connection refused".to_string(),
         },
     );
@@ -77,6 +83,7 @@ fn test_health_response_structure() {
         "horizon".to_string(),
         DependencyStatus::Healthy {
             status: "healthy".to_string(),
+            severity: synapse_core::health::DependencySeverity::NonCritical,
             latency_ms: 150,
         },
     );

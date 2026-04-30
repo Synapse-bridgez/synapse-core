@@ -1,7 +1,17 @@
+[workspace]
+members = ["xtask"]
+resolver = "2"
+
 [package]
 name = "synapse-core"
 version = "0.1.0"
 edition = "2021"
+
+[lints.rust]
+dead_code = "warn"
+
+[lints.clippy]
+too_many_arguments = "warn"
 
 [lib]
 name = "synapse_core"
@@ -64,11 +74,7 @@ pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 flate2 = "1.0"
 opentelemetry = { version = "0.22", features = ["metrics", "trace"] }
 opentelemetry_sdk = { version = "0.22", features = ["rt-tokio", "metrics", "trace"] }
-opentelemetry-otlp = { version = "0.15", features = [
-    "grpc-tonic",
-    "metrics",
-    "trace",
-] }
+opentelemetry-otlp = { version = "0.15", features = ["grpc-tonic", "metrics", "trace"] }
 opentelemetry-semantic-conventions = "0.14"
 tracing-opentelemetry = "0.23"
 prometheus = "0.13"

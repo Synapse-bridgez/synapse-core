@@ -74,6 +74,9 @@ impl TestApp {
             )),
             pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+            secrets_store: None,
+            metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
+            ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let app = create_app(app_state);
@@ -97,6 +100,7 @@ impl TestApp {
     }
 
     /// Truncate all tables for test isolation (call between tests if reusing TestApp).
+    #[allow(dead_code)]
     pub async fn cleanup(&self) {
         let _ = sqlx::query("TRUNCATE TABLE transactions, settlements, audit_logs, webhook_deliveries, webhook_endpoints, transaction_dlq RESTART IDENTITY CASCADE")
             .execute(&self.pool)

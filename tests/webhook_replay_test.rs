@@ -1,8 +1,6 @@
-use chrono::Utc;
 use sqlx::PgPool;
 use synapse_core::db::models::Transaction;
 use synapse_core::db::queries;
-use uuid::Uuid;
 
 #[ignore = "Requires DATABASE_URL"]
 #[sqlx::test]

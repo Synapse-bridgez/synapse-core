@@ -8,13 +8,302 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// Fair lock queue — Redis sorted-set based, FIFO by enqueue timestamp
+// ---------------------------------------------------------------------------
+
+/// Configuration for the fair lock queue.
+#[derive(Clone, Debug)]
+pub struct FairLockConfig {
+    /// How long a waiter stays in the queue before being considered stale and
+    /// removed (crash-safety). Should be > `max_wait`.
+    pub waiter_ttl: Duration,
+    /// Maximum time a caller will wait in the queue before giving up.
+    pub max_wait: Duration,
+    /// How often to poll Redis while waiting for our turn.
+    pub poll_interval: Duration,
+}
+
+impl Default for FairLockConfig {
+    fn default() -> Self {
+        Self {
+            waiter_ttl: Duration::from_secs(60),
+            max_wait: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(50),
+        }
+    }
+}
+
+/// A fair, Redis sorted-set based distributed lock.
+///
+/// ## Protocol
+/// 1. Enqueue: `ZADD lock:queue:<resource> NX <timestamp_ms> <token>`
+///    with a separate heartbeat key `lock:waiter:<resource>:<token>` (EX waiter_ttl)
+///    so crashed waiters are detectable.
+/// 2. Check turn: `ZRANGE lock:queue:<resource> 0 0` — if our token is first, we hold the lock.
+/// 3. Before checking, prune stale waiters whose heartbeat key has expired.
+/// 4. Release: `ZREM lock:queue:<resource> <token>` + delete heartbeat key.
+pub struct FairLockManager {
+    redis_client: Client,
+    lock_ttl: Duration,
+    config: FairLockConfig,
+}
+
+/// A held fair lock. Drop or call `release()` to give up the position.
+pub struct FairLock {
+    resource: String,
+    token: String,
+    redis_client: Client,
+    lock_ttl: Duration,
+    acquired_at: Instant,
+}
+
+impl FairLockManager {
+    pub fn new(
+        redis_url: &str,
+        lock_ttl_secs: u64,
+        config: FairLockConfig,
+    ) -> Result<Self, redis::RedisError> {
+        Ok(Self {
+            redis_client: Client::open(redis_url)?,
+            lock_ttl: Duration::from_secs(lock_ttl_secs),
+            config,
+        })
+    }
+
+    /// Enqueue this worker and wait until it reaches the front of the queue.
+    /// Returns `None` if `max_wait` is exceeded.
+    pub async fn acquire(&self, resource: &str) -> Result<Option<FairLock>, redis::RedisError> {
+        let queue_key = format!("lock:queue:{}", resource);
+        let token = Uuid::new_v4().to_string();
+        let heartbeat_key = format!("lock:waiter:{}:{}", resource, token);
+        let waiter_ttl_secs = self.config.waiter_ttl.as_secs();
+
+        let now_ms = unix_ms();
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // Enqueue with timestamp score (NX — don't overwrite if somehow already present)
+        let _: () = conn.zadd(&queue_key, &token, now_ms as f64).await?;
+
+        // Publish heartbeat so others can detect us as alive
+        conn.set_ex::<_, _, ()>(&heartbeat_key, "alive", waiter_ttl_secs)
+            .await?;
+
+        debug!(resource, %token, "Enqueued in fair lock queue");
+        crate::metrics::lock_contention_total().add(
+            1,
+            &[opentelemetry::KeyValue::new(
+                "resource",
+                resource.to_string(),
+            )],
+        );
+
+        let deadline = tokio::time::Instant::now() + self.config.max_wait;
+
+        loop {
+            // Refresh heartbeat so we aren't pruned while waiting
+            conn.set_ex::<_, _, ()>(&heartbeat_key, "alive", waiter_ttl_secs)
+                .await?;
+
+            // Prune stale waiters (crashed workers whose heartbeat expired)
+            self.prune_stale_waiters(&mut conn, resource, &queue_key)
+                .await?;
+
+            // Check if we are at the front
+            let front: Vec<String> = conn.zrange(&queue_key, 0, 0).await?;
+            if front.first().map(|s| s.as_str()) == Some(&token) {
+                // We're first — acquire the actual lock key
+                let lock_key = format!("lock:{}", resource);
+                let set_result: Option<String> = conn
+                    .set_options(
+                        &lock_key,
+                        &token,
+                        redis::SetOptions::default()
+                            .conditional_set(redis::ExistenceCheck::NX)
+                            .with_expiration(
+                                redis::SetExpiry::EX(self.lock_ttl.as_secs() as usize),
+                            ),
+                    )
+                    .await?;
+
+                if set_result.is_some() {
+                    // Remove from queue and clean up heartbeat
+                    let _: () = conn.zrem(&queue_key, &token).await?;
+                    let _: () = conn.del(&heartbeat_key).await?;
+
+                    debug!(resource, %token, "Fair lock acquired");
+                    crate::metrics::lock_acquired_total().add(
+                        1,
+                        &[opentelemetry::KeyValue::new(
+                            "resource",
+                            resource.to_string(),
+                        )],
+                    );
+
+                    // Register in active lock registry
+                    let acquired_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    lock_registry()
+                        .register(ActiveLockInfo {
+                            resource: resource.to_string(),
+                            token: token.clone(),
+                            acquired_at: acquired_unix,
+                            ttl_secs: self.lock_ttl.as_secs(),
+                            expected_duration_secs: self.lock_ttl.as_secs(),
+                            overdue: false,
+                        })
+                        .await;
+
+                    return Ok(Some(FairLock {
+                        resource: resource.to_string(),
+                        token,
+                        redis_client: self.redis_client.clone(),
+                        lock_ttl: self.lock_ttl,
+                        acquired_at: Instant::now(),
+                    }));
+                }
+                // Lock key already held by someone else — shouldn't normally happen
+                // since we're at the front, but handle it gracefully by waiting.
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                // Give up — remove ourselves from the queue
+                let _: () = conn.zrem(&queue_key, &token).await?;
+                let _: () = conn.del(&heartbeat_key).await?;
+                debug!(resource, %token, "Fair lock wait timed out, removed from queue");
+                return Ok(None);
+            }
+
+            sleep(self.config.poll_interval).await;
+        }
+    }
+
+    /// Remove queue members whose heartbeat key has expired (crashed waiters).
+    async fn prune_stale_waiters(
+        &self,
+        conn: &mut redis::aio::MultiplexedConnection,
+        resource: &str,
+        queue_key: &str,
+    ) -> Result<(), redis::RedisError> {
+        // Fetch all members
+        let members: Vec<String> = conn.zrange(queue_key, 0, -1).await?;
+        for member in members {
+            let hb_key = format!("lock:waiter:{}:{}", resource, member);
+            let alive: Option<String> = conn.get(&hb_key).await?;
+            if alive.is_none() {
+                // Heartbeat gone — waiter crashed, evict from queue
+                let _: () = conn.zrem(queue_key, &member).await?;
+                warn!(resource, token = %member, "Pruned stale waiter from fair lock queue");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FairLock {
+    pub async fn release(self) -> Result<(), redis::RedisError> {
+        let hold_ms = self.acquired_at.elapsed().as_secs_f64() * 1000.0;
+        let lock_key = format!("lock:{}", self.resource);
+        let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+
+        // Release the lock key (token-checked)
+        let script = Script::new(
+            r#"
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            "#,
+        );
+        let _: i32 = script
+            .key(&lock_key)
+            .arg(&self.token)
+            .invoke_async(&mut conn)
+            .await?;
+
+        debug!(resource = %self.resource, hold_ms, "Released fair lock");
+
+        crate::metrics::lock_hold_duration_ms().record(
+            hold_ms,
+            &[opentelemetry::KeyValue::new(
+                "resource",
+                self.resource.clone(),
+            )],
+        );
+
+        let expected_ms = self.lock_ttl.as_secs_f64() * 1000.0;
+        if hold_ms > expected_ms * 2.0 {
+            warn!(
+                resource = %self.resource,
+                hold_ms,
+                expected_ms,
+                "Fair lock held longer than 2x expected duration"
+            );
+        }
+
+        lock_registry().deregister(&self.token).await;
+        Ok(())
+    }
+}
+
+impl Drop for FairLock {
+    fn drop(&mut self) {
+        let lock_key = format!("lock:{}", self.resource);
+        let token = self.token.clone();
+        let client = self.redis_client.clone();
+        let hold_ms = self.acquired_at.elapsed().as_secs_f64() * 1000.0;
+        let expected_ms = self.lock_ttl.as_secs_f64() * 1000.0;
+        let resource = self.resource.clone();
+
+        tokio::spawn(async move {
+            crate::metrics::lock_hold_duration_ms().record(
+                hold_ms,
+                &[opentelemetry::KeyValue::new("resource", resource.clone())],
+            );
+            if hold_ms > expected_ms * 2.0 {
+                warn!(
+                    resource,
+                    hold_ms,
+                    expected_ms,
+                    "Fair lock (dropped) held longer than 2x expected duration"
+                );
+            }
+            lock_registry().deregister(&token).await;
+
+            if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
+                let script = Script::new(
+                    r#"
+                    if redis.call("get", KEYS[1]) == ARGV[1] then
+                        return redis.call("del", KEYS[1])
+                    else
+                        return 0
+                    end
+                    "#,
+                );
+                let _ = script
+                    .key(&lock_key)
+                    .arg(&token)
+                    .invoke_async::<_, i32>(&mut conn)
+                    .await;
+            }
+        });
+    }
+}
+
+/// Current Unix time in milliseconds.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 const LEADER_KEY: &str = "processor:leader";
 const LEADER_LEASE_SECS: u64 = 30;
 const HEARTBEAT_TTL_SECS: u64 = 45;
-
-// ---------------------------------------------------------------------------
-// Active lock registry
-// ---------------------------------------------------------------------------
 
 /// Metadata about a currently-held lock, exposed via the admin endpoint.
 #[derive(Debug, Clone, Serialize)]
@@ -532,5 +821,110 @@ mod tests {
 
         registry.deregister("tok-1").await;
         assert!(registry.snapshot().await.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fair lock queue tests (no Redis required)
+    // -----------------------------------------------------------------------
+
+    /// Verify FairLockConfig defaults are sane.
+    #[test]
+    fn test_fair_lock_config_defaults() {
+        let cfg = FairLockConfig::default();
+        assert!(cfg.max_wait > Duration::ZERO);
+        assert!(cfg.waiter_ttl > cfg.max_wait);
+        assert!(cfg.poll_interval > Duration::ZERO);
+    }
+
+    /// Verify unix_ms() returns a plausible value (after year 2020).
+    #[test]
+    fn test_unix_ms_plausible() {
+        let ms = unix_ms();
+        // 2020-01-01 in ms
+        assert!(ms > 1_577_836_800_000);
+    }
+
+    /// With N workers contending, each should get approximately equal lock time.
+    /// This is a logic/unit test — uses the registry to verify fairness ordering.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_fair_queue_equal_distribution() {
+        let redis_url = "redis://localhost:6379";
+        let resource = "fair_test_equal";
+        let n_workers: usize = 4;
+        let acquired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..n_workers)
+            .map(|_| {
+                let acquired = acquired.clone();
+                tokio::spawn(async move {
+                    let mgr = FairLockManager::new(
+                        redis_url,
+                        2,
+                        FairLockConfig {
+                            max_wait: Duration::from_secs(20),
+                            waiter_ttl: Duration::from_secs(30),
+                            poll_interval: Duration::from_millis(20),
+                        },
+                    )
+                    .unwrap();
+                    if let Ok(Some(lock)) = mgr.acquire(resource).await {
+                        acquired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        sleep(Duration::from_millis(50)).await;
+                        let _ = lock.release().await;
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            let _ = h.await;
+        }
+
+        // All workers should have acquired the lock exactly once
+        assert_eq!(
+            acquired.load(std::sync::atomic::Ordering::SeqCst),
+            n_workers
+        );
+    }
+
+    /// A crashed waiter (no heartbeat) should be pruned from the queue.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_crashed_waiter_pruned() {
+        let redis_url = "redis://localhost:6379";
+        let resource = "fair_test_prune";
+        let queue_key = format!("lock:queue:{}", resource);
+        let stale_token = "stale-worker-token";
+
+        // Manually insert a stale entry (no heartbeat key)
+        let client = Client::open(redis_url).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        // Score = 1 (very old, should be first)
+        let _: () = conn.zadd(&queue_key, stale_token, 1.0_f64).await.unwrap();
+
+        // Now a real worker acquires — it should prune the stale entry and succeed
+        let mgr = FairLockManager::new(
+            redis_url,
+            5,
+            FairLockConfig {
+                max_wait: Duration::from_secs(5),
+                waiter_ttl: Duration::from_secs(10),
+                poll_interval: Duration::from_millis(50),
+            },
+        )
+        .unwrap();
+
+        let lock = mgr.acquire(resource).await.unwrap();
+        assert!(lock.is_some(), "Should acquire after pruning stale waiter");
+
+        // Stale token must be gone from the queue
+        let members: Vec<String> = conn.zrange(&queue_key, 0, -1).await.unwrap();
+        assert!(
+            !members.contains(&stale_token.to_string()),
+            "Stale waiter should have been pruned"
+        );
+
+        let _ = lock.unwrap().release().await;
     }
 }

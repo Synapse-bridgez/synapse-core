@@ -27,9 +27,12 @@ const _MAX_BODY_LOG_SIZE: usize = 1024; // 1 KB limit for body logging
 /// Axum middleware function.
 ///
 /// Mount with:
-/// ```rust
-/// Router::new()
-///     .layer(axum::middleware::from_fn(request_logger_middleware))
+/// ```rust,no_run
+/// use axum::Router;
+/// use synapse_core::middleware::request_logger::request_logger_middleware;
+///
+/// let app = Router::<()>::new()
+///     .layer(axum::middleware::from_fn(request_logger_middleware));
 /// ```
 pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>) -> Response {
     // -----------------------------------------------------------------------

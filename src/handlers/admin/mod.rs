@@ -1,11 +1,13 @@
 pub mod bulk_status;
 pub mod locks;
 pub mod quota;
+pub mod reconciliation;
 pub mod webhook_replay;
 
+use crate::error::AppError;
 use crate::AppState;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -20,38 +22,29 @@ pub struct UpdateFlagRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct UpdateRolloutPercentageRequest {
-    pub rollout_percentage: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateWebhookRateLimitRequest {
     pub max_delivery_rate: i32,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct HistoryQuery {
-    pub flag_name: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
+// ---------------------------------------------------------------------------
+// Asset management request/response types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateAssetRequest {
+    pub asset_code: String,
+    pub asset_issuer: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SetAssetEnabledRequest {
+    pub enabled: bool,
 }
 
 /// Create admin routes for queue management
-pub fn admin_routes() -> Router<AppState> {
-    Router::new()
-        .route("/flags", get(get_flags))
-        .route("/flags/:name", post(update_flag))
-        .route("/flags/:name/rollout", post(update_rollout_percentage))
-        .route("/feature-flags/history", get(get_flag_history))
-        .route("/backup/status", get(get_backup_status))
-        .route(
-            "/backup/verification-history",
-            get(get_backup_verification_history),
-        )
-        .route(
-            "/webhooks/endpoints/:id/rate-limit",
-            post(update_webhook_rate_limit),
-        )
+pub fn admin_routes() -> Router<sqlx::PgPool> {
+    Router::new().route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
 }
 
 /// Create webhook replay admin routes
@@ -66,176 +59,62 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
             "/webhooks/replay/batch",
             post(webhook_replay::batch_replay_webhooks),
         )
-}
-
-pub async fn get_backup_status(State(_state): State<AppState>) -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "phase": "idle",
-            "progress_percentage": 0,
-            "elapsed_seconds": 0,
-            "estimated_remaining_seconds": null,
-            "total_size_bytes": 0
-        })),
-    )
-        .into_response()
-}
-
-pub async fn get_backup_verification_history(
-    State(state): State<AppState>,
-    Query(params): Query<HistoryQuery>,
-) -> impl IntoResponse {
-    let limit = params.limit.unwrap_or(50).min(1000);
-    let offset = params.offset.unwrap_or(0);
-
-    match sqlx::query_as::<_, crate::services::backup::BackupVerificationLog>(
-        r#"
-        SELECT id, backup_filename, verification_status, row_count, latest_timestamp, error_message, verified_at
-        FROM backup_verification_logs
-        ORDER BY verified_at DESC
-        LIMIT $1 OFFSET $2
-        "#,
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(history) => (StatusCode::OK, Json(history)).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get backup verification history: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to retrieve verification history"
-                })),
-            )
-                .into_response()
-        }
-    }
+        .route(
+            "/webhooks/endpoints/:id/rate-limit",
+            post(update_webhook_rate_limit),
+        )
 }
 
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
-pub async fn list_active_instances(State(state): State<crate::ApiState>) -> impl IntoResponse {
-    let election = match crate::services::LeaderElection::new(&state.app_state.redis_url) {
-        Ok(e) => e,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": format!("Redis unavailable: {e}")})),
-            )
-                .into_response();
-        }
-    };
+pub async fn list_active_instances(
+    State(state): State<crate::ApiState>,
+) -> Result<impl IntoResponse, AppError> {
+    let election = crate::services::LeaderElection::new(&state.app_state.redis_url)?;
 
-    let (instances_res, leader_res) =
-        tokio::join!(election.list_active_instances(), election.current_leader(),);
+    let (instances, leader) =
+        tokio::try_join!(election.list_active_instances(), election.current_leader())?;
 
-    match (instances_res, leader_res) {
-        (Ok(instances), Ok(leader)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "instances": instances,
-                "leader": leader,
-                "count": instances.len(),
-            })),
-        )
-            .into_response(),
-        (Err(e), _) | (_, Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "instances": instances,
+            "leader": leader,
+            "count": instances.len(),
+        })),
+    ))
 }
 
-pub async fn get_flags(State(state): State<AppState>) -> impl IntoResponse {
-    match state.feature_flags.get_all().await {
-        Ok(flags) => (StatusCode::OK, Json(flags)).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get feature flags: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to retrieve feature flags"
-                })),
-            )
-                .into_response()
-        }
-    }
+pub async fn get_flags(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let flags = state.feature_flags.get_all().await?;
+    Ok((StatusCode::OK, Json(flags)))
 }
 
 pub async fn update_flag(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(payload): Json<UpdateFlagRequest>,
-) -> impl IntoResponse {
-    match state.feature_flags.update(&name, payload.enabled).await {
-        Ok(flag) => (StatusCode::OK, Json(flag)).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to update feature flag '{}': {}", name, e);
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": format!("Feature flag '{}' not found", name)
-                })),
-            )
-                .into_response()
-        }
-    }
-}
-
-pub async fn update_rollout_percentage(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    Json(payload): Json<UpdateRolloutPercentageRequest>,
-) -> impl IntoResponse {
-    if payload.rollout_percentage < 0 || payload.rollout_percentage > 100 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "rollout_percentage must be between 0 and 100"
-            })),
-        )
-            .into_response();
-    }
-
-    match state
+) -> Result<impl IntoResponse, AppError> {
+    let flag = state
         .feature_flags
-        .update_rollout_percentage(&name, payload.rollout_percentage)
+        .update(&name, payload.enabled)
         .await
-    {
-        Ok(flag) => (StatusCode::OK, Json(flag)).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to update rollout percentage for '{}': {}", name, e);
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": format!("Feature flag '{}' not found", name)
-                })),
-            )
-                .into_response()
-        }
-    }
+        .map_err(|_| AppError::NotFound(format!("Feature flag '{}' not found", name)))?;
+
+    Ok((StatusCode::OK, Json(flag)))
 }
 
 pub async fn update_webhook_rate_limit(
-    State(state): State<AppState>,
+    State(pool): State<sqlx::PgPool>,
     Path(endpoint_id): Path<uuid::Uuid>,
     Json(payload): Json<UpdateWebhookRateLimitRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     if payload.max_delivery_rate <= 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "max_delivery_rate must be greater than 0"
-            })),
-        )
-            .into_response();
+        return Err(AppError::BadRequest(
+            "max_delivery_rate must be greater than 0".to_string(),
+        ));
     }
 
-    match sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE webhook_endpoints
         SET max_delivery_rate = $1, updated_at = NOW()
@@ -244,71 +123,21 @@ pub async fn update_webhook_rate_limit(
     )
     .bind(payload.max_delivery_rate)
     .bind(endpoint_id)
-    .execute(&state.db)
-    .await
-    {
-        Ok(result) => {
-            if result.rows_affected() == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "error": "Webhook endpoint not found"
-                    })),
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "message": "Rate limit updated successfully",
-                        "endpoint_id": endpoint_id,
-                        "max_delivery_rate": payload.max_delivery_rate
-                    })),
-                )
-                    .into_response()
-            }
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to update webhook rate limit for {}: {}",
-                endpoint_id,
-                e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to update rate limit"
-                })),
-            )
-                .into_response()
-        }
-    }
-}
+    .execute(&pool)
+    .await?;
 
-pub async fn get_flag_history(
-    State(state): State<AppState>,
-    Query(params): Query<HistoryQuery>,
-) -> impl IntoResponse {
-    let limit = params.limit.unwrap_or(50).min(1000);
-    let offset = params.offset.unwrap_or(0);
-
-    match state
-        .feature_flags
-        .get_audit_history(params.flag_name.as_deref(), limit, offset)
-        .await
-    {
-        Ok(history) => (StatusCode::OK, Json(history)).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get feature flag history: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to retrieve audit history"
-                })),
-            )
-                .into_response()
-        }
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Webhook endpoint not found".to_string()));
     }
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "Rate limit updated successfully",
+            "endpoint_id": endpoint_id,
+            "max_delivery_rate": payload.max_delivery_rate
+        })),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,60 +145,153 @@ pub async fn get_flag_history(
 // ---------------------------------------------------------------------------
 
 /// GET /admin/webhooks/health
-pub async fn list_webhook_health(State(state): State<crate::ApiState>) -> impl IntoResponse {
-    match crate::services::webhook_dispatcher::list_endpoint_health(&state.app_state.db).await {
-        Ok(health) => (StatusCode::OK, Json(health)).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to list webhook endpoint health: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
+pub async fn list_webhook_health(
+    State(state): State<crate::ApiState>,
+) -> Result<impl IntoResponse, AppError> {
+    let health =
+        crate::services::webhook_dispatcher::list_endpoint_health(&state.app_state.db).await?;
+    Ok((StatusCode::OK, Json(health)))
 }
 
 /// POST /admin/tenants/reload — immediately reload tenant configs from DB
-pub async fn reload_tenant_configs(State(state): State<crate::ApiState>) -> impl IntoResponse {
-    match state.app_state.load_tenant_configs().await {
-        Ok(()) => {
-            let count = state.app_state.tenant_configs.read().await.len();
-            tracing::info!(count, "Tenant configs reloaded via admin endpoint");
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "message": "Tenant configs reloaded",
-                    "tenant_count": count
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to reload tenant configs: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
+pub async fn reload_tenant_configs(
+    State(state): State<crate::ApiState>,
+) -> Result<impl IntoResponse, AppError> {
+    state.app_state.load_tenant_configs().await?;
+    let count = state.app_state.tenant_configs.read().await.len();
+    tracing::info!(count, "Tenant configs reloaded via admin endpoint");
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "Tenant configs reloaded",
+            "tenant_count": count
+        })),
+    ))
 }
 
 /// GET /admin/webhooks/health/:id
 pub async fn get_webhook_health(
     State(state): State<crate::ApiState>,
     Path(id): Path<uuid::Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let health =
+        crate::services::webhook_dispatcher::get_endpoint_health(&state.app_state.db, id).await?;
+    Ok((StatusCode::OK, Json(health)))
+}
+
+// ---------------------------------------------------------------------------
+// Asset registry admin handlers
+// ---------------------------------------------------------------------------
+
+/// GET /admin/assets — list all assets
+pub async fn list_assets(State(state): State<crate::ApiState>) -> impl IntoResponse {
+    match crate::db::models::Asset::fetch_all(&state.app_state.db).await {
+        Ok(assets) => (StatusCode::OK, Json(serde_json::json!(assets))).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list assets: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /admin/assets — register a new asset
+pub async fn create_asset(
+    State(state): State<crate::ApiState>,
+    Json(payload): Json<CreateAssetRequest>,
 ) -> impl IntoResponse {
-    match crate::services::webhook_dispatcher::get_endpoint_health(&state.app_state.db, id).await {
-        Ok(health) => (StatusCode::OK, Json(health)).into_response(),
-        Err(crate::error::AppError::NotFound(msg)) => (
+    let asset_code = payload.asset_code.trim().to_uppercase();
+    if asset_code.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "asset_code is required" })),
+        )
+            .into_response();
+    }
+
+    match sqlx::query_as::<_, crate::db::models::Asset>(
+        r#"
+        INSERT INTO assets (asset_code, asset_issuer, metadata, enabled)
+        VALUES ($1, $2, $3, TRUE)
+        ON CONFLICT (asset_code, asset_issuer) DO UPDATE
+            SET enabled = TRUE, updated_at = NOW()
+        RETURNING id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at
+        "#,
+    )
+    .bind(&asset_code)
+    .bind(&payload.asset_issuer)
+    .bind(&payload.metadata)
+    .fetch_one(&state.app_state.db)
+    .await
+    {
+        Ok(asset) => (StatusCode::CREATED, Json(serde_json::json!(asset))).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to create asset: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// DELETE /admin/assets/:id — remove an asset
+pub async fn delete_asset(
+    State(state): State<crate::ApiState>,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    match sqlx::query("DELETE FROM assets WHERE id = $1")
+        .bind(id)
+        .execute(&state.app_state.db)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 0 => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": msg })),
+            Json(serde_json::json!({ "error": "asset not found" })),
+        )
+            .into_response(),
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "deleted": id }))).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to delete asset {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// PATCH /admin/assets/:id/enabled — enable or disable an asset
+pub async fn set_asset_enabled(
+    State(state): State<crate::ApiState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<SetAssetEnabledRequest>,
+) -> impl IntoResponse {
+    match sqlx::query_as::<_, crate::db::models::Asset>(
+        r#"
+        UPDATE assets SET enabled = $1, updated_at = NOW()
+        WHERE id = $2
+        RETURNING id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at
+        "#,
+    )
+    .bind(payload.enabled)
+    .bind(id)
+    .fetch_one(&state.app_state.db)
+    .await
+    {
+        Ok(asset) => (StatusCode::OK, Json(serde_json::json!(asset))).into_response(),
+        Err(sqlx::Error::RowNotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "asset not found" })),
         )
             .into_response(),
         Err(e) => {
-            tracing::error!("Failed to get webhook endpoint health {}: {}", id, e);
+            tracing::error!("Failed to update asset {}: {}", id, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),

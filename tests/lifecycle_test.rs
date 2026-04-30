@@ -160,7 +160,9 @@ async fn test_full_transaction_lifecycle() {
     );
 
     // ── 7. Enqueue and dispatch webhook delivery ──────────────────────────────
-    let dispatcher = synapse_core::services::WebhookDispatcher::new(app.pool.clone());
+    let dispatcher =
+        synapse_core::services::WebhookDispatcher::new(app.pool.clone(), "redis://localhost:6379")
+            .expect("failed to create webhook dispatcher");
     dispatcher
         .enqueue(
             tx_id,

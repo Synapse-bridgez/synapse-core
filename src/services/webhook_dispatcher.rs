@@ -618,7 +618,7 @@ impl WebhookDispatcher {
             .unwrap_or(None)
             .unwrap_or(0) as f64;
         let success_rate = if total > 0 {
-            (successes / total as f64) * 100.0
+            (successes as f64 / total as f64) * 100.0
         } else {
             100.0
         };
@@ -1064,6 +1064,7 @@ pub async fn get_endpoint_health(
     .map_err(crate::error::AppError::Database)?
     .ok_or_else(|| crate::error::AppError::NotFound(format!("Endpoint {endpoint_id} not found")))?;
 
+    use sqlx::Row;
     Ok(EndpointHealth {
         id: r.get("id"),
         url: r.get("url"),

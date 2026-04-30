@@ -8,10 +8,30 @@ use axum::{
 };
 use redis::Client;
 use serde_json::json;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 use synapse_core::middleware::idempotency::{idempotency_middleware, IdempotencyService};
 use tokio::time::sleep;
 use tower::ServiceExt;
+
+/// Helper to create an IdempotencyService with dummy counters and a lazy pool.
+fn create_idempotency_service(redis_url: &str) -> IdempotencyService {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://dummy")
+        .unwrap();
+    IdempotencyService::new(
+        redis_url,
+        pool,
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicU64::new(0)),
+    )
+    .unwrap()
+}
 
 async fn test_handler() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "success"})))
@@ -44,7 +64,7 @@ async fn setup_redis() -> (Client, String) {
 #[tokio::test]
 async fn test_duplicate_request_returns_cached_response() {
     let (client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     let idempotency_key = "test-key-duplicate-123";
@@ -85,7 +105,7 @@ async fn test_duplicate_request_returns_cached_response() {
 #[tokio::test]
 async fn test_concurrent_requests_return_429() {
     let (_client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     let idempotency_key = "test-key-concurrent-456";
@@ -133,7 +153,7 @@ async fn test_concurrent_requests_return_429() {
 #[tokio::test]
 async fn test_idempotency_key_expires_after_ttl() {
     let (client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service.clone());
 
     let idempotency_key = "test-key-expiry-789";
@@ -177,7 +197,7 @@ async fn test_idempotency_key_expires_after_ttl() {
 #[tokio::test]
 async fn test_cached_response_matches_original() {
     let (client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     let idempotency_key = "test-key-match-101";
@@ -219,7 +239,7 @@ async fn test_cached_response_matches_original() {
 #[tokio::test]
 async fn test_different_payload_same_key_rejected() {
     let (client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     let idempotency_key = "test-key-payload-202";
@@ -265,7 +285,7 @@ async fn test_different_payload_same_key_rejected() {
 async fn test_redis_failure_fallback() {
     // Use invalid Redis URL to simulate connection failure
     let invalid_redis_url = "redis://invalid-host:9999";
-    let service = IdempotencyService::new(invalid_redis_url).unwrap();
+    let service = create_idempotency_service(invalid_redis_url);
     let app = create_test_app(service);
 
     let req = Request::builder()
@@ -285,7 +305,7 @@ async fn test_redis_failure_fallback() {
 #[tokio::test]
 async fn test_no_idempotency_key_proceeds_normally() {
     let (_client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     // Request without idempotency key
@@ -303,7 +323,7 @@ async fn test_no_idempotency_key_proceeds_normally() {
 #[tokio::test]
 async fn test_invalid_idempotency_key_format() {
     let (_client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     // Request with valid key
@@ -326,7 +346,7 @@ async fn test_invalid_idempotency_key_format() {
 #[tokio::test]
 async fn test_two_tenants_same_key_get_independent_responses() {
     let (_client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
 
     let key = "shared-key-tenant-test";
 
@@ -360,7 +380,7 @@ async fn test_two_tenants_same_key_get_independent_responses() {
 #[tokio::test]
 async fn test_no_tenant_id_uses_default_scope() {
     let (_client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service);
 
     let key = "no-tenant-backward-compat";
@@ -392,7 +412,7 @@ async fn test_no_tenant_id_uses_default_scope() {
 #[tokio::test]
 async fn test_stale_lock_recovery() {
     let (client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
 
     let tenant_id = "default";
     let key = "stale-lock-test-key";
@@ -436,7 +456,7 @@ async fn test_stale_lock_recovery() {
 #[tokio::test]
 async fn test_normal_flow_not_affected_by_recovery() {
     let (client, redis_url) = setup_redis().await;
-    let service = IdempotencyService::new(&redis_url).unwrap();
+    let service = create_idempotency_service(&redis_url);
     let app = create_test_app(service.clone());
 
     let key = "normal-flow-recovery-test";

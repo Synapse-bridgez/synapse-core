@@ -13,7 +13,8 @@ pub static SLOW_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// * `slow_query_threshold_ms` - Threshold in milliseconds for considering query as "slow"
 ///
 /// # Example
-/// ```
+/// ```rust,no_run
+/// use synapse_core::db::slow_query::log_query_timing;
 /// log_query_timing("fetch_transaction", "SELECT * FROM transactions WHERE id = $1", 125, 1, 500);
 /// ```
 pub fn log_query_timing(

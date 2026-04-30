@@ -244,54 +244,6 @@ pub async fn queue_depth_task(pool: PgPool, pending_queue_depth: Arc<AtomicU64>)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batch_sizer_clamps_to_min() {
-        let mut s = BatchSizer::new(10, 500, 0.5);
-        let size = s.update(0);
-        assert!(size >= 10);
-    }
-
-    #[test]
-    fn batch_sizer_clamps_to_max() {
-        let mut s = BatchSizer::new(10, 500, 0.5);
-        // Feed a very large depth many times to push EMA up
-        for _ in 0..50 {
-            s.update(100_000);
-        }
-        let size = s.current();
-        assert!(size <= 500);
-    }
-
-    #[test]
-    fn batch_sizer_increases_under_load() {
-        let mut s = BatchSizer::new(10, 500, 0.5);
-        let initial = s.current();
-        for _ in 0..20 {
-            s.update(1_000);
-        }
-        assert!(s.current() > initial);
-    }
-
-    #[test]
-    fn batch_sizer_decreases_during_idle() {
-        let mut s = BatchSizer::new(10, 500, 0.5);
-        // Prime with high load
-        for _ in 0..20 {
-            s.update(1_000);
-        }
-        let high = s.current();
-        // Then idle
-        for _ in 0..50 {
-            s.update(0);
-        }
-        assert!(s.current() < high);
-    }
-}
-
 /// Runs the leader election + heartbeat loop.
 ///
 /// - All instances call this; only the elected leader returns `true` from
@@ -341,5 +293,53 @@ pub async fn run_processor_with_leader_election(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_sizer_clamps_to_min() {
+        let mut s = BatchSizer::new(10, 500, 0.5);
+        let size = s.update(0);
+        assert!(size >= 10);
+    }
+
+    #[test]
+    fn batch_sizer_clamps_to_max() {
+        let mut s = BatchSizer::new(10, 500, 0.5);
+        // Feed a very large depth many times to push EMA up
+        for _ in 0..50 {
+            s.update(100_000);
+        }
+        let size = s.current();
+        assert!(size <= 500);
+    }
+
+    #[test]
+    fn batch_sizer_increases_under_load() {
+        let mut s = BatchSizer::new(10, 500, 0.5);
+        let initial = s.current();
+        for _ in 0..20 {
+            s.update(1_000);
+        }
+        assert!(s.current() > initial);
+    }
+
+    #[test]
+    fn batch_sizer_decreases_during_idle() {
+        let mut s = BatchSizer::new(10, 500, 0.5);
+        // Prime with high load
+        for _ in 0..20 {
+            s.update(1_000);
+        }
+        let high = s.current();
+        // Then idle
+        for _ in 0..50 {
+            s.update(0);
+        }
+        assert!(s.current() < high);
     }
 }

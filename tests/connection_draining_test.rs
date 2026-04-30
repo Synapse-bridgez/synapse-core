@@ -12,8 +12,9 @@ mod test_readiness {
 
     #[tokio::test]
     async fn test_ready_endpoint_returns_200_when_ready() {
-        // Create readiness state that is ready
+        // Create readiness state and mark it as ready
         let readiness = ReadinessState::new();
+        readiness.set_ready();
         assert!(readiness.is_ready());
 
         // The readiness should return true when checked
@@ -80,8 +81,9 @@ mod test_handlers {
 
     #[tokio::test]
     async fn test_ready_handler_returns_200_when_ready() {
-        // Create a minimal test state with readiness
+        // Create a minimal test state with readiness and mark it as ready
         let readiness = ReadinessState::new();
+        readiness.set_ready();
 
         // Create AppState with required fields (using defaults for tests)
         // Note: In a real test, we'd need proper database connection, but we're just testing the handler logic
@@ -120,6 +122,7 @@ mod test_integration {
         // 4. After drain timeout, application shuts down
 
         let readiness = ReadinessState::with_drain_timeout(1);
+        readiness.set_ready();
 
         // Step 1: Application is ready
         assert!(readiness.is_ready());

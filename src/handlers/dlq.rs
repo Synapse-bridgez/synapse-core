@@ -1,10 +1,10 @@
 use axum::{
     extract::{Path, State},
-    response::Json,
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -18,7 +18,7 @@ pub fn dlq_routes() -> Router<PgPool> {
         .route("/dlq/:id/requeue", post(requeue_dlq))
 }
 
-async fn list_dlq(State(pool): State<PgPool>) -> Result<Json<Value>, AppError> {
+async fn list_dlq(State(pool): State<PgPool>) -> Result<impl IntoResponse, AppError> {
     let entries = sqlx::query_as::<_, TransactionDlq>(
         "SELECT * FROM transaction_dlq ORDER BY moved_to_dlq_at DESC LIMIT 100",
     )
@@ -34,12 +34,9 @@ async fn list_dlq(State(pool): State<PgPool>) -> Result<Json<Value>, AppError> {
 async fn requeue_dlq(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let processor = TransactionProcessor::new(pool);
-    processor
-        .requeue_dlq(id)
-        .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    processor.requeue_dlq(id).await?;
 
     Ok(Json(json!({
         "message": "DLQ entry requeued successfully",

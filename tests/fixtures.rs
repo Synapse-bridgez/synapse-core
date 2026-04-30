@@ -54,6 +54,7 @@ impl Default for TransactionFixture {
     }
 }
 
+#[allow(dead_code)]
 impl TransactionFixture {
     pub fn new() -> Self {
         Self::default()

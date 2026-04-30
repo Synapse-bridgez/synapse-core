@@ -33,6 +33,7 @@ const RESYNC_MAX_LIMIT: i64 = 100;
 #[derive(Debug, Clone, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct TransactionStatusUpdate {
     pub transaction_id: Uuid,
+    pub tenant_id: Uuid,
     pub status: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub message: Option<String>,
@@ -78,7 +79,7 @@ pub async fn ws_handler(
             tracing::warn!("Invalid WebSocket authentication token");
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
-    }
+    };
 
     let client_addr = connect_info
         .map(|ci| ci.0.to_string())
