@@ -4,14 +4,19 @@
 CREATE TABLE IF NOT EXISTS webhook_endpoints (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     url TEXT NOT NULL,
-    secret TEXT NOT NULL,                          -- HMAC-SHA256 signing secret
+    secret TEXT NOT NULL DEFAULT '',               -- HMAC-SHA256 signing secret
     event_types TEXT[] NOT NULL DEFAULT '{}',      -- e.g. ARRAY['transaction.completed','transaction.failed']
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_webhook_endpoints_enabled ON webhook_endpoints(enabled);
+-- Ensure columns exist if the table was created by an older migration
+ALTER TABLE webhook_endpoints ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
+ALTER TABLE webhook_endpoints ADD COLUMN IF NOT EXISTS event_types TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE webhook_endpoints ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_enabled ON webhook_endpoints(enabled);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
