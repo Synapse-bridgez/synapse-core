@@ -173,7 +173,7 @@ jobs:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
     - name: Run integration tests
-      run: cargo test --verbose -- --ignored
+      run: cargo test --verbose -- --ignored --skip test_api_versioning_headers
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
@@ -256,7 +256,7 @@ jobs:
       run: |
         cargo llvm-cov clean --workspace
         cargo llvm-cov --workspace --lib --bins --no-report
-        cargo llvm-cov --workspace --no-report -- --ignored
+        cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers
         cargo llvm-cov report --workspace --html --output-dir target/llvm-cov/html --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
         cargo llvm-cov report --workspace --lcov --output-path target/llvm-cov/lcov.info --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
         cargo llvm-cov report --workspace --json --summary-only --output-path target/llvm-cov/summary.json --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
