@@ -182,11 +182,11 @@ impl IdempotencyService {
 
     pub async fn check_idempotency(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
         key: &str,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
-        let cache_key = format!("idempotency:{key}");
-        let lock_key = format!("idempotency:lock:{key}");
+        let cache_key = _cache_key(tenant_id, key);
+        let lock_key = _lock_key(tenant_id, key);
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
@@ -296,14 +296,14 @@ impl IdempotencyService {
 
     pub async fn store_response(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
         key: &str,
         status: u16,
         body: String,
         content_type: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let cache_key = format!("idempotency:{key}");
-        let lock_key = format!("idempotency:lock:{key}");
+        let cache_key = _cache_key(tenant_id, key);
+        let lock_key = _lock_key(tenant_id, key);
 
         let cached = CachedResponse {
             status,
@@ -357,9 +357,10 @@ impl IdempotencyService {
 
     pub async fn release_lock(
         &self,
+        tenant_id: &str,
         key: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let lock_key = format!("idempotency:lock:{key}");
+        let lock_key = _lock_key(tenant_id, key);
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
@@ -568,7 +569,7 @@ pub async fn idempotency_middleware(
 
                 client_response
             } else {
-                if let Err(e) = service.release_lock(&idempotency_key).await {
+                if let Err(e) = service.release_lock(&tenant_id, &idempotency_key).await {
                     tracing::error!("Failed to release idempotency lock: {}", e);
                 }
                 response
