@@ -9,13 +9,16 @@ use synapse_core::{error::AppError, AppState};
 
 /// Helper to ensure DATABASE_URL is set to local test database
 fn setup_env() {
-    env::set_var(
-        "DATABASE_URL",
-        "postgres://synapse:synapse@localhost:5433/synapse_test",
-    );
+    if env::var("DATABASE_URL").is_err() {
+        env::set_var(
+            "DATABASE_URL",
+            "postgres://synapse:synapse@localhost:5432/synapse_test",
+        );
+    }
 }
 
 async fn get_pool() -> PgPool {
+    setup_env();
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
     PgPool::connect(&db_url).await.unwrap()
 }
