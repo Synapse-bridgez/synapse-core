@@ -163,8 +163,14 @@ impl HorizonClient {
                 }
                 let response = req.send().await?;
 
-                if response.status() == 404 {
-                    return Err(HorizonError::AccountNotFound(addr));
+                if !response.status().is_success() {
+                    if response.status() == 404 {
+                        return Err(HorizonError::AccountNotFound(addr));
+                    }
+                    return Err(HorizonError::InvalidResponse(format!(
+                        "Horizon API error: {}",
+                        response.status()
+                    )));
                 }
 
                 let account = response.json::<AccountResponse>().await?;
@@ -297,7 +303,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_get_account_with_mock() {
         let mut server = mockito::Server::new_async().await;
 
@@ -308,7 +313,6 @@ mod tests {
                 {
                     "balance": "100.0000000",
                     "asset_type": "native",
-                    "balance": "100.0000000",
                     "limit": null,
                     "asset_code": null,
                     "asset_issuer": null
@@ -321,12 +325,13 @@ mod tests {
             "last_modified_time": "2021-01-01T00:00:00Z"
         }"#;
 
-        let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r".*/accounts/.*".into()))
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/accounts/.*".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_response)
-            .create();
+            .create_async()
+            .await;
 
         let client = HorizonClient::new(server.url());
         let account = client
@@ -339,17 +344,18 @@ mod tests {
             acc.account_id,
             "GBBD47UZQ5CSKQPV456PYYH4FSYJHBWGQJUVNMCNWZ2NBEHKQPW3KXKJ"
         );
+        mock.assert_async().await;
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_get_account_not_found() {
         let mut server = mockito::Server::new_async().await;
 
-        let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r".*/accounts/.*".into()))
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/accounts/.*".into()))
             .with_status(404)
-            .create();
+            .create_async()
+            .await;
 
         let client = HorizonClient::new(server.url());
         let result = client
@@ -357,6 +363,7 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(HorizonError::AccountNotFound(_))));
+        mock.assert_async().await;
     }
 
     #[test]
@@ -378,25 +385,30 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_circuit_breaker_opens_after_failures() {
         let mut server = mockito::Server::new_async().await;
 
-        let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r".*/accounts/.*".into()))
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/accounts/.*".into()))
             .with_status(500)
             .expect_at_least(3)
-            .create();
+            .create_async()
+            .await;
 
-        let client = HorizonClient::with_circuit_breaker(server.url(), 3, 1);
+        let client = HorizonClient::with_circuit_breaker(server.url(), 3, 60);
 
         // Make 3 failing requests to trip the circuit breaker
         for _ in 0..3 {
             let _ = client.get_account("TEST_ACCOUNT").await;
         }
 
-        // The next request should be rejected by the circuit breaker
+        // The next request should be rejected by the open circuit breaker
         let result = client.get_account("TEST_ACCOUNT").await;
-        assert!(matches!(result, Err(HorizonError::CircuitBreakerOpen(_))));
+        assert!(
+            matches!(result, Err(HorizonError::CircuitBreakerOpen(_))),
+            "Expected CircuitBreakerOpen, got: {:?}",
+            result
+        );
+        mock.assert_async().await;
     }
 }
