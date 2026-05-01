@@ -72,7 +72,7 @@ jobs:
 
     - name: Install cargo-deny
       if: matrix.rust == 'stable'
-      run: cargo install cargo-deny --locked
+      run: cargo install cargo-deny --version 0.16.4 --locked
 
     - name: Check migration safety
       if: matrix.rust == 'stable'
