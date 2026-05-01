@@ -1,12 +1,6 @@
 [advisories]
-# Fail on vulnerabilities with severity >= moderate
 vulnerability = "deny"
-unmaintained = "warn"
 yanked = "deny"
-notice = "warn"
-
-# Add exceptions here for false positives, e.g.:
-# ignore = ["RUSTSEC-2020-0001"]
 ignore = []
 
 [licenses]
