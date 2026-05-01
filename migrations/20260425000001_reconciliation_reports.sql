@@ -8,9 +8,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_reports (
     missing_on_chain_count INTEGER NOT NULL DEFAULT 0,
     orphaned_payments_count INTEGER NOT NULL DEFAULT 0,
     amount_mismatches_count INTEGER NOT NULL DEFAULT 0,
-    has_discrepancies BOOLEAN NOT NULL GENERATED ALWAYS AS (
-        missing_on_chain_count > 0 OR orphaned_payments_count > 0 OR amount_mismatches_count > 0
-    ) STORED,
+    has_discrepancies BOOLEAN NOT NULL DEFAULT false,
     report_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
