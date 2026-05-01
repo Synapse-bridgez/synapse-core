@@ -2,13 +2,17 @@ use reqwest::StatusCode;
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
 use synapse_core::{create_app, AppState};
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
 #[tokio::test]
 #[ignore = "API versioning not yet implemented"]
 async fn test_api_versioning_headers() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = Postgres::default()
+        .with_tag("14-alpine")
+        .start()
+        .await
+        .unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let database_url = format!(
         "postgres://postgres:postgres@127.0.0.1:{}/postgres",

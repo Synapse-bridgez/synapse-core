@@ -10,8 +10,7 @@ CREATE TABLE IF NOT EXISTS webhook_replay_history (
     success BOOLEAN NOT NULL,
     error_message TEXT,
     replayed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    FOREIGN KEY (transaction_id, transaction_created_at) REFERENCES transactions(id, created_at)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Index for efficient lookups by transaction
