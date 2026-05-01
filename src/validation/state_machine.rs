@@ -33,6 +33,9 @@ pub fn validate_status_transition(from: &str, to: &str) -> Result<(), AppError> 
         // From failed (reprocess)
         ("failed", "pending") => true,
 
+        // From dlq (requeue)
+        ("dlq", "pending") => true,
+
         // All other transitions are invalid
         _ => false,
     };

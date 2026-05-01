@@ -87,11 +87,8 @@ async fn test_query_routing() {
 async fn test_health_check_with_invalid_replica() {
     let (url, _container) = start_db().await;
 
-    let result = PoolManager::new(
-        &url,
-        Some("postgres://invalid:invalid@nonexistent:5432/db"),
-    )
-    .await;
+    let result =
+        PoolManager::new(&url, Some("postgres://invalid:invalid@nonexistent:5432/db")).await;
 
     assert!(result.is_err());
 }
