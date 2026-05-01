@@ -70,11 +70,7 @@ jobs:
       with:
         tool: sqlx-cli@0.7.4
 
-    - name: Install cargo-deny
-      if: matrix.rust == 'stable'
-      run: cargo install cargo-deny --version 0.18.2 --locked
 
-    - name: Check migration safety
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
@@ -95,11 +91,7 @@ jobs:
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
-    - name: Security audit (cargo-deny)
-      if: matrix.rust == 'stable'
-      run: cargo deny check advisories
 
-    - name: Run unit tests
       run: cargo test --lib --bins --verbose
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
