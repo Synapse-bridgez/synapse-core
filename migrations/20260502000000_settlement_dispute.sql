@@ -7,7 +7,7 @@ ALTER TABLE settlements
 
 -- Valid statuses: completed, pending_review, disputed, adjusted, voided
 -- The status column already exists (VARCHAR 20); extend the check if present
-DO $$
+DO $body$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
@@ -16,4 +16,4 @@ BEGIN
         ALTER TABLE settlements ADD CONSTRAINT settlements_status_check
             CHECK (status IN ('completed','pending_review','disputed','adjusted','voided'));
     END IF;
-END $$;
+END $body$;

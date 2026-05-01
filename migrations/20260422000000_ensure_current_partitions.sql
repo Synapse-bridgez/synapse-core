@@ -1,6 +1,6 @@
 -- Ensure partitions exist from 2025-01 through 3 months ahead of now.
 -- This is idempotent: it skips months that already have a partition.
-DO $$
+DO $body$
 DECLARE
     cur_date  DATE := DATE '2025-01-01';
     end_date  DATE := DATE_TRUNC('month', NOW()) + INTERVAL '3 months';
@@ -18,4 +18,4 @@ BEGIN
         END IF;
         cur_date := cur_date + INTERVAL '1 month';
     END LOOP;
-END $$;
+END $body$;
