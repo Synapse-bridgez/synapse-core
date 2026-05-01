@@ -50,13 +50,6 @@ async fn setup_redis() -> (Client, String) {
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let client = Client::open(redis_url.clone()).expect("Failed to connect to Redis");
-
-    // Flush test database
-    let mut conn = client
-        .get_connection()
-        .expect("Failed to get Redis connection");
-    redis::cmd("FLUSHDB").execute(&mut conn);
-
     (client, redis_url)
 }
 
