@@ -1,10 +1,9 @@
 [advisories]
-vulnerability = "deny"
-yanked = "deny"
+version = 2
 ignore = []
 
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -17,7 +16,6 @@ allow = [
     "OpenSSL",
     "Zlib",
 ]
-copyleft = "warn"
 
 [bans]
 multiple-versions = "warn"
