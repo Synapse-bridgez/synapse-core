@@ -39,8 +39,8 @@ check_migration() {
         echo "   Issue: Adding NOT NULL columns breaks old app versions that don't know about the column"
         echo "   Solution: Add a DEFAULT value or make the column nullable initially"
         echo ""
-        ((ERRORS++))
-        ((file_errors++))
+        ((ERRORS++)) || true
+        ((file_errors++)) || true
     fi
     
     # Rule 2: Check for column renames (RENAME COLUMN)
@@ -55,8 +55,8 @@ check_migration() {
         echo "     4. Deploy app that reads from new column"
         echo "     5. Drop old column in separate migration"
         echo ""
-        ((ERRORS++))
-        ((file_errors++))
+        ((ERRORS++)) || true
+        ((file_errors++)) || true
     fi
     
     # Rule 3: Check for table drops without deprecation
@@ -69,8 +69,8 @@ check_migration() {
         echo "     2. Wait for full deployment cycle"
         echo "     3. Drop table in separate migration"
         echo ""
-        ((ERRORS++))
-        ((file_errors++))
+        ((ERRORS++)) || true
+        ((file_errors++)) || true
     fi
     
     # Rule 4: Check for column drops without deprecation
@@ -80,7 +80,7 @@ check_migration() {
         echo "   Issue: Dropping columns may break old app versions"
         echo "   Recommendation: Ensure app code no longer references this column"
         echo ""
-        ((WARNINGS++))
+        ((WARNINGS++)) || true
     fi
     
     # Rule 5: Check for constraint additions that might fail on existing data
@@ -90,7 +90,7 @@ check_migration() {
         echo "   Issue: Adding constraints can lock tables and fail on existing data"
         echo "   Recommendation: Use NOT VALID, then VALIDATE CONSTRAINT in separate transaction"
         echo ""
-        ((WARNINGS++))
+        ((WARNINGS++)) || true
     fi
     
     # Rule 6: Check for type changes
@@ -100,8 +100,8 @@ check_migration() {
         echo "   Issue: Type changes can break old app versions and lock tables"
         echo "   Solution: Use add+migrate+drop pattern with new column"
         echo ""
-        ((ERRORS++))
-        ((file_errors++))
+        ((ERRORS++)) || true
+        ((file_errors++)) || true
     fi
     
     # Rule 7: Check for index creation without CONCURRENTLY
@@ -111,7 +111,7 @@ check_migration() {
         echo "   Issue: Non-concurrent index creation locks the table"
         echo "   Recommendation: Use CREATE INDEX CONCURRENTLY"
         echo ""
-        ((WARNINGS++))
+        ((WARNINGS++)) || true
     fi
     
     # Rule 8: Check for foreign key additions without NOT VALID
@@ -121,7 +121,7 @@ check_migration() {
         echo "   Issue: Adding foreign keys can lock tables"
         echo "   Recommendation: Use NOT VALID, then VALIDATE CONSTRAINT separately"
         echo ""
-        ((WARNINGS++))
+        ((WARNINGS++)) || true
     fi
     
     # Rule 9: Check for enum modifications
@@ -131,7 +131,7 @@ check_migration() {
         echo "   Issue: Old app versions won't recognize new enum values"
         echo "   Recommendation: Ensure old app handles unknown enum values gracefully"
         echo ""
-        ((WARNINGS++))
+        ((WARNINGS++)) || true
     fi
     
     # Rule 10: Check for required columns on existing tables
@@ -143,7 +143,7 @@ check_migration() {
                 echo "   Issue: Verify this is safe for blue-green deployment"
                 echo "   Recommendation: Ensure column is nullable or has a default"
                 echo ""
-                ((WARNINGS++))
+                ((WARNINGS++)) || true
             fi
         fi
     fi
