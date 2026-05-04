@@ -16,6 +16,7 @@ fn valid_transition(from: &str, to: &str) -> bool {
         (from, to),
         ("completed", "pending_review")
             | ("pending_review", "disputed")
+            | ("pending_review", "voided")
             | ("pending_review", "completed")
             | ("disputed", "adjusted")
             | ("disputed", "voided")
