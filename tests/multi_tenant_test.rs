@@ -55,19 +55,11 @@ fn make_tenant_config(tenant_id: Uuid, name: &str) -> TenantConfig {
     }
 }
 
-/// Ensure the database schema required by tests is present
+/// Ensure the database schema required by tests is present.
+/// Uses CREATE TABLE IF NOT EXISTS so concurrent tests don't race on drops.
 async fn ensure_schema(pool: &PgPool) {
-    // Drop tables to guarantee clean state
-    let _ = sqlx::query("DROP TABLE IF EXISTS transactions")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("DROP TABLE IF EXISTS tenants")
-        .execute(pool)
-        .await;
-
-    // create tenants table similar to migration
-    let _ = sqlx::query(
-        "CREATE TABLE tenants (
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS tenants (
             tenant_id UUID PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
             api_key VARCHAR(255) NOT NULL UNIQUE,
@@ -78,18 +70,15 @@ async fn ensure_schema(pool: &PgPool) {
         )",
     )
     .execute(pool)
-    .await;
+    .await
+    .ok();
+}
 
-    // simple transactions table with tenant foreign key enforcement
-    let _ = sqlx::query(
-        "CREATE TABLE transactions (
-            transaction_id UUID PRIMARY KEY,
-            tenant_id UUID NOT NULL REFERENCES tenants(tenant_id),
-            amount NUMERIC
-        )",
-    )
-    .execute(pool)
-    .await;
+async fn cleanup_tenant(pool: &PgPool, tenant_id: Uuid) {
+    let _ = sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(pool)
+        .await;
 }
 
 /// Ensure that resolving a tenant via an API key header returns the correct ID
@@ -101,9 +90,10 @@ async fn test_tenant_resolution_from_api_key() {
     ensure_schema(&pool).await;
 
     let tenant_id = Uuid::new_v4();
-    let api_key = "test-key-api";
+    // Use a unique key per run to avoid UNIQUE constraint conflicts
+    let api_key = format!("test-key-api-{}", tenant_id);
 
-    insert_tenant(&pool, tenant_id, "ApiTenant", api_key).await;
+    insert_tenant(&pool, tenant_id, "ApiTenant", &api_key).await;
     let state = make_app_state().await;
     // the state loader should have pulled the tenant from the database
 
@@ -111,12 +101,14 @@ async fn test_tenant_resolution_from_api_key() {
     let (mut parts, _) = req.into_parts();
     parts
         .headers
-        .insert("X-API-Key", header::HeaderValue::from_str(api_key).unwrap());
+        .insert("X-API-Key", header::HeaderValue::from_str(&api_key).unwrap());
 
     let ctx = TenantContext::from_request_parts(&mut parts, &state)
         .await
         .unwrap();
     assert_eq!(ctx.tenant_id, tenant_id);
+
+    cleanup_tenant(&pool, tenant_id).await;
 }
 
 /// Check that X-Tenant-ID or Authorization headers are respected
@@ -128,7 +120,8 @@ async fn test_tenant_resolution_from_header() {
     ensure_schema(&pool).await;
 
     let tenant_id = Uuid::new_v4();
-    insert_tenant(&pool, tenant_id, "HeaderTenant", "unused").await;
+    let api_key = format!("unused-{}", tenant_id);
+    insert_tenant(&pool, tenant_id, "HeaderTenant", &api_key).await;
 
     let state = make_app_state().await;
     // config loaded automatically from db
@@ -158,6 +151,8 @@ async fn test_tenant_resolution_from_header() {
     // but our logic doesn't support Bearer for tenant id, only for API key. however the header test is still good
     let result = TenantContext::from_request_parts(&mut parts2, &state).await;
     assert!(matches!(result, Err(AppError::InvalidApiKey)));
+
+    cleanup_tenant(&pool, tenant_id).await;
 }
 
 /// Insert transactions for two tenants and verify filtering works
@@ -171,29 +166,31 @@ async fn test_query_filtering_by_tenant() {
     let t1 = Uuid::new_v4();
     let t2 = Uuid::new_v4();
 
-    insert_tenant(&pool, t1, "T1", "k1").await;
-    insert_tenant(&pool, t2, "T2", "k2").await;
+    insert_tenant(&pool, t1, "T1", &format!("k1-{}", t1)).await;
+    insert_tenant(&pool, t2, "T2", &format!("k2-{}", t2)).await;
 
-    // create data for each tenant
+    // Insert transactions using the real schema (id, stellar_account, amount, asset_code, tenant_id)
     let tx1 = Uuid::new_v4();
     let tx2 = Uuid::new_v4();
-    sqlx::query("INSERT INTO transactions (transaction_id, tenant_id, amount) VALUES ($1, $2, $3)")
-        .bind(tx1)
-        .bind(t1)
-        .bind(10.0)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO transactions (transaction_id, tenant_id, amount) VALUES ($1, $2, $3)")
-        .bind(tx2)
-        .bind(t2)
-        .bind(20.0)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, tenant_id, created_at) VALUES ($1, '', 10, 'USD', $2, NOW())"
+    )
+    .bind(tx1)
+    .bind(t1)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, tenant_id, created_at) VALUES ($1, '', 20, 'USD', $2, NOW())"
+    )
+    .bind(tx2)
+    .bind(t2)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let list1: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT transaction_id FROM transactions WHERE tenant_id = $1")
+        sqlx::query_as("SELECT id FROM transactions WHERE tenant_id = $1")
             .bind(t1)
             .fetch_all(&pool)
             .await
@@ -204,7 +201,7 @@ async fn test_query_filtering_by_tenant() {
 
     // wrong tenant should not see tx1
     let wrong: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT transaction_id FROM transactions WHERE transaction_id = $1 AND tenant_id = $2",
+        "SELECT id FROM transactions WHERE id = $1 AND tenant_id = $2",
     )
     .bind(tx1)
     .bind(t2)
@@ -212,6 +209,9 @@ async fn test_query_filtering_by_tenant() {
     .await
     .unwrap();
     assert!(wrong.is_none());
+
+    cleanup_tenant(&pool, t1).await;
+    cleanup_tenant(&pool, t2).await;
 }
 
 /// Verify that state configurations are isolated per tenant
@@ -250,20 +250,24 @@ async fn test_concurrent_multi_tenant_requests() {
 
     let t1 = Uuid::new_v4();
     let t2 = Uuid::new_v4();
-    insert_tenant(&pool, t1, "Con1", "ck1").await;
-    insert_tenant(&pool, t2, "Con2", "ck2").await;
+    // Use unique keys per run to avoid UNIQUE constraint conflicts
+    let key1 = format!("ck1-{}", t1);
+    let key2 = format!("ck2-{}", t2);
+    insert_tenant(&pool, t1, "Con1", &key1).await;
+    insert_tenant(&pool, t2, "Con2", &key2).await;
 
     // now create state after tenants exist so loader will pick them up
     let state = make_app_state().await;
 
     let fut1 = {
         let state = state.clone();
+        let key1 = key1.clone();
         async move {
             let req = Request::builder().body(()).unwrap();
             let (mut parts, _) = req.into_parts();
             parts
                 .headers
-                .insert("X-API-Key", header::HeaderValue::from_str("ck1").unwrap());
+                .insert("X-API-Key", header::HeaderValue::from_str(&key1).unwrap());
             TenantContext::from_request_parts(&mut parts, &state)
                 .await
                 .unwrap()
@@ -273,12 +277,13 @@ async fn test_concurrent_multi_tenant_requests() {
 
     let fut2 = {
         let state = state.clone();
+        let key2 = key2.clone();
         async move {
             let req = Request::builder().body(()).unwrap();
             let (mut parts, _) = req.into_parts();
             parts
                 .headers
-                .insert("X-API-Key", header::HeaderValue::from_str("ck2").unwrap());
+                .insert("X-API-Key", header::HeaderValue::from_str(&key2).unwrap());
             TenantContext::from_request_parts(&mut parts, &state)
                 .await
                 .unwrap()
@@ -289,6 +294,9 @@ async fn test_concurrent_multi_tenant_requests() {
     let (r1, r2) = tokio::join!(fut1, fut2);
     assert_eq!(r1, t1);
     assert_eq!(r2, t2);
+
+    cleanup_tenant(&pool, t1).await;
+    cleanup_tenant(&pool, t2).await;
 }
 
 /// Quick sanity check that the database enforces tenant isolation at foreign key level
@@ -299,12 +307,12 @@ async fn test_db_foreign_key_enforces_tenant() {
     let pool = get_pool().await;
     ensure_schema(&pool).await;
 
+    // Insert a transaction referencing a non-existent tenant_id — FK should reject it
     let result = sqlx::query(
-        "INSERT INTO transactions (transaction_id, tenant_id, amount) VALUES ($1, $2, $3)",
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, tenant_id, created_at) VALUES ($1, '', 5, 'USD', $2, NOW())",
     )
     .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
-    .bind(5.0)
+    .bind(Uuid::new_v4()) // random UUID — no matching tenant
     .execute(&pool)
     .await;
 
