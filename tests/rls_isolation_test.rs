@@ -11,20 +11,34 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-async fn setup_db() -> (PgPool, impl std::any::Any) {
+async fn setup_db() -> (PgPool, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
-    let pool = PgPool::connect(&url).await.unwrap();
-    let migrator = Migrator::new(Path::join(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        "migrations",
-    ))
-    .await
-    .unwrap();
-    migrator.run(&pool).await.unwrap();
+    let admin_pool = PgPool::connect(&url).await.unwrap();
+    let migrator = Migrator::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+        .await
+        .unwrap();
+    migrator.run(&admin_pool).await.unwrap();
 
-    // Create current-month partition
+    // Create a non-superuser role so RLS policies are enforced
+    sqlx::query("CREATE ROLE synapse_app LOGIN PASSWORD 'synapse_app'")
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    sqlx::query("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO synapse_app")
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+    sqlx::query("GRANT USAGE ON SCHEMA public TO synapse_app")
+        .execute(&admin_pool)
+        .await
+        .unwrap();
+
+    let app_url = format!("postgres://synapse_app:synapse_app@127.0.0.1:{}/postgres", port);
+    let pool = PgPool::connect(&app_url).await.unwrap();
+
+    // Create current-month partition (needs superuser)
     sqlx::query(r#"
         DO $$
         DECLARE
@@ -41,9 +55,9 @@ async fn setup_db() -> (PgPool, impl std::any::Any) {
                 EXECUTE format('CREATE TABLE %I PARTITION OF transactions FOR VALUES FROM (%L) TO (%L)', partition_name, start_date, end_date);
             END IF;
         END $$;
-    "#).execute(&pool).await.unwrap();
+    "#).execute(&admin_pool).await.unwrap();
 
-    (pool, container)
+    (pool, admin_pool, container)
 }
 
 /// Insert a transaction row with an explicit tenant_id.
@@ -64,7 +78,7 @@ async fn insert_tx_for_tenant(pool: &PgPool, tenant_id: Uuid) -> Uuid {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_tenant_a_cannot_see_tenant_b_transactions() {
-    let (pool, _c) = setup_db().await;
+    let (pool, _admin_pool, _c) = setup_db().await;
 
     let tenant_a = Uuid::new_v4();
     let tenant_b = Uuid::new_v4();
@@ -98,7 +112,7 @@ async fn test_tenant_a_cannot_see_tenant_b_transactions() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_admin_can_see_all_transactions() {
-    let (pool, _c) = setup_db().await;
+    let (pool, _admin_pool, _c) = setup_db().await;
 
     let tenant_a = Uuid::new_v4();
     let tenant_b = Uuid::new_v4();
@@ -131,7 +145,7 @@ async fn test_admin_can_see_all_transactions() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_null_tenant_id_rows_visible_to_admin() {
-    let (pool, _c) = setup_db().await;
+    let (pool, _admin_pool, _c) = setup_db().await;
 
     // Insert a legacy row with no tenant_id
     let id = Uuid::new_v4();
