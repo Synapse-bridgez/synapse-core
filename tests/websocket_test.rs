@@ -212,31 +212,30 @@ async fn test_ws_multiple_clients_receive_broadcast() {
     let sent_count = tx_broadcast.send(update.clone()).unwrap();
     assert_eq!(sent_count, 3, "Should have 3 active subscribers");
 
-    // All clients should receive the message
-    let msg1 = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream1.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    // All clients should receive the message — skip any ping frames
+    async fn next_text(
+        stream: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        loop {
+            let msg = tokio::time::timeout(tokio::time::Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let Message::Text(t) = msg {
+                return t;
+            }
+        }
+    }
 
-    let msg2 = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream2.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-    let msg3 = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws_stream3.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let text1 = next_text(&mut ws_stream1).await;
+    let text2 = next_text(&mut ws_stream2).await;
+    let text3 = next_text(&mut ws_stream3).await;
 
     // Verify all received the same update
-    for msg in [msg1, msg2, msg3] {
-        let text = match msg {
-            Message::Text(t) => t,
-            _ => panic!("Expected text message, got {:?}", msg),
-        };
+    for text in [text1, text2, text3] {
         let received: TransactionStatusUpdate = serde_json::from_str(&text).unwrap();
         assert_eq!(received.transaction_id, transaction_id);
         assert_eq!(received.status, "pending");
