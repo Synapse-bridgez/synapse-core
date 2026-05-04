@@ -116,11 +116,11 @@ pub async fn set_tenant_context(
     is_admin: bool,
 ) -> Result<()> {
     if is_admin {
-        sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+        sqlx::query("SELECT set_config('app.is_admin', 'true', false)")
             .execute(&mut **conn)
             .await?;
     } else if let Some(tid) = tenant_id {
-        sqlx::query("SELECT set_config('app.tenant_id', $1, true), set_config('app.is_admin', 'false', true)")
+        sqlx::query("SELECT set_config('app.tenant_id', $1, false), set_config('app.is_admin', 'false', false)")
             .bind(tid.to_string())
             .execute(&mut **conn)
             .await?;
