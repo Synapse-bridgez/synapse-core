@@ -249,9 +249,9 @@ jobs:
         cargo llvm-cov clean --workspace
         cargo llvm-cov --workspace --lib --bins --no-report
         cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow
-        cargo llvm-cov report --workspace --html --output-dir target/llvm-cov/html --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-        cargo llvm-cov report --workspace --lcov --output-path target/llvm-cov/lcov.info --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
-        cargo llvm-cov report --workspace --json --summary-only --output-path target/llvm-cov/summary.json --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+        cargo llvm-cov report --html --output-dir target/llvm-cov/html --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+        cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+        cargo llvm-cov report --json --summary-only --output-path target/llvm-cov/summary.json --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
