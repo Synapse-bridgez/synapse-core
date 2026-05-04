@@ -24,11 +24,12 @@ async fn test_webhook_replay_tracking(pool: PgPool) -> sqlx::Result<()> {
     sqlx::query(
         r#"
         INSERT INTO webhook_replay_history 
-        (transaction_id, replayed_by, dry_run, success, error_message)
-        VALUES ($1, $2, $3, $4, $5)
+        (transaction_id, transaction_created_at, replayed_by, dry_run, success, error_message)
+        VALUES ($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(inserted.id)
+    .bind(inserted.created_at)
     .bind("test-admin")
     .bind(true)
     .bind(true)
