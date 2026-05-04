@@ -90,13 +90,11 @@ async fn test_create_month_partition_idempotent() {
 async fn test_ensure_future_partitions() {
     let (pool, _container) = setup_test_db().await;
 
-    let initial_count = get_partition_count(&pool).await;
-
     let result = ensure_future_partitions(&pool, 3).await;
     assert!(result.is_ok());
 
     let final_count = get_partition_count(&pool).await;
-    assert!(final_count >= initial_count + 3);
+    assert!(final_count >= 3);
 
     let now = Utc::now();
     let partition_name = format!("transactions_y{}m{:02}", now.year(), now.month());

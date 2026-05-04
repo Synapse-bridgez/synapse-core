@@ -99,9 +99,10 @@ async fn test_tenant_resolution_from_api_key() {
 
     let req = Request::builder().body(()).unwrap();
     let (mut parts, _) = req.into_parts();
-    parts
-        .headers
-        .insert("X-API-Key", header::HeaderValue::from_str(&api_key).unwrap());
+    parts.headers.insert(
+        "X-API-Key",
+        header::HeaderValue::from_str(&api_key).unwrap(),
+    );
 
     let ctx = TenantContext::from_request_parts(&mut parts, &state)
         .await
@@ -189,25 +190,23 @@ async fn test_query_filtering_by_tenant() {
     .await
     .unwrap();
 
-    let list1: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM transactions WHERE tenant_id = $1")
-            .bind(t1)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let list1: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM transactions WHERE tenant_id = $1")
+        .bind(t1)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
 
     assert_eq!(list1.len(), 1);
     assert_eq!(list1[0].0, tx1);
 
     // wrong tenant should not see tx1
-    let wrong: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM transactions WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(tx1)
-    .bind(t2)
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
+    let wrong: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM transactions WHERE id = $1 AND tenant_id = $2")
+            .bind(tx1)
+            .bind(t2)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     assert!(wrong.is_none());
 
     cleanup_tenant(&pool, t1).await;
