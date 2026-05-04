@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/synapse-core
+  IMAGE_NAME: ghcr.io/synapse-bridgez/synapse-core
   COVERAGE_IGNORE_REGEX: '(^|.*/)(tests?/.*|generated/.*|\.sqlx/.*)$'
 
 jobs:
