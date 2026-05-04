@@ -3,8 +3,9 @@ ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tena
 
 CREATE INDEX IF NOT EXISTS idx_transactions_tenant_id ON transactions(tenant_id);
 
--- Enable Row-Level Security
+-- Enable Row-Level Security (FORCE ensures the owner/superuser also obeys policies)
 ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transactions FORCE ROW LEVEL SECURITY;
 
 -- Tenants see only their own rows; NULL tenant_id rows are visible to admins only
 CREATE POLICY tenant_isolation ON transactions
