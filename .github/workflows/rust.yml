@@ -326,8 +326,8 @@ jobs:
         file: ./dockerfile
         push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         tags: |
-          ${{ env.IMAGE_NAME }}:latest
-          ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          ${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          ghcr.io/synapse-bridgez/synapse-core:latest
+          ghcr.io/synapse-bridgez/synapse-core:${{ github.sha }}
+          ghcr.io/synapse-bridgez/synapse-core:${{ env.VERSION }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
