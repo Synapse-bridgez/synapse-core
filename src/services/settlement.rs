@@ -1,7 +1,6 @@
 use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
 use crate::error::AppError;
-use crate::validation::state_machine::validate_status_transition;
 use bigdecimal::BigDecimal;
 use chrono::Utc;
 use sqlx::PgPool;
@@ -10,7 +9,18 @@ use uuid::Uuid;
 /// Returns `true` when transitioning from `from` to `to` is allowed by the
 /// settlement state machine.
 fn valid_transition(from: &str, to: &str) -> bool {
-    validate_status_transition(from, to).is_ok()
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        ("completed", "pending_review")
+            | ("pending_review", "disputed")
+            | ("pending_review", "completed")
+            | ("disputed", "adjusted")
+            | ("disputed", "voided")
+            | ("adjusted", "completed")
+    )
 }
 
 pub struct SettlementService {
