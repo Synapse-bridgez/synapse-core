@@ -156,6 +156,10 @@ pub fn create_app(app_state: AppState) -> Router {
             "/transactions",
             get(handlers::webhook::list_transactions_api),
         )
+        .route(
+            "/transactions/search",
+            get(handlers::search::search_transactions_wrapper),
+        )
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route(
             "/settlements/:id",
