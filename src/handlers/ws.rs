@@ -42,9 +42,7 @@ pub struct TransactionStatusUpdate {
 /// Messages the server pushes to the client.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMessage<'a> {
-    /// A normal transaction-status broadcast.
-    Update(&'a TransactionStatusUpdate),
+enum ServerMessage {
     /// Notification that messages were dropped due to the client being slow.
     MessagesDropped { count: u64 },
     /// Response to a client `resync` request — latest N events from the DB.
@@ -74,8 +72,9 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
 ) -> impl IntoResponse {
-    if let Some(token) = params.token {
-        if !validate_token(&token) {
+    let token = match params.token {
+        Some(t) if validate_token(&t) => t,
+        _ => {
             tracing::warn!("Invalid WebSocket authentication token");
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
@@ -85,6 +84,7 @@ pub async fn ws_handler(
         .map(|ci| ci.0.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    let _ = token; // validated above
     ws.on_upgrade(move |socket| handle_socket(socket, state, client_addr))
 }
 
@@ -174,8 +174,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_addr: String) 
                 result = rx.recv() => {
                     match result {
                         Ok(update) => {
-                            let payload = ServerMessage::Update(&update);
-                            let json = match serde_json::to_string(&payload) {
+                            let json = match serde_json::to_string(&update) {
                                 Ok(j) => j,
                                 Err(e) => {
                                     tracing::error!("Failed to serialize update: {}", e);
