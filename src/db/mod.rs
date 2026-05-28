@@ -8,6 +8,7 @@ pub mod models;
 pub mod partition;
 pub mod pool_manager;
 pub mod queries;
+pub mod session;
 pub mod slow_query;
 
 /// Build a pool and eagerly establish `min_connections` by running `SELECT 1`

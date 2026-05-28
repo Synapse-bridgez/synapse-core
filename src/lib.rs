@@ -17,6 +17,7 @@ pub mod telemetry;
 pub mod tenant;
 pub mod utils;
 pub mod validation;
+pub mod ws;
 
 pub use config::assets::AssetCache;
 
