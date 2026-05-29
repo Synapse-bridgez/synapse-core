@@ -257,6 +257,8 @@ pub fn create_app(app_state: AppState) -> Router {
         .merge(
             Router::new()
                 .route("/ws", get(handlers::ws::ws_handler))
+                .route("/reconnect/status", get(handlers::reconnection::reconnect_status))
+                .route("/reconnect", post(handlers::reconnection::reconnect))
                 .with_state(app_state),
         )
         .layer(axum_middleware::from_fn(
