@@ -1,3 +1,8 @@
+//! Caching module with rate limiting, input validation, and webhook security.
+
+pub mod rate_limiting;
+pub mod validation;
+pub mod webhook;
 //! Caching module with Redis-oriented input validation and rate limiting.
 //!
 //! - [`validation`] — key, value, TTL, and pattern checks before Redis I/O

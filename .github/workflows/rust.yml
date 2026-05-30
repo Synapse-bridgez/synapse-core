@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ "develop" ]
 
+# Cancel any in-progress run for the same branch/PR so stale sessions never
+# block fresh commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
@@ -75,7 +81,6 @@ jobs:
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
-
     - name: Run migrations
       run: |
         for i in 1 2 3; do
@@ -102,7 +107,6 @@ jobs:
       run: cargo test --lib --bins --verbose
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
-
 
 
   integration-tests:
@@ -147,6 +151,9 @@ jobs:
       with:
         toolchain: ${{ matrix.rust }}
 
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
+
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
       with:
@@ -160,14 +167,10 @@ jobs:
           ${{ runner.os }}-${{ matrix.rust }}-cargo-
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      uses: taiki-e/install-action@sccache
-
     - name: Install sqlx-cli
       uses: taiki-e/install-action@v2
       with:
         tool: sqlx-cli@0.7.4
-
 
     - name: Run migrations
       run: |
@@ -185,7 +188,6 @@ jobs:
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
-
 
 
   coverage:
@@ -233,6 +235,9 @@ jobs:
         toolchain: stable
         components: llvm-tools-preview
 
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
+
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
       with:
@@ -246,9 +251,6 @@ jobs:
           ${{ runner.os }}-coverage-cargo-
           ${{ runner.os }}-cargo-
 
-    - name: Install sccache
-      uses: taiki-e/install-action@sccache
-
     - name: Install sqlx-cli
       uses: taiki-e/install-action@v2
       with:
@@ -256,7 +258,6 @@ jobs:
 
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
-
 
     - name: Run migrations
       run: |
