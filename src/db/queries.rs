@@ -1,3 +1,35 @@
+//! # Database Query Module
+//!
+//! This module provides a secure, tested, and well-documented error handling interface for sqlx queries.
+//!
+//! ## Error Handling Strategy
+//!
+//! Errors are handled at multiple layers:
+//! - **Timeout layer**: Queries wrapped with [`with_timeout`] abort if they exceed tier-specific limits
+//! - **Connection layer**: sqlx handles connection errors and pool exhaustion
+//! - **Application layer**: All errors are mapped to [`sqlx::Error`] for consistency
+//!
+//! ## Timeout Tiers
+//!
+//! All queries must be wrapped with an appropriate [`QueryTier`] to enforce safety limits:
+//! - **Read** (5s default): SELECT operations on bounded result sets
+//! - **Write** (10s default): INSERT/UPDATE/DELETE operations with retry logic
+//! - **Admin** (60s default): Large migrations and maintenance tasks
+//!
+//! Overrides via environment: `DB_TIMEOUT_READ_SECS`, `DB_TIMEOUT_WRITE_SECS`, `DB_TIMEOUT_ADMIN_SECS`
+//!
+//! ## Error Recovery
+//!
+//! - **Timeouts**: Increment [`DB_QUERY_TIMEOUT_TOTAL`] counter; connection dropped; returns `PoolTimedOut`
+//! - **Connection failures**: Retried with exponential backoff via [`crate::utils::retry::retry_with_backoff`]
+//! - **Row errors**: Propagated as `sqlx::Error` to caller for logging/handling
+//!
+//! ## Security Considerations
+//!
+//! - All queries use parameterized statements ($1, $2...) to prevent SQL injection
+//! - Tenant context set via [`set_tenant_context`] for RLS policy enforcement
+//! - Sensitive data (passwords, tokens) never logged; only query structure logged
+
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
 use crate::tenant::TenantConfig;
@@ -26,6 +58,15 @@ const DEFAULT_ADMIN_TIMEOUT_SECS: u64 = 60;
 pub static DB_QUERY_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Tier used when wrapping a query with [`with_timeout`].
+///
+/// # Examples
+/// ```ignore
+/// // SELECT query: read tier, 5s timeout
+/// with_timeout(QueryTier::Read, "SELECT * FROM users", query_future).await?;
+///
+/// // INSERT with retry: write tier, 10s timeout
+/// with_timeout(QueryTier::Write, "INSERT INTO transactions", query_future).await?;
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub enum QueryTier {
     Read,
@@ -34,6 +75,7 @@ pub enum QueryTier {
 }
 
 impl QueryTier {
+    /// Get timeout duration for this tier, respecting environment variable overrides.
     fn duration(self) -> Duration {
         let secs = match self {
             QueryTier::Read => std::env::var("DB_TIMEOUT_READ_SECS")
@@ -52,6 +94,7 @@ impl QueryTier {
         Duration::from_secs(secs)
     }
 
+    /// Label for logging: "read", "write", or "admin".
     fn label(self) -> &'static str {
         match self {
             QueryTier::Read => "read",
@@ -63,9 +106,34 @@ impl QueryTier {
 
 /// Wrap a database future with a timeout.
 ///
-/// On timeout the counter `DB_QUERY_TIMEOUT_TOTAL` is incremented, the
-/// sanitised SQL label is logged (no parameter values), and the connection is
-/// dropped so the pool can reclaim it rather than leaving it in a hung state.
+/// Enforces tier-specific timeout limits and manages error handling:
+/// - On **success**: returns result immediately
+/// - On **timeout**: increments [`DB_QUERY_TIMEOUT_TOTAL`], logs error with sql_label (no params),
+///   drops connection from pool, returns `PoolTimedOut`
+/// - On **error**: propagates the underlying error to caller
+///
+/// # Parameters
+/// - `tier`: Timeout tier (Read/Write/Admin) determining max duration
+/// - `sql_label`: Descriptive label for logging (e.g. "SELECT * FROM users"). Must not contain param values.
+/// - `fut`: The database operation future
+///
+/// # Error Handling
+/// Returns `sqlx::Error::PoolTimedOut` if query exceeds tier-specific timeout.
+/// Other errors are propagated as-is.
+///
+/// # Examples
+/// ```ignore
+/// // Wrap a read query
+/// with_timeout(QueryTier::Read, "SELECT * FROM users WHERE id = $1", async {
+///     sqlx::query("SELECT * FROM users WHERE id = $1")
+///         .bind(user_id)
+///         .fetch_one(pool)
+///         .await
+/// }).await?;
+/// ```
+///
+/// # Metrics
+/// Timeout occurrences increment the global counter `DB_QUERY_TIMEOUT_TOTAL` for monitoring.
 pub async fn with_timeout<F, T>(tier: QueryTier, sql_label: &str, fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,

@@ -1,4 +1,7 @@
 use crate::db::{models::Transaction, queries};
+use crate::graphql::input_validation::{
+    validate_asset_code, validate_limit, validate_status, validate_stellar_account,
+};
 use crate::handlers::ws::TransactionStatusUpdate;
 use crate::AppState;
 use async_graphql::{Context, InputObject, Object, Result, Subscription};
@@ -62,9 +65,27 @@ impl TransactionQuery {
         limit: Option<i64>,
         _offset: Option<i64>,
     ) -> Result<Vec<Transaction>> {
+        let effective_limit = limit.unwrap_or(20);
+        validate_limit(effective_limit)
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
+        if let Some(ref f) = filter {
+            if let Some(ref s) = f.status {
+                validate_status(s).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            }
+            if let Some(ref a) = f.asset_code {
+                validate_asset_code(a).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            }
+            if let Some(ref acc) = f.stellar_account {
+                validate_stellar_account(acc)
+                    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            }
+        }
+
         let state = ctx.data::<AppState>()?;
 
-        let txs = queries::list_transactions(&state.db, limit.unwrap_or(20), None, false).await?;
+        let txs =
+            queries::list_transactions(&state.db, effective_limit, None, false).await?;
 
         if let Some(f) = filter {
             let filtered = txs

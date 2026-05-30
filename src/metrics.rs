@@ -128,6 +128,15 @@ pub fn pending_queue_depth() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Settlement operation duration histogram (milliseconds).
+pub fn settlement_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("settlement_duration_ms")
+        .with_description("Settlement operation latency in milliseconds")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
 /// Total number of locks successfully acquired.
 pub fn lock_acquired_total() -> Counter<u64> {
     meter()

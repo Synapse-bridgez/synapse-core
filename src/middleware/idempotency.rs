@@ -210,10 +210,11 @@ impl IdempotencyService {
 
                 self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
-                // Try to acquire lock
+                // Try to acquire lock; store a JSON lock value so
+                // recover_stale_locks can inspect the locked_at timestamp.
                 let acquired: bool = redis::cmd("SET")
                     .arg(&lock_key)
-                    .arg("processing")
+                    .arg(_lock_value())
                     .arg("NX")
                     .arg("EX")
                     .arg(300) // 5 minute lock
@@ -483,7 +484,16 @@ pub async fn idempotency_middleware(
 ) -> Response {
     let idempotency_key = match request.headers().get("x-idempotency-key") {
         Some(key) => match key.to_str() {
-            Ok(k) => k.to_string(),
+            Ok(k) => match validate_idempotency_key(k) {
+                Ok(validated) => validated,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": e.to_string() })),
+                    )
+                        .into_response();
+                }
+            },
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,

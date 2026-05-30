@@ -1,0 +1,50 @@
+name: Webhook Handlers
+
+on:
+  repository_dispatch:
+    types: [webhook_event]
+  workflow_dispatch:
+    inputs:
+      event_type:
+        description: "Webhook event type to simulate"
+        required: true
+        default: "ping"
+
+jobs:
+  handle-webhook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate webhook payload
+        run: |
+          EVENT="${{ github.event.action || github.event.inputs.event_type }}"
+          echo "Received webhook event: $EVENT"
+          if [ -z "$EVENT" ]; then
+            echo "::error::Empty webhook event type"
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-stable-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-stable-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run webhook-related tests
+        run: cargo test --lib webhook -- --nocapture

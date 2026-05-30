@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod db;
@@ -7,9 +8,11 @@ pub mod handlers;
 pub mod health;
 pub mod metrics;
 pub mod middleware;
+pub mod payments;
 pub mod readiness;
 pub mod schemas;
 pub mod secrets;
+pub mod security;
 pub mod services;
 pub mod startup;
 pub mod stellar;
