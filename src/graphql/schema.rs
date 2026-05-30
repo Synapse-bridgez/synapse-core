@@ -1,3 +1,8 @@
+//! GraphQL Schema Configuration
+//!
+//! This module configures the GraphQL schema with security extensions and query limits.
+//! See [error_handling.md](./error_handling.md) for comprehensive error handling documentation.
+
 use crate::graphql::resolvers::{Mutation, Query, Subscription};
 use crate::AppState;
 use async_graphql::{

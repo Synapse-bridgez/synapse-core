@@ -1,3 +1,6 @@
+/// Authentication module with input validation and metrics collection.
+///
+/// See [idempotency.md](./idempotency.md) for comprehensive documentation on idempotency keys.
 /// Authentication module with input validation, metrics, and error handling.
 pub mod error;
 pub mod input_validation;
