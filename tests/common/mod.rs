@@ -23,6 +23,7 @@ use testcontainers_modules::postgres::Postgres;
 pub struct TestApp {
     pub base_url: String,
     pub pool: PgPool,
+    pub readiness: synapse_core::ReadinessState,
     _postgres_container: Box<dyn std::any::Any>,
 }
 
@@ -83,6 +84,9 @@ impl TestApp {
             ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
+        // Clone readiness before app_state is moved into create_app
+        let readiness = app_state.readiness.clone();
+
         let app = create_app(app_state);
 
         // Spawn HTTP server on random port
@@ -99,8 +103,21 @@ impl TestApp {
         Self {
             base_url,
             pool,
+            readiness,
             _postgres_container: Box::new(container),
         }
+    }
+
+    /// Mark the app as ready to accept traffic.
+    #[allow(dead_code)]
+    pub async fn set_ready(&self) {
+        self.readiness.set_ready();
+    }
+
+    /// Begin connection draining (sets not_ready + draining).
+    #[allow(dead_code)]
+    pub async fn start_drain(&self) {
+        self.readiness.start_drain();
     }
 
     /// Truncate all tables for test isolation (call between tests if reusing TestApp).
