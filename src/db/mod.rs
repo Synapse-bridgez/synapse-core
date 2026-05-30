@@ -34,6 +34,7 @@
 
 use crate::config::Config;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub mod audit;
@@ -180,17 +181,23 @@ async fn build_pool(
     idle_timeout_secs: u64,
     statement_timeout_ms: u64,
 ) -> Result<PgPool, sqlx::Error> {
+    let statement_timeout_sql = Arc::<str>::from(format!("SET statement_timeout = {statement_timeout_ms}"));
+
     PgPoolOptions::new()
         .min_connections(min)
         .max_connections(max)
         .idle_timeout(Duration::from_secs(idle_timeout_secs))
-        .after_connect(move |conn, _meta| {
-            Box::pin(async move {
-                sqlx::query(&format!("SET statement_timeout = {statement_timeout_ms}"))
-                    .execute(conn)
-                    .await?;
-                Ok(())
-            })
+        .after_connect({
+            let statement_timeout_sql = Arc::clone(&statement_timeout_sql);
+            move |conn, _meta| {
+                let statement_timeout_sql = Arc::clone(&statement_timeout_sql);
+                Box::pin(async move {
+                    sqlx::query(statement_timeout_sql.as_ref())
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            }
         })
         .connect(url)
         .await
