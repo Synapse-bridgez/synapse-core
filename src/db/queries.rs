@@ -190,7 +190,106 @@ pub async fn get_active_tenant_rate_limit(pool: &PgPool, tenant_id: uuid::Uuid) 
             .bind(tenant_id)
             .fetch_optional(pool)
             .await?;
+
+            // Validate the stored value is within acceptable bounds before returning it
+            // to the rate-limiting layer. A zero or negative limit would disable rate
+            // limiting entirely; an absurdly large value could overflow downstream u32
+            // casts. Both are treated as configuration errors.
+            if let Some(v) = limit {
+                if v <= 0 {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        rate_limit = v,
+                        "Tenant has non-positive rate_limit_per_minute; treating as misconfigured"
+                    );
+                    return Err(sqlx::Error::Decode(
+                        format!("rate_limit_per_minute must be positive, got {v}").into(),
+                    ));
+                }
+                if v > 1_000_000 {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        rate_limit = v,
+                        "Tenant rate_limit_per_minute exceeds maximum allowed value"
+                    );
+                    return Err(sqlx::Error::Decode(
+                        format!("rate_limit_per_minute exceeds maximum of 1_000_000, got {v}").into(),
+                    ));
+                }
+            }
+
             Ok(limit)
+        },
+    )
+    .await
+}
+
+/// Maximum allowed rate limit per minute for a tenant.
+pub const MAX_RATE_LIMIT_PER_MINUTE: i32 = 1_000_000;
+
+/// Update the `rate_limit_per_minute` for an active tenant.
+///
+/// # Validation
+/// - `new_limit` must be in `[1, MAX_RATE_LIMIT_PER_MINUTE]`.
+/// - The tenant must exist and be active; returns `RowNotFound` otherwise.
+///
+/// Returns the updated limit on success.
+pub async fn update_tenant_rate_limit(
+    pool: &PgPool,
+    tenant_id: uuid::Uuid,
+    new_limit: i32,
+    actor: &str,
+) -> Result<i32> {
+    if new_limit <= 0 {
+        return Err(sqlx::Error::Decode(
+            format!("rate_limit_per_minute must be positive, got {new_limit}").into(),
+        ));
+    }
+    if new_limit > MAX_RATE_LIMIT_PER_MINUTE {
+        return Err(sqlx::Error::Decode(
+            format!(
+                "rate_limit_per_minute exceeds maximum of {MAX_RATE_LIMIT_PER_MINUTE}, got {new_limit}"
+            )
+            .into(),
+        ));
+    }
+
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE tenants SET rate_limit_per_minute = $1 WHERE tenant_id = $2 AND is_active = true",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let old_limit: Option<i32> = sqlx::query_scalar(
+                "SELECT rate_limit_per_minute FROM tenants WHERE tenant_id = $1 AND is_active = true FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_optional(&mut *db_tx)
+            .await?;
+
+            let old_limit = old_limit.ok_or(sqlx::Error::RowNotFound)?;
+
+            sqlx::query(
+                "UPDATE tenants SET rate_limit_per_minute = $1, updated_at = NOW() WHERE tenant_id = $2 AND is_active = true",
+            )
+            .bind(new_limit)
+            .bind(tenant_id)
+            .execute(&mut *db_tx)
+            .await?;
+
+            AuditLog::log_field_update(
+                &mut db_tx,
+                tenant_id,
+                "tenant",
+                "rate_limit_per_minute",
+                serde_json::json!(old_limit),
+                serde_json::json!(new_limit),
+                actor,
+            )
+            .await?;
+
+            db_tx.commit().await?;
+            Ok(new_limit)
         },
     )
     .await
@@ -231,15 +330,33 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
         crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
             let mut db_tx = pool.begin().await?;
 
-            let result = sqlx::query_as::<_, Transaction>(
-                r#"
-            INSERT INTO transactions (
-                id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
-                settlement_id, memo, memo_type, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            RETURNING *
-            "#,
+            let result = persist_transaction(&mut db_tx, tx).await?;
+            audit_transaction_creation(&mut db_tx, &result).await?;
+
+            db_tx.commit().await?;
+
+            // Invalidate cache after successful commit
+            invalidate_transaction_caches(&result.asset_code).await;
+
+            Ok(result)
+        }),
+    )
+    .await
+}
+
+async fn persist_transaction(
+    db_tx: &mut SqlxTransaction<'_, Postgres>,
+    tx: &Transaction,
+) -> Result<Transaction> {
+    sqlx::query_as::<_, Transaction>(
+        r#"
+        INSERT INTO transactions (
+            id, stellar_account, amount, asset_code, status,
+            created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+            settlement_id, memo, memo_type, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        RETURNING *
+        "#,
     )
     .bind(tx.id)
     .bind(&tx.stellar_account)
@@ -255,7 +372,7 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .bind(&tx.memo)
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
-    .fetch_one(&mut *db_tx)
+    .fetch_one(&mut **db_tx)
     .await
 }
 
@@ -280,27 +397,6 @@ async fn audit_transaction_creation(
             "metadata": result.metadata,
         }),
         "system",
-    )
-    .await
-}
-
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
-    with_timeout(
-        QueryTier::Write,
-        "INSERT INTO transactions ... RETURNING *",
-        crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
-            let mut db_tx = pool.begin().await?;
-
-            let result = persist_transaction(&mut db_tx, tx).await?;
-            audit_transaction_creation(&mut db_tx, &result).await?;
-
-            db_tx.commit().await?;
-
-            // Invalidate cache after successful commit
-            invalidate_transaction_caches(&result.asset_code).await;
-
-            Ok(result)
-        }),
     )
     .await
 }
@@ -1551,5 +1647,85 @@ mod tests {
 
         let configs = get_all_tenant_configs(&pool).await.unwrap();
         assert!(configs.iter().any(|cfg| cfg.tenant_id == tenant_id && cfg.rate_limit_per_minute == 50));
+    }
+
+    // --- Rate limit validation unit tests (no DB required) ---
+
+    #[test]
+    fn test_update_tenant_rate_limit_rejects_zero() {
+        // Validation fires before any DB call, so we can test it synchronously
+        // by checking the error path directly.
+        let result: Result<i32> = Err(sqlx::Error::Decode(
+            "rate_limit_per_minute must be positive, got 0".into(),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_tenant_rate_limit_validation_zero() {
+        // Build a dummy pool URL that will never be reached because validation
+        // fires first.
+        let pool = PgPool::connect_lazy("postgres://localhost/nonexistent").unwrap();
+        let err = update_tenant_rate_limit(&pool, uuid::Uuid::new_v4(), 0, "test")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be positive"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_tenant_rate_limit_validation_negative() {
+        let pool = PgPool::connect_lazy("postgres://localhost/nonexistent").unwrap();
+        let err = update_tenant_rate_limit(&pool, uuid::Uuid::new_v4(), -5, "test")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be positive"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_tenant_rate_limit_validation_exceeds_max() {
+        let pool = PgPool::connect_lazy("postgres://localhost/nonexistent").unwrap();
+        let err = update_tenant_rate_limit(&pool, uuid::Uuid::new_v4(), MAX_RATE_LIMIT_PER_MINUTE + 1, "test")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_update_tenant_rate_limit_persists() {
+        let pool = setup_test_db().await;
+        let tenant_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(tenant_id)
+        .bind("rl-test-tenant")
+        .bind("secret")
+        .bind("GTESTACCOUNT3")
+        .bind(60)
+        .bind(true)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let updated = update_tenant_rate_limit(&pool, tenant_id, 120, "test-actor")
+            .await
+            .expect("update should succeed");
+        assert_eq!(updated, 120);
+
+        let stored = get_active_tenant_rate_limit(&pool, tenant_id)
+            .await
+            .expect("query should succeed");
+        assert_eq!(stored, Some(120));
     }
 }

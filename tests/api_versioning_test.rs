@@ -35,7 +35,7 @@ async fn test_api_versioning_headers() {
     // Start App
     let app_state = AppState {
         db: pool.clone(),
-        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
             .await
             .unwrap(),
         horizon_client: synapse_core::stellar::HorizonClient::new(

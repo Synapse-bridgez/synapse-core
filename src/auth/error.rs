@@ -79,6 +79,9 @@ pub enum AuthError {
     /// Callers should: Return 400 Bad Request.
     #[error("Validation error: {0}")]
     Validation(String),
+
+    #[error("Rate limit exceeded — retry after {0}s")]
+    RateLimited(u64),
 }
 
 impl AuthError {
@@ -92,6 +95,7 @@ impl AuthError {
             AuthError::InsufficientPermissions(_) => 403,
             AuthError::Validation(_) => 400,
             AuthError::Vault(_) => 502,
+            AuthError::RateLimited(_) => 429,
         }
     }
 
@@ -114,6 +118,7 @@ impl AuthError {
             AuthError::InsufficientPermissions(_) => "ERR_AUTH_003",
             AuthError::Vault(_) => "ERR_AUTH_004",
             AuthError::Validation(_) => "ERR_AUTH_005",
+            AuthError::RateLimited(_) => "ERR_AUTH_006",
         }
     }
 
@@ -373,5 +378,13 @@ mod tests {
             let debug_str = format!("{:?}", err);
             assert!(!debug_str.is_empty());
         }
+    }
+
+    #[test]
+    fn test_rate_limited_status() {
+        let e = AuthError::RateLimited(30);
+        assert_eq!(e.status_code(), 429);
+        assert_eq!(e.code(), "ERR_AUTH_006");
+        assert!(e.to_string().contains("30"));
     }
 }

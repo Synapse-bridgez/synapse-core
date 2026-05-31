@@ -1,5 +1,5 @@
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -17,19 +17,15 @@ struct FailoverState {
 }
 
 impl PoolManager {
-    pub async fn new(primary_url: &str, replica_url: Option<&str>) -> Result<Self, sqlx::Error> {
-        let primary = PgPoolOptions::new()
-            .max_connections(10)
-            .connect(primary_url)
-            .await?;
+    pub async fn new(
+        primary_url: &str,
+        replica_url: Option<&str>,
+        max_connections: u32,
+    ) -> Result<Self, sqlx::Error> {
+        let primary = build_pool(primary_url, max_connections).await?;
 
         let replica = if let Some(url) = replica_url {
-            Some(
-                PgPoolOptions::new()
-                    .max_connections(10)
-                    .connect(url)
-                    .await?,
-            )
+            Some(build_pool(url, max_connections).await?)
         } else {
             None
         };
@@ -72,4 +68,15 @@ impl PoolManager {
     pub async fn get_write_pool(&self) -> &PgPool {
         &self.primary
     }
+}
+
+fn build_pool(
+    url: &str,
+    max_connections: u32,
+) -> impl std::future::Future<Output = Result<PgPool, sqlx::Error>> + '_ {
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        // Fail fast instead of hanging when the pool is exhausted.
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(url)
 }

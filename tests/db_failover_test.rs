@@ -29,7 +29,7 @@ async fn start_db() -> (String, ContainerAsync<Postgres>) {
 async fn test_pool_manager_primary_only() {
     let (url, _container) = start_db().await;
 
-    let pool_manager = PoolManager::new(&url, None)
+    let pool_manager = PoolManager::new(&url, None, 5)
         .await
         .expect("Failed to create pool manager");
 
@@ -51,7 +51,7 @@ async fn test_pool_manager_with_replica() {
 
     let (url, _container) = start_db().await;
 
-    let pool_manager = PoolManager::new(&url, replica_url.as_deref())
+    let pool_manager = PoolManager::new(&url, replica_url.as_deref(), 5)
         .await
         .expect("Failed to create pool manager");
 
@@ -67,7 +67,7 @@ async fn test_pool_manager_with_replica() {
 async fn test_query_routing() {
     let (url, _container) = start_db().await;
 
-    let pool_manager = PoolManager::new(&url, None)
+    let pool_manager = PoolManager::new(&url, None, 5)
         .await
         .expect("Failed to create pool manager");
 
@@ -88,7 +88,7 @@ async fn test_health_check_with_invalid_replica() {
     let (url, _container) = start_db().await;
 
     let result =
-        PoolManager::new(&url, Some("postgres://invalid:invalid@nonexistent:5432/db")).await;
+        PoolManager::new(&url, Some("postgres://invalid:invalid@nonexistent:5432/db"), 5).await;
 
     assert!(result.is_err());
 }

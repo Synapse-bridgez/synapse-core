@@ -54,7 +54,7 @@ async fn test_graphql_queries() {
     .execute(&pool)
     .await;
 
-    let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
+    let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();

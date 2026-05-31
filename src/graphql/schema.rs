@@ -4,6 +4,7 @@
 //! See [error_handling.md](./error_handling.md) for comprehensive error handling documentation.
 //! See [../docs/graphql-health-checks.md](../docs/graphql-health-checks.md) for health check details.
 
+use crate::graphql::rate_limiting::{GraphQlRateLimitConfig, GraphQlRateLimiter};
 use crate::graphql::resolvers::{Mutation, Query, Subscription};
 use crate::AppState;
 use async_graphql::{
@@ -173,5 +174,6 @@ pub fn build_schema(state: AppState) -> AppSchema {
     .limit_complexity(MAX_QUERY_COMPLEXITY)
     .limit_recursive_depth(MAX_QUERY_DEPTH)
     .extension(AliasLimitExtension)
+    .extension(GraphQlRateLimiter::new(GraphQlRateLimitConfig::default()))
     .finish()
 }

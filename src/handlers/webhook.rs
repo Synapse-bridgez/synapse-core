@@ -22,6 +22,7 @@ use tracing::instrument;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+/// Payload received from the Stellar Anchor Platform callback endpoint.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct CallbackPayload {
     pub stellar_account: String,
@@ -31,15 +32,20 @@ pub struct CallbackPayload {
     pub callback_status: Option<String>,
     pub anchor_transaction_id: Option<String>,
     pub memo: Option<String>,
+    /// Memo type for the Stellar transaction. Must be one of: `text`, `hash`, `id`.
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Minimal webhook payload carrying an opaque event identifier.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct WebhookPayload {
     pub id: String,
 }
 
+/// Incoming request body for the transaction callback endpoint.
+///
+/// Unknown fields are rejected (`deny_unknown_fields`) to prevent silent data loss.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookTransactionRequest {
@@ -51,6 +57,7 @@ pub struct WebhookTransactionRequest {
     pub callback_status: Option<String>,
 }
 
+/// Response returned after a transaction is successfully created.
 #[derive(Debug, Serialize)]
 pub struct WebhookTransactionResponse {
     pub id: String,
@@ -119,6 +126,14 @@ fn validate_webhook_payload(
     })
 }
 
+/// Process a raw transaction callback from an external anchor.
+///
+/// Validates and sanitizes all fields before inserting the transaction into the
+/// database. Returns `201 Created` with the new transaction ID and initial status.
+///
+/// # Errors
+/// - `400 Bad Request` – validation fails (invalid address, amount, field length, etc.)
+/// - `500 Internal Server Error` – database insertion fails
 #[instrument(name = "webhook.transaction_callback", skip(state, payload))]
 pub async fn transaction_callback(
     State(state): State<AppState>,
@@ -298,6 +313,7 @@ mod tests {
     }
 }
 
+/// Response body for the generic webhook endpoint.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WebhookResponse {
     pub success: bool,
@@ -318,6 +334,16 @@ fn validate_memo_type(memo_type: &Option<String>) -> Result<(), AppError> {
     }
 }
 
+/// Receive a fiat deposit callback from the Stellar Anchor Platform.
+///
+/// Applies back-pressure when the pending queue exceeds `MAX_PENDING_QUEUE`
+/// (default 10 000), returning `503 Service Unavailable` with a `Retry-After: 30`
+/// header. On success, inserts the transaction and returns `201 Created`.
+///
+/// # Errors
+/// - `400 Bad Request` – invalid `memo_type` or unparseable `amount`
+/// - `503 Service Unavailable` – queue depth exceeded
+/// - `500 Internal Server Error` – database error
 #[utoipa::path(
     post,
     path = "/callback",
@@ -380,6 +406,14 @@ pub async fn callback(
     Ok((StatusCode::CREATED, Json(inserted)).into_response())
 }
 
+/// Generic webhook receiver for event-driven integrations.
+///
+/// Accepts any payload carrying an `id` field and acknowledges receipt.
+/// Intended as an extension point for future event types.
+///
+/// # Errors
+/// - `400 Bad Request` – missing or malformed `id`
+/// - `500 Internal Server Error` – unexpected processing error
 #[utoipa::path(
     post,
     path = "/webhook",
@@ -446,6 +480,7 @@ pub async fn get_transaction(
     Ok(response)
 }
 
+/// Query parameters for paginated transaction listing.
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub cursor: Option<String>,
@@ -458,9 +493,17 @@ pub struct ListQuery {
     pub to_date: Option<String>,
 }
 
+/// List transactions with cursor-based pagination.
+///
+/// Fetches up to `limit` transactions (max 100, default 25). Supports forward
+/// and backward traversal via an opaque `cursor` and optional ISO 8601 date
+/// range filters (`from_date` / `to_date`). Reads from a replica when available;
+/// in that case the response includes `X-Read-Consistency: eventual`.
+///
+/// # Errors
+/// - `400 Bad Request` – invalid cursor, unparseable dates, or `from_date >= to_date`
+/// - `500 Internal Server Error` – database error
 #[utoipa::path(
-    get,
-    path = "/transactions",
     params(
         ("cursor" = Option<String>, Query, description = "Cursor for pagination"),
         ("limit" = Option<i64>, Query, description = "Page size"),
@@ -560,7 +603,10 @@ pub async fn list_transactions(
     Ok(response)
 }
 
-/// Wrapper to accept the router's ApiState without forcing all handlers to change.
+/// `ApiState`-compatible wrapper around [`list_transactions`].
+///
+/// Extracts the inner [`AppState`] and delegates to the same pagination logic,
+/// keeping the router's state type consistent without duplicating handler code.
 pub async fn list_transactions_api(
     State(api_state): State<crate::ApiState>,
     Query(params): Query<ListQuery>,

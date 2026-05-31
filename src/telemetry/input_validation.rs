@@ -12,12 +12,23 @@ const MAX_ATTRIBUTES: usize = 128;
 /// Allowed characters in identifiers (alphanumeric, underscore, hyphen, dot)
 const IDENTIFIER_PATTERN: &str = r"^[a-zA-Z0-9_\-\.]+$";
 
-/// Validates telemetry input data
+/// Validates telemetry input data to prevent injection and format attacks.
+///
+/// # Health Check
+///
+/// Performs input validation as a first-line defense in the telemetry health check,
+/// preventing malformed or malicious data from reaching the exporter.
 #[derive(Debug, Clone)]
 pub struct InputValidator;
 
 impl InputValidator {
-    /// Validates a span name
+    /// Validates a span name for correct format.
+    ///
+    /// # Health Check
+    ///
+    /// A passing validation means the span name is safe to export (non-empty, correctly sized,
+    /// and contains only allowed characters). A failing validation indicates bad input that
+    /// should be logged and the span should be dropped.
     ///
     /// # Errors
     /// Returns error if name is empty, too long, or contains invalid characters
@@ -45,7 +56,12 @@ impl InputValidator {
         Ok(())
     }
 
-    /// Validates a string attribute value
+    /// Validates a string attribute value for safe serialization.
+    ///
+    /// # Health Check
+    ///
+    /// A passing validation means the value is safe to include in telemetry exports.
+    /// Rejects values that exceed the length limit or contain null bytes (injection vector).
     ///
     /// # Errors
     /// Returns error if value is too long or contains null bytes
@@ -66,7 +82,12 @@ impl InputValidator {
         Ok(())
     }
 
-    /// Validates a collection of attributes
+    /// Validates a collection of span attributes.
+    ///
+    /// # Health Check
+    ///
+    /// A passing validation means all attributes are safe to export and within size bounds.
+    /// Rejects if there are too many attributes (prevents DoS) or any attribute is invalid.
     ///
     /// # Errors
     /// Returns error if too many attributes or any attribute is invalid
@@ -89,7 +110,13 @@ impl InputValidator {
         Ok(())
     }
 
-    /// Validates an endpoint URL
+    /// Validates a telemetry exporter endpoint URL.
+    ///
+    /// # Health Check
+    ///
+    /// A passing validation means the endpoint is safe to connect to (http/https only,
+    /// within length limits). A failing validation indicates SSRF or injection attempt
+    /// and should be logged; the connection should not be attempted.
     ///
     /// # Errors
     /// Returns error if endpoint is invalid or potentially malicious

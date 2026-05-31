@@ -92,7 +92,7 @@ impl AppState {
             AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
-            pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None)
+            pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)
                 .await
                 .unwrap(),
             horizon_client: HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
@@ -186,8 +186,9 @@ pub fn create_app(app_state: AppState) -> Router {
 
     // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
     let mut admin_router = Router::new()
-        .route("/health", get(handlers::health))
+        .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
+        .route("/health", get(handlers::health))
         .route("/errors", get(handlers::error_catalog));
 
     if let Some(store) = &app_state.secrets_store {

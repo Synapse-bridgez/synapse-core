@@ -147,7 +147,7 @@ impl SettlementService {
         tracing::info!("Settlement service shutdown completed");
         Ok(())
     }
-}
+
     /// Run settlement for all assets with completed, unsettled transactions.
     /// Respects each asset's `settlement_schedule` — assets configured as
     /// "hourly" are always eligible; "daily" assets only settle once per day;

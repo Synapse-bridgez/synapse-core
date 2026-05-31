@@ -35,7 +35,7 @@ async fn setup_test_app() -> (
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
-    let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
+    let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
     let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
 

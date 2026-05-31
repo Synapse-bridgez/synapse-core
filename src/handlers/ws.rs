@@ -17,8 +17,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::health::DependencySeverity;
 
-pub mod ws_error;
-use ws_error::{validate_ws_token, validate_message_size, validate_message_structure};
+use crate::handlers::ws_error::{validate_ws_token, validate_message_size, validate_message_structure};
 
 /// How often to send a ping frame to the client.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);

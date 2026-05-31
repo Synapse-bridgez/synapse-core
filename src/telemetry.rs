@@ -32,6 +32,13 @@ pub const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Initialise the global tracer and return the provider so the caller can
 /// shut it down cleanly on exit.
+///
+/// # Non-Fatal Failure Handling
+///
+/// Telemetry initialization failures are never fatal. If the OTLP exporter
+/// fails to initialize, the system falls back to a no-op tracer and continues
+/// operation. This ensures observability infrastructure issues do not disrupt
+/// the main application flow.
 pub fn init_tracer(
     service_name: &str,
     otlp_endpoint: Option<&str>,
@@ -124,6 +131,41 @@ pub fn shutdown_tracer(provider: TracerProvider) {
     opentelemetry::global::shutdown_tracer_provider();
 
     tracing::info!("OpenTelemetry shutdown complete (timeout budget: {timeout:?})");
+}
+
+/// Initialize the tracer with non-fatal error handling.
+///
+/// This wrapper around [`init_tracer`] ensures that initialization failures
+/// never cause the application to panic. If initialization fails, a warning
+/// is logged and the system falls back to the no-op tracer.
+///
+/// # Non-Fatal Guarantee
+///
+/// - Initialization errors are logged as warnings
+/// - The application continues with a no-op tracer
+/// - Observability infrastructure issues don't disrupt application flow
+pub fn init_tracer_non_fatal(
+    service_name: &str,
+    otlp_endpoint: Option<&str>,
+) -> TracerProvider {
+    match init_tracer(service_name, otlp_endpoint) {
+        Ok(provider) => provider,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to initialize OpenTelemetry tracer (falling back to no-op): {e}"
+            );
+            // Return a no-op tracer provider
+            let resource = Resource::new(vec![
+                opentelemetry::KeyValue::new(SERVICE_NAME, service_name.to_string()),
+                opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+            ]);
+            let provider = sdktrace::TracerProvider::builder()
+                .with_config(sdktrace::Config::default().with_resource(resource))
+                .build();
+            opentelemetry::global::set_tracer_provider(provider.clone());
+            provider
+        }
+    }
 }
 
 #[cfg(test)]
