@@ -129,3 +129,119 @@ impl CircuitBreaker {
         self.state.lock().await.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a CircuitBreaker with an unreachable Redis URL.
+    /// The client is lazy – construction succeeds; only actual I/O would fail.
+    fn make_cb(threshold: u32, reset_secs: i64) -> CircuitBreaker {
+        let client = RedisClient::open("redis://127.0.0.1:1/").unwrap();
+        CircuitBreaker::new(
+            "test-service".to_string(),
+            client,
+            threshold,
+            Duration::seconds(reset_secs),
+        )
+    }
+
+    fn fail() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Err("simulated failure".into())
+    }
+
+    fn ok() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    // ── Closed → Open ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn closed_transitions_to_open_after_threshold() {
+        let cb = make_cb(3, 60);
+
+        // Two failures – still Closed
+        for _ in 0..2 {
+            let _ = cb.call(|| async { fail() }).await;
+        }
+        assert!(matches!(cb.get_state().await.state, CircuitState::Closed));
+
+        // Third failure crosses threshold → Open
+        let _ = cb.call(|| async { fail() }).await;
+        let state = cb.get_state().await;
+        assert!(matches!(state.state, CircuitState::Open));
+        assert!(state.opened_at.is_some());
+        assert_eq!(state.failure_count, 3);
+    }
+
+    // ── Open → HalfOpen ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_transitions_to_half_open_after_reset_timeout() {
+        let cb = make_cb(1, 0); // reset_timeout = 0 s → expires immediately
+
+        // Trip the breaker
+        let _ = cb.call(|| async { fail() }).await;
+        assert!(matches!(cb.get_state().await.state, CircuitState::Open));
+
+        // Next call: timeout has elapsed → breaker moves to HalfOpen and the
+        // inner function executes.  We return an error so it trips back to Open,
+        // but the important thing is that the call was *attempted* (not fast-failed).
+        let result = cb.call(|| async { fail() }).await;
+        // The call was forwarded (not short-circuited with CircuitBreakerError::Open)
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert_ne!(err_msg, "Circuit breaker is open");
+    }
+
+    // ── HalfOpen → Closed ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn half_open_transitions_to_closed_on_success() {
+        let cb = make_cb(1, 0); // reset_timeout = 0 s
+
+        // Trip to Open
+        let _ = cb.call(|| async { fail() }).await;
+
+        // Probe succeeds → Closed
+        let result = cb.call(|| async { ok() }).await;
+        assert!(result.is_ok());
+
+        let state = cb.get_state().await;
+        assert!(matches!(state.state, CircuitState::Closed));
+        assert_eq!(state.failure_count, 0);
+        assert!(state.opened_at.is_none());
+    }
+
+    // ── HalfOpen → Open ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn half_open_transitions_to_open_on_failure() {
+        let cb = make_cb(1, 0); // reset_timeout = 0 s
+
+        // Trip to Open
+        let _ = cb.call(|| async { fail() }).await;
+
+        // Probe fails → back to Open
+        let _ = cb.call(|| async { fail() }).await;
+
+        let state = cb.get_state().await;
+        assert!(matches!(state.state, CircuitState::Open));
+        assert!(state.opened_at.is_some());
+    }
+
+    // ── Open fast-fails while timeout has not elapsed ─────────────────────────
+
+    #[tokio::test]
+    async fn open_fast_fails_before_reset_timeout() {
+        let cb = make_cb(1, 3600); // reset_timeout = 1 hour
+
+        // Trip to Open
+        let _ = cb.call(|| async { fail() }).await;
+
+        // Immediate call → fast-fail
+        let result = cb.call(|| async { ok() }).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Circuit breaker is open");
+    }
+}
