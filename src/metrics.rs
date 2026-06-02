@@ -120,6 +120,14 @@ pub fn db_query_timeout_total() -> Counter<u64> {
         .init()
 }
 
+/// Slow database query counter.
+pub fn db_slow_queries_total() -> Counter<u64> {
+    meter()
+        .u64_counter("db_slow_queries_total")
+        .with_description("Number of slow database queries")
+        .init()
+}
+
 /// Pending transaction queue depth gauge.
 pub fn pending_queue_depth() -> ObservableGauge<u64> {
     meter()

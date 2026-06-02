@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let _tracer_provider =
+    let tracer_manager =
         synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
             .expect("failed to initialise OpenTelemetry tracer");
 
@@ -468,7 +468,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     synapse_core::db::graceful_shutdown(&pool).await;
 
     // Flush and shut down the OTel exporter on clean exit.
-    opentelemetry::global::shutdown_tracer_provider();
+    tracer_manager.shutdown();
 
     Ok(())
 }

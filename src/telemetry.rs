@@ -30,8 +30,65 @@ use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION
 /// Default maximum time to wait for in-flight spans to be exported on shutdown.
 pub const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Initialise the global tracer and return the provider so the caller can
-/// shut it down cleanly on exit.
+/// Manager for the global OpenTelemetry tracer provider.
+///
+/// This type holds the provider for the lifetime of the application and
+/// exposes a structured shutdown path for graceful tracer teardown.
+pub struct TracerManager {
+    provider: TracerProvider,
+}
+
+impl TracerManager {
+    /// Initialize the tracer manager and register the provider globally.
+    pub fn init(service_name: &str, otlp_endpoint: Option<&str>) -> anyhow::Result<Self> {
+        // W3C TraceContext propagation (traceparent / tracestate headers)
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+
+        let resource = Resource::new(vec![
+            opentelemetry::KeyValue::new(SERVICE_NAME, service_name.to_string()),
+            opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+        ]);
+
+        let provider = match otlp_endpoint {
+            Some(endpoint) => {
+                let exporter = opentelemetry_otlp::new_exporter()
+                    .tonic()
+                    .with_endpoint(endpoint)
+                    .build_span_exporter()?;
+
+                let provider = sdktrace::TracerProvider::builder()
+                    .with_config(sdktrace::Config::default().with_resource(resource))
+                    .with_batch_exporter(exporter, runtime::Tokio)
+                    .build();
+
+                tracing::info!("OpenTelemetry OTLP exporter configured → {endpoint}");
+                provider
+            }
+            None => {
+                let provider = sdktrace::TracerProvider::builder()
+                    .with_config(sdktrace::Config::default().with_resource(resource))
+                    .build();
+
+                tracing::info!("No OTLP_ENDPOINT set — OpenTelemetry running in no-op mode");
+                provider
+            }
+        };
+
+        // Register as the global provider so `opentelemetry::global::tracer()`
+        // works anywhere in the codebase.
+        opentelemetry::global::set_tracer_provider(provider.clone());
+
+        Ok(Self { provider })
+    }
+
+    /// Shut down the tracer and flush any buffered spans.
+    pub fn shutdown(self) {
+        shutdown_tracer(self.provider)
+    }
+}
+
+/// Initialise the global tracer manager and return a guard that can be
+/// shut down cleanly on exit.
 ///
 /// # Non-Fatal Failure Handling
 ///
@@ -42,45 +99,8 @@ pub const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn init_tracer(
     service_name: &str,
     otlp_endpoint: Option<&str>,
-) -> anyhow::Result<TracerProvider> {
-    // W3C TraceContext propagation (traceparent / tracestate headers)
-    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-
-    let resource = Resource::new(vec![
-        opentelemetry::KeyValue::new(SERVICE_NAME, service_name.to_string()),
-        opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-    ]);
-
-    let provider = match otlp_endpoint {
-        Some(endpoint) => {
-            let exporter = opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(endpoint)
-                .build_span_exporter()?;
-
-            let provider = sdktrace::TracerProvider::builder()
-                .with_config(sdktrace::Config::default().with_resource(resource))
-                .with_batch_exporter(exporter, runtime::Tokio)
-                .build();
-
-            tracing::info!("OpenTelemetry OTLP exporter configured → {endpoint}");
-            provider
-        }
-        None => {
-            let provider = sdktrace::TracerProvider::builder()
-                .with_config(sdktrace::Config::default().with_resource(resource))
-                .build();
-
-            tracing::info!("No OTLP_ENDPOINT set — OpenTelemetry running in no-op mode");
-            provider
-        }
-    };
-
-    // Register as the global provider so `opentelemetry::global::tracer()`
-    // works anywhere in the codebase.
-    opentelemetry::global::set_tracer_provider(provider.clone());
-
-    Ok(provider)
+) -> anyhow::Result<TracerManager> {
+    TracerManager::init(service_name, otlp_endpoint)
 }
 
 /// Resolve the flush timeout from the environment, falling back to
@@ -147,14 +167,13 @@ pub fn shutdown_tracer(provider: TracerProvider) {
 pub fn init_tracer_non_fatal(
     service_name: &str,
     otlp_endpoint: Option<&str>,
-) -> TracerProvider {
-    match init_tracer(service_name, otlp_endpoint) {
-        Ok(provider) => provider,
+) -> TracerManager {
+    match TracerManager::init(service_name, otlp_endpoint) {
+        Ok(manager) => manager,
         Err(e) => {
             tracing::warn!(
                 "Failed to initialize OpenTelemetry tracer (falling back to no-op): {e}"
             );
-            // Return a no-op tracer provider
             let resource = Resource::new(vec![
                 opentelemetry::KeyValue::new(SERVICE_NAME, service_name.to_string()),
                 opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
@@ -163,7 +182,7 @@ pub fn init_tracer_non_fatal(
                 .with_config(sdktrace::Config::default().with_resource(resource))
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
-            provider
+            TracerManager { provider }
         }
     }
 }
@@ -171,6 +190,7 @@ pub fn init_tracer_non_fatal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::global;
 
     #[test]
     fn flush_timeout_defaults_to_constant() {
@@ -192,21 +212,15 @@ mod tests {
         assert_eq!(flush_timeout(), DEFAULT_FLUSH_TIMEOUT);
         std::env::remove_var("OTEL_FLUSH_TIMEOUT_SECS");
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use opentelemetry::global;
 
     #[test]
     fn test_init_tracer_sets_global_provider_and_resource() {
-        let provider = init_tracer("test-service", None).expect("failed to init tracer");
+        let manager = init_tracer("test-service", None).expect("failed to init tracer");
         let tracer = global::tracer("test-tracer");
         let span = tracer.start("test-span");
         span.end();
 
-        let resource = provider.config().resource();
+        let resource = manager.provider.config().resource();
         let mut service_name = None;
         let mut service_version = None;
 
@@ -221,12 +235,12 @@ mod tests {
         assert_eq!(service_name.as_deref(), Some("test-service"));
         assert!(service_version.is_some());
 
-        shutdown_tracer(provider);
+        manager.shutdown();
     }
 
     #[test]
     fn test_shutdown_tracer_drops_provider_without_error() {
-        let provider = init_tracer("test-service", None).expect("failed to init tracer");
-        shutdown_tracer(provider);
+        let manager = init_tracer("test-service", None).expect("failed to init tracer");
+        manager.shutdown();
     }
 }
