@@ -1611,10 +1611,11 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind("test tenant")
+        .bind(format!("key-{tenant_id}"))
         .bind("secret")
         .bind("GTESTACCOUNT")
         .bind(420)
@@ -1637,10 +1638,11 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind("test tenant 2")
+        .bind(format!("key-{tenant_id}"))
         .bind("secret2")
         .bind("GTESTACCOUNT2")
         .bind(50)
@@ -1717,10 +1719,11 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind("rl-test-tenant")
+        .bind(format!("key-{tenant_id}"))
         .bind("secret")
         .bind("GTESTACCOUNT3")
         .bind(60)

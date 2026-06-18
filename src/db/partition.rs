@@ -132,7 +132,7 @@ mod tests {
 
         // Pre-clear any existing warm keys so we can detect a fresh write.
         cache.invalidate("query:status_counts").await.ok();
-        cache.invalidate("query:daily_totals").await.ok();
+        cache.invalidate("query:daily_totals:7").await.ok();
         cache.invalidate("query:asset_stats").await.ok();
 
         let manager = PartitionManager::new(pool.clone(), 24, Some(cache.clone()));
@@ -145,7 +145,7 @@ mod tests {
             let status: Option<serde_json::Value> =
                 cache.get("query:status_counts").await.unwrap_or(None);
             let daily: Option<serde_json::Value> =
-                cache.get("query:daily_totals").await.unwrap_or(None);
+                cache.get("query:daily_totals:7").await.unwrap_or(None);
             let assets: Option<serde_json::Value> =
                 cache.get("query:asset_stats").await.unwrap_or(None);
             assert!(status.is_some(), "status_counts should be cached");

@@ -88,7 +88,9 @@ impl SessionManager {
         };
 
         let key = format!("{}{}", SESSION_PREFIX, session_id);
-        let ttl = self.config.expiry.as_secs() as usize;
+        // Redis rejects an `EX` of 0, so floor the TTL at 1 second. Sub-second
+        // expiries (used in tests) are still enforced via `expires_at`/`is_expired`.
+        let ttl = (self.config.expiry.as_secs() as usize).max(1);
 
         let serialized =
             serde_json::to_string(&session).map_err(|_| SessionError::SerializationError)?;

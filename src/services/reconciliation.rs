@@ -405,8 +405,10 @@ mod tests {
     }
 
     fn make_period() -> (DateTime<Utc>, DateTime<Utc>) {
-        let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        let end = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
+        // Must fall within an existing transactions partition (migrations cover
+        // 2025-01 through 2026-07).
+        let start = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 6, 2, 0, 0, 0).unwrap();
         (start, end)
     }
 
