@@ -19,7 +19,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```text
 //! use synapse_core::payments::connection_pool::{PaymentsConnectionPool, PaymentsPoolConfig};
 //!
 //! let pool = PaymentsConnectionPool::new()?;

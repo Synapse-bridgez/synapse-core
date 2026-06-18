@@ -60,7 +60,7 @@ pub static DB_QUERY_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Tier used when wrapping a query with [`with_timeout`].
 ///
 /// # Examples
-/// ```ignore
+/// ```text
 /// // SELECT query: read tier, 5s timeout
 /// with_timeout(QueryTier::Read, "SELECT * FROM users", query_future).await?;
 ///
@@ -122,7 +122,7 @@ impl QueryTier {
 /// Other errors are propagated as-is.
 ///
 /// # Examples
-/// ```ignore
+/// ```text
 /// // Wrap a read query
 /// with_timeout(QueryTier::Read, "SELECT * FROM users WHERE id = $1", async {
 ///     sqlx::query("SELECT * FROM users WHERE id = $1")

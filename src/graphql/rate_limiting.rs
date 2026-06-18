@@ -32,7 +32,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```text
 //! use synapse_core::graphql::rate_limiting::{GraphQlRateLimiter, GraphQlRateLimitConfig};
 //!
 //! let schema = async_graphql::Schema::build(Query, Mutation, Subscription)

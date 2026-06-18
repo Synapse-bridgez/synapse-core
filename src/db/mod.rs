@@ -136,7 +136,7 @@ pub async fn graceful_shutdown(pool: &PgPool) {
 /// - Max connections limits database resource consumption
 ///
 /// # Examples
-/// ```ignore
+/// ```text
 /// let config = Config::from_env();
 /// let pool = create_pool(&config).await?;
 /// ```

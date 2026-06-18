@@ -20,7 +20,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```text
 //! use synapse_core::security::connection_pool::{SecurityConnectionPool, SecurityPoolConfig};
 //!
 //! let pool = SecurityConnectionPool::new()?;
