@@ -45,13 +45,25 @@
 //! `webhook_deliveries` for enabled `webhook_endpoints`. The delivery table is
 //! intentionally append/update oriented:
 //!
-//! - `webhook_deliveries.status` tracks `pending`, `delivered`, or `failed`;
+//! - `webhook_deliveries.status` tracks `pending`, `in_progress`, `delivered`, or `failed`;
+//!   `in_progress` means a worker has claimed the row (see `claimed_at`); workers
+//!   reclaim stale `in_progress` rows older than `CLAIM_TIMEOUT_SECS` (default 5 min);
 //! - `attempt_count`, `last_attempt_at`, and `next_attempt_at` support retry
 //!   scheduling;
 //! - `response_status` and `response_body` capture endpoint responses for
 //!   diagnostics;
+//! - `attempt_history` stores every attempt as a `JSONB` array of
+//!   `{attempt, attempted_at, response_status, response_body, error}` objects,
+//!   used for DLQ routing and operator inspection;
+//! - `claimed_at` records when a worker claimed the row for processing; older
+//!   `in_progress` rows are candidates for reclaim after a crash;
 //! - the `(endpoint_id, transaction_id, event_type)` uniqueness constraint
-//!   prevents duplicate delivery rows for the same event.
+//!   prevents duplicate delivery rows for the same event;
+//! - exhausted deliveries (after `MAX_ATTEMPTS`) are inserted into
+//!   `webhook_delivery_dlq` with the full `attempt_history` for replay;
+//! - per-endpoint circuit breaker state is kept in Redis (`webhook_cb:<id>`);
+//!   when open, the dispatcher skips and reschedules deliveries without
+//!   consuming attempt budget.
 //!
 //! The dispatcher batches pending deliveries and endpoint lookups to avoid an
 //! N+1 query pattern. New query paths should preserve that shape: select a
