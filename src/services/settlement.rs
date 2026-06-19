@@ -1,6 +1,7 @@
 use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
 use crate::error::AppError;
+use crate::validation::state_transitions::{is_valid_transition, SETTLEMENT_TRANSITIONS};
 use bigdecimal::BigDecimal;
 use chrono::Utc;
 use opentelemetry::metrics::Histogram;
@@ -10,31 +11,22 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-/// Returns `true` when transitioning from `from` to `to` is allowed by the
-/// settlement state machine.
-fn valid_transition(from: &str, to: &str) -> bool {
-    if from == to {
-        return true;
-    }
-    matches!(
-        (from, to),
-        ("completed", "pending_review")
-            | ("pending_review", "disputed")
-            | ("pending_review", "voided")
-            | ("pending_review", "completed")
-            | ("disputed", "adjusted")
-            | ("disputed", "voided")
-            | ("adjusted", "completed")
-    )
-}
-
 /// Maps a `sqlx::Error` to the appropriate `AppError` variant.
 ///
-/// `RowNotFound` is treated as a domain-level not-found rather than a generic
-/// database error so callers can distinguish the two cases.
+/// `RowNotFound` during settlement status update indicates concurrent modification (stale transition).
+/// Other `RowNotFound` errors are treated as domain-level not-found.
 fn map_db_err(e: sqlx::Error) -> AppError {
     match e {
         sqlx::Error::RowNotFound => AppError::NotFound("settlement record not found".to_string()),
+        other => AppError::DatabaseError(other.to_string()),
+    }
+}
+
+/// Maps update_settlement_status result, converting RowNotFound to StaleTransition
+/// when it indicates a concurrent modification during atomic update.
+fn map_update_settlement_err(e: sqlx::Error) -> AppError {
+    match e {
+        sqlx::Error::RowNotFound => AppError::StaleTransition,
         other => AppError::DatabaseError(other.to_string()),
     }
 }
@@ -323,8 +315,8 @@ impl SettlementService {
     }
 
     /// Change a settlement's status (dispute, adjust, void, etc.).
-    /// Validates the transition, then delegates to the query layer which
-    /// handles audit logging and releasing transactions on void.
+    /// Validates the transition before delegating to the query layer which
+    /// handles atomic validation (within the lock), audit logging, and releasing transactions on void.
     pub async fn update_status(
         &self,
         id: Uuid,
@@ -333,6 +325,9 @@ impl SettlementService {
         new_total: Option<&BigDecimal>,
         actor: &str,
     ) -> Result<Settlement, AppError> {
+        // Pre-flight validation using unified state machine (no lock yet).
+        // This provides early feedback but is not relied upon for correctness.
+        // The actual correctness check happens inside the locked transaction in the query layer.
         let current = queries::get_settlement(&self.pool, id).await.map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) {
                 AppError::NotFound(format!("settlement {id}"))
@@ -341,16 +336,24 @@ impl SettlementService {
             }
         })?;
 
-        if !valid_transition(&current.status, new_status) {
+        if !is_valid_transition(&current.status, new_status, SETTLEMENT_TRANSITIONS) {
             return Err(AppError::BadRequest(format!(
                 "invalid transition: {} -> {}",
                 current.status, new_status
             )));
         }
 
-        queries::update_settlement_status(&self.pool, id, new_status, reason, new_total, actor)
-            .await
-            .map_err(map_db_err)
+        queries::update_settlement_status(
+            &self.pool,
+            id,
+            &current.status,
+            new_status,
+            reason,
+            new_total,
+            actor,
+        )
+        .await
+        .map_err(map_update_settlement_err)
     }
 }
 
@@ -392,22 +395,6 @@ mod tests {
     fn map_db_err_other_becomes_database_error() {
         let err = map_db_err(sqlx::Error::PoolTimedOut);
         assert!(matches!(err, AppError::DatabaseError(_)));
-    }
-
-    #[test]
-    fn valid_transition_allows_expected_paths() {
-        assert!(valid_transition("completed", "pending_review"));
-        assert!(valid_transition("pending_review", "disputed"));
-        assert!(valid_transition("disputed", "adjusted"));
-        assert!(valid_transition("adjusted", "completed"));
-        assert!(valid_transition("pending_review", "voided"));
-    }
-
-    #[test]
-    fn valid_transition_rejects_invalid_paths() {
-        assert!(!valid_transition("completed", "voided"));
-        assert!(!valid_transition("adjusted", "disputed"));
-        assert!(!valid_transition("voided", "completed"));
     }
 
     #[test]

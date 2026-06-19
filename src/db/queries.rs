@@ -745,6 +745,7 @@ pub async fn list_settlements_cursor(
 pub async fn update_settlement_status(
     pool: &PgPool,
     id: Uuid,
+    expected_from_status: &str,
     new_status: &str,
     reason: Option<&str>,
     new_total: Option<&sqlx::types::BigDecimal>,
@@ -758,6 +759,14 @@ pub async fn update_settlement_status(
             .fetch_optional(&mut *db_tx)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
+
+    // Validate transition against the locked row (not the pre-lock read).
+    // This catches concurrent modifications: if the status changed or no-op transition is detected,
+    // mark as stale by returning RowNotFound (which will be converted to StaleTransition in service layer).
+    if current.status != expected_from_status || current.status == new_status {
+        db_tx.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    }
 
     // Preserve original amount on first adjustment
     let original_total = if current.original_total_amount.is_none() && new_total.is_some() {
@@ -776,7 +785,7 @@ pub async fn update_settlement_status(
             reviewed_by = $5,
             reviewed_at = NOW(),
             updated_at = NOW()
-        WHERE id = $6
+        WHERE id = $6 AND status = $7
         RETURNING *
         "#,
     )
@@ -786,8 +795,10 @@ pub async fn update_settlement_status(
     .bind(original_total)
     .bind(actor)
     .bind(id)
-    .fetch_one(&mut *db_tx)
-    .await?;
+    .bind(expected_from_status)
+    .fetch_optional(&mut *db_tx)
+    .await?
+    .ok_or(sqlx::Error::RowNotFound)?;
 
     // If voided, release transactions back to unsettled
     if new_status == "voided" {

@@ -4,6 +4,7 @@ use std::fmt;
 
 pub mod schemas;
 pub mod state_machine;
+pub mod state_transitions;
 
 pub const STELLAR_ACCOUNT_LEN: usize = 56;
 pub const ASSET_CODE_MAX_LEN: usize = 12;

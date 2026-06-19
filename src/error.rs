@@ -79,6 +79,8 @@ pub mod codes {
         ("ERR_SETTLEMENT_001", 400, "Invalid settlement amount");
     pub const SETTLEMENT_002: (&str, u16, &str) =
         ("ERR_SETTLEMENT_002", 409, "Settlement already exists");
+    pub const SETTLEMENT_003: (&str, u16, &str) =
+        ("ERR_SETTLEMENT_003", 409, "Stale transition: settlement state changed during processing");
 
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
@@ -182,6 +184,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::SETTLEMENT_002.2,
         },
         ErrorCode {
+            code: codes::SETTLEMENT_003.0,
+            http_status: codes::SETTLEMENT_003.1,
+            description: codes::SETTLEMENT_003.2,
+        },
+        ErrorCode {
             code: codes::RATE_LIMIT_001.0,
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
@@ -239,6 +246,9 @@ pub enum AppError {
     #[error("Invalid status transition: {0}")]
     InvalidStatusTransition(String),
 
+    #[error("Stale transition: settlement state changed during processing")]
+    StaleTransition,
+
     #[error("Invalid webhook signature")]
     InvalidWebhookSignature,
 
@@ -284,6 +294,7 @@ impl AppError {
             AppError::InvalidStellarAddress(_) => StatusCode::BAD_REQUEST,
             AppError::TransactionAlreadyProcessed(_) => StatusCode::CONFLICT,
             AppError::InvalidStatusTransition(_) => StatusCode::BAD_REQUEST,
+            AppError::StaleTransition => StatusCode::CONFLICT,
             AppError::InvalidWebhookSignature => StatusCode::UNAUTHORIZED,
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,
@@ -314,6 +325,7 @@ impl AppError {
             AppError::InvalidStellarAddress(_) => codes::TRANSACTION_003.0,
             AppError::TransactionAlreadyProcessed(_) => codes::TRANSACTION_004.0,
             AppError::InvalidStatusTransition(_) => codes::TRANSACTION_005.0,
+            AppError::StaleTransition => codes::SETTLEMENT_003.0,
             AppError::InvalidWebhookSignature => codes::WEBHOOK_001.0,
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
             AppError::InvalidSettlementAmount(_) => codes::SETTLEMENT_001.0,

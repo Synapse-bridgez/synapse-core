@@ -1,46 +1,12 @@
 use crate::error::AppError;
+use crate::validation::state_transitions::{is_valid_transition, TRANSACTION_TRANSITIONS};
 
 /// Validates transaction status transitions according to the state machine.
 ///
-/// Valid transitions:
-/// - pending → processing
-/// - pending → completed (direct completion)
-/// - pending → failed
-/// - processing → completed
-/// - processing → failed
-/// - failed → pending (reprocess)
-///
-/// Invalid transitions (examples):
-/// - completed → pending
-/// - completed → processing
-/// - completed → failed
+/// Valid transitions are defined in `state_transitions::TRANSACTION_TRANSITIONS`.
+/// Same-state transitions are always valid (idempotent).
 pub fn validate_status_transition(from: &str, to: &str) -> Result<(), AppError> {
-    // Allow same-state transitions (idempotent updates)
-    if from == to {
-        return Ok(());
-    }
-
-    let valid = match (from, to) {
-        // From pending
-        ("pending", "processing") => true,
-        ("pending", "completed") => true,
-        ("pending", "failed") => true,
-
-        // From processing
-        ("processing", "completed") => true,
-        ("processing", "failed") => true,
-
-        // From failed (reprocess)
-        ("failed", "pending") => true,
-
-        // From dlq (requeue)
-        ("dlq", "pending") => true,
-
-        // All other transitions are invalid
-        _ => false,
-    };
-
-    if valid {
+    if is_valid_transition(from, to, TRANSACTION_TRANSITIONS) {
         Ok(())
     } else {
         Err(AppError::InvalidStatusTransition(format!(
