@@ -318,6 +318,90 @@ pub async fn set_tenant_context(
     Ok(())
 }
 
+/// Execute work in a transaction with tenant context set via SET LOCAL.
+///
+/// This is the leak-proof way to handle tenant-scoped database access:
+/// - `SET LOCAL` sets GUCs transaction-scoped (auto-cleared on commit/rollback)
+/// - GUCs cannot persist on the pooled connection after the transaction ends
+/// - If context is not set, queries fail closed (RLS policy sees NULL and denies access)
+///
+/// # Justification for Leak-Proof Design
+///
+/// **Why SET LOCAL is safe under connection pooling:**
+/// - Session-scoped `set_config(..., false)` persists on the connection
+/// - Transaction-scoped `SET LOCAL` is cleared automatically on commit/rollback
+/// - Even if the same physical connection serves tenant A then tenant B,
+///   A's context is guaranteed cleared before B starts its transaction
+/// - Failed transactions (rollback) also clear the GUCs
+///
+/// **Why this fails closed without context:**
+/// - If a request forgets to call this helper, GUCs default to empty strings
+/// - RLS policies check `current_setting('app.tenant_id') = tenant_id::text`
+/// - Empty string != any UUID, so queries return empty result (deny)
+/// - Queries never accidentally see all tenants' data
+///
+/// # Example
+///
+/// ```ignore
+/// let result = with_tenant(pool, Some(tenant_id), false, |mut tx| async {
+///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
+///         .bind(id)
+///         .fetch_one(&mut *tx)
+///         .await
+/// }).await?;
+/// ```
+///
+/// # Parameters
+/// - `pool`: Connection pool
+/// - `tenant_id`: Some(uuid) for tenant, None for admin context
+/// - `is_admin`: If true, sets app.is_admin='true' and bypasses RLS
+/// - `work`: Async closure receiving the transaction
+/// Execute tenant-scoped database work with transaction-scoped context.
+///
+/// Wraps work in a transaction and sets app.tenant_id/app.is_admin using SET LOCAL,
+/// which auto-clears on commit/rollback. Leak-proof under connection pooling.
+///
+/// # Example
+/// ```ignore
+/// let result = with_tenant(&pool, Some(tenant_id), false, async {
+///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions")
+///         .fetch_all(&mut *tx)
+///         .await
+/// }).await?;
+/// ```
+pub async fn with_tenant<F, T>(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    is_admin: bool,
+    work: impl FnOnce(&mut SqlxTransaction<Postgres>) -> F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let mut tx = pool.begin().await?;
+
+    // Set context using SET LOCAL (transaction-scoped, auto-cleared on commit/rollback)
+    if is_admin {
+        sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+            .execute(&mut *tx)
+            .await?;
+    } else if let Some(tid) = tenant_id {
+        sqlx::query("SELECT set_config('app.tenant_id', $1, true), set_config('app.is_admin', 'false', true)")
+            .bind(tid.to_string())
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        // Fail closed: if no context provided, set to unreachable values
+        sqlx::query("SELECT set_config('app.tenant_id', '', true), set_config('app.is_admin', 'false', true)")
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let result = work(&mut tx).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
 // --- Transaction Queries ---
 
 /// Insert a transaction created from an inbound webhook/callback payload.
