@@ -71,6 +71,7 @@ async-trait = "0.1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+subtle = "2.5"
 pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 flate2 = "1.0"
 opentelemetry = { version = "0.22", features = ["metrics", "trace"] }

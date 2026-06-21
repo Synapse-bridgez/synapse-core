@@ -131,8 +131,8 @@ pub fn create_app(app_state: AppState) -> Router {
         graphql_schema,
     };
 
-    // Callback routes with validation + quota middleware
-    let callback_routes = Router::new()
+    // Callback routes: signature verification + api_key_auth + validation + quota
+    let mut callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
         .layer(axum_middleware::from_fn_with_state(
@@ -141,10 +141,21 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::api_key_auth,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::signature_verification::signature_verification,
         ));
 
-    // Webhook route with validation + quota middleware
-    let webhook_routes = Router::new()
+    // Inject SecretsStore for signature verification
+    if let Some(store) = &app_state.secrets_store {
+        callback_routes = callback_routes.layer(axum::Extension(store.clone()));
+    }
+
+    // Webhook route: signature verification + validation + quota
+    let mut webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
@@ -152,7 +163,18 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::api_key_auth,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::signature_verification::signature_verification,
         ));
+
+    // Inject SecretsStore for signature verification
+    if let Some(store) = &app_state.secrets_store {
+        webhook_routes = webhook_routes.layer(axum::Extension(store.clone()));
+    }
 
     // Core API routes (shared between versioned and unversioned)
     let core_routes = Router::new()
@@ -183,25 +205,12 @@ pub fn create_app(app_state: AppState) -> Router {
         middleware::versioning::v2_version_middleware,
     ));
 
-    // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
+    // Admin routes — auth + SecretsStore injected for rotation-aware auth
     let mut admin_router = Router::new()
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))
-        .route("/errors", get(handlers::error_catalog));
-
-    if let Some(store) = &app_state.secrets_store {
-        admin_router = admin_router.layer(axum::Extension(store.clone()));
-    }
-
-    admin_router
-        // Unversioned routes default to V2 behaviour
-        .merge(core_routes.layer(axum_middleware::from_fn(
-            middleware::versioning::v2_version_middleware,
-        )))
-        // Versioned route groups
-        .nest("/api/v1", v1_routes)
-        .nest("/api/v2", v2_routes)
+        .route("/errors", get(handlers::error_catalog))
         .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
@@ -254,6 +263,22 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
         )
+        .layer(axum_middleware::from_fn(
+            crate::middleware::auth::admin_auth,
+        ));
+
+    if let Some(store) = &app_state.secrets_store {
+        admin_router = admin_router.layer(axum::Extension(store.clone()));
+    }
+
+    admin_router
+        // Unversioned routes default to V2 behaviour
+        .merge(core_routes.layer(axum_middleware::from_fn(
+            middleware::versioning::v2_version_middleware,
+        )))
+        // Versioned route groups
+        .nest("/api/v1", v1_routes)
+        .nest("/api/v2", v2_routes)
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
