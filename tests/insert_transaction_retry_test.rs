@@ -71,19 +71,24 @@ async fn test_retried_insert_does_not_duplicate_row_or_audit_log() {
 
     let tx = TransactionFixture::pending_deposit();
 
-    let first = insert_transaction(&pool, &tx)
+    let (first, first_is_new) = insert_transaction(&pool, &tx)
         .await
         .expect("first insert should succeed");
     assert_eq!(first.id, tx.id);
+    assert!(first_is_new, "first insert should create a fresh row");
 
     // Simulate a retry: the same caller-generated `tx` (same id + created_at)
     // is inserted again, as `retry_with_backoff` would do after a transient
     // post-commit error on the first attempt.
-    let retried = insert_transaction(&pool, &tx)
+    let (retried, retried_is_new) = insert_transaction(&pool, &tx)
         .await
         .expect("retried insert should be idempotent, not error");
     assert_eq!(retried.id, tx.id);
     assert_eq!(retried.stellar_account, first.stellar_account);
+    assert!(
+        !retried_is_new,
+        "retry should observe the already-committed row, not create a new one"
+    );
 
     let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE id = $1")
         .bind(tx.id)

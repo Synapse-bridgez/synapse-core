@@ -6,7 +6,7 @@
 /// - No-context queries fail closed (return nothing)
 /// - Concurrent requests on same connection don't interfere
 
-use sqlx::{migrate::Migrator, PgPool};
+use sqlx::{migrate::Migrator, Acquire, PgPool};
 use std::path::Path;
 use synapse_core::db::queries::with_tenant;
 use testcontainers::runners::AsyncRunner;
@@ -75,16 +75,16 @@ async fn setup_db() -> (PgPool, PgPool, impl std::any::Any) {
 /// Insert a transaction row for a specific tenant
 async fn insert_tx_for_tenant(pool: &PgPool, tenant_id: Uuid, tx_id: Uuid) {
     with_tenant(pool, Some(tenant_id), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query(
                 r#"INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at, tenant_id)
                    VALUES ($1, 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 100, 'USD', 'pending', NOW(), NOW(), $2)"#,
             )
             .bind(tx_id)
             .bind(tenant_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
-        }
+        })
     })
     .await
     .unwrap();
@@ -122,24 +122,24 @@ async fn test_set_local_prevents_connection_reuse_leak() {
 
     // Request 1: Tenant A queries its own data
     let result_a1: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_a), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions ORDER BY id")
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
     assert_eq!(result_a1.len(), 2, "tenant A should see its 2 transactions");
-    assert!(result_a1.iter().all(|(id)| id == &tx_a1 || id == &tx_a2));
+    assert!(result_a1.iter().all(|(id,)| id == &tx_a1 || id == &tx_a2));
 
     // Request 2: Tenant B queries (reuses connection, different context)
     let result_b: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_b), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions ORDER BY id")
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
@@ -148,25 +148,25 @@ async fn test_set_local_prevents_connection_reuse_leak() {
 
     // Request 3: Tenant A queries again (connection reused, context reset again)
     let result_a2: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_a), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions ORDER BY id")
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
     assert_eq!(result_a2.len(), 2, "tenant A should still see its 2 transactions");
-    assert!(result_a2.iter().all(|(id)| id == &tx_a1 || id == &tx_a2));
+    assert!(result_a2.iter().all(|(id,)| id == &tx_a1 || id == &tx_a2));
 
     // Verify B didn't see A's data during request 2
     let b_sees_a: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_b), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions WHERE id = ANY($1)")
                 .bind(vec![tx_a1, tx_a2])
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
@@ -244,11 +244,11 @@ async fn test_concurrent_tenant_isolation() {
     // Run concurrent queries
     let fut_a = async {
         with_tenant(&pool, Some(tenant_a), false, |tx| {
-            async move {
+            Box::pin(async move {
                 sqlx::query_as::<_, (Uuid,)>("SELECT id FROM transactions")
-                    .fetch_all(&mut *tx)
+                    .fetch_all(&mut **tx)
                     .await
-            }
+            })
         })
         .await
         .unwrap()
@@ -256,11 +256,11 @@ async fn test_concurrent_tenant_isolation() {
 
     let fut_b = async {
         with_tenant(&pool, Some(tenant_b), false, |tx| {
-            async move {
+            Box::pin(async move {
                 sqlx::query_as::<_, (Uuid,)>("SELECT id FROM transactions")
-                    .fetch_all(&mut *tx)
+                    .fetch_all(&mut **tx)
                     .await
-            }
+            })
         })
         .await
         .unwrap()
@@ -303,7 +303,7 @@ async fn test_null_tenant_id_admin_only() {
         .unwrap();
 
     // Regular tenant shouldn't see NULL tenant_id rows
-    let tenant_sees_legacy: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM transactions")
+    let _tenant_sees_legacy: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM transactions")
         .fetch_all(&admin_pool)
         .await
         .unwrap();

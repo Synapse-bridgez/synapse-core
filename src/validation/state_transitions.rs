@@ -1,8 +1,6 @@
 /// Declarative state transition table consumed by all domains.
 /// Each domain builds its allowed transitions from these definitions.
 
-use std::collections::HashSet;
-
 /// A single allowed transition from one state to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Transition {
@@ -54,6 +52,7 @@ pub fn is_valid_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_transaction_transitions_coverage() {
@@ -117,11 +116,8 @@ mod tests {
 
     #[test]
     fn test_invalid_settlement_transitions_rejected() {
-        assert!(!is_valid_transition(
-            "pending_review",
-            "pending_review",
-            SETTLEMENT_TRANSITIONS
-        ));
+        // Same-state transitions are always valid (idempotent) — see
+        // `test_same_state_always_valid` — so only cross-state rejections belong here.
         assert!(!is_valid_transition(
             "adjusted",
             "disputed",

@@ -1,7 +1,6 @@
 use crate::stellar::client::HorizonClient;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -170,7 +169,7 @@ impl AccountMonitor {
         let memo = payment.memo.as_ref().unwrap();
         let payment_amount = payment.amount.parse::<f64>()?;
 
-        let tx = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::Decimal)>(
+        let tx = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::BigDecimal)>(
             "SELECT id, stellar_account, asset_code, amount FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
         )
         .bind(memo)
@@ -268,7 +267,7 @@ impl AccountMonitor {
         // Try to extract transaction ID and details if a matching transaction exists
         if let Some(memo) = &payment.memo {
             if let Ok(Some((tx_id, stellar_account, amount, asset_code, anchor_tx_id))) =
-                sqlx::query_as::<_, (Uuid, String, sqlx::types::Decimal, String, Option<String>)>(
+                sqlx::query_as::<_, (Uuid, String, sqlx::types::BigDecimal, String, Option<String>)>(
                     "SELECT id, stellar_account, amount, asset_code, anchor_transaction_id FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
                 )
                 .bind(memo)
@@ -364,6 +363,7 @@ impl AccountMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     async fn get_pool() -> PgPool {
         sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL not set"))
@@ -385,7 +385,7 @@ mod tests {
         )
         .bind(tx_id)
         .bind(account)
-        .bind(sqlx::types::Decimal::from_str_exact(&amount.to_string()).unwrap())
+        .bind(sqlx::types::BigDecimal::from_str(&amount.to_string()).unwrap())
         .bind(asset_code)
         .bind(memo)
         .execute(pool)
