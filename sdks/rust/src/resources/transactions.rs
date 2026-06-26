@@ -177,7 +177,7 @@ impl<'a> Transactions<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn transaction_body(id: &str) -> serde_json::Value {
@@ -242,5 +242,71 @@ mod tests {
             "expected NotFound, got: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn search_returns_page_on_200() {
+        let server = MockServer::start().await;
+        let tx_id = "550e8400-e29b-41d4-a716-446655440000";
+
+        Mock::given(method("GET"))
+            .and(path("/transactions/search"))
+            .and(header("X-API-Key", "test-key"))
+            .and(query_param("status", "pending"))
+            .and(query_param("asset_code", "USD"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 1,
+                "results": [transaction_body(tx_id)],
+                "next_cursor": "next-page-token"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "test-key");
+        let filters = SearchParams {
+            status: Some("pending".to_string()),
+            asset_code: Some("USD".to_string()),
+            ..Default::default()
+        };
+        let result = client.transactions().search(filters).await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let page = result.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.results.len(), 1);
+        assert_eq!(page.results[0].id, tx_id);
+        assert_eq!(page.next_cursor.as_deref(), Some("next-page-token"));
+    }
+
+    #[tokio::test]
+    async fn search_returns_empty_page_on_zero_matches() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/transactions/search"))
+            .and(query_param("status", "nonexistent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 0,
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "test-key");
+        let filters = SearchParams {
+            status: Some("nonexistent".to_string()),
+            ..Default::default()
+        };
+        let result = client.transactions().search(filters).await;
+
+        assert!(
+            result.is_ok(),
+            "zero matches must be an empty page, not an error: {:?}",
+            result
+        );
+        let page = result.unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.results.is_empty());
+        assert!(page.next_cursor.is_none());
     }
 }
