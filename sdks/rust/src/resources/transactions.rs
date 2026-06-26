@@ -1,6 +1,6 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
-use crate::models::{ListParams, Transaction, TransactionList};
+use crate::models::{ListParams, SearchParams, Transaction, TransactionList, TransactionSearch};
 
 pub struct Transactions<'a> {
     pub(crate) client: &'a SynapseClient,
@@ -91,6 +91,87 @@ impl<'a> Transactions<'a> {
             other => other,
         }
     }
+
+    /// Search transactions by filter, returning a single page of matches.
+    ///
+    /// Calls `GET /transactions/search` with any of the [`SearchParams`]
+    /// fields supplied; omitted fields leave that dimension unfiltered. Uses
+    /// the standard public client (`X-API-Key`).
+    ///
+    /// A search that matches nothing is **not** an error: it returns a
+    /// [`TransactionSearch`] with `total == 0` and an empty `results` page.
+    /// Use `next_cursor` to page through larger result sets.
+    ///
+    /// # Errors
+    /// - [`SynapseError::InvalidCursor`] – the cursor is malformed or expired (HTTP 400).
+    /// - [`SynapseError::Api`] – server returned another non-success status.
+    /// - [`SynapseError::Http`] – network error.
+    /// - [`SynapseError::Decode`] – response body is not valid JSON.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use synapse_sdk::{SearchParams, SynapseClient};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let client = SynapseClient::new("https://api.example.com", "your-api-key");
+    ///
+    /// let filters = SearchParams {
+    ///     status: Some("completed".to_string()),
+    ///     asset_code: Some("USD".to_string()),
+    ///     min_amount: Some("10.00".to_string()),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let page = client.transactions().search(filters).await.unwrap();
+    /// println!("{} total matches, {} on this page", page.total, page.results.len());
+    /// # }
+    /// ```
+    pub async fn search(&self, filters: SearchParams) -> Result<TransactionSearch, SynapseError> {
+        let limit_str = filters.limit.map(|l| l.to_string());
+        let mut query: Vec<(&str, &str)> = Vec::new();
+
+        if let Some(ref v) = filters.status {
+            query.push(("status", v.as_str()));
+        }
+        if let Some(ref v) = filters.asset_code {
+            query.push(("asset_code", v.as_str()));
+        }
+        if let Some(ref v) = filters.min_amount {
+            query.push(("min_amount", v.as_str()));
+        }
+        if let Some(ref v) = filters.max_amount {
+            query.push(("max_amount", v.as_str()));
+        }
+        if let Some(ref v) = filters.from {
+            query.push(("from", v.as_str()));
+        }
+        if let Some(ref v) = filters.to {
+            query.push(("to", v.as_str()));
+        }
+        if let Some(ref v) = filters.stellar_account {
+            query.push(("stellar_account", v.as_str()));
+        }
+        if let Some(ref v) = filters.cursor {
+            query.push(("cursor", v.as_str()));
+        }
+        if let Some(ref v) = limit_str {
+            query.push(("limit", v.as_str()));
+        }
+
+        match self
+            .client
+            .get_query::<TransactionSearch>("/transactions/search", &query)
+            .await
+        {
+            Err(SynapseError::Api {
+                status: 400,
+                message,
+            }) if message.contains("cursor") => Err(SynapseError::InvalidCursor(message)),
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,58 +245,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_returns_page_on_200() {
+    async fn search_returns_page_on_200() {
         let server = MockServer::start().await;
         let tx_id = "550e8400-e29b-41d4-a716-446655440000";
 
         Mock::given(method("GET"))
-            .and(path("/transactions"))
+            .and(path("/transactions/search"))
             .and(header("X-API-Key", "test-key"))
-            .and(query_param("limit", "2"))
+            .and(query_param("status", "pending"))
+            .and(query_param("asset_code", "USD"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [transaction_body(tx_id)],
-                "meta": { "next_cursor": "next-page-token", "has_more": true }
+                "total": 1,
+                "results": [transaction_body(tx_id)],
+                "next_cursor": "next-page-token"
             })))
             .mount(&server)
             .await;
 
         let client = SynapseClient::new(server.uri(), "test-key");
-        let params = ListParams {
-            limit: Some(2),
+        let filters = SearchParams {
+            status: Some("pending".to_string()),
+            asset_code: Some("USD".to_string()),
             ..Default::default()
         };
-        let result = client.transactions().list(params).await;
+        let result = client.transactions().search(filters).await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let page = result.unwrap();
-        assert_eq!(page.data.len(), 1);
-        assert_eq!(page.data[0].id, tx_id);
-        assert!(page.meta.has_more);
-        assert_eq!(page.meta.next_cursor.as_deref(), Some("next-page-token"));
+        assert_eq!(page.total, 1);
+        assert_eq!(page.results.len(), 1);
+        assert_eq!(page.results[0].id, tx_id);
+        assert_eq!(page.next_cursor.as_deref(), Some("next-page-token"));
     }
 
     #[tokio::test]
-    async fn list_returns_invalid_cursor_on_400() {
+    async fn search_returns_empty_page_on_zero_matches() {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .and(path("/transactions"))
-            .and(query_param("cursor", "bogus-cursor"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("Invalid cursor: malformed"))
+            .and(path("/transactions/search"))
+            .and(query_param("status", "nonexistent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 0,
+                "results": []
+            })))
             .mount(&server)
             .await;
 
         let client = SynapseClient::new(server.uri(), "test-key");
-        let params = ListParams {
-            cursor: Some("bogus-cursor".to_string()),
+        let filters = SearchParams {
+            status: Some("nonexistent".to_string()),
             ..Default::default()
         };
-        let result = client.transactions().list(params).await;
+        let result = client.transactions().search(filters).await;
 
         assert!(
-            matches!(result, Err(SynapseError::InvalidCursor(_))),
-            "expected InvalidCursor, got: {:?}",
+            result.is_ok(),
+            "zero matches must be an empty page, not an error: {:?}",
             result
         );
+        let page = result.unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.results.is_empty());
+        assert!(page.next_cursor.is_none());
     }
 }

@@ -1,20 +1,29 @@
 use thiserror::Error;
 
+/// Errors returned by the Synapse SDK.
 #[derive(Debug, Error)]
 pub enum SynapseError {
-    /// The requested resource does not exist (HTTP 404).
-    #[error("not found: {0}")]
-    NotFound(String),
-    /// The provided pagination cursor is invalid or expired (HTTP 400).
-    #[error("invalid or expired cursor: {0}")]
-    InvalidCursor(String),
-    /// The API returned a non-success status code.
-    #[error("api error {status}: {message}")]
-    Api { status: u16, message: String },
-    /// A network-level error from the HTTP client.
-    #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
-    /// The response body could not be decoded as JSON.
-    #[error("json decode error: {0}")]
-    Decode(#[from] serde_json::Error),
+    /// The server returned an HTTP error status.
+    ///
+    /// 5xx responses are transient (retryable). 4xx responses are permanent
+    /// caller mistakes and are never retried.
+    #[error("HTTP {status}: {body}")]
+    Http { status: u16, body: String },
+
+    /// A network-level failure occurred before a response was received.
+    #[error("network error: {0}")]
+    Network(#[from] reqwest::Error),
+}
+
+impl SynapseError {
+    /// Returns `true` if this error may resolve on a subsequent attempt.
+    ///
+    /// Network errors and 5xx HTTP responses are transient. 4xx responses are
+    /// permanent (they represent a caller mistake) and must not be retried.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            SynapseError::Network(_) => true,
+            SynapseError::Http { status, .. } => *status >= 500,
+        }
+    }
 }

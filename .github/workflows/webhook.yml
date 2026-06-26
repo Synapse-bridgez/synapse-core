@@ -1,3 +1,14 @@
+# Synapse Core Webhook Handlers CI/CD Workflow
+#
+# Triggered by repository_dispatch (external webhook events) or workflow_dispatch
+# (manual simulation). Split into two parallel jobs:
+#
+#   unit-tests ──────────► fast, stateless webhook validation
+#   integration-tests ───► Postgres + Redis for replay and delivery paths
+#
+# See docs/ci-cd-webhook.md for test coverage, security assumptions, and
+# performance rules.
+
 name: Webhook Handlers
 
 on:
@@ -10,28 +21,50 @@ on:
         required: true
         default: "ping"
 
-# Cancel in-progress webhook runs on the same branch to avoid duplicate event processing
-# and prevent redundant API calls to external services
+# Cancel in-progress webhook runs on the same branch to avoid duplicate event
+# processing and prevent redundant API calls to external services.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_CACHE_SIZE: 1G
+
 jobs:
-  handle-webhook:
+  # ── Job 1: unit-tests ────────────────────────────────────────────────────────
+  # Runs pure-logic webhook tests that do not require live Postgres or Redis.
+  # Covers signature verification, payload validation, dispatcher filters, and
+  # schema checks in src/ plus standalone tests/webhook_* files.
+  unit-tests:
     runs-on: ubuntu-latest
-    # Serialize external API calls (taiki-e install-action) to prevent GitHub API rate limits
+    timeout-minutes: 20
+
+    # Serialize external API calls (taiki-e install-action) to prevent GitHub
+    # API rate limits on webhook-triggered runs.
     concurrency:
       group: ${{ github.workflow }}-install-tools-${{ github.ref }}
       cancel-in-progress: false
+
+    permissions:
+      contents: read
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Validate webhook payload
         run: |
+          set -euo pipefail
           EVENT="${{ github.event.action || github.event.inputs.event_type }}"
           echo "Received webhook event: $EVENT"
           if [ -z "$EVENT" ]; then
             echo "::error::Empty webhook event type"
+            exit 1
+          fi
+          # Match cache::webhook::validate_event_id charset and length limits.
+          if ! printf '%s' "$EVENT" | grep -Eq '^[A-Za-z0-9_:-]{1,64}$'; then
+            echo "::error::Invalid webhook event type format"
             exit 1
           fi
 
@@ -40,8 +73,14 @@ jobs:
         with:
           toolchain: stable
 
-      # Cache Cargo dependencies to reduce repeated download requests to crates.io
-      # Avoids rate limit errors from excessive dependency downloads on webhook events
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
+
+      # Cache Cargo dependencies to reduce repeated download requests to crates.io.
+      # Avoids rate limit errors from excessive dependency downloads on webhook events.
       - name: Cache Cargo artifacts
         uses: actions/cache@v4
         with:
@@ -50,13 +89,143 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-stable-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-webhook-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-webhook-cargo-
             ${{ runner.os }}-stable-cargo-
             ${{ runner.os }}-cargo-
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Run webhook unit tests
+        id: run_webhook_unit_tests
+        run: |
+          set -e
+          echo "Running webhook library unit tests..."
+          if ! cargo test --lib webhook --verbose; then
+            echo "::error::Webhook library unit tests failed."
+            exit 1
+          fi
+          echo "Running webhook integration test files (stateless)..."
+          if ! cargo test --verbose \
+              --test webhook_auth_test \
+              --test webhook_delivery_test \
+              --test webhook_test; then
+            echo "::error::Webhook stateless integration tests failed."
+            exit 1
+          fi
+          echo "Webhook unit tests passed"
+        continue-on-error: false
 
-      - name: Run webhook-related tests
-        run: cargo test --lib webhook -- --nocapture
+      - name: Handle unit test failure
+        if: failure() && steps.run_webhook_unit_tests.outcome == 'failure'
+        run: |
+          echo "::error::Webhook unit tests failed. Run 'cargo test --lib webhook' locally to debug."
+          exit 1
+
+  # ── Job 2: integration-tests ─────────────────────────────────────────────────
+  # Runs database-backed webhook replay tests and concurrent delivery tests.
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    concurrency:
+      group: ${{ github.workflow }}-install-tools-${{ github.ref }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: synapse
+          POSTGRES_PASSWORD: synapse
+          POSTGRES_DB: synapse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 10s
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 5s
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-webhook-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-webhook-cargo-
+            ${{ runner.os }}-stable-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.7.4
+
+      - name: Run migrations
+        run: |
+          for i in 1 2 3; do
+            sqlx migrate run && break
+            echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+            sleep 5
+            [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+          done
+        env:
+          DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+
+      - name: Run webhook integration tests
+        id: run_webhook_integration_tests
+        run: |
+          set -e
+          echo "Running webhook replay integration tests..."
+          if ! cargo test --verbose --test webhook_replay_test -- --ignored; then
+            echo "::error::Webhook replay integration tests failed."
+            exit 1
+          fi
+          echo "Running webhook concurrent delivery tests..."
+          if ! cargo test --verbose --test webhook_concurrent_delivery_test -- --ignored; then
+            echo "::error::Webhook concurrent delivery tests failed."
+            exit 1
+          fi
+          echo "Webhook integration tests passed"
+        env:
+          DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+          REDIS_URL: redis://localhost:6379
+        continue-on-error: false
+
+      - name: Handle integration test failure
+        if: failure() && steps.run_webhook_integration_tests.outcome == 'failure'
+        run: |
+          echo "::error::Webhook integration tests failed. Ensure Postgres and Redis services are running."
+          exit 1

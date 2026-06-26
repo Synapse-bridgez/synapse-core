@@ -1,0 +1,46 @@
+name: Rust SDK CI
+
+on:
+  push:
+    paths:
+      - 'sdks/rust/**'
+  pull_request:
+    paths:
+      - 'sdks/rust/**'
+
+jobs:
+  ci:
+    name: clippy, fmt, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            sdks/rust/target/
+          key: ${{ runner.os }}-rust-sdk-${{ hashFiles('sdks/rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-sdk-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
