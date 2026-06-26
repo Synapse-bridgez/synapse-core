@@ -1,5 +1,5 @@
-/// Declarative state transition table consumed by all domains.
-/// Each domain builds its allowed transitions from these definitions.
+//! Declarative state transition table consumed by all domains.
+//! Each domain builds its allowed transitions from these definitions.
 
 /// A single allowed transition from one state to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

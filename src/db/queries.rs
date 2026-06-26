@@ -356,19 +356,6 @@ pub async fn set_tenant_context(
 /// - `tenant_id`: Some(uuid) for tenant, None for admin context
 /// - `is_admin`: If true, sets app.is_admin='true' and bypasses RLS
 /// - `work`: Async closure receiving the transaction
-/// Execute tenant-scoped database work with transaction-scoped context.
-///
-/// Wraps work in a transaction and sets app.tenant_id/app.is_admin using SET LOCAL,
-/// which auto-clears on commit/rollback. Leak-proof under connection pooling.
-///
-/// # Example
-/// ```ignore
-/// let result = with_tenant(&pool, Some(tenant_id), false, |tx| Box::pin(async move {
-///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions")
-///         .fetch_all(&mut **tx)
-///         .await
-/// })).await?;
-/// ```
 pub async fn with_tenant<T>(
     pool: &PgPool,
     tenant_id: Option<Uuid>,
