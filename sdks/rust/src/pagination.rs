@@ -120,11 +120,10 @@ mod tests {
     async fn passes_cursor_to_each_fetch() {
         let cursors_seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let responses: Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>> =
-            Arc::new(Mutex::new(vec![
-                (vec![1], Some("tok".to_string())),
-                (vec![2], None),
-            ]));
+        let responses: Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>> = Arc::new(Mutex::new(vec![
+            (vec![1], Some("tok".to_string())),
+            (vec![2], None),
+        ]));
 
         let mut iter = PageIter::new(|cursor| {
             let seen = cursors_seen.clone();
@@ -145,7 +144,11 @@ mod tests {
 
         let seen = cursors_seen.lock().unwrap();
         assert_eq!(seen[0], None, "first call must pass None");
-        assert_eq!(seen[1], Some("tok".to_string()), "second call must pass the cursor from page 1");
+        assert_eq!(
+            seen[1],
+            Some("tok".to_string()),
+            "second call must pass the cursor from page 1"
+        );
     }
 
     #[tokio::test]

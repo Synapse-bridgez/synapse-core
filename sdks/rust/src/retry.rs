@@ -107,7 +107,11 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "retries disabled when max_attempts=1");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "retries disabled when max_attempts=1"
+        );
     }
 
     #[tokio::test]
@@ -123,6 +127,10 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 3, "should try exactly max_attempts times");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "should try exactly max_attempts times"
+        );
     }
 }
