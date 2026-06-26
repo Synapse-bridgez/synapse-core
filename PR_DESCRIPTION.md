@@ -1,93 +1,41 @@
-# PR: Telemetry Rate Limiting
+# PR: Rust SDK test coverage for settlements.list() / settlements.get(id)
 
-**Branch**: `feature/telemetry-rate-limiting`
+**Branch**: `feature/rust-sdk-test-coverage-for-settlementslist-settlementsgetid`
+
+Closes #19
 
 ## Summary
 
-Adds per-event-type token-bucket rate limiting for telemetry operations (traces, metrics, and events). Introduces `TelemetryRateLimiter` that reuses the lock-free `RateLimiter` from `crate::cache::rate_limiting`, with independent buckets for each event type. All rate-limit overflows are non-fatal — events are dropped, a warning is logged, and rejection metrics are recorded.
-
-## Problem
-
-The telemetry module previously had no rate limiting. A burst of traces, metrics, or log events could overwhelm the export pipeline, causing backpressure to spike and potentially degrade application performance. Without isolation between event types, a burst in one category (e.g., metrics) could starve others (e.g., traces).
-
-## Solution
-
-### New Module: `src/telemetry/rate_limiting.rs`
-
-- **`TelemetryRateLimitConfig`** — Configurable per-event-type limits and shared window duration.
-- **`TelemetryRateLimiter`** — O(1)-cloneable struct wrapping three independent `RateLimiter` buckets (trace, metric, event).
-- **`TelemetryRateLimitMetrics`** — Snapshot of acquired/rejected counts per event type for observability.
-- Reuses the existing lock-free token-bucket implementation from `crate::cache::rate_limiting` to avoid duplicating rate-limit logic.
-
-### Key Behaviors
-
-| Event type | Default limit | Window |
-|------------|--------------|--------|
-| Trace      | 1000         | 60 s   |
-| Metric     | 5000         | 60 s   |
-| Event      | 500          | 60 s   |
-
-- **Non-fatal**: exceeded limits drop the event and emit a `tracing::warn!` — no panic.
-- **Independent buckets**: one type cannot starve another.
-- **Metrics**: `metrics()` returns per-type acquired/rejected counts.
-- **Reset**: `reset_all()` restores all buckets (useful for tests or operator intervention).
-- **Exhaustion check**: `any_exhausted()` supports health-check / backpressure signaling.
+Adds focused unit tests for `settlements.list()` and `settlements.get(id)` using a mocked HTTP transport (`wiremock`). No live server or database is required. Also wires the `Settlements` resource into the SDK client and fixes existing SDK compilation gaps.
 
 ## Changes
 
 ### Created Files
-- ✅ `src/telemetry/rate_limiting.rs` — New rate-limiting module for telemetry
+- `sdks/rust/src/resources/settlements.rs` — `Settlements` resource with `list()` and `get()` methods plus 4 tests
 
 ### Modified Files
-
 | File | Changes |
 |------|---------|
-| `src/telemetry/mod.rs` | Export `rate_limiting` module and public types |
+| `sdks/rust/Cargo.toml` | Added `wiremock` and `chrono` dependencies |
+| `sdks/rust/src/client.rs` | Added `get_query()`, `settlements()`, `transactions()`, and `new()` constructor |
+| `sdks/rust/src/error.rs` | Added `NotFound`, `InvalidCursor`, `Decode` variants |
+| `sdks/rust/src/lib.rs` | Exported resources module and public types |
+| `sdks/rust/src/models.rs` | Added `Settlement` and `SettlementListResponse` |
+| `sdks/rust/src/resources/mod.rs` | Exported `settlements` module |
+| `sdks/rust/src/resources/transactions.rs` | Fixed references to match current error variants |
 
-## API
+## Tests
 
-```rust
-use synapse_core::telemetry::{TelemetryRateLimiter, TelemetryRateLimitConfig, TelemetryRateLimitMetrics};
-
-let limiter = TelemetryRateLimiter::new();
-
-if limiter.try_acquire_trace() {
-    // process trace
-} else {
-    // dropped — warning already logged
-}
-
-let metrics: TelemetryRateLimitMetrics = limiter.metrics();
-```
-
-## Testing
-
-### Unit Tests (37 tests)
 ```bash
-cargo test --lib telemetry::rate_limiting::tests
+cargo test -p synapse-sdk --lib
 ```
 
-Coverage includes:
-- Default and custom configuration
-- Per-type acquire/reject paths
-- Independent bucket isolation
-- `try_acquire(&RecordType)` dispatch
-- Remaining-token accounting
-- Metrics snapshot accuracy
-- `reset_all()` restoration
-- `any_exhausted()` boolean logic
-- Clone shares state (O(1) Arc semantics)
-- Edge cases: zero limits, large windows, default-trait equivalence
+All 15 tests pass (4 new + 11 existing):
+- `get_returns_settlement_on_200` — happy path for single record fetch
+- `get_returns_not_found_on_404` — maps HTTP 404 to `SynapseError::NotFound`
+- `list_returns_page_on_200` — happy path for paginated list
+- `list_returns_empty_page_on_zero_matches` — empty result set is not an error
 
-## Backward Compatibility
+## Scope Guard
 
-✅ **No breaking changes**
-- All existing telemetry APIs are unchanged.
-- New module is opt-in; existing callers compile without modification.
-
-## Code Review Notes
-
-- Minimal implementation: only types and logic necessary for telemetry rate limiting.
-- No duplicated token-bucket algorithm — delegates to `crate::cache::rate_limiting::RateLimiter`.
-- All overflow paths are logged and measured, never panicking.
-- Follows existing codebase conventions (module layout, doc comments, test naming).
+Only files under `sdks/rust/` were modified. No changes were made to `src/`.
