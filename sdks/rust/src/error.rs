@@ -13,6 +13,18 @@ pub enum SynapseError {
     /// A network-level failure occurred before a response was received.
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
+
+    /// The requested resource was not found (HTTP 404).
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// The pagination cursor is malformed or expired (HTTP 400 with cursor message).
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(String),
+
+    /// The server returned a non-success status with a structured error message.
+    #[error("API error {status}: {message}")]
+    Api { status: u16, message: String },
 }
 
 impl SynapseError {
@@ -24,6 +36,8 @@ impl SynapseError {
         match self {
             SynapseError::Network(_) => true,
             SynapseError::Http { status, .. } => *status >= 500,
+            SynapseError::Api { status, .. } => *status >= 500,
+            _ => false,
         }
     }
 }
