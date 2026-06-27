@@ -21,14 +21,14 @@ pub struct Transaction {
 }
 
 /// Pagination metadata included in list responses.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ListMeta {
     pub next_cursor: Option<String>,
     pub has_more: bool,
 }
 
 /// Paginated list of transactions.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TransactionList {
     pub data: Vec<Transaction>,
     pub meta: ListMeta,
@@ -62,7 +62,7 @@ pub struct SearchParams {
 }
 
 /// A single page of transactions returned by [`Transactions::search`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TransactionSearch {
     /// Total number of records matching the filters across all pages.
     pub total: i64,
@@ -110,7 +110,7 @@ pub struct Settlement {
 }
 
 /// Paginated list of settlements.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SettlementList {
     pub settlements: Vec<Settlement>,
     pub next_cursor: Option<String>,
