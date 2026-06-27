@@ -90,3 +90,77 @@ pub struct ListParams {
     /// Exclusive ISO 8601 range end (e.g. `"2024-02-01T00:00:00Z"`).
     pub to_date: Option<String>,
 }
+
+/// Filters for [`Transactions::export`].
+///
+/// All fields are optional. The server streams back raw CSV or JSON bytes —
+/// the SDK returns them untouched.
+#[derive(Debug, Default)]
+pub struct ExportFilters {
+    /// Export format: `"csv"` (default) or `"json"`.
+    pub format: Option<String>,
+    /// Inclusive start date, `YYYY-MM-DD` or RFC 3339.
+    pub from: Option<String>,
+    /// Inclusive end date, `YYYY-MM-DD` or RFC 3339.
+    pub to: Option<String>,
+    /// Filter by transaction status.
+    pub status: Option<String>,
+    /// Filter by asset code.
+    pub asset_code: Option<String>,
+}
+
+// ── Events / reconnect models ───────────────────────────────────────────────
+
+/// Response from `POST /reconnect`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReconnectResponse {
+    /// Suggested back-off interval in seconds before the next attempt.
+    pub backoff_seconds: u64,
+    /// Whether the client must perform a full state resync.
+    pub requires_resync: bool,
+}
+
+/// Response from `GET /reconnect/status`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReconnectStatusResponse {
+    /// The reconnect status type (e.g. `"ready"`, `"session_expired"`).
+    #[serde(rename = "type")]
+    pub status_type: String,
+    /// Whether the client must perform a full state resync.
+    pub requires_resync: bool,
+}
+
+// ── Settlement models ────────────────────────────────────────────────────────
+
+/// A single settlement record returned by the API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Settlement {
+    pub id: String,
+    pub asset_code: String,
+    pub total_amount: String,
+    pub tx_count: i32,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub dispute_reason: Option<String>,
+    pub original_total_amount: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+}
+
+/// Pagination metadata for settlement list responses.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettlementListMeta {
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// Paginated list of settlements.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettlementList {
+    pub settlements: Vec<Settlement>,
+    #[serde(flatten)]
+    pub meta: SettlementListMeta,
+}
