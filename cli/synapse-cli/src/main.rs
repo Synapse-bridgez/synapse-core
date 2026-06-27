@@ -30,11 +30,20 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum TransactionCommand {
-    /// Get a transaction by ID. Returns exit code 0 on success, 1 on not-found or other error.
+    #[command(about = "Fetch a single transaction by its UUID",
+              long_about = "Fetch a single transaction by its UUID.\n\n\
+                            Exit codes:\n  \
+                            0 - Success\n  \
+                            1 - Transaction not found or other error\n\n\
+                            Output formats:\n  \
+                            table - Human-readable table (default)\n  \
+                            json - Pretty-printed JSON\n\n\
+                            Not-found errors (HTTP 404) are surfaced as exit code 1 with message \
+                            'transaction not found: <error message>', distinguishing them from other failure modes.")]
     Get {
-        /// Transaction ID (required)
+        /// Transaction ID (UUID)
         id: String,
-        /// Output format: table (default) or json
+        /// Output format: 'table' (default) or 'json'
         #[arg(long, default_value = "table")]
         format: String,
     },
