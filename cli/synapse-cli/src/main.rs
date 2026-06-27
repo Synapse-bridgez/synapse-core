@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+mod output;
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct Config {
     base_url: Option<String>,
@@ -20,6 +22,10 @@ struct Args {
     /// API key
     #[arg(long, env = "SYNAPSE_API_KEY")]
     api_key: Option<String>,
+
+    /// Output as JSON
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 fn load_config() -> Config {
