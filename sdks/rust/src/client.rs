@@ -1,4 +1,5 @@
 use crate::error::SynapseError;
+use crate::resources::health::Health;
 use crate::retry::{retry_with_backoff, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_ATTEMPTS};
 use serde::de::DeserializeOwned;
 
@@ -35,6 +36,11 @@ impl SynapseClient {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             base_delay_ms: DEFAULT_BASE_DELAY_MS,
         }
+    }
+
+    /// Access the health resource.
+    pub fn health(&self) -> Health {
+        Health::new(self.clone())
     }
 
     /// Issue an authenticated GET request to `path` and deserialize the JSON response.
