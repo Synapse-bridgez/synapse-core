@@ -303,4 +303,170 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     }
+
+    #[tokio::test]
+    async fn list_reports_with_pagination() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/admin/reconciliation/reports"))
+            .and(header("X-Admin-Key", "admin-test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "reports": [],
+                "total": 0,
+                "limit": 10,
+                "offset": 20,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let reconciliation = AdminReconciliation::new(&client);
+        let result = reconciliation
+            .list_reports(ListReportsParams {
+                limit: Some(10),
+                offset: Some(20),
+            })
+            .await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let page = result.unwrap();
+        assert_eq!(page.limit, 10);
+        assert_eq!(page.offset, 20);
+        assert_eq!(page.total, 0);
+        assert!(page.reports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_report_with_discrepancies() {
+        let server = MockServer::start().await;
+        let report_id = "550e8400-e29b-41d4-a716-446655440000";
+
+        Mock::given(method("GET"))
+            .and(path(format!("/admin/reconciliation/reports/{}", report_id)))
+            .and(header("X-Admin-Key", "admin-test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": report_id,
+                "generated_at": "2024-01-15T10:00:00Z",
+                "period_start": "2024-01-14T10:00:00Z",
+                "period_end": "2024-01-15T10:00:00Z",
+                "summary": {
+                    "total_db_transactions": 105,
+                    "total_chain_payments": 102,
+                    "missing_on_chain_count": 2,
+                    "orphaned_payments_count": 1,
+                    "amount_mismatches_count": 0,
+                    "has_discrepancies": true,
+                },
+                "missing_on_chain": [
+                    {
+                        "id": "d0000000-0000-0000-0000-000000000001",
+                        "stellar_account": "GABC1234567890123456789012345678901234567890123456789012",
+                        "amount": "100.00",
+                        "asset_code": "USD",
+                        "memo": "payment-1",
+                        "created_at": "2024-01-14T12:00:00Z",
+                    }
+                ],
+                "orphaned_payments": [],
+                "amount_mismatches": [],
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let reconciliation = AdminReconciliation::new(&client);
+        let result = reconciliation
+            .get_report(Uuid::parse_str(report_id).unwrap())
+            .await;
+
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert!(report.summary.has_discrepancies);
+        assert_eq!(report.summary.missing_on_chain_count, 2);
+        assert_eq!(report.missing_on_chain.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_returns_http_error_on_bad_account() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/admin/reconciliation/run"))
+            .and(header("X-Admin-Key", "admin-test-key"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string("invalid account format"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let reconciliation = AdminReconciliation::new(&client);
+        let result = reconciliation
+            .run("invalid-account", None)
+            .await;
+
+        assert!(result.is_err());
+        match result {
+            Err(SynapseError::Api { status, .. }) => {
+                assert_eq!(status, 400);
+            }
+            other => panic!("expected Api error with 400 status, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_report_returns_not_found_on_404() {
+        let server = MockServer::start().await;
+        let report_id = "00000000-0000-0000-0000-000000000000";
+
+        Mock::given(method("GET"))
+            .and(path(format!("/admin/reconciliation/reports/{}", report_id)))
+            .and(header("X-Admin-Key", "admin-test-key"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string("Report not found"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let reconciliation = AdminReconciliation::new(&client);
+        let result = reconciliation
+            .get_report(Uuid::parse_str(report_id).unwrap())
+            .await;
+
+        assert!(result.is_err());
+        match result {
+            Err(SynapseError::Api { status, .. }) => {
+                assert_eq!(status, 404);
+            }
+            other => panic!("expected Api error with 404 status, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_reports_uses_admin_key_not_public_key() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/admin/reconciliation/reports"))
+            .and(header("X-Admin-Key", "admin-test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "reports": [],
+                "total": 0,
+                "limit": 20,
+                "offset": 0,
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let reconciliation = AdminReconciliation::new(&client);
+        let result = reconciliation
+            .list_reports(ListReportsParams::default())
+            .await;
+
+        // If the test passes, it means X-Admin-Key header was sent, not X-API-Key
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
 }
