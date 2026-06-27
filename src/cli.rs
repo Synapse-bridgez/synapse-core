@@ -20,6 +20,10 @@ pub enum Commands {
     #[command(subcommand)]
     Tx(TxCommands),
 
+    /// Settlement management commands
+    #[command(subcommand)]
+    Settlements(SettlementsCommands),
+
     /// Database management commands
     #[command(subcommand)]
     Db(DbCommands),
@@ -57,6 +61,27 @@ pub enum TxCommands {
 
         /// Output format (json or text)
         #[arg(long, default_value = "text")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SettlementsCommands {
+    /// List all settlements
+    List {
+        /// Output format (json or table)
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Get a specific settlement by ID
+    Get {
+        /// Settlement UUID
+        #[arg(value_name = "SETTLEMENT_ID")]
+        id: String,
+
+        /// Output format (json or table)
+        #[arg(long, default_value = "table")]
         format: String,
     },
 }
@@ -293,4 +318,90 @@ pub async fn handle_backup_restore_pitr(
     _timestamp_str: &str,
 ) -> anyhow::Result<()> {
     anyhow::bail!("PITR restore service not yet implemented")
+}
+
+pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+    let params = synapse_sdk::ListParams::default();
+
+    match client.settlements().list(params).await {
+        Ok(response) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&response)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!("{:<36} {:<12} {:<15} {:<10}", "ID", "Status", "Total Amount", "Tx Count");
+                    println!("{}", "-".repeat(73));
+                    for settlement in &response.settlements {
+                        println!(
+                            "{:<36} {:<12} {:<15} {:<10}",
+                            settlement.id, settlement.status, settlement.total_amount, settlement.tx_count
+                        );
+                    }
+                    if response.has_more {
+                        println!("\n✓ {} settlements (more available)", response.settlements.len());
+                    } else {
+                        println!("\n✓ {} settlements", response.settlements.len());
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to list settlements: {}", e);
+            anyhow::bail!("Failed to list settlements: {}", e)
+        }
+    }
+}
+
+pub async fn handle_settlements_get(config: &Config, id: &str, format: &str) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+
+    match client.settlements().get(id).await {
+        Ok(settlement) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&settlement)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!("ID:                    {}", settlement.id);
+                    println!("Asset Code:            {}", settlement.asset_code);
+                    println!("Total Amount:          {}", settlement.total_amount);
+                    println!("Transaction Count:     {}", settlement.tx_count);
+                    println!("Status:                {}", settlement.status);
+                    println!("Period Start:          {}", settlement.period_start);
+                    println!("Period End:            {}", settlement.period_end);
+                    println!("Created At:            {}", settlement.created_at);
+                    println!("Updated At:            {}", settlement.updated_at);
+                    if let Some(reason) = settlement.dispute_reason {
+                        println!("Dispute Reason:        {}", reason);
+                    }
+                    if let Some(amount) = settlement.original_total_amount {
+                        println!("Original Total Amount: {}", amount);
+                    }
+                    if let Some(reviewer) = settlement.reviewed_by {
+                        println!("Reviewed By:           {}", reviewer);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(synapse_sdk::SynapseError::Http { status: 404, body }) => {
+            tracing::warn!("Settlement {} not found: {}", id, body);
+            anyhow::bail!("Settlement {} not found", id)
+        }
+        Err(e) => {
+            tracing::error!("Failed to get settlement: {}", e);
+            anyhow::bail!("Failed to get settlement: {}", e)
+        }
+    }
 }

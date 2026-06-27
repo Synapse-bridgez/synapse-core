@@ -22,7 +22,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 mod cli;
-use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
+use cli::{BackupCommands, Cli, Commands, DbCommands, SettlementsCommands, TxCommands};
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -103,6 +103,14 @@ async fn main() -> anyhow::Result<()> {
                 end,
                 format,
             } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
+        },
+        Some(Commands::Settlements(settlements_cmd)) => match settlements_cmd {
+            SettlementsCommands::List { format } => {
+                cli::handle_settlements_list(&config, &format).await
+            }
+            SettlementsCommands::Get { id, format } => {
+                cli::handle_settlements_get(&config, &id, &format).await
+            }
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,

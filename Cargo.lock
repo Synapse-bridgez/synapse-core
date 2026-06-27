@@ -4581,6 +4581,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "subtle",
+ "synapse-sdk",
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
@@ -4598,6 +4599,19 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid",
  "vaultrs",
+]
+
+[[package]]
+name = "synapse-sdk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rand 0.8.6",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

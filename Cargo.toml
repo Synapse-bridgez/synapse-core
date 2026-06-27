@@ -17,6 +17,7 @@ name = "synapse_core"
 path = "src/lib.rs"
 
 [dependencies]
+synapse-sdk = { path = "sdks/rust" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.6", features = ["ws"] }
 vaultrs = "0.7"
