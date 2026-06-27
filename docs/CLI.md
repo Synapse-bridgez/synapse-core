@@ -2,6 +2,32 @@
 
 The Synapse Core CLI provides command-line tools for managing settlements, transactions, and database operations.
 
+## Getting Started
+
+The CLI is part of the `synapse-core` binary. You can invoke it using:
+
+```bash
+synapse-core <COMMAND> [OPTIONS]
+```
+
+To see available commands:
+```bash
+synapse-core --help
+```
+
+To see help for a specific command:
+```bash
+synapse-core tx search --help
+synapse-core settlements list --help
+```
+
+## Environment Variables
+
+- `SYNAPSE_API_URL` – API base URL (default: `http://localhost:3000`)
+- `SYNAPSE_API_KEY` – API key for authentication (default: `dev-key`)
+- `DATABASE_URL` – PostgreSQL database URL (for server operations)
+- `REDIS_URL` – Redis connection URL (for server operations)
+
 ## Commands
 
 ### Transactions Search
@@ -113,7 +139,33 @@ synapse-core settlements get <SETTLEMENT_ID> [--format <FORMAT>]
 synapse-core settlements get 550e8400-e29b-41d4-a716-446655440000
 ```
 
-Returns HTTP 404 if settlement not found.
+**Error Handling:**
+- Returns HTTP 404 if settlement not found (distinguishable from transport errors)
+- Network errors are logged and reported separately
+
+## Important Notes
+
+### Transactions Search
+
+**Edge Cases:**
+- Empty results are not errors – you get `total: 0, results: []` with no next cursor
+- The `--to` date is exclusive (use `2024-02-01T00:00:00Z` to exclude Feb 1 and later)
+- The `--from` date is inclusive
+- A search with no matches returns an empty page, never an error
+- Invalid or expired cursors return a 400 error and must not be retried with the same cursor
+
+**Pagination:**
+- Use `next_cursor` from the response to fetch the next page
+- Never manually construct or modify cursor values
+- Cursors are opaque and may expire if not used promptly
+- Results are limited to maximum 100 per page
+
+### Settlements
+
+**404 Handling:**
+- When a settlement ID doesn't exist, the CLI exits with failure
+- Transport errors (network, timeout) are distinct from not-found errors
+- Both are logged but handled differently for scripting purposes
 
 ## Configuration
 
