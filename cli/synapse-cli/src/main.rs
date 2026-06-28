@@ -56,6 +56,10 @@ enum AdminCommands {
     #[command(subcommand)]
     Reconciliation(ReconciliationCommands),
 
+    /// Settlement administration.
+    #[command(subcommand)]
+    Settlements(AdminSettlementCommands),
+
     /// Distributed lock administration.
     #[command(subcommand)]
     Locks(LockCommands),
@@ -63,6 +67,34 @@ enum AdminCommands {
     /// Tenant quota administration.
     #[command(subcommand)]
     Quotas(QuotaCommands),
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminSettlementCommands {
+    /// Update a settlement status through the admin API.
+    UpdateStatus {
+        /// Settlement UUID.
+        settlement_id: Uuid,
+
+        /// New settlement status.
+        new_status: String,
+
+        /// Optional reason recorded with the status change.
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Optional adjusted total amount. Only meaningful for adjusted settlements.
+        #[arg(long)]
+        new_total: Option<String>,
+
+        /// Actor recorded with the status change. Defaults to the server's admin actor.
+        #[arg(long)]
+        actor: Option<String>,
+
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -308,6 +340,17 @@ struct RunRequest<'a> {
     period_hours: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+struct UpdateSettlementStatusRequest<'a> {
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_total: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<&'a str>,
+}
+
 struct ApiClient {
     http: reqwest::Client,
     base_url: String,
@@ -343,6 +386,14 @@ impl ApiClient {
         B: Serialize + ?Sized,
     {
         self.send(self.http.post(self.url(path)).json(body)).await
+    }
+
+    async fn patch_json<T, B>(&self, path: &str, body: &B) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+        B: Serialize + ?Sized,
+    {
+        self.send(self.http.patch(self.url(path)).json(body)).await
     }
 
     async fn delete<T>(&self, path: &str) -> Result<T>
@@ -402,11 +453,28 @@ impl ApiClient {
             .context("failed to read response body")?;
 
         if !status.is_success() {
-            bail!("server returned {status}: {body}");
+            bail!("{}", server_error_message(&body));
         }
 
         serde_json::from_str(&body).context("failed to parse response JSON")
     }
+}
+
+fn server_error_message(body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            ["error", "detail", "message"]
+                .into_iter()
+                .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.to_string());
+
+    message
+        .strip_prefix("Bad request: ")
+        .unwrap_or(&message)
+        .to_string()
 }
 
 #[tokio::main]
@@ -427,9 +495,44 @@ async fn main() -> Result<()> {
 async fn handle_admin(client: &ApiClient, command: AdminCommands) -> Result<()> {
     match command {
         AdminCommands::Reconciliation(command) => handle_reconciliation(client, command).await,
+        AdminCommands::Settlements(command) => handle_admin_settlements(client, command).await,
         AdminCommands::Locks(command) => handle_locks(client, command).await,
         AdminCommands::Quotas(command) => handle_quotas(client, command).await,
     }
+}
+
+async fn handle_admin_settlements(
+    client: &ApiClient,
+    command: AdminSettlementCommands,
+) -> Result<()> {
+    match command {
+        AdminSettlementCommands::UpdateStatus {
+            settlement_id,
+            new_status,
+            reason,
+            new_total,
+            actor,
+            json,
+        } => {
+            let response: serde_json::Value = client
+                .patch_json(
+                    &format!("/admin/settlements/{settlement_id}/status"),
+                    &UpdateSettlementStatusRequest {
+                        status: &new_status,
+                        reason: reason.as_deref(),
+                        new_total: new_total.as_deref(),
+                        actor: actor.as_deref(),
+                    },
+                )
+                .await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_locks(client: &ApiClient, command: LockCommands) -> Result<()> {
