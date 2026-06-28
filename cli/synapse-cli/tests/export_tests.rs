@@ -13,7 +13,10 @@ fn test_export_passes_through_raw_bytes() {
         .arg("csv");
 
     let output = cmd.output().expect("Failed to execute");
-    assert!(!output.status.success(), "Command should fail with no server");
+    assert!(
+        !output.status.success(),
+        "Command should fail with no server"
+    );
 }
 
 #[test]
@@ -58,14 +61,11 @@ fn test_export_supports_output_file() {
 fn test_export_default_format_is_csv() {
     let mut cmd = Command::cargo_bin("synapse").expect("Failed to find binary");
 
-    cmd.arg("transactions")
-        .arg("export")
-        .arg("--help");
+    cmd.arg("transactions").arg("export").arg("--help");
 
     cmd.assert()
         .success()
-        .stdout(predicates::str::contains("csv")
-            .or(predicates::str::contains("CSV")));
+        .stdout(predicates::str::contains("csv").or(predicates::str::contains("CSV")));
 }
 
 #[test]

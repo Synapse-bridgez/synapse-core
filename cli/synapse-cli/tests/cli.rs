@@ -1,25 +1,29 @@
 use assert_cmd::Command;
+use mockito::Server;
+use serde_json::json;
 use std::net::TcpListener;
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::thread;
 use std::time::Duration;
 
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
+const TENANT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 #[test]
 fn reconciliation_commands_table_mode_happy_path() {
     let server = MockServer::spawn("happy");
     let base_url = server.base_url();
-    let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-        "admin",
-        "reconciliation",
-        "reports",
-    ]);
 
-    let output = cmd.output().expect("reports output");
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &base_url,
+            "admin",
+            "reconciliation",
+            "reports",
+        ])
+        .output()
+        .expect("reports output");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
     assert!(stdout.contains("Reports: 1 total"));
@@ -27,35 +31,68 @@ fn reconciliation_commands_table_mode_happy_path() {
     assert!(stdout.contains(SAMPLE_REPORT_ID));
     assert!(stdout.contains("| yes"));
 
-    let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-        "admin",
-        "reconciliation",
-        "report",
-        SAMPLE_REPORT_ID,
-    ]);
-
-    let output = cmd.output().expect("report output");
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &base_url,
+            "admin",
+            "reconciliation",
+            "report",
+            SAMPLE_REPORT_ID,
+        ])
+        .output()
+        .expect("report output");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
     assert!(stdout.contains("Report ID:"));
     assert!(stdout.contains("Summary:"));
     assert!(stdout.contains("Has discrepancies: yes"));
+}
 
-    let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-use mockito::Server;
-use serde_json::json;
+#[test]
+fn reconciliation_commands_json_mode_edge_case() {
+    let server = MockServer::spawn("edge");
+    let base_url = server.base_url();
+
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &base_url,
+            "admin",
+            "reconciliation",
+            "reports",
+            "--json",
+        ])
+        .output()
+        .expect("reports json output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"total\": 0"));
+    assert!(stdout.contains("\"reports\": []"));
+
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &base_url,
+            "admin",
+            "reconciliation",
+            "report",
+            SAMPLE_REPORT_ID,
+        ])
+        .output()
+        .expect("report output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("No discrepancies found"));
+    assert!(stdout.contains("Has discrepancies: no"));
+}
 
 #[test]
 fn run_help_text_mentions_required_and_optional_flags() {
-    let mut cmd = Command::cargo_bin("synapse").expect("binary exists");
-    cmd.args(["admin", "reconciliation", "run", "--help"]);
-    let output = cmd.output().expect("help output");
+    let output = synapse_command()
+        .args(["admin", "reconciliation", "run", "--help"])
+        .output()
+        .expect("help output");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
 
@@ -78,7 +115,7 @@ async fn run_command_prints_mock_server_summary() {
             json!({
                 "message": "Reconciliation completed successfully",
                 "report": {
-                    "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
+                    "id": SAMPLE_REPORT_ID,
                     "generated_at": "2026-06-27T06:10:12Z",
                     "period_start": "2026-06-26T06:10:12Z",
                     "period_end": "2026-06-27T06:10:12Z",
@@ -90,23 +127,23 @@ async fn run_command_prints_mock_server_summary() {
                     "has_discrepancies": true
                 }
             })
-            .to_string()
+            .to_string(),
         )
         .create_async()
         .await;
 
-    let mut cmd = Command::cargo_bin("synapse").expect("binary exists");
-    cmd.args([
-        "--base-url",
-        &server.url(),
-        "admin",
-        "reconciliation",
-        "run",
-        "--account",
-        "GA_TEST_ACCOUNT",
-    ]);
-
-    let output = cmd.output().expect("run output");
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &server.url(),
+            "admin",
+            "reconciliation",
+            "run",
+            "--account",
+            "GA_TEST_ACCOUNT",
+        ])
+        .output()
+        .expect("run output");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
     assert!(stdout.contains("Reconciliation completed successfully"));
@@ -114,60 +151,131 @@ async fn run_command_prints_mock_server_summary() {
     assert!(stdout.contains("Has discrepancies: yes"));
 }
 
+#[tokio::test]
+async fn quotas_list_get_set_and_reset_use_formatter_output() {
+    let mut server = Server::new_async().await;
+    let quota = json!({
+        "tenant_id": TENANT_ID,
+        "name": "tenant-a",
+        "rate_limit_per_minute": 25,
+        "quota_status": {
+            "limit": 25,
+            "remaining": 20,
+            "reset_at": "2026-06-27T06:10:12Z"
+        }
+    });
+
+    let _list = server
+        .mock("GET", "/admin/quotas")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!([quota.clone()]).to_string())
+        .create_async()
+        .await;
+    let output = synapse_command()
+        .args(["--base-url", &server.url(), "admin", "quotas", "list"])
+        .output()
+        .expect("quotas list output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("tenant-a"));
+    assert!(stdout.contains("25"));
+    assert!(stdout.contains(TENANT_ID));
+
+    let get_path = format!("/admin/quotas/{TENANT_ID}");
+    let _get = server
+        .mock("GET", get_path.as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(quota.to_string())
+        .create_async()
+        .await;
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &server.url(),
+            "admin",
+            "quotas",
+            "get",
+            TENANT_ID,
+            "--json",
+        ])
+        .output()
+        .expect("quotas get output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"tenant_id\": \"550e8400-e29b-41d4-a716-446655440000\""));
+
+    let set_path = format!("/admin/quotas/{TENANT_ID}");
+    let _set = server
+        .mock("PUT", set_path.as_str())
+        .match_header("content-type", "application/json")
+        .match_body(r#"{"custom_limit":50}"#)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"message": "quota updated", "tenant_id": TENANT_ID}).to_string())
+        .create_async()
+        .await;
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &server.url(),
+            "admin",
+            "quotas",
+            "set",
+            TENANT_ID,
+            "--limit",
+            "50",
+        ])
+        .output()
+        .expect("quotas set output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("message: quota updated"));
+
+    let reset_path = format!("/admin/quotas/{TENANT_ID}/reset");
+    let _reset = server
+        .mock("DELETE", reset_path.as_str())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"message": "quota reset", "tenant_id": TENANT_ID}).to_string())
+        .create_async()
+        .await;
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            &server.url(),
+            "admin",
+            "quotas",
+            "reset",
+            TENANT_ID,
+            "--json",
+        ])
+        .output()
+        .expect("quotas reset output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"message\": \"quota reset\""));
+}
+
 #[test]
-fn reconciliation_commands_json_mode_edge_case() {
-    let server = MockServer::spawn("edge");
-    let base_url = server.base_url();
-    let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-        "admin",
-        "reconciliation",
-        "reports",
-        "--json",
-    ]);
+fn quotas_set_rejects_zero_limit_before_sending() {
+    let output = synapse_command()
+        .args([
+            "--base-url",
+            "http://127.0.0.1:9",
+            "admin",
+            "quotas",
+            "set",
+            TENANT_ID,
+            "0",
+        ])
+        .output()
+        .expect("quotas set output");
 
-    let output = cmd.output().expect("reports json output");
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-    assert!(stdout.contains("\"total\": 0"));
-    assert!(stdout.contains("\"reports\": []"));
-
-    let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-        "admin",
-        "reconciliation",
-        "report",
-        SAMPLE_REPORT_ID,
-    ]);
-
-    let output = cmd.output().expect("report output");
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-    assert!(stdout.contains("No discrepancies found"));
-    assert!(stdout.contains("Has discrepancies: no"));
-
-    let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-        "admin",
-        "reconciliation",
-        "run",
-        "--account",
-        "GA_TEST_ACCOUNT",
-        "--json",
-    ]);
-
-    let output = cmd.output().expect("run json output");
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-    assert!(stdout.contains("\"message\": \"Reconciliation completed successfully\""));
-    assert!(stdout.contains("\"has_discrepancies\": false"));
-    assert!(stdout.contains("\"total_db_transactions\": 0"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("valid utf-8");
+    assert!(stderr.contains("quota limit must be positive"));
 }
 
 fn synapse_command() -> Command {
@@ -182,8 +290,8 @@ struct MockServer {
 impl MockServer {
     fn spawn(scenario: &str) -> Self {
         let port = free_port();
-        let binary = std::env::var_os("CARGO_BIN_EXE_mock-server")
-            .expect("mock-server binary path");
+        let binary =
+            std::env::var_os("CARGO_BIN_EXE_mock-server").expect("mock-server binary path");
         let child = StdCommand::new(binary)
             .env("MOCK_SERVER_ADDR", format!("127.0.0.1:{port}"))
             .env("MOCK_SERVER_SCENARIO", scenario)
@@ -226,13 +334,4 @@ impl Drop for MockServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-    let output = cmd.output().expect("command output");
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-
-    assert!(stdout.contains("Reconciliation completed successfully"));
-    assert!(stdout.contains("Report ID: 3f1d8c31-5f1d-4fb8-93e0-112233445566"));
-    assert!(stdout.contains("Database transactions: 12"));
-    assert!(stdout.contains("Has discrepancies: yes"));
 }

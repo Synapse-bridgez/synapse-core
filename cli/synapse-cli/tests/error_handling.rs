@@ -1,4 +1,4 @@
-use synapse_cli::{CliError, handle_error, EXIT_AUTH_FAILURE, EXIT_NOT_FOUND, EXIT_OTHER};
+use synapse_cli::{handle_error, CliError, EXIT_AUTH_FAILURE, EXIT_NOT_FOUND, EXIT_OTHER};
 
 #[test]
 fn test_auth_failure_exit_code() {
