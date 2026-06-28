@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
+const SAMPLE_LOCK_TOKEN: &str = "4e4e9e47-7e0f-4f2f-8d63-323c61279209";
 
 fn main() -> std::io::Result<()> {
     let addr = std::env::var("MOCK_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:4010".to_string());
@@ -89,6 +90,13 @@ fn route(request_line: &str, scenario: &str) -> String {
                 json_response(200, &report_detail(report_id, true, 12, 11))
             }
         }
+        ("GET", "/admin/locks") => {
+            if scenario == "edge" {
+                json_response(200, r#"{"active_locks":[],"total":0,"overdue":0}"#)
+            } else {
+                json_response(200, &locks_body())
+            }
+        }
         _ => json_response(404, r#"{"error":"Not found"}"#),
     }
 }
@@ -142,6 +150,33 @@ fn report_detail(report_id: &str, has_discrepancies: bool, db: i32, chain: i32) 
   "missing_on_chain": [],
   "orphaned_payments": [],
   "amount_mismatches": []
+}}"#
+    )
+}
+
+fn locks_body() -> String {
+    format!(
+        r#"{{
+  "active_locks": [
+    {{
+      "resource": "settlement:550e8400-e29b-41d4-a716-446655440000",
+      "token": "{SAMPLE_LOCK_TOKEN}",
+      "acquired_at": 1782540612,
+      "ttl_secs": 30,
+      "expected_duration_secs": 30,
+      "overdue": false
+    }},
+    {{
+      "resource": "payout-batch:daily",
+      "token": "89ca5ddc-51bd-44bd-817e-f4175dcab0bc",
+      "acquired_at": 1782540400,
+      "ttl_secs": 30,
+      "expected_duration_secs": 30,
+      "overdue": true
+    }}
+  ],
+  "total": 2,
+  "overdue": 1
 }}"#
     )
 }

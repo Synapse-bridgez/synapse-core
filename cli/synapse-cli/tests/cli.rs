@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
+const SAMPLE_LOCK_TOKEN: &str = "4e4e9e47-7e0f-4f2f-8d63-323c61279209";
 const TENANT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 #[test]
@@ -85,6 +86,72 @@ fn reconciliation_commands_json_mode_edge_case() {
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
     assert!(stdout.contains("No discrepancies found"));
     assert!(stdout.contains("Has discrepancies: no"));
+}
+
+#[test]
+fn locks_list_table_mode_happy_path() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+
+    let output = synapse_command()
+        .args(["--base-url", &base_url, "admin", "locks", "list"])
+        .output()
+        .expect("locks list output");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("Active locks: 2 total (1 overdue)"));
+    assert!(stdout.contains("Resource | Token | Acquired At | TTL | Expected Duration | Overdue"));
+    assert!(stdout.contains("settlement:550e8400-e29b-41d4-a716-446655440000"));
+    assert!(stdout.contains(SAMPLE_LOCK_TOKEN));
+    assert!(stdout.contains("payout-batch:daily"));
+    assert!(stdout.contains("| yes"));
+}
+
+#[test]
+fn locks_list_json_mode_happy_path() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+
+    let output = synapse_command()
+        .args(["--base-url", &base_url, "admin", "locks", "list", "--json"])
+        .output()
+        .expect("locks list json output");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"active_locks\": ["));
+    assert!(stdout.contains("\"resource\": \"settlement:550e8400-e29b-41d4-a716-446655440000\""));
+    assert!(stdout.contains(&format!("\"token\": \"{SAMPLE_LOCK_TOKEN}\"")));
+    assert!(stdout.contains("\"total\": 2"));
+    assert!(stdout.contains("\"overdue\": 1"));
+}
+
+#[test]
+fn locks_list_handles_empty_response_edge_case() {
+    let server = MockServer::spawn("edge");
+    let base_url = server.base_url();
+
+    let output = synapse_command()
+        .args(["--base-url", &base_url, "admin", "locks", "list"])
+        .output()
+        .expect("locks list empty output");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("Active locks: 0 total (0 overdue)"));
+    assert!(stdout.contains("No active locks found"));
+
+    let output = synapse_command()
+        .args(["--base-url", &base_url, "admin", "locks", "list", "--json"])
+        .output()
+        .expect("locks list empty json output");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"active_locks\": []"));
+    assert!(stdout.contains("\"total\": 0"));
+    assert!(stdout.contains("\"overdue\": 0"));
 }
 
 #[test]

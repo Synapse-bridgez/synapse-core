@@ -56,9 +56,23 @@ enum AdminCommands {
     #[command(subcommand)]
     Reconciliation(ReconciliationCommands),
 
+    /// Distributed lock administration.
+    #[command(subcommand)]
+    Locks(LockCommands),
+
     /// Tenant quota administration.
     #[command(subcommand)]
     Quotas(QuotaCommands),
+}
+
+#[derive(Subcommand, Debug)]
+enum LockCommands {
+    /// List active distributed locks held by this instance.
+    List {
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -216,6 +230,23 @@ struct TenantQuotaView {
     name: String,
     rate_limit_per_minute: i32,
     quota_status: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ListLocksResponse {
+    active_locks: Vec<ActiveLockView>,
+    total: usize,
+    overdue: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ActiveLockView {
+    resource: String,
+    token: String,
+    acquired_at: u64,
+    ttl_secs: u64,
+    expected_duration_secs: u64,
+    overdue: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -393,8 +424,20 @@ async fn main() -> Result<()> {
 async fn handle_admin(client: &ApiClient, command: AdminCommands) -> Result<()> {
     match command {
         AdminCommands::Reconciliation(command) => handle_reconciliation(client, command).await,
+        AdminCommands::Locks(command) => handle_locks(client, command).await,
         AdminCommands::Quotas(command) => handle_quotas(client, command).await,
     }
+}
+
+async fn handle_locks(client: &ApiClient, command: LockCommands) -> Result<()> {
+    match command {
+        LockCommands::List { json } => {
+            let response: ListLocksResponse = client.get("/admin/locks").await?;
+            println!("{}", output::render(&response, json, format_locks_table)?);
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_quotas(client: &ApiClient, command: QuotaCommands) -> Result<()> {
@@ -677,6 +720,35 @@ fn format_run_table(response: &RunResponse) -> String {
         format!("  Has discrepancies: {}", yes_no(report.has_discrepancies)),
     ]
     .join("\n")
+}
+
+fn format_locks_table(response: &ListLocksResponse) -> String {
+    let mut lines = vec![format!(
+        "Active locks: {} total ({} overdue)",
+        response.total, response.overdue
+    )];
+
+    if response.active_locks.is_empty() {
+        lines.push("No active locks found".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push("Resource | Token | Acquired At | TTL | Expected Duration | Overdue".to_string());
+    lines.push("-------- | ----- | ----------- | --- | ----------------- | -------".to_string());
+
+    for lock in &response.active_locks {
+        lines.push(format!(
+            "{} | {} | {} | {} | {} | {}",
+            lock.resource,
+            lock.token,
+            lock.acquired_at,
+            lock.ttl_secs,
+            lock.expected_duration_secs,
+            yes_no(lock.overdue)
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn yes_no(value: bool) -> &'static str {
