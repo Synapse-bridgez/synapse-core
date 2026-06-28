@@ -62,3 +62,19 @@ fn test_cli_tx_force_complete_help() {
     cmd.arg("tx").arg("force-complete").arg("--help");
     cmd.assert().success();
 }
+
+#[ignore = "Requires Docker/external services"]
+#[test]
+fn test_cli_tx_list_help() {
+    let mut cmd = synapse_cmd();
+    cmd.arg("tx").arg("list").arg("--help");
+    cmd.assert().success();
+}
+
+#[ignore = "Requires Docker/external services"]
+#[test]
+fn test_cli_tx_search_help() {
+    let mut cmd = synapse_cmd();
+    cmd.arg("tx").arg("search").arg("--help");
+    cmd.assert().success();
+}

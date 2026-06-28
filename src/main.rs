@@ -97,6 +97,29 @@ async fn main() -> anyhow::Result<()> {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
+            TxCommands::List {
+                cursor,
+                limit,
+                from_date,
+                to_date,
+                format,
+            } => cli::handle_tx_list(cursor, limit, from_date, to_date, &format).await,
+            TxCommands::Search {
+                status,
+                asset_code,
+                min_amount,
+                max_amount,
+                from,
+                to,
+                stellar_account,
+                cursor,
+                limit,
+                format,
+            } => cli::handle_tx_search(
+                status, asset_code, min_amount, max_amount, from, to, stellar_account, cursor,
+                limit, &format,
+            )
+            .await,
             TxCommands::Reconcile {
                 account,
                 start,
