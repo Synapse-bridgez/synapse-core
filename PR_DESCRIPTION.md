@@ -1,155 +1,93 @@
-# PR: Unified Settlement Transition State Machine & TOCTOU Fix
+# PR: Telemetry Rate Limiting
 
-**Branch**: `feature/settlement-transition-toctou`
+**Branch**: `feature/telemetry-rate-limiting`
 
 ## Summary
 
-Eliminates duplicate hardcoded transition tables and fixes a time-of-check/time-of-use (TOCTOU) race condition in settlement status updates. Both transaction and settlement domains now consume a single declarative state machine definition. Settlement updates are now atomic and self-consistent with re-validation inside the lock and a conditional UPDATE guard.
+Adds per-event-type token-bucket rate limiting for telemetry operations (traces, metrics, and events). Introduces `TelemetryRateLimiter` that reuses the lock-free `RateLimiter` from `crate::cache::rate_limiting`, with independent buckets for each event type. All rate-limit overflows are non-fatal — events are dropped, a warning is logged, and rejection metrics are recorded.
 
 ## Problem
 
-### Issue 1: Duplicated Transition Tables
-- `src/validation/state_machine.rs::validate_status_transition` (transaction rules)
-- `src/services/settlement.rs::valid_transition` (settlement rules)
-- Separate implementations → risk of silent drift
-- No single source of truth
-
-### Issue 2: TOCTOU Race in Settlement Updates
-```
-READ current status (unlocked)
-  ↓ (can race here - another task changes status)
-VALIDATE transition
-  ↓
-LOCK row
-  ↓
-UPDATE unconditionally (WHERE id = $x, no status guard)
-```
-Result: Two concurrent tasks can both validate, then one clobbers the other's state.
-
-**Example**: Both reviewers validate pending_review→disputed and pending_review→voided, then serially apply both updates. The second overwrites the first, creating an invalid disputed→voided transition.
+The telemetry module previously had no rate limiting. A burst of traces, metrics, or log events could overwhelm the export pipeline, causing backpressure to spike and potentially degrade application performance. Without isolation between event types, a burst in one category (e.g., metrics) could starve others (e.g., traces).
 
 ## Solution
 
-### Unified State Machine (new file)
+### New Module: `src/telemetry/rate_limiting.rs`
 
-**`src/validation/state_transitions.rs`**
-```rust
-pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
-    Transition { from: "pending", to: "processing" },
-    Transition { from: "pending", to: "completed" },
-    // ... 5 more
-];
+- **`TelemetryRateLimitConfig`** — Configurable per-event-type limits and shared window duration.
+- **`TelemetryRateLimiter`** — O(1)-cloneable struct wrapping three independent `RateLimiter` buckets (trace, metric, event).
+- **`TelemetryRateLimitMetrics`** — Snapshot of acquired/rejected counts per event type for observability.
+- Reuses the existing lock-free token-bucket implementation from `crate::cache::rate_limiting` to avoid duplicating rate-limit logic.
 
-pub const SETTLEMENT_TRANSITIONS: &[Transition] = &[
-    Transition { from: "completed", to: "pending_review" },
-    Transition { from: "pending_review", to: "disputed" },
-    // ... 5 more
-];
+### Key Behaviors
 
-pub fn is_valid_transition(from: &str, to: &str, allowed: &[Transition]) -> bool {
-    if from == to { return true; }  // idempotent
-    allowed.iter().any(|t| t.from == from && t.to == to)
-}
-```
+| Event type | Default limit | Window |
+|------------|--------------|--------|
+| Trace      | 1000         | 60 s   |
+| Metric     | 5000         | 60 s   |
+| Event      | 500          | 60 s   |
 
-### Atomic Settlement Updates
-
-**Before (vulnerable)**:
-```
-Lock row
-UPDATE settlements SET status = $1 WHERE id = $6  // No status guard!
-```
-
-**After (safe)**:
-```
-Lock row (FOR UPDATE)
-Re-validate: if current.status != expected_from_status { Err(StaleTransition) }
-UPDATE settlements SET ... WHERE id = $6 AND status = $7  // Status guard!
-```
-
-If another task changed the status after the pre-lock read:
-- Re-validation inside lock catches it
-- UPDATE with status guard affects 0 rows
-- Returns `RowNotFound` → mapped to `StaleTransition` (409 Conflict)
+- **Non-fatal**: exceeded limits drop the event and emit a `tracing::warn!` — no panic.
+- **Independent buckets**: one type cannot starve another.
+- **Metrics**: `metrics()` returns per-type acquired/rejected counts.
+- **Reset**: `reset_all()` restores all buckets (useful for tests or operator intervention).
+- **Exhaustion check**: `any_exhausted()` supports health-check / backpressure signaling.
 
 ## Changes
 
 ### Created Files
-- ✅ `src/validation/state_transitions.rs` – Unified transition definitions
-- ✅ `tests/settlement_toctou_race_test.rs` – Comprehensive state machine tests
-- ✅ `docs/settlement-transition-unification.md` – Architecture + diagrams
-- ✅ `IMPLEMENTATION_SUMMARY.md` – Detailed change documentation
-- ✅ `CHECKLIST.md` – Requirements verification
+- ✅ `src/telemetry/rate_limiting.rs` — New rate-limiting module for telemetry
 
 ### Modified Files
 
 | File | Changes |
 |------|---------|
-| `src/validation/mod.rs` | Export `state_transitions` module |
-| `src/validation/state_machine.rs` | Use unified definition; remove duplicate logic |
-| `src/services/settlement.rs` | Use unified definition; pass `expected_from_status` to queries |
-| `src/db/queries.rs` | **Atomic update**: re-validate in lock + status guard + conflict detection |
-| `src/error.rs` | Add `StaleTransition` error (409 Conflict) + error code ERR_SETTLEMENT_003 |
+| `src/telemetry/mod.rs` | Export `rate_limiting` module and public types |
+
+## API
+
+```rust
+use synapse_core::telemetry::{TelemetryRateLimiter, TelemetryRateLimitConfig, TelemetryRateLimitMetrics};
+
+let limiter = TelemetryRateLimiter::new();
+
+if limiter.try_acquire_trace() {
+    // process trace
+} else {
+    // dropped — warning already logged
+}
+
+let metrics: TelemetryRateLimitMetrics = limiter.metrics();
+```
 
 ## Testing
 
-### Unit Tests (10+ tests)
+### Unit Tests (37 tests)
 ```bash
-cargo test settlement_toctou_race_test
+cargo test --lib telemetry::rate_limiting::tests
 ```
-- Verifies unified transitions match original behavior (both domains)
-- Tests idempotent same-state transitions
-- Confirms no duplicate transitions
-- Validates error types
 
-### Integration Tests (requires database)
-```bash
-DATABASE_URL=postgres://... cargo test --test settlement_dispute_test
-```
-- Concurrent update scenarios
-- Audit log consistency
-- Settlement void/dispute/adjustment paths
+Coverage includes:
+- Default and custom configuration
+- Per-type acquire/reject paths
+- Independent bucket isolation
+- `try_acquire(&RecordType)` dispatch
+- Remaining-token accounting
+- Metrics snapshot accuracy
+- `reset_all()` restoration
+- `any_exhausted()` boolean logic
+- Clone shares state (O(1) Arc semantics)
+- Edge cases: zero limits, large windows, default-trait equivalence
 
 ## Backward Compatibility
 
 ✅ **No breaking changes**
-- Public APIs unchanged: `validate_status_transition()`, `update_status()`
-- All valid/invalid transitions preserved exactly
-- Audit logging unchanged
-- All existing tests pass without modification
-
-⚠️ **New behavior** (clients should handle)
-- Settlement updates can now return 409 Conflict with error code `ERR_SETTLEMENT_003`
-- Clients should retry on `StaleTransition` with exponential backoff
-
-## State Machines
-
-### Transaction Status
-```
-dlq ──→ pending ──→ processing ──→ completed
-         ↑_____________↑________________↓
-                       │              failed
-                       └────────────────┘
-```
-
-### Settlement Status
-```
-completed ──→ pending_review ──┬──→ disputed ──→ adjusted ──→ completed
-              ↑_________________│_________________________________↓
-              └────────voided────┘
-```
-
-## Acceptance Criteria Met
-
-✅ One declarative source of truth (consumed by both domains)
-✅ Concurrent conflicting transitions: exactly one wins, other gets `StaleTransition` (409)
-✅ All pre-existing valid/invalid transitions preserved
-✅ Audit rows still written on success
-✅ Transition validation now atomic and self-consistent
+- All existing telemetry APIs are unchanged.
+- New module is opt-in; existing callers compile without modification.
 
 ## Code Review Notes
 
-- Minimal implementation: only changes necessary for correctness
-- TOCTOU fix uses standard database locking patterns (FOR UPDATE + WHERE guard)
-- Error handling is deterministic and testable
-- No changes to business logic, only safety improvements
+- Minimal implementation: only types and logic necessary for telemetry rate limiting.
+- No duplicated token-bucket algorithm — delegates to `crate::cache::rate_limiting::RateLimiter`.
+- All overflow paths are logged and measured, never panicking.
+- Follows existing codebase conventions (module layout, doc comments, test naming).
