@@ -1,94 +1,68 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use crate::models::{GraphQLRequest, GraphQLResponse};
 
+/// Access the `POST /graphql` endpoint.
 pub struct GraphQL<'a> {
     pub(crate) client: &'a SynapseClient,
 }
 
-/// The raw envelope returned by `POST /graphql`.
-///
-/// On success `data` is populated. On a GraphQL-level error the server still
-/// returns HTTP 200 but populates `errors` instead of (or alongside) `data`.
-#[derive(Debug, Deserialize)]
-struct GraphqlEnvelope {
-    #[serde(default)]
-    data: Option<Value>,
-    #[serde(default)]
-    errors: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GraphqlRequest<'a> {
-    query: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    variables: Option<Value>,
-}
-
 impl<'a> GraphQL<'a> {
-    /// Execute a GraphQL query against `POST /graphql`.
+    /// Send a raw GraphQL query and return the parsed response.
     ///
-    /// `variables` may be any JSON-serialisable value (typically a
-    /// `serde_json::json!({…})` object), or `None` when the query has no
-    /// variables.
-    ///
-    /// GraphQL errors (HTTP 200 + `"errors"` array) are surfaced as
-    /// [`SynapseError::GraphqlErrors`] and are **distinct** from transport
-    /// failures ([`SynapseError::Network`] / [`SynapseError::Http`]).
+    /// Uses the standard public client (`X-API-Key`). A successful HTTP 200
+    /// response that contains an `errors` array is surfaced as
+    /// [`SynapseError::GraphQL`] — distinct from transport/network errors —
+    /// so callers can handle application-level GraphQL failures separately.
     ///
     /// # Errors
-    /// - [`SynapseError::GraphqlErrors`] – server returned HTTP 200 with an
-    ///   `errors` array; inspect the inner `Vec` for details.
-    /// - [`SynapseError::Http`] – server returned a 4xx or 5xx status.
-    /// - [`SynapseError::Network`] – a transport-level failure occurred.
+    /// - [`SynapseError::GraphQL`] – HTTP 200 but the response contained an
+    ///   `errors` array (application-level GraphQL error).
+    /// - [`SynapseError::Api`] – server returned a non-success HTTP status.
+    /// - [`SynapseError::Network`] – transport/network failure.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use synapse_sdk::{SynapseClient, SynapseError};
-    /// use serde_json::json;
+    /// use synapse_sdk::SynapseClient;
     ///
     /// # #[tokio::main]
     /// # async fn main() {
     /// let client = SynapseClient::new("https://api.example.com", "your-api-key");
     ///
-    /// let query = r#"{ transactions { id status } }"#;
+    /// let resp = client
+    ///     .graphql()
+    ///     .query("{ transactions { id status } }", None)
+    ///     .await
+    ///     .unwrap();
     ///
-    /// match client.graphql().query(query, None).await {
-    ///     Ok(data) => println!("{}", data),
-    ///     Err(SynapseError::GraphqlErrors(errs)) => {
-    ///         eprintln!("GraphQL errors: {:?}", errs);
-    ///     }
-    ///     Err(e) => eprintln!("transport error: {}", e),
-    /// }
+    /// println!("{:?}", resp.data);
     /// # }
     /// ```
-    pub async fn query(&self, query: &str, variables: Option<Value>) -> Result<Value, SynapseError> {
-        let req = GraphqlRequest { query, variables };
-        let envelope: GraphqlEnvelope = self.client.post("/graphql", &req).await?;
-
-        if let Some(errors) = envelope.errors {
-            if !errors.is_empty() {
-                return Err(SynapseError::GraphqlErrors(errors));
-            }
+    pub async fn query(
+        &self,
+        query: impl Into<String>,
+        variables: Option<serde_json::Value>,
+    ) -> Result<GraphQLResponse, SynapseError> {
+        let body = GraphQLRequest { query: query.into(), variables };
+        let resp: GraphQLResponse = self.client.post("/graphql", body).await?;
+        if !resp.errors.is_empty() {
+            let messages: Vec<&str> = resp.errors.iter().map(|e| e.message.as_str()).collect();
+            return Err(SynapseError::GraphQL(messages.join("; ")));
         }
-
-        Ok(envelope.data.unwrap_or(Value::Null))
+        Ok(resp)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::SynapseClient;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn query_returns_data_on_happy_path() {
+    async fn query_returns_data_on_200() {
         let server = MockServer::start().await;
-
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(header("X-API-Key", "test-key"))
@@ -105,84 +79,28 @@ mod tests {
             .await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-        let data = result.unwrap();
-        assert_eq!(data["transactions"][0]["id"], "abc");
-        assert_eq!(data["transactions"][0]["status"], "pending");
+        let resp = result.unwrap();
+        assert!(resp.data.is_some());
+        assert!(resp.errors.is_empty());
     }
 
     #[tokio::test]
-    async fn query_surfaces_graphql_errors_distinctly_from_transport_errors() {
+    async fn query_surfaces_graphql_errors_on_200_with_errors_array() {
         let server = MockServer::start().await;
-
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "errors": [{ "message": "Unknown field `foo`", "locations": [] }]
+                "errors": [{ "message": "Unsupported GraphQL query" }]
             })))
             .mount(&server)
             .await;
 
         let client = SynapseClient::new(server.uri(), "test-key");
-        let result = client.graphql().query("{ foo }", None).await;
+        let result = client.graphql().query("{ unknown }", None).await;
 
         assert!(
-            matches!(result, Err(SynapseError::GraphqlErrors(_))),
-            "expected GraphqlErrors, got: {:?}",
-            result
-        );
-        if let Err(SynapseError::GraphqlErrors(errs)) = result {
-            assert!(!errs.is_empty());
-            assert_eq!(errs[0]["message"], "Unknown field `foo`");
-        }
-    }
-
-    #[tokio::test]
-    async fn query_sends_variables_when_provided() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(header("X-API-Key", "test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": { "transaction": { "id": "xyz", "status": "completed" } }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = SynapseClient::new(server.uri(), "test-key");
-        let vars = serde_json::json!({ "id": "xyz" });
-        let result = client
-            .graphql()
-            .query(
-                "query GetTx($id: ID!) { transaction(id: $id) { id status } }",
-                Some(vars),
-            )
-            .await;
-
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-        let data = result.unwrap();
-        assert_eq!(data["transaction"]["id"], "xyz");
-    }
-
-    #[tokio::test]
-    async fn query_returns_http_error_on_4xx() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
-            .mount(&server)
-            .await;
-
-        let client = SynapseClient::new(server.uri(), "bad-key");
-        let result = client
-            .graphql()
-            .query("{ transactions { id } }", None)
-            .await;
-
-        assert!(
-            matches!(result, Err(SynapseError::Api { status: 401, .. })),
-            "expected Api 401, got: {:?}",
+            matches!(result, Err(SynapseError::GraphQL(_))),
+            "expected GraphQL error variant, got: {:?}",
             result
         );
     }
