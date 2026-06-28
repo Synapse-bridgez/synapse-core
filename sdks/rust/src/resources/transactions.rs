@@ -1,6 +1,6 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
-use crate::models::{ListParams, SearchParams, Transaction, TransactionList, TransactionSearch};
+use crate::models::{ExportFilters, ListParams, SearchParams, Transaction, TransactionList, TransactionSearch};
 
 pub struct Transactions<'a> {
     pub(crate) client: &'a SynapseClient,
@@ -247,6 +247,65 @@ impl<'a> Transactions<'a> {
             other => other,
         }
     }
+
+    /// Download a raw export of transactions (CSV or JSON bytes).
+    ///
+    /// Calls `GET /export` and returns the **raw response bytes** untouched.
+    /// The SDK intentionally does not parse CSV rows — callers are responsible
+    /// for interpreting the bytes according to the requested `format`.
+    ///
+    /// Uses the standard public client (`X-API-Key`).
+    ///
+    /// # Edge case
+    /// An export with no matching rows is **not** an error: the server returns
+    /// an HTTP 200 with an empty body (or headers-only CSV). Callers receive
+    /// `Ok(vec![])` in that case.
+    ///
+    /// # Errors
+    /// - [`SynapseError::Api`] – server returned a non-success status.
+    /// - [`SynapseError::Network`] – network error before a response was received.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use synapse_sdk::{ExportFilters, SynapseClient};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let client = SynapseClient::new("https://api.example.com", "your-api-key");
+    ///
+    /// let bytes = client
+    ///     .transactions()
+    ///     .export(ExportFilters {
+    ///         format: Some("csv".to_string()),
+    ///         status: Some("completed".to_string()),
+    ///         ..Default::default()
+    ///     })
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// println!("received {} bytes", bytes.len());
+    /// # }
+    /// ```
+    pub async fn export(&self, filters: ExportFilters) -> Result<Vec<u8>, SynapseError> {
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(ref v) = filters.format {
+            query.push(("format", v.as_str()));
+        }
+        if let Some(ref v) = filters.from {
+            query.push(("from", v.as_str()));
+        }
+        if let Some(ref v) = filters.to {
+            query.push(("to", v.as_str()));
+        }
+        if let Some(ref v) = filters.status {
+            query.push(("status", v.as_str()));
+        }
+        if let Some(ref v) = filters.asset_code {
+            query.push(("asset_code", v.as_str()));
+        }
+        self.client.get_bytes("/export", &query).await
+    }
 }
 
 #[cfg(test)]
@@ -383,5 +442,73 @@ mod tests {
         assert_eq!(page.total, 0);
         assert!(page.results.is_empty());
         assert!(page.next_cursor.is_none());
+    }
+
+    // ── export tests (Issue #626) ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn export_returns_raw_bytes_on_200() {
+        let server = MockServer::start().await;
+        let csv_body = "id,stellar_account,amount,asset_code,status\nabc,GABC,100.00,USD,completed\n";
+
+        Mock::given(method("GET"))
+            .and(path("/export"))
+            .and(header("X-API-Key", "test-key"))
+            .and(query_param("format", "csv"))
+            .and(query_param("status", "completed"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(csv_body))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "test-key");
+        let result = client
+            .transactions()
+            .export(ExportFilters {
+                format: Some("csv".to_string()),
+                status: Some("completed".to_string()),
+                ..Default::default()
+            })
+            .await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let bytes = result.unwrap();
+        assert_eq!(bytes, csv_body.as_bytes(), "raw bytes must be returned untouched");
+    }
+
+    #[tokio::test]
+    async fn export_returns_empty_bytes_when_no_rows_match() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![]))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "test-key");
+        let result = client
+            .transactions()
+            .export(ExportFilters::default())
+            .await;
+
+        assert!(result.is_ok(), "empty export must not be an error: {:?}", result);
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_sends_public_api_key_not_admin_key() {
+        // The export endpoint uses the public X-API-Key header.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/export"))
+            .and(header("X-API-Key", "public-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![]))
+            .mount(&server)
+            .await;
+
+        let client = SynapseClient::new(server.uri(), "public-key");
+        let result = client.transactions().export(ExportFilters::default()).await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     }
 }
