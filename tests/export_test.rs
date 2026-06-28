@@ -51,11 +51,13 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .await;
 
     let (tx, _rx) = tokio::sync::broadcast::channel(100);
-    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
+    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379")
+        .await
+        .unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
-        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+        pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
             .await
             .unwrap(),
         horizon_client: synapse_core::stellar::HorizonClient::new(
@@ -66,7 +68,9 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         start_time: std::time::Instant::now(),
         readiness: synapse_core::ReadinessState::new(),
         tx_broadcast: tx,
-        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
+            .await
+            .unwrap(),
         profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),

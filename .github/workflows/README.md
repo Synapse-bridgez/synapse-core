@@ -5,6 +5,11 @@ The primary pipeline is [`rust.yml`](./rust.yml), which runs formatting, migrati
 safety checks, clippy, builds, unit tests, integration tests, coverage collection,
 and coverage threshold enforcement.
 
+The webhook pipeline is [`webhook.yml`](./webhook.yml), triggered by
+`repository_dispatch` or manual `workflow_dispatch`. It runs webhook-focused unit
+and integration tests in parallel. See [`docs/ci-cd-webhook.md`](../../docs/ci-cd-webhook.md)
+for coverage details and security assumptions.
+
 ## Session Management
 
 In this CI/CD module, a session is one isolated GitHub Actions job execution:

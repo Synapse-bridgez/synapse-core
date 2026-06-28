@@ -5,7 +5,18 @@
 
 use std::time::Duration;
 
-/// Configuration for reconnection behavior
+/// Configuration for reconnection behavior and circuit breaker.
+///
+/// # Health Check
+///
+/// Configures how the reconnection manager monitors exporter connectivity:
+/// - `initial_backoff` and `max_backoff` control retry delays.
+/// - `backoff_multiplier` scales delays exponentially.
+/// - `max_failures` is the failure threshold before the circuit opens.
+/// - `circuit_open_duration` is how long the circuit stays open before auto-reset.
+///
+/// When the circuit is open, all export attempts fail immediately. When closed, normal
+/// retry logic applies with exponential backoff.
 #[derive(Debug, Clone)]
 pub struct ReconnectionConfig {
     /// Initial backoff duration
@@ -32,7 +43,14 @@ impl Default for ReconnectionConfig {
     }
 }
 
-/// Manages reconnection attempts with exponential backoff
+/// Manages reconnection attempts with exponential backoff and circuit breaker.
+///
+/// # Health Check
+///
+/// Monitors exporter connectivity by tracking consecutive failures and implementing
+/// a circuit breaker pattern. When `max_failures` is reached, the circuit opens and
+/// all export attempts are rejected immediately until `circuit_open_duration` elapses.
+/// This prevents hammering a failing exporter and allows it time to recover.
 #[derive(Debug, Clone)]
 pub struct ReconnectionManager {
     config: ReconnectionConfig,
@@ -42,12 +60,23 @@ pub struct ReconnectionManager {
 }
 
 impl ReconnectionManager {
-    /// Creates a new reconnection manager with default configuration
+    /// Creates a new reconnection manager with default configuration.
+    ///
+    /// # Health Check
+    ///
+    /// Returns a healthy reconnection manager with default retry parameters (100ms initial backoff,
+    /// 30s max backoff, 5 failures before circuit opens, 60s circuit open duration).
+    /// See [`ReconnectionConfig::default`] for details.
     pub fn new() -> Self {
         Self::with_config(ReconnectionConfig::default())
     }
 
-    /// Creates a new reconnection manager with custom configuration
+    /// Creates a new reconnection manager with custom configuration.
+    ///
+    /// # Health Check
+    ///
+    /// Initializes a manager with custom reconnection parameters. The manager starts healthy
+    /// (circuit closed, zero failures).
     pub fn with_config(config: ReconnectionConfig) -> Self {
         Self {
             config,
@@ -57,14 +86,25 @@ impl ReconnectionManager {
         }
     }
 
-    /// Records a successful connection
+    /// Records a successful connection and resets failure counters.
+    ///
+    /// # Health Check
+    ///
+    /// Call this after a successful export. It resets the failure count to zero,
+    /// closes the circuit breaker if open, and clears the last failure timestamp.
     pub fn record_success(&mut self) {
         self.consecutive_failures = 0;
         self.circuit_open = false;
         self.last_failure_time = None;
     }
 
-    /// Records a failed connection attempt
+    /// Records a failed connection attempt and increments failure counter.
+    ///
+    /// # Health Check
+    ///
+    /// Call this after a failed export attempt. It increments the failure count and
+    /// may open the circuit breaker if `max_failures` is reached. The caller should
+    /// check `is_circuit_open()` before retrying.
     pub fn record_failure(&mut self) {
         self.consecutive_failures += 1;
         self.last_failure_time = Some(std::time::Instant::now());
@@ -74,7 +114,15 @@ impl ReconnectionManager {
         }
     }
 
-    /// Checks if circuit breaker is open
+    /// Checks if the circuit breaker is open and resets if the open duration has elapsed.
+    ///
+    /// # Health Check
+    ///
+    /// - Returns `true` if the circuit is open and the open duration has not yet elapsed.
+    ///   In this case, the caller should fail the operation immediately (no-op degradation).
+    /// - Returns `false` if the circuit is closed or has auto-reset due to elapsed duration.
+    ///   In this case, the caller may retry with the backoff from [`next_backoff()`](Self::next_backoff).
+    /// - Also auto-resets failure counters when the open duration elapses.
     pub fn is_circuit_open(&mut self) -> bool {
         if !self.circuit_open {
             return false;
@@ -92,14 +140,26 @@ impl ReconnectionManager {
         true
     }
 
-    /// Calculates the next backoff duration with jitter
+    /// Calculates the next backoff duration with exponential growth and jitter.
+    ///
+    /// # Health Check
+    ///
+    /// Returns the duration to wait before the next reconnection attempt:
+    /// - Zero if there are no failures yet.
+    /// - Exponential backoff (initial * multiplier^(failures-1)) if failures exist, capped at max_backoff.
+    /// - Jitter (±10%) to prevent thundering herd.
+    ///
+    /// The caller should sleep for this duration before retrying the export.
     pub fn next_backoff(&self) -> Duration {
         if self.consecutive_failures == 0 {
             return Duration::from_secs(0);
         }
 
         let base_backoff = self.config.initial_backoff.as_millis() as f64
-            * self.config.backoff_multiplier.powi((self.consecutive_failures - 1) as i32);
+            * self
+                .config
+                .backoff_multiplier
+                .powi((self.consecutive_failures - 1) as i32);
 
         let capped_backoff = base_backoff.min(self.config.max_backoff.as_millis() as f64);
 
@@ -110,7 +170,13 @@ impl ReconnectionManager {
         Duration::from_millis(final_backoff as u64)
     }
 
-    /// Returns the current number of consecutive failures
+    /// Returns the current number of consecutive failures.
+    ///
+    /// # Health Check
+    ///
+    /// A count greater than zero indicates the exporter is having trouble. If this reaches
+    /// `max_failures`, the circuit will open on the next failure and reject all attempts
+    /// until the circuit auto-resets.
     pub fn failure_count(&self) -> u32 {
         self.consecutive_failures
     }
@@ -284,7 +350,10 @@ mod tests {
 
         // Sleep past the circuit_open_duration
         std::thread::sleep(Duration::from_millis(10));
-        assert!(!manager.is_circuit_open(), "Circuit should auto-reset after open duration");
+        assert!(
+            !manager.is_circuit_open(),
+            "Circuit should auto-reset after open duration"
+        );
     }
 
     #[test]
@@ -312,7 +381,10 @@ mod tests {
 
         // b2 should be roughly 3× b1 (within jitter tolerance)
         assert!(b2 > b1, "Second backoff should exceed first");
-        assert!(b2 >= 270, "Second backoff should be near 300ms (±10% jitter)");
+        assert!(
+            b2 >= 270,
+            "Second backoff should be near 300ms (±10% jitter)"
+        );
     }
 
     #[test]

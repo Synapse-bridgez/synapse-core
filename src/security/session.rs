@@ -1,35 +1,86 @@
-/// Secure Session Management — validation and rate-limiting checks.
+//! Secure session management with validation and session checks.
+//!
+//! This module provides session validation logic that acts as a health check
+//! for the security layer. Invalid sessions indicate a security issue or misconfiguration.
+
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 const MAX_SESSION_TTL_SECS: i64 = 86_400; // 24 h
 const MAX_USER_ID_LEN: usize = 128;
 
+/// Errors that can occur during session validation.
+///
+/// These errors indicate either invalid input (misconfiguration) or session expiration/inactivity
+/// (degraded security state). All errors are non-fatal; callers should handle gracefully.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionValidationError {
+    /// User ID is empty. Indicates misconfiguration at session creation time.
     #[error("User ID is empty")]
     EmptyUserId,
+
+    /// User ID exceeds maximum length (128 chars). Indicates input validation failure.
     #[error("User ID exceeds maximum length")]
     UserIdTooLong,
+
+    /// TTL is invalid. Must be between 1 and 86400 seconds (24 hours).
+    /// Indicates misconfiguration or request tampering.
     #[error("TTL must be between 1 and {MAX_SESSION_TTL_SECS} seconds")]
     InvalidTtl,
+
+    /// Session has expired. The session is stale and should not be trusted.
+    /// Caller should prompt for re-authentication.
     #[error("Session has expired")]
     Expired,
+
+    /// Session is inactive. The session was explicitly deactivated/revoked.
+    /// Caller should deny access and require re-authentication.
     #[error("Session is inactive")]
     Inactive,
 }
 
-/// Lightweight session record used for validation.
+/// A session record that can be validated for liveness and integrity.
+///
+/// This struct serves as a health check for the session layer. Validation determines
+/// whether the session is still valid, active, and within TTL bounds.
+///
+/// # Fields
+/// - `id`: Unique session identifier
+/// - `user_id`: Associated user; must be non-empty and ≤128 chars
+/// - `expires_at`: Expiration time; if in the past, session is stale
+/// - `is_active`: Flag indicating whether the session has been explicitly revoked
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
+    /// Unique session identifier
     pub id: Uuid,
+    /// Associated user ID (must be non-empty)
     pub user_id: String,
+    /// Absolute time when this session expires
     pub expires_at: DateTime<Utc>,
+    /// Whether the session is active (false = revoked)
     pub is_active: bool,
 }
 
-/// Validate inputs before creating a session.
-pub fn validate_session_params(user_id: &str, ttl_seconds: i64) -> Result<(), SessionValidationError> {
+/// Validates input parameters before creating a new session.
+///
+/// This function acts as a health check for session creation configuration.
+/// It ensures user ID and TTL are within acceptable bounds.
+///
+/// # Arguments
+/// - `user_id`: User identifier; must be non-empty and ≤128 characters
+/// - `ttl_seconds`: Session time-to-live; must be between 1 and 86400 seconds
+///
+/// # Returns
+/// - `Ok(())` if inputs are valid
+/// - `Err(SessionValidationError)` if user_id is empty, too long, or ttl_seconds is out of range
+///
+/// # Caller responsibility
+/// If validation fails, reject the session creation request and log the error.
+/// Do not attempt to create a session with invalid parameters.
+pub fn validate_session_params(
+    user_id: &str,
+    ttl_seconds: i64,
+) -> Result<(), SessionValidationError> {
     if user_id.is_empty() {
         return Err(SessionValidationError::EmptyUserId);
     }
@@ -42,7 +93,29 @@ pub fn validate_session_params(user_id: &str, ttl_seconds: i64) -> Result<(), Se
     Ok(())
 }
 
-/// Validate that an existing session is still usable.
+/// Validates that an existing session is still active, usable, and within TTL.
+///
+/// This is the primary health check for the session layer. It determines whether
+/// a session can be trusted for authorization decisions. A valid session must:
+/// - Be marked as active (not revoked)
+/// - Not have expired (expiration time must be in the future)
+///
+/// # Arguments
+/// - `session`: The session record to validate
+///
+/// # Returns
+/// - `Ok(())` if the session is healthy (active and not expired)
+/// - `Err(SessionValidationError::Inactive)` if the session has been revoked
+/// - `Err(SessionValidationError::Expired)` if the current time is at or past `expires_at`
+///
+/// # Caller responsibility
+/// - If validation fails with `Inactive`, deny access immediately (session was revoked)
+/// - If validation fails with `Expired`, treat as stale session and prompt re-authentication
+/// - Callers must check this before granting access to protected resources
+///
+/// # Non-fatal behavior
+/// This function is non-fatal; its job is to report the security state so callers
+/// can make appropriate decisions. The overall system continues even if sessions are invalid.
 pub fn validate_session(session: &SessionRecord) -> Result<(), SessionValidationError> {
     if !session.is_active {
         return Err(SessionValidationError::Inactive);

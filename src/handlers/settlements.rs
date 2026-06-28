@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use crate::utils::cursor as cursor_util;
+use crate::validation::{validate_max_len, validate_required};
 use crate::ApiState;
 use axum::{
     extract::{Path, Query, State},
@@ -136,6 +137,35 @@ pub struct UpdateSettlementStatusRequest {
     pub actor: Option<String>,
 }
 
+impl UpdateSettlementStatusRequest {
+    /// Validates the settlement status update request.
+    ///
+    /// Returns a 400 Bad Request error if:
+    /// - status is empty or missing
+    /// - status exceeds 50 characters
+    /// - reason exceeds 255 characters
+    /// - actor exceeds 50 characters
+    pub fn validate(&self) -> Result<(), AppError> {
+        validate_required("status", &self.status)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+        validate_max_len("status", &self.status, 50)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+        if let Some(reason) = &self.reason {
+            validate_max_len("reason", reason, 255)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        }
+
+        if let Some(actor) = &self.actor {
+            validate_max_len("actor", actor, 50)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+}
+
 /// PATCH /admin/settlements/:id/status
 /// Allowed transitions: completed→pending_review, →disputed, pending_review→adjusted/voided/disputed,
 /// disputed→adjusted/voided/pending_review.
@@ -144,6 +174,8 @@ pub async fn update_settlement_status(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateSettlementStatusRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    payload.validate()?;
+
     let new_total: Option<sqlx::types::BigDecimal> = match payload.new_total.as_deref() {
         Some(s) => match s.parse() {
             Ok(v) => Some(v),
@@ -166,4 +198,94 @@ pub async fn update_settlement_status(
         .await?;
 
     Ok((StatusCode::OK, Json(settlement)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_settlement_status_valid() {
+        let req = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: Some("testing".to_string()),
+            new_total: None,
+            actor: Some("admin".to_string()),
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_update_settlement_status_empty_status() {
+        let req = UpdateSettlementStatusRequest {
+            status: "".to_string(),
+            reason: None,
+            new_total: None,
+            actor: None,
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_update_settlement_status_status_too_long() {
+        let req = UpdateSettlementStatusRequest {
+            status: "a".repeat(51),
+            reason: None,
+            new_total: None,
+            actor: None,
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_update_settlement_status_reason_too_long() {
+        let req = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: Some("a".repeat(256)),
+            new_total: None,
+            actor: None,
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_update_settlement_status_actor_too_long() {
+        let req = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: None,
+            new_total: None,
+            actor: Some("a".repeat(51)),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_update_settlement_status_boundary_values() {
+        // Test status at max length
+        let req = UpdateSettlementStatusRequest {
+            status: "a".repeat(50),
+            reason: None,
+            new_total: None,
+            actor: None,
+        };
+        assert!(req.validate().is_ok());
+
+        // Test reason at max length
+        let req = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: Some("a".repeat(255)),
+            new_total: None,
+            actor: None,
+        };
+        assert!(req.validate().is_ok());
+
+        // Test actor at max length
+        let req = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: None,
+            new_total: None,
+            actor: Some("a".repeat(50)),
+        };
+        assert!(req.validate().is_ok());
+    }
 }

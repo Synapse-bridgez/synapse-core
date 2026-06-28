@@ -34,13 +34,18 @@
 //! buffers. Long-running send loops should select on their normal work, health
 //! checks, and shutdown notification so slow clients cannot hold server
 //! termination indefinitely.
-pub mod health;
 pub mod connection_pool;
+pub mod health;
 pub mod metrics;
+pub mod pagination;
 
-pub use health::HealthChecker;
 pub use connection_pool::ConnectionPool;
+pub use health::HealthChecker;
 pub use metrics::WebSocketMetrics;
+pub use pagination::{
+    Cursor, EventPage, PaginationError, PaginationParams, PaginationRequest, DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+};
 
 #[cfg(test)]
 mod tests {

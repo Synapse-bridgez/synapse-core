@@ -1,3 +1,37 @@
+# Synapse Core CI/CD Workflow
+#
+# This workflow runs on every push to `main`/`develop` and on pull requests
+# targeting `develop`. It is split into three jobs that run in sequence:
+#
+#   unit-tests ──┐
+#                ├──► coverage
+#   integration-tests ──┘
+#
+# ## Pagination in CI/CD
+#
+# Pagination logic (cursor-based, offset-based, and WebSocket streaming) is
+# exercised across all three jobs:
+#
+# - unit-tests:       runs `--lib --bins` which includes all inline `#[cfg(test)]`
+#                     modules, covering pure-logic pagination unit tests
+#                     (cursor encoding/decoding, limit clamping, filter building).
+#
+# - integration-tests: runs `-- --ignored` which includes the full integration
+#                      test suite. Pagination integration tests are gated with
+#                      `#[ignore]` because they require live Postgres + Redis.
+#                      The `--skip` flags exclude unrelated flaky tests so that
+#                      pagination tests always run.
+#
+# - coverage:         collects LLVM coverage across both unit and integration
+#                     test runs and enforces a minimum line-coverage threshold.
+#                     Pagination code paths (cursor queries, offset queries,
+#                     GraphQL pagination resolvers) must remain above the
+#                     project-wide 40 % floor; the 60 % warning threshold
+#                     encourages higher coverage over time.
+#
+# See docs/ci-cd-pagination.md for a full explanation of how pagination tests
+# are structured, what each job covers, and how to add new pagination tests.
+
 name: Rust
 
 on:
@@ -16,15 +50,26 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
+  # Regex used by cargo-llvm-cov to exclude generated/test files from coverage
+  # reports. Pagination test helpers in tests/ are excluded here so that only
+  # production pagination code (src/) counts toward the threshold.
   COVERAGE_IGNORE_REGEX: '(^|.*/)(tests?/.*|generated/.*|\.sqlx/.*)$'
-
-# Cancel in-progress runs for the same branch/PR to avoid wasted runner time
-# and stale session state from concurrent jobs sharing the same cache keys.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # CI pool sizing: keep connections low to match the single-node test DB.
+  # These are picked up by Config::load() via DB_MIN_CONNECTIONS / DB_MAX_CONNECTIONS.
+  DB_MIN_CONNECTIONS: "2"
+  DB_MAX_CONNECTIONS: "10"
+  DB_IDLE_TIMEOUT_SECS: "30"
+  DB_STATEMENT_TIMEOUT_MS: "30000"
+  DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS: "120000"
 
 jobs:
+  # ── Job 1: unit-tests ────────────────────────────────────────────────────────
+  # Runs fast, stateless tests that do not require Redis.
+  # Covers:
+  #   - Cursor encoding / decoding (src/utils/cursor.rs)
+  #   - Limit clamping and filter building (src/db/query_builder.rs)
+  #   - GraphQL pagination types (src/graphql/pagination/)
+  #   - Quota middleware logic (src/middleware/quota.rs)
   unit-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -33,11 +78,19 @@ jobs:
       matrix:
         rust: [stable]
 
+    # Serialize external API calls (taiki-e install-action) to avoid GitHub API rate limits
+    # Multiple concurrent requests from install-action would quickly exhaust the rate limit
+    concurrency:
+      group: ${{ github.workflow }}-install-tools-${{ github.ref }}
+      cancel-in-progress: false
+
     # Limit job-level permissions to the minimum required.
     permissions:
       contents: read
 
     services:
+      # Postgres is required even for unit tests because sqlx performs
+      # compile-time query verification against a live database.
       postgres:
         image: postgres:14-alpine
         env:
@@ -92,20 +145,15 @@ jobs:
       with:
         tool: sqlx-cli@0.7.4
 
+    # Validates that no migration breaks existing pagination indexes.
+    # The script checks for destructive operations (DROP INDEX, ALTER TABLE)
+    # on columns used by cursor queries (created_at, id).
     - name: Check migration safety
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
     - name: Run migrations
       id: run_migrations
-      run: |
-        set -e
-        echo "Starting database migrations..."
-        if ! sqlx migrate run; then
-          echo "::error::Migration failed. Check migration files for errors."
-          exit 1
-        fi
-        echo "Migrations completed successfully"
       run: |
         for i in 1 2 3; do
           sqlx migrate run && break
@@ -165,6 +213,12 @@ jobs:
         echo "::error::Project build failed. Review compilation errors and fix syntax/type issues."
         exit 1
 
+    # Runs all inline unit tests (`#[cfg(test)]` modules inside src/).
+    # Pagination unit tests covered here:
+    #   - src/utils/cursor.rs        — cursor encode/decode round-trips
+    #   - src/db/query_builder.rs    — dynamic WHERE clause construction
+    #   - src/graphql/pagination/    — cursor and offset pagination types
+    #   - src/middleware/quota.rs    — rate-limit logic (affects paginated endpoints)
     - name: Run unit tests
       id: run_unit_tests
       run: |
@@ -193,6 +247,12 @@ jobs:
       fail-fast: false
       matrix:
         rust: [stable]
+
+    # Serialize external API calls (taiki-e install-action) to avoid GitHub API rate limits
+    # This concurrency group ensures install-action calls are not made concurrently across jobs
+    concurrency:
+      group: ${{ github.workflow }}-install-tools-${{ github.ref }}
+      cancel-in-progress: false
 
     permissions:
       contents: read
@@ -234,6 +294,9 @@ jobs:
     - name: Install sccache
       uses: taiki-e/install-action@sccache
 
+    - name: Start sccache session
+      run: sccache --start-server || true
+
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
       with:
@@ -263,6 +326,19 @@ jobs:
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
+    # Runs all tests marked `#[ignore]` — these are the integration tests that
+    # require live services.
+    #
+    # Pagination tests included:
+    #   tests/integration_test.rs   — cursor pagination, empty pages, last page
+    #   tests/search_test.rs        — paginated full-text search results
+    #   tests/websocket_test.rs     — paginated history on WS connect
+    #   tests/graphql_test.rs       — GraphQL cursor + offset pagination
+    #   tests/export_test.rs        — streaming export (large paginated result)
+    #
+    # Skipped tests:
+    #   test_api_versioning_headers — unrelated to pagination; flaky in CI
+    #   test_invalid_signature_flow — auth test; no pagination dependency
     - name: Run integration tests
       id: run_integration_tests
       run: |
@@ -292,6 +368,11 @@ jobs:
     needs:
       - unit-tests
       - integration-tests
+    # Serialize external API calls (codecov, taiki-e install-action) to reduce rate limit pressure
+    # Coverage job makes multiple external API requests; running sequentially prevents rate limit errors
+    concurrency:
+      group: ${{ github.workflow }}-external-api-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -334,6 +415,9 @@ jobs:
     - name: Install sccache
       uses: taiki-e/install-action@sccache
 
+    - name: Start sccache session
+      run: sccache --start-server || true
+
     - name: Cache Cargo registry and build artifacts
       uses: actions/cache@v4
       with:
@@ -366,6 +450,16 @@ jobs:
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
 
+    # Two-pass coverage collection:
+    #   Pass 1 (--lib --bins): unit tests — fast, no Redis needed.
+    #   Pass 2 (--ignored):    integration tests — requires Postgres + Redis.
+    #
+    # Both passes contribute to the same coverage report so that pagination
+    # code exercised only by integration tests (e.g. the actual SQL queries)
+    # is still counted.
+    #
+    # The COVERAGE_IGNORE_REGEX excludes test helpers and generated files so
+    # that only production pagination code affects the threshold.
     - name: Collect coverage data
       id: collect_coverage
       run: |
@@ -424,6 +518,8 @@ jobs:
           target/llvm-cov/summary.json
         if-no-files-found: error
 
+    # Serialize external API upload (Codecov) to avoid overwhelming their rate limits
+    # Multiple workflows uploading simultaneously would increase 429 error probability
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
       with:
@@ -435,6 +531,10 @@ jobs:
         disable_search: true
         verbose: true
 
+    # Enforces coverage thresholds using the JSON summary produced above.
+    # jq extracts the line-coverage percentage; awk compares it to the limits.
+    # Adding new pagination code without tests will cause this step to fail
+    # if coverage drops below 40 %.
     - name: Enforce coverage thresholds
       id: enforce_coverage
       run: |

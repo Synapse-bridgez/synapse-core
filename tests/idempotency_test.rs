@@ -1,8 +1,8 @@
 use axum::{
-    body::Body,
+    body::{self, Body},
     http::{Request, StatusCode},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
@@ -11,7 +11,9 @@ use serde_json::json;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
-use synapse_core::middleware::idempotency::{idempotency_middleware, IdempotencyService};
+use synapse_core::middleware::idempotency::{
+    idempotency_middleware, BodyEncoding, CachedResponse, IdempotencyService, IdempotencyStatus,
+};
 use tokio::time::sleep;
 use tower::ServiceExt;
 
@@ -35,6 +37,71 @@ fn create_idempotency_service(redis_url: &str) -> IdempotencyService {
 
 async fn test_handler() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "success"})))
+}
+
+async fn brace_text_handler() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(body::boxed(Body::from("ey plain text containing { brace")))
+        .unwrap()
+}
+
+async fn exact_json_handler() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(body::boxed(Body::from(r#"{ "z": 1, "a": 2 }"#)))
+        .unwrap()
+}
+
+async fn binary_handler() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .body(body::boxed(Body::from(vec![0, 159, 146, 150, 255, 1])))
+        .unwrap()
+}
+
+fn create_replay_test_app(service: IdempotencyService) -> Router {
+    Router::new()
+        .route("/text", post(brace_text_handler))
+        .route("/json", post(exact_json_handler))
+        .route("/binary", post(binary_handler))
+        .layer(middleware::from_fn_with_state(
+            service,
+            idempotency_middleware,
+        ))
+}
+
+async fn assert_replay_is_identical(app: &Router, path: &str) {
+    let key = uuid::Uuid::new_v4().to_string();
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-idempotency-key", &key)
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    let first_status = first.status();
+    let first_content_type = first.headers().get("content-type").cloned();
+    let first_body = hyper::body::to_bytes(first.into_body()).await.unwrap();
+
+    let replay = app.clone().oneshot(request()).await.unwrap();
+    let replay_status = replay.status();
+    let replay_content_type = replay.headers().get("content-type").cloned();
+    assert_eq!(
+        replay.headers().get("x-idempotent-replayed").unwrap(),
+        "true"
+    );
+    let replay_body = hyper::body::to_bytes(replay.into_body()).await.unwrap();
+
+    assert_eq!(replay_status, first_status);
+    assert_eq!(replay_content_type, first_content_type);
+    assert_eq!(replay_body, first_body);
 }
 
 fn create_test_app(service: IdempotencyService) -> Router {
@@ -447,6 +514,55 @@ async fn test_stale_lock_recovery() {
 
 #[ignore = "Requires Redis"]
 #[tokio::test]
+async fn test_stale_recovery_does_not_require_keys_command() {
+    let (client, redis_url) = setup_redis().await;
+    let mut admin = client.get_connection().unwrap();
+    redis::cmd("ACL")
+        .arg("SETUSER")
+        .arg("idempotency-scanner")
+        .arg("on")
+        .arg(">scanpass")
+        .arg("~*")
+        .arg("+@all")
+        .arg("-keys")
+        .execute(&mut admin);
+
+    let restricted_url = redis_url.replacen("redis://", "redis://idempotency-scanner:scanpass@", 1);
+    let service = create_idempotency_service(&restricted_url);
+    let key = uuid::Uuid::new_v4().to_string();
+    let lock_key = format!("idempotency:lock:default:{key}");
+    let old_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 180;
+    let lock_value = serde_json::json!({
+        "instance_id": "crashed-instance",
+        "locked_at": old_timestamp,
+        "token": uuid::Uuid::new_v4().to_string(),
+    });
+    redis::cmd("SET")
+        .arg(&lock_key)
+        .arg(lock_value.to_string())
+        .arg("EX")
+        .arg(300)
+        .execute(&mut admin);
+
+    service.recover_stale_locks().await.unwrap();
+
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&lock_key)
+        .query(&mut admin)
+        .unwrap();
+    assert!(!exists, "SCAN-based recovery should remove the stale lock");
+    redis::cmd("ACL")
+        .arg("DELUSER")
+        .arg("idempotency-scanner")
+        .execute(&mut admin);
+}
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
 async fn test_normal_flow_not_affected_by_recovery() {
     let (client, redis_url) = setup_redis().await;
     let service = create_idempotency_service(&redis_url);
@@ -475,4 +591,76 @@ async fn test_normal_flow_not_affected_by_recovery() {
         .query(&mut conn)
         .unwrap();
     assert!(exists, "Cached response should not be deleted by recovery");
+}
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_cross_owner_release_is_a_no_op() {
+    let (client, redis_url) = setup_redis().await;
+    let service = create_idempotency_service(&redis_url);
+    let tenant_id = "cross-owner";
+    let key = &uuid::Uuid::new_v4().to_string();
+
+    let first_token = match service.check_idempotency(tenant_id, key).await.unwrap() {
+        IdempotencyStatus::New {
+            lock_token: Some(token),
+        } => token,
+        status => panic!("expected a Redis lock, got {status:?}"),
+    };
+
+    let second_token = uuid::Uuid::new_v4().to_string();
+    let replacement = serde_json::json!({
+        "instance_id": "instance-b",
+        "locked_at": 1,
+        "token": second_token,
+    });
+    let lock_key = format!("idempotency:lock:{tenant_id}:{key}");
+    let mut conn = client.get_connection().unwrap();
+    redis::cmd("SET")
+        .arg(&lock_key)
+        .arg(replacement.to_string())
+        .arg("EX")
+        .arg(300)
+        .execute(&mut conn);
+
+    service
+        .release_lock(tenant_id, key, Some(&first_token))
+        .await
+        .unwrap();
+
+    service
+        .store_response(
+            tenant_id,
+            key,
+            CachedResponse {
+                status: 200,
+                body: "late owner response".to_string(),
+                content_type: Some("text/plain".to_string()),
+                encoding: BodyEncoding::Utf8,
+            },
+            Some(&first_token),
+        )
+        .await
+        .unwrap();
+
+    let remaining: String = redis::cmd("GET").arg(&lock_key).query(&mut conn).unwrap();
+    let remaining: serde_json::Value = serde_json::from_str(&remaining).unwrap();
+    assert_eq!(remaining["token"], second_token);
+    let cache_key = format!("idempotency:{tenant_id}:{key}");
+    let cached_exists: bool = redis::cmd("EXISTS")
+        .arg(cache_key)
+        .query(&mut conn)
+        .unwrap();
+    assert!(!cached_exists, "the old owner must not overwrite the cache");
+}
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_replays_preserve_text_json_and_binary_bytes() {
+    let (_client, redis_url) = setup_redis().await;
+    let app = create_replay_test_app(create_idempotency_service(&redis_url));
+
+    assert_replay_is_identical(&app, "/text").await;
+    assert_replay_is_identical(&app, "/json").await;
+    assert_replay_is_identical(&app, "/binary").await;
 }

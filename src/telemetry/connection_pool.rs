@@ -8,9 +8,16 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::telemetry::input_validation::{InputValidator, ValidationError};
+use crate::telemetry::error_handling::TelemetryError;
+use crate::telemetry::input_validation::InputValidator;
 
-/// Pool configuration.
+/// Pool configuration for telemetry exporter connections.
+///
+/// # Health Check
+///
+/// Defines the constraints for the telemetry connection pool health check:
+/// - `max_size` enforces a hard cap to prevent resource exhaustion attacks.
+/// - `max_idle` evicts stale connections, preventing unbounded resource hold when the exporter changes.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     /// Maximum number of connections the pool may hold at once.
@@ -29,19 +36,6 @@ impl Default for PoolConfig {
             endpoint: "http://localhost:4317".to_string(),
         }
     }
-}
-
-/// Error returned by pool operations.
-#[derive(Debug, thiserror::Error)]
-pub enum PoolError {
-    #[error("Pool exhausted: all {0} connections are in use")]
-    Exhausted(usize),
-
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
-
-    #[error("Endpoint validation failed: {0}")]
-    Validation(#[from] ValidationError),
 }
 
 /// A single connection managed by the pool.
@@ -70,6 +64,7 @@ impl PooledConnection {
     }
 }
 
+#[derive(Debug)]
 struct PoolState {
     available: VecDeque<PooledConnection>,
     /// Total connections in existence (idle + currently in use).
@@ -113,20 +108,27 @@ pub struct ConnectionPool {
 
 impl ConnectionPool {
     /// Creates a pool with default configuration.
-    pub fn new() -> Result<Self, PoolError> {
+    ///
+    /// # Errors
+    /// Returns [`TelemetryError::PoolConfigError`] if the default endpoint is invalid.
+    pub fn new() -> Result<Self, TelemetryError> {
         Self::with_config(PoolConfig::default())
     }
 
     /// Creates a pool with the supplied configuration.
     ///
+    /// Validates the endpoint URL and pool size at construction time, failing fast
+    /// if configuration is invalid. This prevents resource exhaustion from invalid configs.
+    ///
     /// # Errors
-    /// - [`PoolError::Validation`] when `config.endpoint` is invalid.
-    /// - [`PoolError::InvalidConfig`] when `max_size` is zero.
-    pub fn with_config(config: PoolConfig) -> Result<Self, PoolError> {
-        InputValidator::validate_endpoint(&config.endpoint)?;
+    /// - [`TelemetryError::ValidationError`] when `config.endpoint` is invalid.
+    /// - [`TelemetryError::PoolConfigError`] when `max_size` is zero or invalid.
+    pub fn with_config(config: PoolConfig) -> Result<Self, TelemetryError> {
+        InputValidator::validate_endpoint(&config.endpoint)
+            .map_err(TelemetryError::ValidationError)?;
 
         if config.max_size == 0 {
-            return Err(PoolError::InvalidConfig(
+            return Err(TelemetryError::PoolConfigError(
                 "max_size must be at least 1".into(),
             ));
         }
@@ -137,15 +139,24 @@ impl ConnectionPool {
         })
     }
 
-    /// Acquires a connection from the pool.
+    /// Acquires a connection from the pool for use.
     ///
-    /// Returns an idle connection when one is available. Otherwise creates a
-    /// new one, provided the pool ceiling has not been reached. Stale idle
-    /// connections are evicted before the availability check.
+    /// # Health Check
+    ///
+    /// A successful acquisition means the pool is healthy and has capacity. On success,
+    /// the caller receives an idle connection from the queue or a newly created connection.
+    /// Stale idle connections are evicted automatically before the availability check.
+    ///
+    /// A failing result with `Exhausted` means the pool has hit its capacity ceiling
+    /// (`max_size`). The caller should back off and retry, or fail the telemetry operation
+    /// gracefully (no-op degradation).
     ///
     /// # Errors
-    /// [`PoolError::Exhausted`] when all `max_size` connections are in use.
-    pub fn acquire(&self) -> Result<PooledConnection, PoolError> {
+    /// [`TelemetryError::PoolExhausted`] when all `max_size` connections are in use.
+    ///
+    /// # Non-fatal behavior
+    /// If the mutex is poisoned, recovers by creating a new state instead of panicking.
+    pub fn acquire(&self) -> Result<PooledConnection, TelemetryError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.evict_stale_locked(&mut state);
 
@@ -154,7 +165,7 @@ impl ConnectionPool {
         }
 
         if state.total >= self.config.max_size {
-            return Err(PoolError::Exhausted(self.config.max_size));
+            return Err(TelemetryError::PoolExhausted(self.config.max_size));
         }
 
         let id = state.next_id();
@@ -162,10 +173,13 @@ impl ConnectionPool {
         Ok(PooledConnection::new(id, self.config.endpoint.clone()))
     }
 
-    /// Returns a connection to the pool.
+    /// Returns a connection to the pool after use.
+    ///
+    /// # Health Check
     ///
     /// Stale connections are discarded and the pool size is decremented.
     /// Non-stale connections are re-queued for future acquisition.
+    /// Does not propagate errors; logs and recovers gracefully from poisoned mutexes.
     pub fn release(&self, mut conn: PooledConnection) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -179,19 +193,24 @@ impl ConnectionPool {
     }
 
     /// Number of idle connections currently in the pool.
+    ///
+    /// # Health Check
+    ///
+    /// Returns the count of idle connections available for reuse. A high idle count
+    /// may indicate the exporter is slow or unavailable; zero idle count indicates
+    /// all pool capacity is in use.
     pub fn idle_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.available.len())
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
     }
 
     /// Total connections managed by the pool (idle + currently in use).
+    ///
+    /// # Health Check
+    ///
+    /// Returns the total number of active and idle connections. If this equals `max_size`,
+    /// the pool is at capacity and new acquisitions will fail with `Exhausted`.
     pub fn total_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.total)
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.total).unwrap_or(0)
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {
@@ -243,7 +262,10 @@ mod tests {
         let pool = ConnectionPool::with_config(config).unwrap();
         let _c1 = pool.acquire().unwrap();
         let _c2 = pool.acquire().unwrap();
-        assert!(matches!(pool.acquire(), Err(PoolError::Exhausted(2))));
+        assert!(matches!(
+            pool.acquire(),
+            Err(TelemetryError::PoolExhausted(2))
+        ));
     }
 
     #[test]

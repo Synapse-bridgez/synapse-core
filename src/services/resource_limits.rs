@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
-use tracing::{error, warn};
+use tracing::error;
 
 /// Configuration for background task resource limits.
 #[derive(Debug, Clone)]
@@ -53,17 +53,15 @@ impl ResourceLimiter {
             .await
             .map_err(|_| ResourceLimitError::SemaphoreError)?;
 
-        let result = timeout(self.timeout_duration, future)
-            .await
-            .map_err(|_| {
-                crate::metrics::background_task_timeout_total().add(1, &[]);
-                error!(
-                    task = %self.task_name,
-                    timeout_secs = self.timeout_duration.as_secs(),
-                    "Background task exceeded timeout"
-                );
-                ResourceLimitError::Timeout
-            })?;
+        let result = timeout(self.timeout_duration, future).await.map_err(|_| {
+            crate::metrics::background_task_timeout_total().add(1, &[]);
+            error!(
+                task = %self.task_name,
+                timeout_secs = self.timeout_duration.as_secs(),
+                "Background task exceeded timeout"
+            );
+            ResourceLimitError::Timeout
+        })?;
 
         drop(permit);
         Ok(result)

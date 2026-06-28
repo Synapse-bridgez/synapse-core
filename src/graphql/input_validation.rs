@@ -4,13 +4,7 @@
 //! schema types and resolver code stay free of ad-hoc string checks.
 
 /// Permitted status values for transaction queries.
-const ALLOWED_STATUSES: &[&str] = &[
-    "pending",
-    "completed",
-    "failed",
-    "cancelled",
-    "processing",
-];
+const ALLOWED_STATUSES: &[&str] = &["pending", "completed", "failed", "cancelled", "processing"];
 
 /// Maximum length for free-form string filter fields.
 const MAX_FILTER_FIELD_LENGTH: usize = 256;
@@ -105,7 +99,7 @@ pub fn validate_stellar_account(account: &str) -> Result<(), InputValidationErro
 /// Rejects values outside `[1, MAX_QUERY_LIMIT]` to prevent both empty
 /// result requests and unbounded page sizes that could exhaust resources.
 pub fn validate_limit(limit: i64) -> Result<(), InputValidationError> {
-    if limit < 1 || limit > MAX_QUERY_LIMIT {
+    if !(1..=MAX_QUERY_LIMIT).contains(&limit) {
         return Err(InputValidationError::LimitExceeded {
             value: limit,
             max: MAX_QUERY_LIMIT,
@@ -154,7 +148,10 @@ mod tests {
     #[test]
     fn test_valid_stellar_accounts() {
         assert!(validate_stellar_account("GABC123DEF456").is_ok());
-        assert!(validate_stellar_account("GBQVLZE4XCNDFW44GQDYAAPYPFZKLKLXNGKJHYZZTARJQGFN5QKYXW1E").is_ok());
+        assert!(validate_stellar_account(
+            "GBQVLZE4XCNDFW44GQDYAAPYPFZKLKLXNGKJHYZZTARJQGFN5QKYXW1E"
+        )
+        .is_ok());
     }
 
     #[test]

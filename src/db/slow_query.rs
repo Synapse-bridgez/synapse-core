@@ -24,18 +24,20 @@ pub fn log_query_timing(
     rows_affected: usize,
     slow_query_threshold_ms: u64,
 ) {
-    // Log all queries in development, or slow queries in production
+    let is_slow = duration_ms >= slow_query_threshold_ms;
+
+    // Development: log every query in debug builds.
+    // Production: only record slow query events.
     if cfg!(debug_assertions) {
-        // Development: log everything at debug level
         tracing::debug!(
             query_name = query_name,
             duration_ms = duration_ms,
             rows_affected = rows_affected,
             sql = query_sql,
+            slow_threshold_ms = slow_query_threshold_ms,
             "query timing"
         );
-    } else if duration_ms >= slow_query_threshold_ms {
-        // Production: log slow queries at warn level
+    } else if is_slow {
         tracing::warn!(
             query_name = query_name,
             duration_ms = duration_ms,
@@ -44,9 +46,12 @@ pub fn log_query_timing(
             sql = query_sql,
             "slow query detected"
         );
+    }
 
-        // Increment slow query counter
+    if is_slow {
+        // Track slow query count both in-process and via OpenTelemetry.
         SLOW_QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::db_slow_queries_total().add(1, &[]);
     }
 }
 

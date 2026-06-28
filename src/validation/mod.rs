@@ -4,6 +4,7 @@ use std::fmt;
 
 pub mod schemas;
 pub mod state_machine;
+pub mod state_transitions;
 
 pub const STELLAR_ACCOUNT_LEN: usize = 56;
 pub const ASSET_CODE_MAX_LEN: usize = 12;
@@ -158,6 +159,28 @@ pub fn validate_positive_amount(amount: &BigDecimal) -> ValidationResult {
     Ok(())
 }
 
+pub fn validate_range(field: &'static str, value: i64, min: i64, max: i64) -> ValidationResult {
+    if value < min || value > max {
+        return Err(ValidationError::new(
+            field,
+            format!("must be between {min} and {max}"),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn validate_min_len(field: &'static str, value: &str, min_len: usize) -> ValidationResult {
+    if value.len() < min_len {
+        return Err(ValidationError::new(
+            field,
+            format!("must be at least {min_len} characters"),
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +246,23 @@ mod tests {
         assert!(validate_positive_amount(&positive).is_ok());
         assert!(validate_positive_amount(&zero).is_err());
         assert!(validate_positive_amount(&negative).is_err());
+    }
+
+    #[test]
+    fn validates_range() {
+        assert!(validate_range("days", 5, 1, 365).is_ok());
+        assert!(validate_range("days", 1, 1, 365).is_ok());
+        assert!(validate_range("days", 365, 1, 365).is_ok());
+        assert!(validate_range("days", 0, 1, 365).is_err());
+        assert!(validate_range("days", 366, 1, 365).is_err());
+    }
+
+    #[test]
+    fn validates_min_len() {
+        assert!(validate_min_len("status", "pending", 1).is_ok());
+        assert!(validate_min_len("status", "pending", 7).is_ok());
+        assert!(validate_min_len("status", "pending", 8).is_err());
+        assert!(validate_min_len("status", "", 1).is_err());
     }
 
     #[test]

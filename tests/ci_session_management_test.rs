@@ -169,9 +169,7 @@ async fn test_database_transaction_rollback() {
         .expect("Failed to execute query in transaction");
 
     // Rollback transaction
-    tx.rollback()
-        .await
-        .expect("Failed to rollback transaction");
+    tx.rollback().await.expect("Failed to rollback transaction");
 
     pool.close().await;
 }
@@ -290,17 +288,23 @@ async fn test_connection_pool_limits() {
         .expect("Failed to connect to database");
 
     // Acquire connections up to the limit
-    let conn1 = pool.acquire().await.expect("Failed to acquire connection 1");
-    let conn2 = pool.acquire().await.expect("Failed to acquire connection 2");
+    let mut conn1 = pool
+        .acquire()
+        .await
+        .expect("Failed to acquire connection 1");
+    let mut conn2 = pool
+        .acquire()
+        .await
+        .expect("Failed to acquire connection 2");
 
     // Verify we can still use the connections
     let result1: (i32,) = sqlx::query_as("SELECT 1")
-        .fetch_one(&*conn1)
+        .fetch_one(&mut *conn1)
         .await
         .expect("Failed to execute query on connection 1");
 
     let result2: (i32,) = sqlx::query_as("SELECT 2")
-        .fetch_one(&*conn2)
+        .fetch_one(&mut *conn2)
         .await
         .expect("Failed to execute query on connection 2");
 
@@ -325,11 +329,11 @@ async fn test_session_cleanup_on_shutdown() {
         .expect("Failed to connect to database");
 
     // Acquire a connection
-    let conn = pool.acquire().await.expect("Failed to acquire connection");
+    let mut conn = pool.acquire().await.expect("Failed to acquire connection");
 
     // Execute a query
     let _result: (i32,) = sqlx::query_as("SELECT 1")
-        .fetch_one(&*conn)
+        .fetch_one(&mut *conn)
         .await
         .expect("Failed to execute query");
 

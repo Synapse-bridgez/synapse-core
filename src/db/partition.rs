@@ -1,6 +1,5 @@
 use crate::services::query_cache::QueryCache;
 use sqlx::PgPool;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use tracing::{error, info};
@@ -29,20 +28,7 @@ impl PartitionManager {
 
             loop {
                 interval.tick().await;
-                let result = if let Some(ref limiter) = self.limiter {
-                    limiter
-                        .run(async {
-                            self.maintain_partitions().await
-                        })
-                        .await
-                        .map_err(|e| sqlx::Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            e.to_string(),
-                        )))
-                        .and_then(|r| r)
-                } else {
-                    self.maintain_partitions().await
-                };
+                let result = self.maintain_partitions().await;
 
                 if let Err(e) = result {
                     error!("Partition maintenance failed: {}", e);
@@ -140,11 +126,13 @@ mod tests {
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
         let pool = PgPool::connect(&database_url).await.unwrap();
-        let cache = QueryCache::new(&redis_url).expect("redis must be available");
+        let cache = QueryCache::new(&redis_url)
+            .await
+            .expect("redis must be available");
 
         // Pre-clear any existing warm keys so we can detect a fresh write.
         cache.invalidate("query:status_counts").await.ok();
-        cache.invalidate("query:daily_totals").await.ok();
+        cache.invalidate("query:daily_totals:7").await.ok();
         cache.invalidate("query:asset_stats").await.ok();
 
         let manager = PartitionManager::new(pool.clone(), 24, Some(cache.clone()));
@@ -157,7 +145,7 @@ mod tests {
             let status: Option<serde_json::Value> =
                 cache.get("query:status_counts").await.unwrap_or(None);
             let daily: Option<serde_json::Value> =
-                cache.get("query:daily_totals").await.unwrap_or(None);
+                cache.get("query:daily_totals:7").await.unwrap_or(None);
             let assets: Option<serde_json::Value> =
                 cache.get("query:asset_stats").await.unwrap_or(None);
             assert!(status.is_some(), "status_counts should be cached");

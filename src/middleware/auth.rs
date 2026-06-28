@@ -60,6 +60,7 @@ pub async fn api_key_auth(req: Request<Body>, next: Next<Body>) -> Result<Respon
 /// Admin auth middleware that accepts all currently-valid API keys (supports secret rotation).
 /// If a `SecretsStore` extension is present on the request, it checks all valid keys
 /// (current + grace-period previous). Falls back to the `ADMIN_API_KEY` env var otherwise.
+/// Uses constant-time comparison and requires ADMIN_API_KEY to be set (fails closed).
 pub async fn admin_auth(req: Request<Body>, next: Next<Body>) -> Result<Response, StatusCode> {
     let auth_header = req
         .headers()
@@ -75,21 +76,36 @@ pub async fn admin_auth(req: Request<Body>, next: Next<Body>) -> Result<Response
     // Try SecretsStore extension first (rotation-aware).
     if let Some(store) = req.extensions().get::<SecretsStore>() {
         let valid_keys = store.valid_admin_keys().await;
-        if valid_keys.iter().any(|k| k == &provided) {
+        if valid_keys
+            .iter()
+            .any(|k| constant_time_eq(k.as_bytes(), provided.as_bytes()))
+        {
             return Ok(next.run(req).await);
         }
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Fallback: plain env var (no Vault / rotation).
-    let admin_api_key =
-        std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "admin-secret-key".to_string());
+    // Fallback: plain env var. Fail closed if not set.
+    let admin_api_key = std::env::var("ADMIN_API_KEY").ok();
+    let Some(admin_api_key) = admin_api_key else {
+        tracing::error!("admin_auth: ADMIN_API_KEY not configured; request rejected");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
 
-    if provided == admin_api_key {
+    if constant_time_eq(admin_api_key.as_bytes(), provided.as_bytes()) {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Constant-time byte slice equality check to prevent timing attacks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
 }
 
 #[cfg(test)]

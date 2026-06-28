@@ -8,9 +8,7 @@
 //! - Threshold-based error handling
 //! - Error recovery scenarios
 
-use synapse_core::telemetry::{
-    ErrorAction, ErrorHandler, TelemetryError, TelemetryResult,
-};
+use synapse_core::telemetry::{ErrorAction, ErrorHandler, TelemetryError, TelemetryResult};
 
 #[test]
 fn test_telemetry_error_types() {
@@ -131,7 +129,7 @@ fn test_multiple_error_types_in_sequence() {
     let mut handler = ErrorHandler::with_threshold(5);
 
     // Mix different error types
-    let errors = vec![
+    let errors = [
         TelemetryError::ConnectionError("conn1".to_string()),
         TelemetryError::ExportError("export1".to_string()),
         TelemetryError::ConnectionError("conn2".to_string()),
@@ -162,7 +160,7 @@ fn test_telemetry_result_type() {
     // Test success case
     let success: TelemetryResult<i32> = Ok(42);
     assert!(success.is_ok());
-    assert_eq!(success.unwrap(), 42);
+    assert_eq!(success.ok(), Some(42));
 
     // Test error case
     let error: TelemetryResult<i32> = Err(TelemetryError::ExportError("failed".to_string()));

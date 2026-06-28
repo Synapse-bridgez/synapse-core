@@ -1,9 +1,11 @@
 use redis::{AsyncCommands, Client, Script};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -41,7 +43,9 @@ impl Default for FairLockConfig {
 ///    with a separate heartbeat key `lock:waiter:<resource>:<token>` (EX waiter_ttl)
 ///    so crashed waiters are detectable.
 /// 2. Check turn: `ZRANGE lock:queue:<resource> 0 0` — if our token is first, we hold the lock.
-/// 3. Before checking, prune stale waiters whose heartbeat key has expired.
+/// 3. Before checking, prune stale waiters by score: any member whose enqueue
+///    timestamp is older than `waiter_ttl` has a guaranteed-expired heartbeat and
+///    is removed without individual key lookups (O(stale) per round, O(1)-amortized).
 /// 4. Release: `ZREM lock:queue:<resource> <token>` + delete heartbeat key.
 pub struct FairLockManager {
     redis_client: Client,
@@ -105,9 +109,8 @@ impl FairLockManager {
             conn.set_ex::<_, _, ()>(&heartbeat_key, "alive", waiter_ttl_secs)
                 .await?;
 
-            // Prune stale waiters (crashed workers whose heartbeat expired)
-            self.prune_stale_waiters(&mut conn, resource, &queue_key)
-                .await?;
+            // Prune stale waiters (score-based — O(stale) with no per-member GETs)
+            self.prune_stale_waiters(&mut conn, &queue_key).await?;
 
             // Check if we are at the front
             let front: Vec<String> = conn.zrange(&queue_key, 0, 0).await?;
@@ -180,24 +183,29 @@ impl FairLockManager {
         }
     }
 
-    /// Remove queue members whose heartbeat key has expired (crashed waiters).
+    /// Remove queue members whose enqueue timestamp (score) is older than
+    /// `waiter_ttl`.  Any such member's heartbeat key has expired by definition,
+    /// so no per-member GET is needed — a single `ZRANGEBYSCORE` + batched `ZREM`
+    /// replaces the previous O(N-per-poll) scan.
     async fn prune_stale_waiters(
         &self,
         conn: &mut redis::aio::MultiplexedConnection,
-        resource: &str,
         queue_key: &str,
     ) -> Result<(), redis::RedisError> {
-        // Fetch all members
-        let members: Vec<String> = conn.zrange(queue_key, 0, -1).await?;
-        for member in members {
-            let hb_key = format!("lock:waiter:{}:{}", resource, member);
-            let alive: Option<String> = conn.get(&hb_key).await?;
-            if alive.is_none() {
-                // Heartbeat gone — waiter crashed, evict from queue
-                let _: () = conn.zrem(queue_key, &member).await?;
-                warn!(resource, token = %member, "Pruned stale waiter from fair lock queue");
+        let waiter_ttl_ms = self.config.waiter_ttl.as_millis() as f64;
+        let stale_threshold = (unix_ms() as f64) - waiter_ttl_ms;
+
+        let stale: Vec<String> = conn
+            .zrangebyscore(queue_key, "-inf", stale_threshold)
+            .await?;
+
+        if !stale.is_empty() {
+            for member in &stale {
+                warn!(token = %member, "Pruning stale waiter from fair lock queue (timestamp-based)");
             }
+            let _: () = conn.zrem(queue_key, stale).await?;
         }
+
         Ok(())
     }
 }
@@ -365,6 +373,54 @@ pub fn lock_registry() -> &'static LockRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// LockError
+// ---------------------------------------------------------------------------
+
+/// Typed error returned by [`LockManager::with_lock`].
+#[derive(Debug)]
+pub enum LockError {
+    /// A Redis operation failed.
+    Redis(redis::RedisError),
+    /// Lock was not acquired within the timeout — caller may retry or skip.
+    LockNotAcquired,
+    /// The lock was lost during the critical section (renewal failed or token
+    /// mismatch).  The body closure was aborted; callers must treat any
+    /// in-progress writes as potentially unsafe and roll back or re-validate.
+    LockLost,
+    /// The body closure returned an error.
+    Inner(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Redis(e) => write!(f, "Redis error: {e}"),
+            LockError::LockNotAcquired => write!(f, "lock not acquired within timeout"),
+            LockError::LockLost => {
+                write!(f, "lock lost during critical section (renewal failed)")
+            }
+            LockError::Inner(e) => write!(f, "critical section error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LockError::Redis(e) => Some(e),
+            LockError::Inner(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<redis::RedisError> for LockError {
+    fn from(e: redis::RedisError) -> Self {
+        LockError::Redis(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LockManager
 // ---------------------------------------------------------------------------
 
@@ -373,6 +429,27 @@ pub struct LockManager {
     default_ttl: Duration,
 }
 
+/// A held distributed lock.
+///
+/// ## Fencing token (`fence_token`)
+///
+/// Each successful acquisition atomically increments a per-resource counter in
+/// Redis (`INCR lock:fence:<resource>`) and records the result as
+/// `fence_token`.  Because `INCR` is serial inside the lock (only one holder
+/// at a time), the token is strictly monotonically increasing across
+/// acquisitions.
+///
+/// Callers of [`LockManager::with_lock`] receive this token as a parameter and
+/// **should forward it to every protected write** so the resource can reject
+/// stale operations with a check such as:
+///
+/// ```sql
+/// UPDATE settlements SET ... WHERE id = $1 AND fence_token <= $2
+/// ```
+///
+/// A stale holder (paused after expiry, before it could detect the loss) will
+/// have a lower token than the current holder, so its writes are silently
+/// dropped rather than applied twice.
 #[derive(Clone)]
 pub struct Lock {
     key: String,
@@ -380,6 +457,9 @@ pub struct Lock {
     redis_client: Client,
     ttl: Duration,
     acquired_at: Instant,
+    /// Monotonically increasing acquisition counter for this resource.
+    /// See struct-level docs for usage.
+    pub fence_token: u64,
 }
 
 impl LockManager {
@@ -406,10 +486,22 @@ impl LockManager {
         loop {
             attempts += 1;
 
-            if let Some(lock) = self.try_acquire(&key, &token, ttl).await? {
-                debug!(resource, attempts, "Acquired distributed lock");
+            if let Some(mut lock) = self.try_acquire(&key, &token, ttl).await? {
+                // Fetch the monotonic fence token for this acquisition.
+                // INCR is only reached by the new holder (SET NX succeeded), so
+                // the sequence is strictly increasing across acquisitions.
+                let fence_key = format!("lock:fence:{resource}");
+                let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
+                let ft: i64 = conn.incr(&fence_key, 1_i64).await?;
+                lock.fence_token = ft as u64;
 
-                // Metrics
+                debug!(
+                    resource,
+                    attempts,
+                    fence_token = lock.fence_token,
+                    "Acquired distributed lock"
+                );
+
                 crate::metrics::lock_acquired_total().add(
                     1,
                     &[opentelemetry::KeyValue::new(
@@ -418,7 +510,6 @@ impl LockManager {
                     )],
                 );
 
-                // Register in active lock registry
                 let acquired_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -437,7 +528,6 @@ impl LockManager {
                 return Ok(Some(lock));
             }
 
-            // Each failed attempt is a contention event
             crate::metrics::lock_contention_total().add(
                 1,
                 &[opentelemetry::KeyValue::new(
@@ -480,25 +570,37 @@ impl LockManager {
                 redis_client: self.redis_client.clone(),
                 ttl,
                 acquired_at: Instant::now(),
+                fence_token: 0, // filled in by acquire() after INCR
             }))
         } else {
             Ok(None)
         }
     }
 
+    /// Execute `f` while holding the distributed lock, with automatic renewal.
+    ///
+    /// ## Renewal guard
+    /// A background task renews the lock every `ttl/2`.  If renewal ever
+    /// returns a token mismatch or a Redis error, the lock is considered lost
+    /// and `with_lock` returns [`LockError::LockLost`] without waiting for `f`
+    /// to finish.  Callers must treat the in-flight work as potentially unsafe
+    /// and roll back or re-validate before retrying.
+    ///
+    /// ## Fencing token
+    /// `f` receives the lock's monotonically increasing `fence_token` as its
+    /// argument.  Pass this token to every protected write so stale writers
+    /// are rejected — see [`Lock::fence_token`] for the recommended SQL pattern.
     pub async fn with_lock<F, T>(
         &self,
         resource: &str,
         timeout_duration: Duration,
         f: F,
-    ) -> Result<Option<T>, Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<Option<T>, LockError>
     where
-        F: FnOnce() -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<T, Box<dyn std::error::Error + Send + Sync>>,
-                    > + Send,
-            >,
+        F: FnOnce(
+            u64,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<T, Box<dyn std::error::Error + Send + Sync>>> + Send>,
         >,
     {
         let lock = match self.acquire(resource, timeout_duration).await? {
@@ -506,11 +608,49 @@ impl LockManager {
             None => return Ok(None),
         };
 
-        let result = f().await;
+        let fence_token = lock.fence_token;
+        let renew_interval = lock.ttl / 2;
+        let lock_token = lock.token.clone();
 
+        // Channel the renewal task uses to signal loss to this task.
+        let (loss_tx, mut loss_rx) = watch::channel(false);
+
+        let mut renew_lock = lock.clone();
+        let renewal_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(renew_interval).await;
+                match renew_lock.renew().await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!(key = %renew_lock.key, "lock lost during renewal (token mismatch)");
+                        let _ = loss_tx.send(true);
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(key = %renew_lock.key, error = %e, "lock renewal Redis error, treating as lost");
+                        let _ = loss_tx.send(true);
+                        return;
+                    }
+                }
+            }
+        });
+
+        // Race the body against a lock-loss signal from the renewal task.
+        // Any change to the watch channel (including sender drop) is treated as loss.
+        let body_result = tokio::select! {
+            _ = loss_rx.changed() => {
+                renewal_handle.abort();
+                lock_registry().deregister(&lock_token).await;
+                return Err(LockError::LockLost);
+            }
+            r = f(fence_token) => r,
+        };
+
+        // Body finished first — cancel the renewal task and release the lock.
+        renewal_handle.abort();
         lock.release().await?;
 
-        result.map(Some)
+        body_result.map(Some).map_err(LockError::Inner)
     }
 }
 
@@ -539,13 +679,11 @@ impl Lock {
 
         debug!(resource, hold_ms, "Released distributed lock");
 
-        // Record hold duration metric
         crate::metrics::lock_hold_duration_ms().record(
             hold_ms,
             &[opentelemetry::KeyValue::new("resource", resource.clone())],
         );
 
-        // Alert if held longer than 2x TTL
         let expected_ms = self.ttl.as_secs_f64() * 1000.0;
         if hold_ms > expected_ms * 2.0 {
             warn!(
@@ -554,7 +692,6 @@ impl Lock {
             );
         }
 
-        // Remove from registry
         lock_registry().deregister(&self.token).await;
 
         Ok(())
@@ -620,7 +757,6 @@ impl Drop for Lock {
         let resource = key.trim_start_matches("lock:").to_string();
 
         tokio::spawn(async move {
-            // Record metrics on drop (best-effort)
             crate::metrics::lock_hold_duration_ms().record(
                 hold_ms,
                 &[opentelemetry::KeyValue::new("resource", resource.clone())],
@@ -749,6 +885,7 @@ impl LeaderElection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[ignore = "Requires DATABASE_URL / Redis"]
     #[tokio::test]
@@ -790,7 +927,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_metrics_emitted() {
-        // Verify metric instruments can be created without panicking
         let _ = crate::metrics::lock_acquired_total();
         let _ = crate::metrics::lock_contention_total();
         let _ = crate::metrics::lock_hold_duration_ms();
@@ -827,7 +963,6 @@ mod tests {
     // Fair lock queue tests (no Redis required)
     // -----------------------------------------------------------------------
 
-    /// Verify FairLockConfig defaults are sane.
     #[test]
     fn test_fair_lock_config_defaults() {
         let cfg = FairLockConfig::default();
@@ -836,7 +971,6 @@ mod tests {
         assert!(cfg.poll_interval > Duration::ZERO);
     }
 
-    /// Verify unix_ms() returns a plausible value (after year 2020).
     #[test]
     fn test_unix_ms_plausible() {
         let ms = unix_ms();
@@ -844,8 +978,172 @@ mod tests {
         assert!(ms > 1_577_836_800_000);
     }
 
-    /// With N workers contending, each should get approximately equal lock time.
-    /// This is a logic/unit test — uses the registry to verify fairness ordering.
+    /// Stale threshold is correctly calculated as `now - waiter_ttl_ms`.
+    #[test]
+    fn test_prune_stale_threshold_calculation() {
+        let waiter_ttl = Duration::from_secs(60);
+        let now_ms = unix_ms() as f64;
+        let threshold = now_ms - waiter_ttl.as_millis() as f64;
+        // Threshold must be in the past
+        assert!(threshold < now_ms);
+        // And within a reasonable range (not in the distant past)
+        assert!(threshold > now_ms - 120_000.0);
+    }
+
+    /// LockError variants display meaningful messages.
+    #[test]
+    fn test_lock_error_display() {
+        assert!(LockError::LockNotAcquired.to_string().contains("timeout"));
+        assert!(LockError::LockLost.to_string().contains("lost"));
+        assert!(LockError::Inner(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "boom"
+        )))
+        .to_string()
+        .contains("boom"));
+    }
+
+    // -----------------------------------------------------------------------
+    // with_lock renewal integration tests (require Redis)
+    // -----------------------------------------------------------------------
+
+    /// A long-running body keeps the lock alive via auto-renewal; no second
+    /// holder can acquire the same resource while the body is running.
+    ///
+    /// Setup: TTL = 500 ms, body sleeps 2 s (4× TTL).
+    /// The renewal task fires at 250 ms, 750 ms, 1250 ms, 1750 ms — each
+    /// extending the key by another 500 ms.  A concurrent acquire attempt
+    /// throughout the body duration must always return `None`.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_with_lock_auto_renewal_keeps_lock_alive() {
+        let redis_url = "redis://localhost:6379";
+        let resource = "test_renewal_keeps_lock";
+
+        // Clean up any leftover state from a previous run
+        {
+            let client = Client::open(redis_url).unwrap();
+            let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg(format!("lock:{resource}"))
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+
+        // Short TTL so the key expires quickly without renewal
+        let mgr = Arc::new(LockManager {
+            redis_client: Client::open(redis_url).unwrap(),
+            default_ttl: Duration::from_millis(500),
+        });
+
+        let concurrent_acquired = Arc::new(AtomicBool::new(false));
+        let concurrent_acquired_clone = concurrent_acquired.clone();
+        let mgr_poller = mgr.clone();
+        let resource_str = resource.to_string();
+
+        // Spawn a task that polls for the lock throughout the body's 2 s sleep
+        let poller = tokio::spawn(async move {
+            // Poll every 200 ms for 2 s
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if let Ok(Some(_)) = mgr_poller
+                    .acquire(&resource_str, Duration::from_millis(10))
+                    .await
+                {
+                    concurrent_acquired_clone.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        });
+
+        let result = mgr
+            .with_lock(resource, Duration::from_secs(5), |_fence_token| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+                })
+            })
+            .await;
+
+        let _ = poller.await;
+
+        assert!(result.is_ok(), "with_lock should succeed: {result:?}");
+        assert!(
+            !concurrent_acquired.load(Ordering::SeqCst),
+            "no second holder should have acquired the lock during the body"
+        );
+    }
+
+    /// If the lock is lost mid-body (simulated by deleting the key from Redis),
+    /// `with_lock` must return `LockError::LockLost` before the body completes.
+    ///
+    /// Setup: TTL = 300 ms (renewal fires at 150 ms).  After the body starts,
+    /// we wait 50 ms then delete the lock key directly.  The next renewal at
+    /// 150 ms finds a token mismatch and signals loss.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_with_lock_signals_lock_lost_on_renewal_failure() {
+        let redis_url = "redis://localhost:6379";
+        let resource = "test_renewal_loss_signal";
+
+        {
+            let client = Client::open(redis_url).unwrap();
+            let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg(format!("lock:{resource}"))
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+
+        let mgr = LockManager {
+            redis_client: Client::open(redis_url).unwrap(),
+            default_ttl: Duration::from_millis(300),
+        };
+
+        let body_completed = Arc::new(AtomicBool::new(false));
+        let body_completed_clone = body_completed.clone();
+
+        // Saboteur: delete the lock key 50 ms after the body starts
+        let saboteur_client = Client::open(redis_url).unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Ok(mut conn) = saboteur_client.get_multiplexed_async_connection().await {
+                let _: () = redis::cmd("DEL")
+                    .arg(format!("lock:{resource}"))
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap_or(());
+            }
+        });
+
+        let result = mgr
+            .with_lock(resource, Duration::from_secs(2), move |_fence_token| {
+                let flag = body_completed_clone.clone();
+                Box::pin(async move {
+                    // Body sleeps 2 s — renewal should interrupt it
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    flag.store(true, Ordering::SeqCst);
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+                })
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(LockError::LockLost)),
+            "expected LockLost, got: {result:?}"
+        );
+        assert!(
+            !body_completed.load(Ordering::SeqCst),
+            "body should have been aborted before completing"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fair-lock integration tests (unchanged, require Redis)
+    // -----------------------------------------------------------------------
+
     #[ignore = "Requires Redis"]
     #[tokio::test]
     async fn test_fair_queue_equal_distribution() {
@@ -881,14 +1179,12 @@ mod tests {
             let _ = h.await;
         }
 
-        // All workers should have acquired the lock exactly once
         assert_eq!(
             acquired.load(std::sync::atomic::Ordering::SeqCst),
             n_workers
         );
     }
 
-    /// A crashed waiter (no heartbeat) should be pruned from the queue.
     #[ignore = "Requires Redis"]
     #[tokio::test]
     async fn test_crashed_waiter_pruned() {
@@ -897,13 +1193,12 @@ mod tests {
         let queue_key = format!("lock:queue:{}", resource);
         let stale_token = "stale-worker-token";
 
-        // Manually insert a stale entry (no heartbeat key)
         let client = Client::open(redis_url).unwrap();
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-        // Score = 1 (very old, should be first)
+
+        // Insert a stale entry with a score far in the past (guaranteed expired)
         let _: () = conn.zadd(&queue_key, stale_token, 1.0_f64).await.unwrap();
 
-        // Now a real worker acquires — it should prune the stale entry and succeed
         let mgr = FairLockManager::new(
             redis_url,
             5,
@@ -918,7 +1213,6 @@ mod tests {
         let lock = mgr.acquire(resource).await.unwrap();
         assert!(lock.is_some(), "Should acquire after pruning stale waiter");
 
-        // Stale token must be gone from the queue
         let members: Vec<String> = conn.zrange(&queue_key, 0, -1).await.unwrap();
         assert!(
             !members.contains(&stale_token.to_string()),

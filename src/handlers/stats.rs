@@ -3,6 +3,7 @@ use crate::error::AppError;
 use crate::services::query_cache::{
     cache_key_asset_stats, cache_key_daily_totals, cache_key_status_counts, CacheConfig,
 };
+use crate::validation::validate_range;
 use crate::ApiState;
 use axum::{
     extract::State,
@@ -13,6 +14,9 @@ use axum::{
 use serde::Deserialize;
 use std::time::Duration;
 
+const MIN_DAYS: i32 = 1;
+const MAX_DAYS: i32 = 365;
+
 #[derive(Deserialize)]
 pub struct DailyTotalsQuery {
     #[serde(default = "default_days")]
@@ -21,6 +25,13 @@ pub struct DailyTotalsQuery {
 
 fn default_days() -> i32 {
     7
+}
+
+impl DailyTotalsQuery {
+    pub fn validate(&self) -> Result<(), AppError> {
+        validate_range("days", self.days as i64, MIN_DAYS as i64, MAX_DAYS as i64)
+            .map_err(|e| AppError::BadRequest(e.to_string()))
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -83,6 +94,8 @@ pub async fn daily_totals(
     State(state): State<ApiState>,
     axum::extract::Query(query): axum::extract::Query<DailyTotalsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
+
     let cache_key = cache_key_daily_totals(query.days);
     let config = CacheConfig::default();
 
@@ -186,4 +199,55 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> Result<impl IntoRes
         idempotency_fallback_count: 0,
     };
     Ok((StatusCode::OK, Json(combined_metrics)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_daily_totals_query_valid_days() {
+        let query = DailyTotalsQuery { days: 7 };
+        assert!(query.validate().is_ok());
+
+        let query = DailyTotalsQuery { days: 1 };
+        assert!(query.validate().is_ok());
+
+        let query = DailyTotalsQuery { days: 365 };
+        assert!(query.validate().is_ok());
+    }
+
+    #[test]
+    fn test_daily_totals_query_invalid_days_too_low() {
+        let query = DailyTotalsQuery { days: 0 };
+        assert!(query.validate().is_err());
+
+        let query = DailyTotalsQuery { days: -1 };
+        assert!(query.validate().is_err());
+    }
+
+    #[test]
+    fn test_daily_totals_query_invalid_days_too_high() {
+        let query = DailyTotalsQuery { days: 366 };
+        assert!(query.validate().is_err());
+
+        let query = DailyTotalsQuery { days: 1000 };
+        assert!(query.validate().is_err());
+    }
+
+    #[test]
+    fn test_daily_totals_query_boundary_values() {
+        // Test boundary values
+        let query = DailyTotalsQuery { days: MIN_DAYS };
+        assert!(query.validate().is_ok(), "should accept MIN_DAYS");
+
+        let query = DailyTotalsQuery { days: MAX_DAYS };
+        assert!(query.validate().is_ok(), "should accept MAX_DAYS");
+
+        let query = DailyTotalsQuery { days: MIN_DAYS - 1 };
+        assert!(query.validate().is_err(), "should reject below MIN_DAYS");
+
+        let query = DailyTotalsQuery { days: MAX_DAYS + 1 };
+        assert!(query.validate().is_err(), "should reject above MAX_DAYS");
+    }
 }

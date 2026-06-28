@@ -54,11 +54,13 @@ async fn test_graphql_queries() {
     .execute(&pool)
     .await;
 
-    let pool_manager = PoolManager::new(&database_url, None).await.unwrap();
+    let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();
-    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap();
+    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379")
+        .await
+        .unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -71,7 +73,9 @@ async fn test_graphql_queries() {
         start_time: std::time::Instant::now(),
         tx_broadcast,
         readiness,
-        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
+            .await
+            .unwrap(),
         profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),

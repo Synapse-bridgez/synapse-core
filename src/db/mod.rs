@@ -31,6 +31,16 @@
 //! - All connections use SSL/TLS if configured in `database_url`
 //! - Connection strings never logged; only error details logged
 //! - RLS policies enforced via tenant context (see [`queries::set_tenant_context`])
+//!
+//! ## Reconnection and retry behavior
+//!
+//! - Transient database failures are classified by [`crate::utils::retry::is_transient_db_error`]
+//! - Retriable operations use exponential backoff via
+//!   [`crate::utils::retry::retry_with_backoff`]
+//! - Connection pool warm-up is fail-open: startup detects failures without
+//!   making pool creation brittle
+//! - See [database reconnection logic](../../docs/database-reconnection-logic.md)
+//!   for design, security, and recovery guidance
 
 use crate::config::Config;
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -126,7 +136,7 @@ pub async fn graceful_shutdown(pool: &PgPool) {
 /// - Max connections limits database resource consumption
 ///
 /// # Examples
-/// ```ignore
+/// ```text
 /// let config = Config::from_env();
 /// let pool = create_pool(&config).await?;
 /// ```
@@ -149,16 +159,16 @@ pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
         })
         .connect(&config.database_url)
         .await?;
-    
+
     // Warm up connections to reduce initial query latency
     warm_up(&pool, config.db_min_connections).await?;
-    
+
     tracing::info!(
         min_connections = config.db_min_connections,
         max_connections = config.db_max_connections,
         "Connection pool initialized and warmed up"
     );
-    
+
     Ok(pool)
 }
 
@@ -182,7 +192,8 @@ async fn build_pool(
     idle_timeout_secs: u64,
     statement_timeout_ms: u64,
 ) -> Result<PgPool, sqlx::Error> {
-    let statement_timeout_sql = Arc::<str>::from(format!("SET statement_timeout = {statement_timeout_ms}"));
+    let statement_timeout_sql =
+        Arc::<str>::from(format!("SET statement_timeout = {statement_timeout_ms}"));
 
     PgPoolOptions::new()
         .min_connections(min)
@@ -216,8 +227,9 @@ async fn build_pool(
 /// - Detects database connectivity issues before accepting traffic
 async fn warm_up(pool: &PgPool, min_connections: u32) -> Result<(), sqlx::Error> {
     let start = std::time::Instant::now();
-    let mut handles = Vec::with_capacity(min_connections as usize);
-    
+    let mut handles: Vec<tokio::task::JoinHandle<Result<(), sqlx::Error>>> =
+        Vec::with_capacity(min_connections as usize);
+
     for i in 0..min_connections {
         let pool = pool.clone();
         handles.push(tokio::spawn(async move {
@@ -233,17 +245,17 @@ async fn warm_up(pool: &PgPool, min_connections: u32) -> Result<(), sqlx::Error>
             }
         }));
     }
-    
+
     for handle in handles {
         handle.await.ok();
     }
-    
+
     let elapsed = start.elapsed();
     tracing::info!(
         connections = min_connections,
         duration_ms = elapsed.as_millis(),
         "Pool warm-up completed"
     );
-    
+
     Ok(())
 }

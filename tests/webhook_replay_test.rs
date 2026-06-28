@@ -18,7 +18,7 @@ async fn test_webhook_replay_tracking(pool: PgPool) -> sqlx::Result<()> {
         None,
     );
 
-    let inserted = queries::insert_transaction(&pool, &tx).await?;
+    let (inserted, _) = queries::insert_transaction(&pool, &tx).await?;
 
     // Simulate a replay attempt
     sqlx::query(
@@ -65,7 +65,7 @@ async fn test_list_failed_webhooks(pool: PgPool) -> sqlx::Result<()> {
         None,
     );
 
-    let inserted = queries::insert_transaction(&pool, &tx).await?;
+    let (inserted, _) = queries::insert_transaction(&pool, &tx).await?;
 
     // Update status to failed
     sqlx::query("UPDATE transactions SET status = 'failed' WHERE id = $1")
@@ -100,7 +100,7 @@ async fn test_replay_updates_status(pool: PgPool) -> sqlx::Result<()> {
         None,
     );
 
-    let inserted = queries::insert_transaction(&pool, &tx).await?;
+    let (inserted, _) = queries::insert_transaction(&pool, &tx).await?;
 
     // Update status to failed
     sqlx::query("UPDATE transactions SET status = 'failed' WHERE id = $1")

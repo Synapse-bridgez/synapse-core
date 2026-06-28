@@ -21,6 +21,17 @@ impl ComplianceService {
             .await
     }
 
+    /// Exposed for integration tests only; prefer [`generate_report`].
+    pub async fn generate_for_range_test(
+        &self,
+        period: &str,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<ComplianceReport, AppError> {
+        self.generate_for_range(period, period_start, period_end)
+            .await
+    }
+
     async fn generate_for_range(
         &self,
         period: &str,
@@ -29,14 +40,27 @@ impl ComplianceService {
     ) -> Result<ComplianceReport, AppError> {
         let db_err = |e: sqlx::Error| AppError::DatabaseError(e.to_string());
 
-        // Transaction count and settlement total
+        // All aggregates computed within a single REPEATABLE READ transaction for
+        // a consistent point-in-time snapshot.
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+
+        // Transaction count + settlement_total (completed/settled only).
         let summary = sqlx::query(
-            "SELECT COUNT(*) AS tx_count, COALESCE(SUM(amount), 0) AS settlement_total \
+            "SELECT \
+               COUNT(*) AS tx_count, \
+               COALESCE(SUM(CASE WHEN status IN ('completed', 'settled') THEN amount ELSE 0 END), 0) AS settlement_total, \
+               COALESCE(SUM(CASE WHEN status = 'pending'  THEN 1 ELSE 0 END), 0) AS pending_count, \
+               COALESCE(SUM(CASE WHEN status = 'failed'   THEN 1 ELSE 0 END), 0) AS failed_count \
              FROM transactions WHERE created_at >= $1 AND created_at < $2",
         )
         .bind(period_start)
         .bind(period_end)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
 
@@ -45,7 +69,7 @@ impl ComplianceService {
             .try_get::<BigDecimal, _>("settlement_total")
             .unwrap_or_default();
 
-        // Anomaly count: transactions stuck in 'pending' for > 1 hour
+        // Anomaly count: transactions stuck in 'pending' for > 1 hour.
         let anomaly_row = sqlx::query(
             "SELECT COUNT(*) AS anomaly_count FROM transactions \
              WHERE created_at >= $1 AND created_at < $2 \
@@ -53,13 +77,13 @@ impl ComplianceService {
         )
         .bind(period_start)
         .bind(period_end)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(db_err)?;
 
         let anomaly_count: i64 = anomaly_row.try_get("anomaly_count").unwrap_or(0);
 
-        // Volume by asset
+        // Volume by asset (all statuses for volume reporting).
         let asset_rows = sqlx::query(
             "SELECT asset_code, COUNT(*) AS tx_count, COALESCE(SUM(amount), 0) AS total_amount \
              FROM transactions WHERE created_at >= $1 AND created_at < $2 \
@@ -67,9 +91,9 @@ impl ComplianceService {
         )
         .bind(period_start)
         .bind(period_end)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(db_err)?;
 
         let volume_by_asset: serde_json::Value = asset_rows
             .into_iter()
@@ -88,7 +112,7 @@ impl ComplianceService {
             .collect::<serde_json::Map<_, _>>()
             .into();
 
-        // Top 10 accounts by volume
+        // Top 10 accounts by volume.
         let account_rows = sqlx::query(
             "SELECT stellar_account, COUNT(*) AS tx_count, COALESCE(SUM(amount), 0) AS total_amount \
              FROM transactions WHERE created_at >= $1 AND created_at < $2 \
@@ -96,9 +120,9 @@ impl ComplianceService {
         )
         .bind(period_start)
         .bind(period_end)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(db_err)?;
 
         let top_accounts: serde_json::Value = account_rows
             .into_iter()
@@ -115,38 +139,36 @@ impl ComplianceService {
             .collect::<Vec<_>>()
             .into();
 
-        let report = ComplianceReport {
-            id: Uuid::new_v4(),
-            period: period.to_string(),
-            period_start,
-            period_end,
-            transaction_count: tx_count,
-            settlement_total,
-            anomaly_count,
-            volume_by_asset,
-            top_accounts,
-            created_at: Utc::now(),
-        };
-
+        // Idempotent upsert: ON CONFLICT (period, period_start) DO UPDATE so a
+        // second call for the same period returns the existing row unchanged.
         let saved = sqlx::query_as::<_, ComplianceReport>(
             "INSERT INTO compliance_reports \
                 (id, period, period_start, period_end, transaction_count, \
                  settlement_total, anomaly_count, volume_by_asset, top_accounts, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) \
+             ON CONFLICT (period, period_start) DO UPDATE SET \
+                 transaction_count = EXCLUDED.transaction_count, \
+                 settlement_total  = EXCLUDED.settlement_total, \
+                 anomaly_count     = EXCLUDED.anomaly_count, \
+                 volume_by_asset   = EXCLUDED.volume_by_asset, \
+                 top_accounts      = EXCLUDED.top_accounts \
+             RETURNING *",
         )
-        .bind(report.id)
-        .bind(&report.period)
-        .bind(report.period_start)
-        .bind(report.period_end)
-        .bind(report.transaction_count)
-        .bind(&report.settlement_total)
-        .bind(report.anomaly_count)
-        .bind(&report.volume_by_asset)
-        .bind(&report.top_accounts)
-        .bind(report.created_at)
-        .fetch_one(&self.pool)
+        .bind(Uuid::new_v4())
+        .bind(period)
+        .bind(period_start)
+        .bind(period_end)
+        .bind(tx_count)
+        .bind(&settlement_total)
+        .bind(anomaly_count)
+        .bind(&volume_by_asset)
+        .bind(&top_accounts)
+        .bind(Utc::now())
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(db_err)?;
+
+        tx.commit().await.map_err(db_err)?;
 
         Ok(saved)
     }

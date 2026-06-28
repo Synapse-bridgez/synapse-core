@@ -3,6 +3,7 @@
 //! Provides structured export of telemetry data including traces, metrics,
 //! and span data with proper buffering, compression, and error handling.
 
+use crate::telemetry::error_handling::TelemetryError;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -121,20 +122,37 @@ pub struct ExportBatch {
 }
 
 impl ExportBatch {
-    /// Creates a new batch from records
+    /// Creates a new batch from records.
+    ///
+    /// Estimates the serialized size of the batch. If serialization fails,
+    /// size is set to 0. Timestamps default to 0 if system time is unavailable.
+    /// Neither failure is fatal; the batch is created with degraded metadata.
     pub fn new(records: Vec<TelemetryRecord>) -> Self {
         let size_bytes = serde_json::to_string(&records)
             .map(|s| s.len())
-            .unwrap_or(0);
+            .unwrap_or_else(|_| {
+                // Serialization failed; estimate size as last resort
+                // This is non-fatal; batch will still be created
+                tracing::warn!("Failed to estimate batch size via serialization; using 0");
+                0
+            });
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_else(|| {
+                // System time is unavailable; use 0
+                // This is non-fatal; batch will still be created
+                tracing::warn!("System time unavailable for batch timestamp; using 0");
+                0
+            });
 
         Self {
             batch_id: uuid::Uuid::new_v4().to_string(),
             records,
             size_bytes,
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+            created_at,
         }
     }
 
@@ -245,12 +263,19 @@ impl Default for ExportConfig {
 /// Service for exporting telemetry data
 #[derive(Debug)]
 pub struct DataExportService {
+    #[allow(dead_code)]
     config: ExportConfig,
     buffer: Arc<RwLock<ExportBuffer>>,
 }
 
 impl DataExportService {
-    /// Creates a new export service with default configuration
+    /// Creates a new export service with the supplied configuration.
+    ///
+    /// # Arguments
+    /// - `config`: Export configuration including buffer size, batch size, and endpoint.
+    ///
+    /// # Non-fatal behavior
+    /// The service starts immediately; configuration errors are deferred to export time.
     pub fn new(config: ExportConfig) -> Self {
         Self {
             config: config.clone(),
@@ -261,66 +286,78 @@ impl DataExportService {
         }
     }
 
-    /// Creates a new export service with default configuration
+    /// Creates a new export service with default configuration.
+    ///
+    /// Equivalent to `Self::new(ExportConfig::default())`.
     pub fn with_default_config() -> Self {
         Self::new(ExportConfig::default())
     }
 
-    /// Adds a telemetry record to the export buffer
+    /// Adds a telemetry record to the export buffer.
+    ///
+    /// If the buffer reaches batch size, returns a ready-to-export batch.
+    /// If the buffer is at capacity, the oldest record is discarded.
+    ///
+    /// # Returns
+    /// `Some(batch)` if buffer flushed due to batch size, `None` otherwise.
+    /// This is non-fatal; the record is always buffered even if overflow occurs.
     pub async fn record(&self, record: TelemetryRecord) -> Option<ExportBatch> {
         let mut buffer = self.buffer.write().await;
         buffer.push(record)
     }
 
-    /// Forces a flush of all pending records
+    /// Forces a flush of all pending records into a single batch.
+    ///
+    /// # Returns
+    /// `Some(batch)` if any records were pending, `None` if buffer was already empty.
     pub async fn flush(&self) -> Option<ExportBatch> {
         let mut buffer = self.buffer.write().await;
         buffer.flush()
     }
 
-    /// Returns the current number of pending records
+    /// Returns the current number of pending records awaiting export.
     pub async fn pending_count(&self) -> usize {
         let buffer = self.buffer.read().await;
         buffer.len()
     }
 
-    /// Validates a record before adding to buffer
-    pub fn validate_record(record: &TelemetryRecord) -> Result<(), ExportError> {
+    /// Validates a record before adding to buffer.
+    ///
+    /// Checks that the record ID is non-empty and payload does not exceed MAX_PAYLOAD_SIZE.
+    ///
+    /// # Errors
+    /// Returns [`TelemetryError::ValidationError`] if record ID is empty,
+    /// or [`TelemetryError::PayloadTooLarge`] if payload exceeds size limit.
+    pub fn validate_record(record: &TelemetryRecord) -> Result<(), TelemetryError> {
         if record.id.is_empty() {
-            return Err(ExportError::ValidationError("record ID cannot be empty".into()));
+            return Err(TelemetryError::ValidationError(
+                crate::telemetry::input_validation::ValidationError::EmptyValue(
+                    "record ID cannot be empty".into(),
+                ),
+            ));
         }
 
         if record.payload_size() > MAX_PAYLOAD_SIZE {
-            return Err(ExportError::PayloadTooLarge);
+            return Err(TelemetryError::PayloadTooLarge(MAX_PAYLOAD_SIZE));
         }
 
         Ok(())
     }
 }
 
-/// Error types for export operations
-#[derive(Debug, thiserror::Error)]
-pub enum ExportError {
-    #[error("Export failed: {0}")]
-    ExportFailed(String),
-
-    #[error("Validation error: {0}")]
-    ValidationError(String),
-
-    #[error("Payload too large")]
-    PayloadTooLarge,
-
-    #[error("Connection error: {0}")]
-    ConnectionError(String),
-
-    #[error("Timeout after {0} seconds")]
-    Timeout(u64),
-}
-
 impl TelemetryRecord {
-    /// Estimates the serialized size of this record
+    /// Estimates the serialized size of this record.
+    ///
+    /// Returns 0 if serialization fails. This is non-fatal; the record
+    /// is still usable even if size estimation fails.
     pub fn payload_size(&self) -> usize {
-        serde_json::to_string(self).map(|s| s.len()).unwrap_or(0)
+        serde_json::to_string(self)
+            .map(|s| s.len())
+            .unwrap_or_else(|_| {
+                // Serialization failed; estimate conservatively as 0
+                // This is non-fatal; record validation can still succeed
+                0
+            })
     }
 }
 
@@ -357,11 +394,7 @@ pub fn create_trace_record(
 }
 
 /// Creates a new metric record
-pub fn create_metric_record(
-    name: &str,
-    metric_type: MetricType,
-    value: f64,
-) -> TelemetryRecord {
+pub fn create_metric_record(name: &str, metric_type: MetricType, value: f64) -> TelemetryRecord {
     TelemetryRecord {
         id: uuid::Uuid::new_v4().to_string(),
         record_type: RecordType::Metric,
@@ -388,7 +421,7 @@ mod tests {
     fn test_export_batch_creation() {
         let record = create_trace_record("trace1", "span1", "test_op", 100, 200, TraceStatus::Ok);
         let batch = ExportBatch::new(vec![record]);
-        
+
         assert!(batch.is_valid());
         assert!(!batch.batch_id.is_empty());
     }
@@ -396,7 +429,7 @@ mod tests {
     #[test]
     fn test_export_buffer_push() {
         let mut buffer = ExportBuffer::new(100, 10);
-        
+
         for i in 0..15 {
             let record = create_trace_record(
                 &format!("trace{}", i),
@@ -407,7 +440,7 @@ mod tests {
                 TraceStatus::Ok,
             );
             let batch = buffer.push(record);
-            
+
             // First batch should be created at 10 records
             if i == 9 {
                 assert!(batch.is_some());
@@ -419,7 +452,7 @@ mod tests {
     #[test]
     fn test_export_buffer_full() {
         let mut buffer = ExportBuffer::new(5, 10);
-        
+
         for i in 0..10 {
             let record = create_trace_record(
                 &format!("trace{}", i),
@@ -431,22 +464,25 @@ mod tests {
             );
             buffer.push(record);
         }
-        
+
         // Should have max 5 records (oldest dropped)
         assert_eq!(buffer.len(), 5);
     }
 
     #[test]
     fn test_data_export_service_record() {
-        let service = DataExportService::with_default_config();
-        
+        // Use a batch size of 1 so a single record flushes a batch immediately.
+        let config = ExportConfig {
+            batch_size: 1,
+            ..ExportConfig::default()
+        };
+        let service = DataExportService::new(config);
+
         let record = create_trace_record("trace1", "span1", "test", 100, 200, TraceStatus::Ok);
-        
+
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let batch = runtime.block_on(async {
-            service.record(record).await
-        });
-        
+        let batch = runtime.block_on(async { service.record(record).await });
+
         assert!(batch.is_some());
     }
 
@@ -468,7 +504,7 @@ mod tests {
             }),
             attributes: vec![],
         };
-        
+
         assert!(DataExportService::validate_record(&record).is_err());
     }
 
@@ -500,7 +536,7 @@ mod tests {
             }),
             attributes: vec![],
         };
-        
+
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("warn"));
     }

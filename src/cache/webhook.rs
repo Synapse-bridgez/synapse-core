@@ -7,7 +7,7 @@
 //!
 //! # Typical usage
 //!
-//! ```ignore
+//! ```text
 //! use synapse_core::cache::webhook::{verify_signature, validate_timestamp, validate_event_id, replay_cache_key};
 //!
 //! // 1. Reject replays: timestamp must be within 5 minutes of now.

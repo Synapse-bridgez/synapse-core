@@ -5,6 +5,7 @@ pub mod reconciliation;
 pub mod webhook_replay;
 
 use crate::error::AppError;
+use crate::validation::{validate_max_len, validate_required};
 use crate::AppState;
 use axum::{
     extract::{Path, State},
@@ -35,6 +36,29 @@ pub struct CreateAssetRequest {
     pub asset_code: String,
     pub asset_issuer: Option<String>,
     pub metadata: Option<serde_json::Value>,
+}
+
+impl CreateAssetRequest {
+    /// Validates the asset creation request.
+    ///
+    /// Returns a 400 Bad Request error if:
+    /// - asset_code is empty
+    /// - asset_code exceeds 12 characters
+    /// - asset_issuer exceeds 56 characters
+    pub fn validate(&self) -> Result<(), AppError> {
+        let asset_code = self.asset_code.trim();
+        validate_required("asset_code", asset_code)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        validate_max_len("asset_code", asset_code, 12)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+        if let Some(issuer) = &self.asset_issuer {
+            validate_max_len("asset_issuer", issuer, 56)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,6 +118,10 @@ pub async fn update_flag(
     Path(name): Path<String>,
     Json(payload): Json<UpdateFlagRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Validate flag name: must not be empty and not exceed 255 characters
+    validate_required("name", &name).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    validate_max_len("name", &name, 255).map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     let flag = state
         .feature_flags
         .update(&name, payload.enabled)
@@ -203,14 +231,16 @@ pub async fn create_asset(
     State(state): State<crate::ApiState>,
     Json(payload): Json<CreateAssetRequest>,
 ) -> impl IntoResponse {
-    let asset_code = payload.asset_code.trim().to_uppercase();
-    if asset_code.is_empty() {
+    // Validate asset request
+    if let Err(e) = payload.validate() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "asset_code is required" })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response();
     }
+
+    let asset_code = payload.asset_code.trim().to_uppercase();
 
     match sqlx::query_as::<_, crate::db::models::Asset>(
         r#"

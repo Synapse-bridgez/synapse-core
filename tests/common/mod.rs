@@ -16,13 +16,14 @@
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
 use synapse_core::{create_app, AppState};
-use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
 /// Test application with automatic database and HTTP server setup.
 pub struct TestApp {
     pub base_url: String,
     pub pool: PgPool,
+    pub readiness: synapse_core::ReadinessState,
     _postgres_container: Box<dyn std::any::Any>,
 }
 
@@ -58,7 +59,7 @@ impl TestApp {
         let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
         let app_state = AppState {
             db: pool.clone(),
-            pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None)
+            pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
                 .await
                 .unwrap(),
             horizon_client: synapse_core::stellar::HorizonClient::new(
@@ -71,7 +72,9 @@ impl TestApp {
             start_time: std::time::Instant::now(),
             readiness: synapse_core::ReadinessState::new(),
             tx_broadcast,
-            query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379").unwrap(),
+            query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
+                .await
+                .unwrap(),
             profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
             tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
@@ -82,6 +85,9 @@ impl TestApp {
             metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
             ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
+
+        // Clone readiness before app_state is moved into create_app
+        let readiness = app_state.readiness.clone();
 
         let app = create_app(app_state);
 
@@ -99,8 +105,21 @@ impl TestApp {
         Self {
             base_url,
             pool,
+            readiness,
             _postgres_container: Box::new(container),
         }
+    }
+
+    /// Mark the app as ready to accept traffic.
+    #[allow(dead_code)]
+    pub async fn set_ready(&self) {
+        self.readiness.set_ready();
+    }
+
+    /// Begin connection draining (sets not_ready + draining).
+    #[allow(dead_code)]
+    pub async fn start_drain(&self) {
+        self.readiness.start_drain();
     }
 
     /// Truncate all tables for test isolation (call between tests if reusing TestApp).
