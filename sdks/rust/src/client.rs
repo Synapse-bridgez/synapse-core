@@ -44,31 +44,14 @@ impl SynapseClient {
         }
     }
 
+    /// Construct a client with the given base URL and API key (no retries configured).
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        SynapseClient::builder(base_url, api_key).build()
+    }
+
     /// Issue an authenticated GET request to `path` and deserialize the JSON response.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, SynapseError> {
-        let url = format!("{}{}", self.base_url, path);
-        let key = self.api_key.clone();
-        let http = self.http.clone();
-        retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
-            let url = url.clone();
-            let key = key.clone();
-            let http = http.clone();
-            async move {
-                let resp = http
-                    .get(&url)
-                    .header("X-API-Key", &key)
-                    .send()
-                    .await
-                    .map_err(SynapseError::Network)?;
-                let status = resp.status().as_u16();
-                if status >= 400 {
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Http { status, body });
-                }
-                resp.json::<T>().await.map_err(SynapseError::Network)
-            }
-        })
-        .await
+        self.get_query(path, &[]).await
     }
 
     /// Issue an authenticated GET request with query parameters.
@@ -100,7 +83,7 @@ impl SynapseClient {
                 let status = resp.status().as_u16();
                 if status >= 400 {
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Http { status, body });
+                    return Err(SynapseError::Api { status, message: body });
                 }
                 resp.json::<T>().await.map_err(SynapseError::Network)
             }
@@ -109,15 +92,14 @@ impl SynapseClient {
     }
 
     /// Issue an authenticated POST request with a JSON body.
-    pub async fn post<T: DeserializeOwned, B: Serialize + Clone>(
+    pub async fn post<T: DeserializeOwned, B: Serialize + Clone + Send + 'static>(
         &self,
         path: &str,
-        body: &B,
+        body: B,
     ) -> Result<T, SynapseError> {
         let url = format!("{}{}", self.base_url, path);
         let key = self.api_key.clone();
         let http = self.http.clone();
-        let body = body.clone();
         retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
             let url = url.clone();
             let key = key.clone();
@@ -133,11 +115,8 @@ impl SynapseClient {
                     .map_err(SynapseError::Network)?;
                 let status = resp.status().as_u16();
                 if status >= 400 {
-                    let body_text = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Http {
-                        status,
-                        body: body_text,
-                    });
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SynapseError::Api { status, message: body });
                 }
                 resp.json::<T>().await.map_err(SynapseError::Network)
             }
@@ -145,19 +124,29 @@ impl SynapseClient {
         .await
     }
 
-    /// Return a handle to the `stats` resource.
+    /// Access the transactions resource.
+    pub fn transactions(&self) -> crate::resources::transactions::Transactions<'_> {
+        crate::resources::transactions::Transactions { client: self }
+    }
+
+    /// Access the graphql resource.
+    pub fn graphql(&self) -> crate::resources::graphql::GraphQL<'_> {
+        crate::resources::graphql::GraphQL { client: self }
+    }
+
+    /// Access the stats resource.
     pub fn stats(&self) -> crate::resources::stats::Stats<'_> {
         crate::resources::stats::Stats { client: self }
     }
 
-    /// Return a handle to the `events` resource.
+    /// Access the events resource.
     pub fn events(&self) -> crate::resources::events::Events<'_> {
         crate::resources::events::Events { client: self }
     }
 
-    /// Return a handle to the `transactions` resource.
-    pub fn transactions(&self) -> crate::resources::transactions::Transactions<'_> {
-        crate::resources::transactions::Transactions { client: self }
+    /// Access the admin resource (requires admin API key).
+    pub fn admin(&self) -> crate::resources::admin::Admin<'_> {
+        crate::resources::admin::Admin { client: self }
     }
 }
 

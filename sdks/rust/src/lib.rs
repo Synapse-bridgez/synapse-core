@@ -7,7 +7,4 @@ pub mod retry;
 
 pub use client::SynapseClient;
 pub use error::SynapseError;
-pub use models::{
-    CacheMetrics, DailyTotal, ListParams, ReconnectRequest, ReconnectStatusResponse,
-    ReconnectionResponse, SearchParams, StatusCount, StatsAsset,
-};
+pub use models::{ListParams, SearchParams};

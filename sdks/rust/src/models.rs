@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+// ── Transaction models ────────────────────────────────────────────────────────
+
 /// A single transaction returned by the API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Transaction {
@@ -67,122 +69,117 @@ pub struct ListParams {
     pub to_date: Option<String>,
 }
 
-// ── Stats models ─────────────────────────────────────────────────────────────
+// ── GraphQL models (issue #634) ───────────────────────────────────────────────
 
-/// Transaction count broken down by status.
-///
-/// An empty dataset returns a zeroed `StatusCount` list (never `null`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Request body for `POST /graphql`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphQLRequest {
+    pub query: String,
+    pub variables: Option<serde_json::Value>,
+}
+
+/// A GraphQL application-level error returned inside an HTTP 200 response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphQLError {
+    pub message: String,
+}
+
+/// Response from `POST /graphql`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphQLResponse {
+    pub data: Option<serde_json::Value>,
+    #[serde(default)]
+    pub errors: Vec<GraphQLError>,
+}
+
+// ── Stats models (issue #633) ─────────────────────────────────────────────────
+
+/// Per-status transaction count returned by `GET /stats/status`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct StatusCount {
     pub status: String,
     pub count: i64,
 }
 
-/// Aggregated transaction totals for a single day.
-///
-/// An empty dataset returns an empty list (never `null`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Per-day transaction volume returned by `GET /stats/daily`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DailyTotal {
     pub date: String,
+    pub count: i64,
     pub total_amount: String,
-    pub tx_count: i64,
 }
 
-/// Per-asset aggregated statistics.
-///
-/// An empty dataset returns an empty list (never `null`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct StatsAsset {
+/// Per-asset statistics returned by `GET /stats/assets`.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AssetStats {
     pub asset_code: String,
+    pub count: i64,
     pub total_amount: String,
-    pub tx_count: i64,
-    pub avg_amount: String,
 }
 
-/// Combined cache metrics returned by `GET /cache/metrics`.
+/// Cache metrics returned by `GET /stats/cache`.
 ///
-/// All counters default to `0` when no cache activity has occurred.
+/// Empty datasets return a zeroed structure, never `null`/`None`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CacheMetrics {
-    #[serde(default)]
-    pub query_cache: QueryCacheMetrics,
-    #[serde(default)]
-    pub idempotency_cache_hits: u64,
-    #[serde(default)]
-    pub idempotency_cache_misses: u64,
-    #[serde(default)]
-    pub idempotency_lock_acquired: u64,
-    #[serde(default)]
-    pub idempotency_lock_contention: u64,
-    #[serde(default)]
-    pub idempotency_errors: u64,
-    #[serde(default)]
-    pub idempotency_fallback_count: u64,
-}
-
-/// Inner query-cache metrics nested inside [`CacheMetrics`].
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct QueryCacheMetrics {
-    #[serde(default)]
     pub hits: u64,
-    #[serde(default)]
     pub misses: u64,
-    #[serde(default)]
-    pub total: u64,
-    #[serde(default)]
     pub hit_rate: f64,
-    #[serde(default)]
-    pub memory_hits: u64,
-    #[serde(default)]
-    pub memory_misses: u64,
-    #[serde(default)]
-    pub memory_total: u64,
-    #[serde(default)]
-    pub memory_hit_rate: f64,
+    pub evictions: u64,
+    pub size: u64,
+    pub capacity: u64,
 }
 
-// ── Events / reconnect models ─────────────────────────────────────────────────
-
-/// Body sent to `POST /reconnect`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReconnectRequest {
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_sequence: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force_resync: Option<bool>,
+impl Default for CacheMetrics {
+    fn default() -> Self {
+        Self { hits: 0, misses: 0, hit_rate: 0.0, evictions: 0, size: 0, capacity: 0 }
+    }
 }
 
-/// Response returned by both `POST /reconnect` and `GET /reconnect/status`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReconnectionResponse {
+/// Query parameters for `stats.daily()`.
+#[derive(Debug, Default)]
+pub struct DailyParams {
+    /// Number of days to include (1–365; server default: 7).
+    pub days: Option<i32>,
+}
+
+// ── Events / reconnect models (issue #642) ────────────────────────────────────
+
+/// Response from `POST /reconnect` or `GET /reconnect/status`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReconnectResponse {
     #[serde(rename = "type")]
-    pub response_type: String,
-    #[serde(default)]
-    pub status: Option<ReconnectStatusDetail>,
-    #[serde(default)]
-    pub backoff_seconds: u64,
-    #[serde(default)]
-    pub requires_resync: bool,
-    #[serde(default)]
+    pub kind: String,
+    pub status: Option<ReconnectStatus>,
+    pub backoff_seconds: Option<u64>,
+    pub requires_resync: Option<bool>,
     pub message: Option<String>,
 }
 
-/// The inner `status` field of a `ReconnectionResponse`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReconnectStatusDetail {
-    pub status: String,
-    pub session_id: Option<String>,
+/// Reconnect status variant embedded in [`ReconnectResponse`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReconnectStatus {
+    Ready { session_id: String },
+    RetryAfter { wait_seconds: u64 },
+    SessionExpired,
+    InvalidToken,
 }
 
-/// Response for `GET /reconnect/status` — simplified view of session state.
-///
-/// `active` is `false` and the other fields are `None` when no session exists,
-/// satisfying the requirement that `reconnect_status()` never errors on no session.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReconnectStatusResponse {
-    pub active: bool,
-    pub session_id: Option<String>,
-    pub backoff_seconds: Option<u64>,
-    pub requires_resync: Option<bool>,
+// ── Admin / bulk-status models (issue #644) ───────────────────────────────────
+
+/// Per-item failure reported inside [`BulkStatusResponse`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkUpdateError {
+    pub id: String,
+    pub error: String,
+}
+
+/// Response from `POST /admin/transactions/bulk-status`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkStatusResponse {
+    pub updated: usize,
+    pub failed: usize,
+    #[serde(default)]
+    pub errors: Vec<BulkUpdateError>,
 }
