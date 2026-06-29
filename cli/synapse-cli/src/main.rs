@@ -110,7 +110,7 @@ enum ReconciliationCommands {
 enum SettlementCommands {
     #[command(
         about = "Update a settlement's status",
-        long_about = "Update a settlement's status through the admin API and print the updated settlement.\n\nRequired arguments:\n  <SETTLEMENT_ID>        UUID of the settlement to update.\nRequired flags:\n  --status <STATUS>      New status to apply (pending, completed, pending_review, disputed, adjusted, or voided).\nOptional flags:\n  --reason <REASON>      Human-readable reason for the change.\n  --new-total <TOTAL>    Replacement total amount; only meaningful when setting status to adjusted.\n  --actor <ACTOR>        Actor recorded in the audit log (default: admin).\n  --json                 Print the raw API response as JSON."
+        long_about = "Update a settlement's status through the admin API and print the updated settlement.\n\nUSAGE:\n    synapse admin settlements update-status <SETTLEMENT_ID> --status <STATUS> [OPTIONS]\n\nREQUIRED:\n  <SETTLEMENT_ID>        UUID of the settlement to update.\n  --status <STATUS>      New status to apply (pending, completed, pending_review, disputed, adjusted, or voided).\n\nOPTIONAL:\n  --reason <REASON>      Human-readable reason for the change.\n  --new-total <TOTAL>    Replacement total amount; only meaningful when setting status to adjusted.\n  --actor <ACTOR>        Actor recorded in the audit log (default: admin).\n  --json                 Print the raw API response as JSON."
     )]
     UpdateStatus {
         /// UUID of the settlement to update.
