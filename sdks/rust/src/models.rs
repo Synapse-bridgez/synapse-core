@@ -377,6 +377,85 @@ pub struct BulkStatusResponse {
 }
 
 // ============================================================================
+// Admin: Webhook Replay Models
+// ============================================================================
+
+/// Optional filters for [`AdminWebhookReplay::list_failed`].
+#[derive(Debug, Default)]
+pub struct ListFailedWebhooksFilters {
+    /// Maximum records to return (server default: 50, max: 100).
+    pub limit: Option<i64>,
+    /// Number of records to skip for pagination.
+    pub offset: Option<i64>,
+    /// Filter by asset code (e.g. `"USD"`).
+    pub asset_code: Option<String>,
+    /// Inclusive start timestamp (RFC 3339, e.g. `"2024-01-01T00:00:00Z"`).
+    pub from_date: Option<String>,
+    /// Inclusive end timestamp (RFC 3339).
+    pub to_date: Option<String>,
+}
+
+/// A single failed webhook delivery from the audit log.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FailedWebhookInfo {
+    pub transaction_id: Uuid,
+    pub stellar_account: String,
+    pub amount: String,
+    pub asset_code: String,
+    pub anchor_transaction_id: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+    pub retry_count: i32,
+}
+
+/// Response from `GET /admin/webhooks/failed`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FailedWebhooksResponse {
+    pub total: i64,
+    pub webhooks: Vec<FailedWebhookInfo>,
+}
+
+/// Result of a single replay attempt (individual or within a batch).
+///
+/// **Always inspect this struct** — even when the HTTP response is 200 the
+/// `success` field may be `false` for individual items in a batch.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookReplayResult {
+    pub transaction_id: Uuid,
+    pub success: bool,
+    pub message: String,
+    pub dry_run: bool,
+    pub replayed_at: Option<DateTime<Utc>>,
+}
+
+/// Response from `POST /admin/webhooks/replay/batch`.
+///
+/// The overall HTTP status is always 200. **Callers must inspect each entry
+/// in `results`** — `successful` and `failed` are aggregate counts and some
+/// items may have failed even when others succeeded.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchWebhookReplayResponse {
+    pub total: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub results: Vec<WebhookReplayResult>,
+}
+
+// ── Internal request types (not part of the public API surface) ───────────────
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReplayWebhookRequest {
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct BatchReplayRequest {
+    pub transaction_ids: Vec<Uuid>,
+    pub dry_run: bool,
+}
+
+// ============================================================================
 // Admin: DLQ (Dead-Letter Queue) Models
 // ============================================================================
 
