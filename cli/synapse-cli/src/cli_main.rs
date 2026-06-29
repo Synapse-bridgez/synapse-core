@@ -65,22 +65,22 @@ enum AdminCommands {
 enum TransactionAdminCommands {
     #[command(
         about = "Bulk-update transaction statuses",
-        long_about = "Bulk-update the status of multiple transactions.\n\nRequired flags:\n  --ids <IDS>       Comma-separated transaction IDs to update.\n  --status <STATUS> New status to apply to every listed transaction.\nOptional flags:\n  --format <FORMAT> Output format: table (default) or json."
+        long_about = "Bulk-update the status of multiple transactions.\n\nRequired flags:\n  --ids <IDS>       Comma-separated transaction IDs to update.\n  --status <STATUS> New status to apply to every listed transaction.\n\nOptional flags:\n  --format <FORMAT> Output format: table (default) or json."
     )]
     BulkStatus(BulkStatusArgs),
 }
 
 #[derive(Args, Debug)]
 struct BulkStatusArgs {
-    /// Comma-separated transaction IDs to update.
+    /// Required: comma-separated transaction IDs to update.
     #[arg(long, value_name = "IDS")]
     ids: String,
 
-    /// New status to apply to every listed transaction.
+    /// Required: new status to apply to every listed transaction.
     #[arg(long, value_name = "STATUS")]
     status: String,
 
-    /// Output format: table (default) or json.
+    /// Optional: output format. Use table for human-readable output (default) or json for the raw response payload.
     #[arg(long, value_name = "FORMAT", default_value = "table")]
     format: String,
 }

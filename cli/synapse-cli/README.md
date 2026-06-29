@@ -75,6 +75,26 @@ cargo run --bin synapse -- --base-url http://127.0.0.1:4010 events watch --token
 
 ### Transactions
 
+#### Bulk-update transaction statuses
+
+Update the status of multiple transactions in one request. The command requires both an ID list and a new status, and supports an optional output format flag.
+
+```bash
+synapse admin transactions bulk-status --ids 550e8400-e29b-41d4-a716-446655440000,550e8400-e29b-41d4-a716-446655440001 --status completed
+```
+
+Example output:
+```text
+updated: 2
+failed: 0
+```
+
+This example is copy-paste runnable against the mock server when you start the CLI with a base URL that points to the mock server, for example:
+
+```bash
+cargo run --bin synapse -- --base-url http://127.0.0.1:4010 admin transactions bulk-status --ids 550e8400-e29b-41d4-a716-446655440000,550e8400-e29b-41d4-a716-446655440001 --status completed
+```
+
 #### Export Transactions
 
 Export transactions to CSV or JSON format with optional filters. The export streams raw data without parsing or modification.
