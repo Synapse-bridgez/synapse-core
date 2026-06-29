@@ -406,3 +406,143 @@ Run all tests:
 ```bash
 cargo test
 ```
+
+## Events
+
+### events reconnect-status
+
+Check whether the server will accept a reconnection before committing an attempt.
+No flags are required — omitting `--token` asks the server to create a new session.
+
+```
+synapse events reconnect-status [OPTIONS]
+
+OPTIONS:
+    --token <UUID>          Session token from a previous connection (optional).
+                            Omit to get a fresh session with status=ready.
+    --last-sequence <N>     Last event sequence number received (optional).
+                            The server uses this to advise whether requires_resync is true.
+    --format <FORMAT>       Output format: table (default) or json.
+```
+
+**Status values returned:**
+
+| status           | meaning                                                       |
+|------------------|---------------------------------------------------------------|
+| ready            | Reconnect immediately; use the returned session_id            |
+| retry_after      | Rate-limited; wait `backoff_seconds` before retrying          |
+| session_expired  | Session is gone; start a new connection (omit --token)        |
+| invalid_token    | Token is malformed; check the UUID you are passing            |
+
+**Example — new session (no --token):**
+
+```bash
+$ synapse --url http://localhost:3000 events reconnect-status
+type: reconnect
+status: ready
+session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+backoff_seconds: 1
+requires_resync: true
+```
+
+**Example — existing session:**
+
+```bash
+$ synapse --url http://localhost:3000 events reconnect-status \
+    --token 3fa85f64-5717-4562-b3fc-2c963f66afa6 \
+    --last-sequence 42
+type: reconnect
+status: ready
+session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+backoff_seconds: 3
+requires_resync: false
+```
+
+**Example — JSON output (useful for scripting):**
+
+```bash
+$ synapse --url http://localhost:3000 events reconnect-status \
+    --token 3fa85f64-5717-4562-b3fc-2c963f66afa6 \
+    --format json
+{
+  "type": "reconnect",
+  "status": {
+    "status": "ready",
+    "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  },
+  "backoff_seconds": 3,
+  "requires_resync": false
+}
+```
+
+---
+
+### events reconnect
+
+Resume a previous WebSocket session (POST /reconnect).
+Registers a reconnection attempt and returns backoff guidance.
+
+```
+synapse events reconnect --session-id <UUID> [OPTIONS]
+
+REQUIRED:
+    --session-id <UUID>     UUID of the session to resume.
+                            Obtain from a prior reconnect-status run.
+
+OPTIONS:
+    --last-sequence <N>     Last event sequence number received (optional).
+                            Enables gap detection; omit to force a full resync.
+    --force-resync          Always request a full state resync (optional, default: false).
+    --format <FORMAT>       Output format: table (default) or json.
+```
+
+**Exit codes:**
+- `0` — Request completed (inspect `status` field for the outcome)
+- `1` — Network error or server returned a non-200 response
+
+**Example — resume a session:**
+
+```bash
+$ synapse --url http://localhost:3000 events reconnect \
+    --session-id 3fa85f64-5717-4562-b3fc-2c963f66afa6
+type: reconnect
+status: ready
+session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+backoff_seconds: 3
+requires_resync: false
+```
+
+**Example — resume with sequence hint and forced resync:**
+
+```bash
+$ synapse --url http://localhost:3000 events reconnect \
+    --session-id 3fa85f64-5717-4562-b3fc-2c963f66afa6 \
+    --last-sequence 99 \
+    --force-resync \
+    --format json
+{
+  "type": "reconnect",
+  "status": {
+    "status": "ready",
+    "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  },
+  "backoff_seconds": 3,
+  "requires_resync": true
+}
+```
+
+**Example — expired session:**
+
+```bash
+$ synapse --url http://localhost:3000 events reconnect \
+    --session-id 00000000-0000-0000-0000-000000000000
+error: Session not found or expired
+
+$ echo $?
+1
+```
+
+> **Tip — copy-paste against the mock server:**
+> Start the mock server with `cargo run --bin mock-server`, then run any of
+> the examples above substituting `http://localhost:3000` for the address
+> printed at startup.
