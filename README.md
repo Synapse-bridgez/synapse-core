@@ -134,6 +134,288 @@ SELECT maintain_partitions();
 
 More utilities available in `migrations/partition_utils.sql`.
 
+## 🖥️ CLI Reference
+
+The `synapse-core` binary doubles as a CLI tool.  Run with no arguments (or `serve`) to start the server; use the sub-commands below to inspect a running instance or manage data.
+
+```
+synapse-core [COMMAND]
+
+Commands:
+  serve       Start the HTTP server (default)
+  tx          Transaction management
+  db          Database management
+  backup      Backup management
+  config      Validate configuration
+  stats       Query live transaction statistics
+  graphql     Execute a GraphQL query or mutation
+```
+
+### `stats` — Live Transaction Statistics
+
+All `stats` sub-commands call the running server (default `http://localhost:3000`).  Override with `--url` or the `SYNAPSE_URL` environment variable.  Add `--json` to any command to get machine-readable output.
+
+#### `stats status` — Transaction counts by status
+
+```bash
+synapse-core stats status
+```
+
+Sample output:
+
+```
+STATUS                    COUNT
+--------------------------------
+completed                   142
+failed                        3
+pending                      12
+processing                    5
+```
+
+With `--json`:
+
+```bash
+synapse-core stats status --json
+```
+
+```json
+[
+  { "status": "completed", "count": 142 },
+  { "status": "failed",    "count": 3   },
+  { "status": "pending",   "count": 12  },
+  { "status": "processing","count": 5   }
+]
+```
+
+#### `stats daily` — Daily totals (rolling window)
+
+```bash
+# Last 7 days (default)
+synapse-core stats daily
+
+# Last 30 days
+synapse-core stats daily --days 30
+```
+
+Sample output (`--days 7`):
+
+```
+DATE         TOTAL AMOUNT    TX COUNT
+------------------------------------------
+2026-06-23      15420.00           23
+2026-06-24      18902.50           31
+2026-06-25      12340.75           19
+2026-06-26      21000.00           28
+2026-06-27       9875.25           14
+2026-06-28      17654.00           25
+2026-06-29      13210.50           18
+```
+
+With `--json`:
+
+```bash
+synapse-core stats daily --days 3 --json
+```
+
+```json
+[
+  { "date": "2026-06-27", "total_amount": "9875.25",  "tx_count": 14 },
+  { "date": "2026-06-28", "total_amount": "17654.00", "tx_count": 25 },
+  { "date": "2026-06-29", "total_amount": "13210.50", "tx_count": 18 }
+]
+```
+
+Valid range for `--days`: **1–365**.  The server rejects values outside this range with HTTP 400.
+
+#### `stats assets` — Per-asset volume
+
+```bash
+synapse-core stats assets
+```
+
+Sample output:
+
+```
+ASSET         TOTAL AMOUNT    TX COUNT         AVG AMOUNT
+------------------------------------------------------------
+USDC          108402.25            87           1245.43
+XLM            52100.00            45           1157.78
+```
+
+With `--json`:
+
+```bash
+synapse-core stats assets --json
+```
+
+```json
+[
+  {
+    "asset_code":    "USDC",
+    "total_amount":  "108402.25",
+    "tx_count":      87,
+    "avg_amount":    "1245.43"
+  },
+  {
+    "asset_code":    "XLM",
+    "total_amount":  "52100.00",
+    "tx_count":      45,
+    "avg_amount":    "1157.78"
+  }
+]
+```
+
+#### `stats cache` — Query-cache and idempotency-cache metrics
+
+```bash
+synapse-core stats cache
+```
+
+Sample output:
+
+```
+Query cache:
+  hits:     312
+  misses:   48
+  hit_rate: 86.67%
+
+Idempotency cache:
+  cache_hits:      198
+  cache_misses:    22
+  lock_acquired:   210
+  lock_contention: 4
+  errors:          0
+  fallback_count:  2
+```
+
+With `--json`:
+
+```bash
+synapse-core stats cache --json
+```
+
+```json
+{
+  "query_cache": {
+    "hits": 312, "misses": 48, "total": 360,
+    "hit_rate": 0.8667,
+    "memory_hits": 280, "memory_misses": 32,
+    "memory_total": 312, "memory_hit_rate": 0.8974
+  },
+  "idempotency_cache_hits":      198,
+  "idempotency_cache_misses":    22,
+  "idempotency_lock_acquired":   210,
+  "idempotency_lock_contention": 4,
+  "idempotency_errors":          0,
+  "idempotency_fallback_count":  2
+}
+```
+
+---
+
+### `graphql query` — Execute GraphQL queries and mutations
+
+Sends a GraphQL document to `POST /graphql` and pretty-prints the response.
+
+```
+synapse-core graphql query <GRAPHQL_QUERY> [OPTIONS]
+
+Arguments:
+  <GRAPHQL_QUERY>   GraphQL query or mutation string
+
+Options:
+  --variables <JSON>   Optional JSON object for variables
+  --url <URL>          Server base URL [default: http://localhost:3000]
+                       [env: SYNAPSE_URL]
+```
+
+#### List all transactions
+
+```bash
+synapse-core graphql query '{ transactions { id status } }'
+```
+
+Sample output:
+
+```json
+{
+  "data": {
+    "transactions": [
+      { "id": "3f6e2a1b-...", "status": "completed" },
+      { "id": "7c4d9f3e-...", "status": "pending"   }
+    ]
+  }
+}
+```
+
+#### Look up a single transaction
+
+```bash
+synapse-core graphql query \
+  '{ transaction(id: "3f6e2a1b-1234-5678-abcd-000000000001") { id status amount assetCode } }'
+```
+
+Sample output:
+
+```json
+{
+  "data": {
+    "transaction": {
+      "id":        "3f6e2a1b-1234-5678-abcd-000000000001",
+      "status":    "completed",
+      "amount":    "100.50",
+      "assetCode": "USDC"
+    }
+  }
+}
+```
+
+#### Filter with variables
+
+```bash
+synapse-core graphql query \
+  '{ transactions { id status } }' \
+  --variables '{"filter":{"status":"pending"}}'
+```
+
+#### Force-complete a transaction (mutation)
+
+```bash
+synapse-core graphql query \
+  'mutation { forceCompleteTransaction(id: "3f6e2a1b-1234-5678-abcd-000000000001") { id status } }'
+```
+
+Sample output:
+
+```json
+{
+  "data": {
+    "forceCompleteTransaction": {
+      "id":     "3f6e2a1b-1234-5678-abcd-000000000001",
+      "status": "completed"
+    }
+  }
+}
+```
+
+#### GraphQL errors vs transport errors
+
+When the server returns an `errors` array (HTTP 200), the CLI prints the errors to **stderr** and exits non-zero:
+
+```
+GraphQL errors:
+[
+  {
+    "message": "Unsupported GraphQL query",
+    "locations": [{ "line": 1, "column": 3 }]
+  }
+]
+```
+
+Transport failures (connection refused, DNS errors, etc.) are reported as `Transport error – could not reach <url>: …` and also exit non-zero.
+
+---
+
 #### 📡 Webhook Endpoint (Under Development)
 
 The main purpose of this service is to receive callbacks from the Stellar Anchor Platform. The endpoint will be:
