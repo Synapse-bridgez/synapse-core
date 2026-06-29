@@ -1,10 +1,11 @@
+pub mod dlq;
+pub mod locks;
 pub mod reconciliation;
 pub mod settlements;
 
+pub use dlq::AdminDlq;
 pub use reconciliation::AdminReconciliation;
 pub use settlements::AdminSettlements;
-pub mod locks;
-pub mod settlements;
 
 use crate::client::SynapseClient;
 

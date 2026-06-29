@@ -375,3 +375,42 @@ pub struct BulkStatusResponse {
     #[serde(default)]
     pub errors: Vec<BulkUpdateError>,
 }
+
+// ============================================================================
+// Admin: DLQ (Dead-Letter Queue) Models
+// ============================================================================
+
+/// A single dead-letter queue entry.
+///
+/// Mirrors `TransactionDlq` in `src/db/models.rs`. `amount` is returned as a
+/// decimal string rather than a numeric type so callers can format it without
+/// precision loss.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DlqEntry {
+    pub id: Uuid,
+    pub transaction_id: Uuid,
+    pub stellar_account: String,
+    pub amount: String,
+    pub asset_code: String,
+    pub anchor_transaction_id: Option<String>,
+    pub error_reason: String,
+    pub stack_trace: Option<String>,
+    pub retry_count: i32,
+    pub original_created_at: DateTime<Utc>,
+    pub moved_to_dlq_at: DateTime<Utc>,
+    pub last_retry_at: Option<DateTime<Utc>>,
+}
+
+/// Response from `GET /dlq`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DlqListResponse {
+    pub dlq_entries: Vec<DlqEntry>,
+    pub count: usize,
+}
+
+/// Response from `POST /dlq/:id/requeue`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequeueResponse {
+    pub message: String,
+    pub dlq_id: Uuid,
+}
