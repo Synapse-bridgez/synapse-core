@@ -5,13 +5,15 @@ const ADDRESS: &str = "127.0.0.1:4010";
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
 
 fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind(ADDRESS)?;
-    println!("Mock Synapse API listening on http://{ADDRESS}");
+    let addr = std::env::var("MOCK_SERVER_ADDR").unwrap_or_else(|_| ADDRESS.to_string());
+    let scenario = std::env::var("MOCK_SERVER_SCENARIO").unwrap_or_else(|_| "happy".to_string());
+    let listener = TcpListener::bind(&addr)?;
+    println!("Mock Synapse API listening on http://{addr}");
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(err) = handle_connection(stream) {
+                if let Err(err) = handle_connection(stream, &scenario) {
                     eprintln!("mock server error: {err}");
                 }
             }
@@ -23,7 +25,6 @@ fn main() -> std::io::Result<()> {
 }
 
 fn handle_connection(stream: TcpStream, scenario: &str) -> std::io::Result<()> {
-fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -32,7 +33,7 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let response = route(request_line.trim_end());
+    let response = route(request_line.trim_end(), scenario);
     let mut stream = stream;
     stream.write_all(response.as_bytes())?;
     stream.flush()?;
@@ -40,7 +41,6 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
 }
 
 fn route(request_line: &str, scenario: &str) -> String {
-fn route(request_line: &str) -> String {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
@@ -65,9 +65,6 @@ fn route(request_line: &str) -> String {
 }"#
             } else {
                 r#"{
-        ("POST", "/admin/reconciliation/run") => json_response(
-            200,
-            r#"{
   "message": "Reconciliation completed successfully",
   "report": {
     "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
@@ -86,8 +83,6 @@ fn route(request_line: &str) -> String {
 
             json_response(200, body)
         }
-}"#,
-        ),
         ("GET", path) if path.starts_with("/admin/reconciliation/reports?") => {
             let query = path.split_once('?').map(|(_, query)| query).unwrap_or_default();
             let params = parse_query(query);
@@ -105,9 +100,6 @@ fn route(request_line: &str) -> String {
                 )
             } else {
                 format!(
-            json_response(
-                200,
-                &format!(
                     r#"{{
   "reports": [
     {{
@@ -131,8 +123,6 @@ fn route(request_line: &str) -> String {
             };
 
             json_response(200, &body)
-                ),
-            )
         }
         ("GET", path) if path.starts_with("/events/watch") => {
             let body = r#"[
@@ -148,6 +138,27 @@ fn route(request_line: &str) -> String {
     "timestamp": "2024-01-15T10:31:00Z"
   }
 ]"#;
+            json_response(200, body)
+        }
+        ("POST", "/admin/transactions/bulk-status") => {
+            let body = if scenario == "edge" {
+                r#"{
+  "updated": 1,
+  "failed": 1,
+  "errors": [
+    {
+      "transaction_id": "550e8400-e29b-41d4-a716-446655440001",
+      "error": "status transition not allowed"
+    }
+  ]
+}"#
+            } else {
+                r#"{
+  "updated": 2,
+  "failed": 0,
+  "errors": []
+}"#
+            };
             json_response(200, body)
         }
         ("GET", path) if path.starts_with("/admin/reconciliation/reports/") => {
@@ -175,9 +186,6 @@ fn route(request_line: &str) -> String {
                 )
             } else {
                 format!(
-            json_response(
-                200,
-                &format!(
                     r#"{{
   "id": "{report_id}",
   "generated_at": "2026-06-27T06:10:12Z",
@@ -199,15 +207,10 @@ fn route(request_line: &str) -> String {
             };
 
             json_response(200, &body)
-                ),
-            )
         }
-        _ => json_response(
-            404,
-            r#"{
+        _ => json_response(404, r#"{
   "error": "Not found"
-}"#,
-        ),
+}"#),
     }
 }
 

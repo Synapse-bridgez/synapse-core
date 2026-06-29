@@ -1,4 +1,6 @@
 use assert_cmd::Command;
+use mockito::Server;
+use serde_json::json;
 use std::net::TcpListener;
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::thread;
@@ -10,14 +12,9 @@ const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
 fn reconciliation_commands_table_mode_happy_path() {
     let server = MockServer::spawn("happy");
     let base_url = server.base_url();
+
     let mut cmd = synapse_command();
-    cmd.args([
-        "--base-url",
-        &base_url,
-        "admin",
-        "reconciliation",
-        "reports",
-    ]);
+    cmd.args(["--base-url", &base_url, "admin", "reconciliation", "reports"]);
 
     let output = cmd.output().expect("reports output");
     assert!(output.status.success());
@@ -48,8 +45,20 @@ fn reconciliation_commands_table_mode_happy_path() {
     cmd.args([
         "--base-url",
         &base_url,
-use mockito::Server;
-use serde_json::json;
+        "admin",
+        "reconciliation",
+        "run",
+        "--account",
+        "GA_TEST_ACCOUNT",
+    ]);
+
+    let output = cmd.output().expect("run output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("Reconciliation completed successfully"));
+    assert!(stdout.contains("Database transactions: 12"));
+    assert!(stdout.contains("Has discrepancies: yes"));
+}
 
 #[test]
 fn run_help_text_mentions_required_and_optional_flags() {
@@ -90,7 +99,7 @@ async fn run_command_prints_mock_server_summary() {
                     "has_discrepancies": true
                 }
             })
-            .to_string()
+            .to_string(),
         )
         .create_async()
         .await;
@@ -115,9 +124,86 @@ async fn run_command_prints_mock_server_summary() {
 }
 
 #[test]
+fn admin_bulk_status_table_and_json_output_happy_path() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "transactions",
+        "bulk-status",
+        "--ids",
+        "550e8400-e29b-41d4-a716-446655440000,550e8400-e29b-41d4-a716-446655440001",
+        "--status",
+        "completed",
+    ]);
+
+    let output = cmd.output().expect("bulk status output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("updated: 2"));
+    assert!(stdout.contains("failed: 0"));
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "transactions",
+        "bulk-status",
+        "--ids",
+        "550e8400-e29b-41d4-a716-446655440000,550e8400-e29b-41d4-a716-446655440001",
+        "--status",
+        "completed",
+        "--format",
+        "json",
+    ]);
+
+    let output = cmd.output().expect("bulk status json output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"updated\": 2"));
+    assert!(stdout.contains("\"failed\": 0"));
+    assert!(stdout.contains("\"errors\": []"));
+}
+
+#[test]
+fn admin_bulk_status_partial_failure_edge_case_is_reported() {
+    let server = MockServer::spawn("edge");
+    let base_url = server.base_url();
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "transactions",
+        "bulk-status",
+        "--ids",
+        "550e8400-e29b-41d4-a716-446655440000,550e8400-e29b-41d4-a716-446655440001",
+        "--status",
+        "failed",
+        "--format",
+        "json",
+    ]);
+
+    let output = cmd.output().expect("bulk status edge output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"updated\": 1"));
+    assert!(stdout.contains("\"failed\": 1"));
+    assert!(stdout.contains("\"transaction_id\": \"550e8400-e29b-41d4-a716-446655440001\""));
+    assert!(stdout.contains("\"error\": \"status transition not allowed\""));
+}
+
+#[test]
 fn reconciliation_commands_json_mode_edge_case() {
     let server = MockServer::spawn("edge");
     let base_url = server.base_url();
+
     let mut cmd = synapse_command();
     cmd.args([
         "--base-url",
@@ -226,13 +312,4 @@ impl Drop for MockServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-    let output = cmd.output().expect("command output");
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-
-    assert!(stdout.contains("Reconciliation completed successfully"));
-    assert!(stdout.contains("Report ID: 3f1d8c31-5f1d-4fb8-93e0-112233445566"));
-    assert!(stdout.contains("Database transactions: 12"));
-    assert!(stdout.contains("Has discrepancies: yes"));
 }
