@@ -51,6 +51,46 @@ synapse --base-url https://api.synapse.example.com --api-key your-key transactio
 
 ## Commands
 
+### Admin Locks
+
+#### List Active Locks
+
+List active distributed locks currently held by the Synapse instance.
+
+```bash
+synapse admin locks list [--json]
+```
+
+**Required flags:** none
+
+**Optional flags:**
+- `--json`: Print the raw API response as pretty JSON instead of the default table.
+
+**Mock server example:**
+
+Start the mock server in one terminal:
+
+```bash
+cd cli/synapse-cli
+MOCK_SERVER_ADDR=127.0.0.1:4010 MOCK_SERVER_SCENARIO=happy cargo run --bin mock-server
+```
+
+Then run the CLI against it:
+
+```bash
+cargo run --bin synapse -- --base-url http://127.0.0.1:4010 admin locks list
+```
+
+Sample output:
+
+```text
+Active locks: 2 total (1 overdue)
+Resource | Token | Acquired At | TTL | Expected Duration | Overdue
+-------- | ----- | ----------- | --- | ----------------- | -------
+settlement:550e8400-e29b-41d4-a716-446655440000 | 4e4e9e47-7e0f-4f2f-8d63-323c61279209 | 1782540612 | 30 | 30 | no
+payout-batch:daily | 89ca5ddc-51bd-44bd-817e-f4175dcab0bc | 1782540400 | 30 | 30 | yes
+```
+
 ### Transactions
 
 #### Export Transactions
