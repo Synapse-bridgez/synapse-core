@@ -4,6 +4,7 @@ pub async fn spawn_mock_server() -> MockServer {
     MockServer::start().await
 }
 
+/// Stub a GET endpoint on `server` that returns `status` and `body` as JSON.
 pub async fn stub_get_endpoint(
     server: &MockServer,
     path: &str,

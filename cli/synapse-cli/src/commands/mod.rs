@@ -1,8 +1,12 @@
+pub mod graphql;
 pub mod events;
 pub mod health;
 pub mod settlements;
 pub mod stats;
 pub mod transactions;
+
+pub use settlements::SettlementsCmd;
+pub use transactions::TransactionsCmd;
 
 pub use events::EventsCmd;
 pub use settlements::SettlementsCmd;

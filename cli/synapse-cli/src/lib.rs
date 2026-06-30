@@ -1,4 +1,9 @@
 pub mod client;
+pub mod commands;
+pub mod formatter;
+
+pub use client::{ApiClient, SynapseCliClient};
+pub use formatter::{print, print_one, Formatter, OutputFormat, TableDisplay};
 pub mod error;
 pub mod formatter;
 

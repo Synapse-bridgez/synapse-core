@@ -5,6 +5,13 @@ const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
 const SAMPLE_LOCK_TOKEN: &str = "4e4e9e47-7e0f-4f2f-8d63-323c61279209";
 
 fn main() -> std::io::Result<()> {
+    let addr = std::env::var("MOCK_SERVER_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:4010".to_string());
+    let scenario = std::env::var("MOCK_SERVER_SCENARIO")
+        .unwrap_or_else(|_| "happy".to_string());
+
+    let listener = TcpListener::bind(&addr)?;
+    eprintln!("Mock Synapse API listening on http://{addr} (scenario={scenario})");
     let addr = std::env::var("MOCK_SERVER_ADDR").unwrap_or_else(|_| ADDRESS.to_string());
     let scenario = std::env::var("MOCK_SERVER_SCENARIO").unwrap_or_else(|_| "happy".to_string());
     let listener = TcpListener::bind(&addr)?;
@@ -52,13 +59,34 @@ fn route(request_line: &str, scenario: &str) -> String {
     match (method, path) {
         // ── Reconciliation ────────────────────────────────────────────────────
         ("POST", "/admin/reconciliation/run") => {
+            let body = if scenario == "edge" {
+                format!(
+                    r#"{{
+  "message": "Reconciliation completed successfully",
+  "report": {{
+    "id": "{SAMPLE_REPORT_ID}",
+    "generated_at": "2026-06-27T06:10:12Z",
+    "period_start": "2026-06-26T06:10:12Z",
+    "period_end": "2026-06-27T06:10:12Z",
+    "total_db_transactions": 0,
+    "total_chain_payments": 0,
+    "missing_on_chain_count": 0,
+    "orphaned_payments_count": 0,
+    "amount_mismatches_count": 0,
+    "has_discrepancies": false
+  }}
+}}"#
+                )
+            } else {
+                format!(
+                    r#"{{
             if scenario == "edge" {
                 json_response(200, &run_body(false, 0, 0))
             } else {
                 r#"{
   "message": "Reconciliation completed successfully",
-  "report": {
-    "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
+  "report": {{
+    "id": "{SAMPLE_REPORT_ID}",
     "generated_at": "2026-06-27T06:10:12Z",
     "period_start": "2026-06-26T06:10:12Z",
     "period_end": "2026-06-27T06:10:12Z",
@@ -68,9 +96,23 @@ fn route(request_line: &str, scenario: &str) -> String {
     "orphaned_payments_count": 0,
     "amount_mismatches_count": 1,
     "has_discrepancies": true
-  }
-}"#
+  }}
+}}"#
+                )
             };
+            json_response(200, &body)
+        }
+
+        ("GET", path) if path.starts_with("/admin/reconciliation/reports?") => {
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let params = parse_query(query);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(20);
+            let offset = params
+                .get("offset")
+                .and_then(|v| v.parse::<i32>().ok())
 
             json_response(200, body)
                 json_response(200, &run_body(true, 12, 11))
@@ -126,7 +168,6 @@ fn route(request_line: &str, scenario: &str) -> String {
                     ),
                 )
             };
-
             json_response(200, &body)
         }
         ("GET", path) if path.starts_with("/events/watch") => {
@@ -241,6 +282,22 @@ fn report_detail(report_id: &str, has_discrepancies: bool, db: i32, chain: i32) 
   "orphaned_payments": [],
   "amount_mismatches": []
 }}"#
+                )
+            };
+            json_response(200, &body)
+        }
+
+        ("POST", "/graphql") => {
+            // Consume request body (read remaining headers + body) so the client
+            // does not get a broken-pipe error. For tests we just serve a fixed
+            // happy-path response regardless of query content.
+            json_response(
+                200,
+                r#"{"data":{"transactions":[{"id":"550e8400-e29b-41d4-a716-446655440000","status":"pending"}]}}"#,
+            )
+        }
+
+        _ => json_response(404, r#"{"error":"Not found"}"#),
     )
 }
 
@@ -284,8 +341,8 @@ fn json_response(status: u16, body: &str) -> String {
         _ => "OK",
     };
     format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        len = body.len(),
     )
 }
 

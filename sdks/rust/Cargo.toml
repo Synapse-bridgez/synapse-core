@@ -13,11 +13,8 @@ serde_json = "1"
 thiserror = "1"
 rand = "0.8"
 tokio = { version = "1", features = ["time"] }
-chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 wiremock = "0.5"
 tokio = { version = "1", features = ["full"] }
-wiremock = "0.6"
-wiremock = "0.5"

@@ -70,6 +70,12 @@ fn format_array(values: &[Value]) -> String {
         return "(empty)".to_string();
     }
 
+    fn format_object_as_table(obj: &serde_json::Map<String, Value>) -> String {
+        let mut rows = Vec::new();
+        let map: BTreeMap<&String, &Value> = obj.iter().collect();
+
+        for (key, value) in map {
+            rows.push(format!("{}: {}", key, format_value(value)));
     let Some(first) = values.iter().find_map(Value::as_object) else {
         return values
             .iter()
@@ -103,6 +109,59 @@ fn format_array(values: &[Value]) -> String {
 fn format_cell(value: &Value) -> String {
     match value {
         Value::Null => "-".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => {
+            if s.len() > 50 {
+                format!("{}...", &s[..47])
+            } else {
+                s.clone()
+            }
+        }
+        Value::Array(arr) => format!("[{} items]", arr.len()),
+        Value::Object(obj) => format!("{{{} fields}}", obj.len()),
+    }
+}
+
+/// Trait for types that can render themselves as a table row.
+pub trait TableDisplay: serde::Serialize {
+    fn headers() -> Vec<&'static str>;
+    fn row(&self) -> Vec<String>;
+}
+
+/// Print a slice of table-displayable items to stdout.
+pub fn print<T: TableDisplay>(items: &[T], fmt: OutputFormat) {
+    match fmt {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            if items.is_empty() {
+                println!("(empty)");
+                return;
+            }
+            let headers = T::headers();
+            println!("{}", headers.join(" | "));
+            println!("{}", "-".repeat(80));
+            for item in items {
+                println!("{}", item.row().join(" | "));
+            }
+        }
+    }
+}
+
+/// Print a single serializable item to stdout.
+pub fn print_one<T: serde::Serialize>(item: &T, fmt: OutputFormat) {
+    match fmt {
+        OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".to_string());
+            println!("{}", json);
+        }
+        OutputFormat::Table => {
+            let v = serde_json::to_value(item).unwrap_or(Value::Null);
+            println!("{}", Formatter::format_as_table(&v));
+        }
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => value.clone(),
