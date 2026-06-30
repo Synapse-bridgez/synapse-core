@@ -1,12 +1,18 @@
+/// Minimal HTTP mock server for CLI integration tests.
+///
+/// Reads MOCK_SERVER_ADDR (default 127.0.0.1:4010) and serves a fixed set of
+/// Synapse API routes with realistic payloads.
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 
-const ADDRESS: &str = "127.0.0.1:4010";
-const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
+const DEFAULT_ADDR: &str = "127.0.0.1:4010";
 
 fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind(ADDRESS)?;
-    println!("Mock Synapse API listening on http://{ADDRESS}");
+    let addr = std::env::var("MOCK_SERVER_ADDR")
+        .unwrap_or_else(|_| DEFAULT_ADDR.to_string());
+
+    let listener = TcpListener::bind(&addr)?;
+    println!("Mock Synapse API listening on http://{addr}");
 
     for stream in listener.incoming() {
         match stream {
@@ -22,7 +28,6 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle_connection(stream: TcpStream, scenario: &str) -> std::io::Result<()> {
 fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -39,41 +44,116 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
-fn route(request_line: &str, scenario: &str) -> String {
 fn route(request_line: &str) -> String {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
 
-    match (method, path) {
-        ("POST", "/admin/reconciliation/run") => {
-            let body = if scenario == "edge" {
-                r#"{
-  "message": "Reconciliation completed successfully",
-  "report": {
-    "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
-    "generated_at": "2026-06-27T06:10:12Z",
-    "period_start": "2026-06-26T06:10:12Z",
-    "period_end": "2026-06-27T06:10:12Z",
-    "total_db_transactions": 0,
-    "total_chain_payments": 0,
-    "missing_on_chain_count": 0,
-    "orphaned_payments_count": 0,
-    "amount_mismatches_count": 0,
-    "has_discrepancies": false
-  }
-}"#
-            } else {
-                r#"{
+    // Strip query string for matching, keep it for param parsing
+    let path_only = path.split('?').next().unwrap_or(path);
+
+    match (method, path_only) {
+        // ── Health ─────────────────────────────────────────────────────────────
+        ("GET", "/live") => json_response(200, r#"{"status":"alive"}"#),
+
+        ("GET", "/ready") => json_response(200, r#"{"status":"ready","draining":false}"#),
+
+        ("GET", "/health") => json_response(
+            200,
+            r#"{
+  "status": "healthy",
+  "version": "0.1.0",
+  "db": "connected",
+  "db_pool": {
+    "active_connections": 2,
+    "idle_connections": 8,
+    "max_connections": 10,
+    "usage_percent": 20.0
+  },
+  "pending_queue_depth": 0,
+  "current_batch_size": 50,
+  "ws_connection_count": 3
+}"#,
+        ),
+
+        ("GET", "/errors") => json_response(
+            200,
+            r#"{
+  "errors": {
+    "E001": "not found",
+    "E002": "validation error",
+    "E003": "internal server error"
+  },
+  "version": "1.0.0"
+}"#,
+        ),
+
+        // ── Stats ──────────────────────────────────────────────────────────────
+        ("GET", "/stats/status") => json_response(
+            200,
+            r#"[
+  {"status":"pending","count":12},
+  {"status":"completed","count":847},
+  {"status":"failed","count":5},
+  {"status":"cancelled","count":2}
+]"#,
+        ),
+
+        ("GET", "/stats/daily") => {
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let params = parse_query(query);
+            let days = params
+                .get("days")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(7);
+
+            // Build N days of sample data ending on 2026-06-30
+            let mut rows = Vec::new();
+            for i in (0..days).rev() {
+                // Simple date arithmetic: subtract i days from 2026-06-30
+                let (y, m, d) = subtract_days(2026, 6, 30, i);
+                let count = 100 + (i * 7) % 50;
+                let amount = 10000 + (i * 137) % 5000;
+                rows.push(format!(
+                    r#"  {{"date":"{y:04}-{m:02}-{d:02}","total_amount":"{amount}.00","transaction_count":{count}}}"#
+                ));
+            }
+            json_response(200, &format!("[\n{}\n]", rows.join(",\n")))
+        }
+
+        ("GET", "/stats/assets") => json_response(
+            200,
+            r#"[
+  {"asset_code":"USD","total_amount":"142350.00","transaction_count":521},
+  {"asset_code":"EUR","total_amount":"87200.50","transaction_count":214},
+  {"asset_code":"USDC","total_amount":"34100.00","transaction_count":143},
+  {"asset_code":"XLM","total_amount":"9800.75","transaction_count":88}
+]"#,
+        ),
+
+        ("GET", "/cache/metrics") => json_response(
+            200,
+            r#"{
+  "query_cache": {"hits": 4820, "misses": 310, "size": 512},
+  "idempotency_cache_hits": 1203,
+  "idempotency_cache_misses": 47,
+  "idempotency_lock_acquired": 980,
+  "idempotency_lock_contention": 12,
+  "idempotency_errors": 0,
+  "idempotency_fallback_count": 3
+}"#,
+        ),
+
+        // ── Admin / Reconciliation ─────────────────────────────────────────────
         ("POST", "/admin/reconciliation/run") => json_response(
             200,
             r#"{
   "message": "Reconciliation completed successfully",
   "report": {
     "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
-    "generated_at": "2026-06-27T06:10:12Z",
-    "period_start": "2026-06-26T06:10:12Z",
-    "period_end": "2026-06-27T06:10:12Z",
+    "generated_at": "2026-06-30T06:15:00Z",
+    "period_start": "2026-06-29T06:15:00Z",
+    "period_end": "2026-06-30T06:15:00Z",
     "total_db_transactions": 12,
     "total_chain_payments": 11,
     "missing_on_chain_count": 1,
@@ -81,40 +161,24 @@ fn route(request_line: &str) -> String {
     "amount_mismatches_count": 1,
     "has_discrepancies": true
   }
-}"#
-            };
-
-            json_response(200, body)
-        }
 }"#,
         ),
-        ("GET", path) if path.starts_with("/admin/reconciliation/reports?") => {
-            let query = path.split_once('?').map(|(_, query)| query).unwrap_or_default();
-            let params = parse_query(query);
-            let limit = params.get("limit").and_then(|value| value.parse::<i32>().ok()).unwrap_or(20);
-            let offset = params.get("offset").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
 
-            let body = if scenario == "edge" {
-                format!(
-                    r#"{{
-  "reports": [],
-  "total": 0,
-  "limit": {limit},
-  "offset": {offset}
-}}"#
-                )
-            } else {
-                format!(
+        ("GET", path_ref) if path_ref.starts_with("/admin/reconciliation/reports") && !path_ref.contains('/') => {
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let params = parse_query(query);
+            let limit = params.get("limit").and_then(|v| v.parse::<u32>().ok()).unwrap_or(20);
+            let offset = params.get("offset").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
             json_response(
                 200,
                 &format!(
                     r#"{{
   "reports": [
     {{
-      "id": "{SAMPLE_REPORT_ID}",
-      "generated_at": "2026-06-27T06:10:12Z",
-      "period_start": "2026-06-26T06:10:12Z",
-      "period_end": "2026-06-27T06:10:12Z",
+      "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
+      "generated_at": "2026-06-30T06:15:00Z",
+      "period_start": "2026-06-29T06:15:00Z",
+      "period_end": "2026-06-30T06:15:00Z",
       "total_db_transactions": 12,
       "total_chain_payments": 11,
       "missing_on_chain_count": 1,
@@ -127,46 +191,20 @@ fn route(request_line: &str) -> String {
   "limit": {limit},
   "offset": {offset}
 }}"#
-                )
-            };
-
-            json_response(200, &body)
                 ),
             )
         }
-        ("GET", path) if path.starts_with("/admin/reconciliation/reports/") => {
-            let report_id = path.rsplit('/').next().unwrap_or(SAMPLE_REPORT_ID);
 
-            let body = if scenario == "edge" {
-                format!(
-                    r#"{{
-  "id": "{report_id}",
-  "generated_at": "2026-06-27T06:10:12Z",
-  "period_start": "2026-06-26T06:10:12Z",
-  "period_end": "2026-06-27T06:10:12Z",
-  "summary": {{
-    "total_db_transactions": 0,
-    "total_chain_payments": 0,
-    "missing_on_chain_count": 0,
-    "orphaned_payments_count": 0,
-    "amount_mismatches_count": 0,
-    "has_discrepancies": false
-  }},
-  "missing_on_chain": [],
-  "orphaned_payments": [],
-  "amount_mismatches": []
-}}"#
-                )
-            } else {
-                format!(
+        ("GET", path_ref) if path_ref.starts_with("/admin/reconciliation/reports/") => {
+            let report_id = path_only.rsplit('/').next().unwrap_or("3f1d8c31-5f1d-4fb8-93e0-112233445566");
             json_response(
                 200,
                 &format!(
                     r#"{{
   "id": "{report_id}",
-  "generated_at": "2026-06-27T06:10:12Z",
-  "period_start": "2026-06-26T06:10:12Z",
-  "period_end": "2026-06-27T06:10:12Z",
+  "generated_at": "2026-06-30T06:15:00Z",
+  "period_start": "2026-06-29T06:15:00Z",
+  "period_end": "2026-06-30T06:15:00Z",
   "summary": {{
     "total_db_transactions": 12,
     "total_chain_payments": 11,
@@ -179,21 +217,15 @@ fn route(request_line: &str) -> String {
   "orphaned_payments": [],
   "amount_mismatches": []
 }}"#
-                )
-            };
-
-            json_response(200, &body)
                 ),
             )
         }
-        _ => json_response(
-            404,
-            r#"{
-  "error": "Not found"
-}"#,
-        ),
+
+        _ => json_response(404, r#"{"error":"Not found"}"#),
     }
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn json_response(status: u16, body: &str) -> String {
     let reason = match status {
@@ -202,7 +234,6 @@ fn json_response(status: u16, body: &str) -> String {
         500 => "Internal Server Error",
         _ => "OK",
     };
-
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -213,6 +244,41 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
-        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
+}
+
+/// Subtract `days` from a (year, month, day) date, returning a new (y, m, d).
+/// Only handles the Gregorian calendar for dates near 2026. Good enough for mock data.
+fn subtract_days(mut y: u32, mut m: u32, mut d: u32, mut days: u32) -> (u32, u32, u32) {
+    while days > 0 {
+        if d > 1 {
+            d -= 1;
+        } else {
+            if m > 1 {
+                m -= 1;
+            } else {
+                m = 12;
+                y -= 1;
+            }
+            d = days_in_month(y, m);
+        }
+        days -= 1;
+    }
+    (y, m, d)
+}
+
+fn days_in_month(y: u32, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
 }

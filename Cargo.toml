@@ -85,7 +85,6 @@ prometheus = "0.13"
 lru = "0.12"
 parking_lot = "0.12"
 lazy_static = "1"
-synapse-sdk = { path = "sdks/rust" }
 
 [dev-dependencies]
 mockito = "1"
