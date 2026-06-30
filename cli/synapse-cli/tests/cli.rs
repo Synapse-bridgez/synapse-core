@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use mockito::{Matcher, Server};
 use serde_json::json;
 use std::net::TcpListener;
-use std::process::{Child, Command as StdCommand, Stdio};
+use std::process::{Child, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -497,6 +497,79 @@ fn quotas_set_rejects_zero_limit_before_sending() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("valid utf-8");
     assert!(stderr.contains("quota limit must be positive"));
+}
+
+#[test]
+fn settlement_update_status_help_mentions_required_and_optional_flags() {
+    let mut cmd = synapse_command();
+    cmd.args(["admin", "settlements", "update-status", "--help"]);
+
+    let output = cmd.output().expect("help output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+
+    assert!(stdout.contains("Required arguments:"));
+    assert!(stdout.contains("<SETTLEMENT_ID>"));
+    assert!(stdout.contains("Required flags:"));
+    assert!(stdout.contains("--status <STATUS>"));
+    assert!(stdout.contains("Optional flags:"));
+    assert!(stdout.contains("--new-total <TOTAL>"));
+    assert!(stdout.contains("--actor <ACTOR>"));
+}
+
+#[test]
+fn settlement_update_status_table_and_json_modes() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "settlements",
+        "update-status",
+        SAMPLE_SETTLEMENT_ID,
+        "--status",
+        "adjusted",
+        "--reason",
+        "Audit correction",
+        "--new-total",
+        "125.0000000",
+    ]);
+
+    let output = cmd.output().expect("settlement output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("Settlement updated successfully"));
+    assert!(stdout.contains("Settlement ID: 8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11"));
+    assert!(stdout.contains("Status: adjusted"));
+    assert!(stdout.contains("Dispute reason: Audit correction"));
+    assert!(stdout.contains("Original total amount: 130.0000000"));
+
+    let mut cmd = synapse_command();
+    cmd.args([
+        "--base-url",
+        &base_url,
+        "admin",
+        "settlements",
+        "update-status",
+        SAMPLE_SETTLEMENT_ID,
+        "--status",
+        "adjusted",
+        "--reason",
+        "Audit correction",
+        "--new-total",
+        "125.0000000",
+        "--json",
+    ]);
+
+    let output = cmd.output().expect("settlement json output");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"status\": \"adjusted\""));
+    assert!(stdout.contains("\"original_total_amount\": \"130.0000000\""));
+    assert!(stdout.contains("\"reviewed_by\": \"admin\""));
 }
 
 fn synapse_command() -> Command {
