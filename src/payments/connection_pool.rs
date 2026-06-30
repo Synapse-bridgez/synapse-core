@@ -19,7 +19,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```text
 //! use synapse_core::payments::connection_pool::{PaymentsConnectionPool, PaymentsPoolConfig};
 //!
 //! let pool = PaymentsConnectionPool::new()?;
@@ -131,6 +131,7 @@ impl PaymentsConnection {
     }
 }
 
+#[derive(Debug)]
 struct PoolState {
     available: VecDeque<PaymentsConnection>,
     /// Total connections in existence (idle + currently in use).
@@ -242,18 +243,12 @@ impl PaymentsConnectionPool {
 
     /// Number of idle connections currently available in the pool.
     pub fn idle_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.available.len())
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
     }
 
     /// Total connections managed by the pool (idle + currently in use).
     pub fn total_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.total)
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.total).unwrap_or(0)
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {
@@ -305,10 +300,7 @@ fn safe_endpoint_label(url: &str) -> String {
     if let Some(after_scheme) = url.find("://").map(|i| i + 3) {
         let rest = &url[after_scheme..];
         // Strip userinfo if present (everything before the last '@' before the first '/')
-        let host_start = rest
-            .rfind('@')
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let host_start = rest.rfind('@').map(|i| i + 1).unwrap_or(0);
         let host_and_path = &rest[host_start..];
         // Keep only up to the first '/' (host:port)
         let host = host_and_path.split('/').next().unwrap_or(host_and_path);

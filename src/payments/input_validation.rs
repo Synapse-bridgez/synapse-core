@@ -44,7 +44,9 @@ static ALLOWED_STATUSES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 pub fn validate_payment_amount(raw: &str) -> Result<BigDecimal, PaymentError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(PaymentError::InvalidAmount("amount must not be empty".into()));
+        return Err(PaymentError::InvalidAmount(
+            "amount must not be empty".into(),
+        ));
     }
 
     let amount: BigDecimal = trimmed
@@ -57,14 +59,10 @@ pub fn validate_payment_amount(raw: &str) -> Result<BigDecimal, PaymentError> {
         ));
     }
 
-    // Check decimal precision
-    let (_, scale) = amount.as_bigint_and_exponent();
-    if scale > MAX_DECIMAL_PLACES as i64 {
-        return Err(PaymentError::InvalidAmount(format!(
-            "amount must have at most {MAX_DECIMAL_PLACES} decimal places"
-        )));
-    }
-
+    // Range checks come before the precision check so that an out-of-range
+    // amount is reported as below-minimum / above-maximum rather than as a
+    // precision error (values below the minimum necessarily carry more
+    // fractional digits than allowed).
     let min: BigDecimal = MIN_AMOUNT.parse().unwrap();
     let max: BigDecimal = MAX_AMOUNT.parse().unwrap();
 
@@ -80,6 +78,14 @@ pub fn validate_payment_amount(raw: &str) -> Result<BigDecimal, PaymentError> {
         )));
     }
 
+    // Check decimal precision
+    let (_, scale) = amount.as_bigint_and_exponent();
+    if scale > MAX_DECIMAL_PLACES as i64 {
+        return Err(PaymentError::InvalidAmount(format!(
+            "amount must have at most {MAX_DECIMAL_PLACES} decimal places"
+        )));
+    }
+
     Ok(amount)
 }
 
@@ -87,7 +93,9 @@ pub fn validate_payment_amount(raw: &str) -> Result<BigDecimal, PaymentError> {
 pub fn validate_settlement_status(status: &str) -> Result<(), PaymentError> {
     let s = status.trim();
     if s.is_empty() {
-        return Err(PaymentError::InvalidStatus("status must not be empty".into()));
+        return Err(PaymentError::InvalidStatus(
+            "status must not be empty".into(),
+        ));
     }
     if !ALLOWED_STATUSES.contains(s) {
         return Err(PaymentError::InvalidStatus(format!(
@@ -183,8 +191,18 @@ mod tests {
 
     #[test]
     fn valid_statuses_accepted() {
-        for s in &["pending", "completed", "disputed", "voided", "adjusted", "pending_review"] {
-            assert!(validate_settlement_status(s).is_ok(), "status '{s}' should be valid");
+        for s in &[
+            "pending",
+            "completed",
+            "disputed",
+            "voided",
+            "adjusted",
+            "pending_review",
+        ] {
+            assert!(
+                validate_settlement_status(s).is_ok(),
+                "status '{s}' should be valid"
+            );
         }
     }
 

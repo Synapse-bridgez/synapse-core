@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::telemetry::input_validation::InputValidator;
 use crate::telemetry::error_handling::TelemetryError;
+use crate::telemetry::input_validation::InputValidator;
 
 /// Pool configuration for telemetry exporter connections.
 ///
@@ -64,6 +64,7 @@ impl PooledConnection {
     }
 }
 
+#[derive(Debug)]
 struct PoolState {
     available: VecDeque<PooledConnection>,
     /// Total connections in existence (idle + currently in use).
@@ -124,7 +125,7 @@ impl ConnectionPool {
     /// - [`TelemetryError::PoolConfigError`] when `max_size` is zero or invalid.
     pub fn with_config(config: PoolConfig) -> Result<Self, TelemetryError> {
         InputValidator::validate_endpoint(&config.endpoint)
-            .map_err(|e| TelemetryError::ValidationError(e))?;
+            .map_err(TelemetryError::ValidationError)?;
 
         if config.max_size == 0 {
             return Err(TelemetryError::PoolConfigError(
@@ -199,10 +200,7 @@ impl ConnectionPool {
     /// may indicate the exporter is slow or unavailable; zero idle count indicates
     /// all pool capacity is in use.
     pub fn idle_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.available.len())
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
     }
 
     /// Total connections managed by the pool (idle + currently in use).
@@ -212,10 +210,7 @@ impl ConnectionPool {
     /// Returns the total number of active and idle connections. If this equals `max_size`,
     /// the pool is at capacity and new acquisitions will fail with `Exhausted`.
     pub fn total_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.total)
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.total).unwrap_or(0)
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {
@@ -267,7 +262,10 @@ mod tests {
         let pool = ConnectionPool::with_config(config).unwrap();
         let _c1 = pool.acquire().unwrap();
         let _c2 = pool.acquire().unwrap();
-        assert!(matches!(pool.acquire(), Err(TelemetryError::PoolExhausted(2))));
+        assert!(matches!(
+            pool.acquire(),
+            Err(TelemetryError::PoolExhausted(2))
+        ));
     }
 
     #[test]

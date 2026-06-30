@@ -274,18 +274,14 @@ impl AuthMetrics {
         if completed_outcomes > outcomes {
             return Err(AuthError::Validation(format!(
                 "metrics invariant violated: successful({}) + failed({}) = {} > outcomes({})",
-                successful,
-                failed,
-                completed_outcomes,
-                outcomes,
+                successful, failed, completed_outcomes, outcomes,
             )));
         }
 
         if outcomes > total {
             return Err(AuthError::Validation(format!(
                 "metrics invariant violated: outcomes({}) > total_attempts({})",
-                outcomes,
-                total,
+                outcomes, total,
             )));
         }
 
@@ -517,17 +513,17 @@ mod tests {
         let m = AuthMetrics::new();
         m.record_attempt();
         m.record_success(); // valid: 1 success, 1 attempt
-        // Force a second success by directly manipulating via a second attempt
-        // then checking that validate catches outcomes > total.
-        // We simulate the invariant violation by recording success twice
-        // on a single attempt (second call is guarded, so we use two attempts
-        // but only one total to test the validate path directly).
-        // Instead, test via the public API: two outcomes on one attempt.
+                            // Force a second success by directly manipulating via a second attempt
+                            // then checking that validate catches outcomes > total.
+                            // We simulate the invariant violation by recording success twice
+                            // on a single attempt (second call is guarded, so we use two attempts
+                            // but only one total to test the validate path directly).
+                            // Instead, test via the public API: two outcomes on one attempt.
         m.record_attempt(); // total = 2
         m.record_success(); // success = 2, failed = 0 → 2 ≤ 2 ✓
         m.record_failure(); // success = 2, failed = 1 → 3 > 2 ✗
-        // The failure guard fires (2+0 = 2 >= 2), so failed stays 0.
-        // Validate should still pass.
+                            // The failure guard fires (2+0 = 2 >= 2), so failed stays 0.
+                            // Validate should still pass.
         assert!(m.validate().is_ok());
     }
 }

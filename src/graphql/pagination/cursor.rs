@@ -1,7 +1,7 @@
 //! Cursor-based pagination implementation
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use crate::graphql::pagination::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Cursor-based pagination parameters
 #[derive(Debug, Clone)]
@@ -29,22 +29,17 @@ impl CursorPagination {
             return Err("Cannot specify both 'first' and 'last'".to_string());
         }
 
-        // Validate first/last values
+        // Validate first/last values. Values exceeding MAX_PAGE_SIZE are not an
+        // error — they are clamped to the maximum by `page_size()`.
         if let Some(f) = first {
             if f < 0 {
                 return Err("'first' must be non-negative".to_string());
-            }
-            if f > MAX_PAGE_SIZE {
-                return Err(format!("'first' cannot exceed {}", MAX_PAGE_SIZE));
             }
         }
 
         if let Some(l) = last {
             if l < 0 {
                 return Err("'last' must be non-negative".to_string());
-            }
-            if l > MAX_PAGE_SIZE {
-                return Err(format!("'last' cannot exceed {}", MAX_PAGE_SIZE));
             }
         }
 
@@ -127,9 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn test_first_exceeds_max_error() {
-        let pagination = CursorPagination::new(None, None, Some(MAX_PAGE_SIZE + 1), None);
-        assert!(pagination.is_err());
+    fn test_first_exceeds_max_is_clamped() {
+        // Requesting more than the maximum is accepted and clamped, not rejected.
+        let pagination = CursorPagination::new(None, None, Some(MAX_PAGE_SIZE + 1), None).unwrap();
+        assert_eq!(pagination.page_size(), MAX_PAGE_SIZE);
     }
 
     #[test]

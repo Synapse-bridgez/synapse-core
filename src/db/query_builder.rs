@@ -1,3 +1,40 @@
+//! Dynamic query builder for internal/admin transaction queries.
+//!
+//! # ⚠ Security Notice — String Interpolation
+//!
+//! Unlike the parameterised queries in `src/db/queries.rs`, this builder
+//! constructs SQL by **string interpolation**.  This is intentional for the
+//! admin/reporting use-case where the full set of filter combinations cannot be
+//! expressed with a fixed number of `$N` placeholders, but it means that
+//! **callers are responsible for ensuring all inputs are validated before
+//! calling any builder method**.
+//!
+//! ## Safe usage contract
+//!
+//! Every value passed to a builder method must satisfy one of:
+//!
+//! - **Typed** — `BigDecimal`, `DateTime<Utc>`, `Uuid` values are formatted by
+//!   their `Display` implementations which produce safe, well-defined output.
+//! - **Validated string** — string values (`status`, `asset_code`,
+//!   `stellar_account`) must be validated against an allow-list or regex
+//!   **before** being passed here.  The validation layer in
+//!   `src/validation/mod.rs` enforces this for all HTTP-originated inputs.
+//!
+//! ## What this builder must NOT be used for
+//!
+//! - Raw user-supplied strings that have not been validated.
+//! - Any query that runs in a user-facing request path without prior validation.
+//!
+//! For user-facing queries, use the parameterised functions in
+//! `src/db/queries.rs` instead.
+//!
+//! ## Planned improvement
+//!
+//! This builder should be migrated to sqlx's `QueryBuilder` API
+//! (`sqlx::QueryBuilder::push_bind`) which supports dynamic parameterised
+//! queries.  Until that migration is complete, all callers must validate inputs
+//! at the boundary.  See `docs/database-input-validation.md` for details.
+
 use sqlx::types::BigDecimal;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;

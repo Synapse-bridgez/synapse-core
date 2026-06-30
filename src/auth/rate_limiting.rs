@@ -252,10 +252,7 @@ impl AuthRateLimiter {
     // -- private helpers --
 
     fn get_or_create_auth_bucket(&self, identity: &str) -> RateLimiter {
-        let mut map = self
-            .auth_buckets
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut map = self.auth_buckets.lock().unwrap_or_else(|p| p.into_inner());
         map.entry(identity.to_string())
             .or_insert_with(|| {
                 RateLimiter::with_config(RateLimitConfig {

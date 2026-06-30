@@ -156,7 +156,10 @@ impl ReconnectionManager {
         }
 
         let base_backoff = self.config.initial_backoff.as_millis() as f64
-            * self.config.backoff_multiplier.powi((self.consecutive_failures - 1) as i32);
+            * self
+                .config
+                .backoff_multiplier
+                .powi((self.consecutive_failures - 1) as i32);
 
         let capped_backoff = base_backoff.min(self.config.max_backoff.as_millis() as f64);
 
@@ -347,7 +350,10 @@ mod tests {
 
         // Sleep past the circuit_open_duration
         std::thread::sleep(Duration::from_millis(10));
-        assert!(!manager.is_circuit_open(), "Circuit should auto-reset after open duration");
+        assert!(
+            !manager.is_circuit_open(),
+            "Circuit should auto-reset after open duration"
+        );
     }
 
     #[test]
@@ -375,7 +381,10 @@ mod tests {
 
         // b2 should be roughly 3× b1 (within jitter tolerance)
         assert!(b2 > b1, "Second backoff should exceed first");
-        assert!(b2 >= 270, "Second backoff should be near 300ms (±10% jitter)");
+        assert!(
+            b2 >= 270,
+            "Second backoff should be near 300ms (±10% jitter)"
+        );
     }
 
     #[test]

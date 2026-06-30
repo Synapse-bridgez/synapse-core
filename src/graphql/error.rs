@@ -28,6 +28,7 @@
 //! | `INTERNAL_ERROR` | Unexpected server error (details redacted) |
 
 use async_graphql::Error as GqlError;
+use async_graphql::ErrorExtensions;
 
 // ---------------------------------------------------------------------------
 // Stable error codes
@@ -182,7 +183,10 @@ mod tests {
         err.extensions
             .as_ref()
             .and_then(|e| e.get("code"))
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .and_then(|v| match v {
+                async_graphql::Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     #[test]
@@ -222,7 +226,10 @@ mod tests {
             .extensions
             .as_ref()
             .and_then(|e| e.get("retryAfter"))
-            .and_then(|v| v.as_u64());
+            .and_then(|v| match v {
+                async_graphql::Value::Number(n) => n.as_u64(),
+                _ => None,
+            });
         assert_eq!(retry, Some(30));
     }
 
@@ -270,7 +277,9 @@ mod tests {
             GraphQlError::NotFound("r".into()),
             GraphQlError::Authentication,
             GraphQlError::Authorization,
-            GraphQlError::RateLimited { retry_after_secs: 0 },
+            GraphQlError::RateLimited {
+                retry_after_secs: 0,
+            },
             GraphQlError::Complexity("c".into()),
             GraphQlError::Database("d".into()),
             GraphQlError::Internal("i".into()),

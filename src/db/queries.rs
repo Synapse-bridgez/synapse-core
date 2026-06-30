@@ -60,7 +60,7 @@ pub static DB_QUERY_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Tier used when wrapping a query with [`with_timeout`].
 ///
 /// # Examples
-/// ```ignore
+/// ```text
 /// // SELECT query: read tier, 5s timeout
 /// with_timeout(QueryTier::Read, "SELECT * FROM users", query_future).await?;
 ///
@@ -122,7 +122,7 @@ impl QueryTier {
 /// Other errors are propagated as-is.
 ///
 /// # Examples
-/// ```ignore
+/// ```text
 /// // Wrap a read query
 /// with_timeout(QueryTier::Read, "SELECT * FROM users WHERE id = $1", async {
 ///     sqlx::query("SELECT * FROM users WHERE id = $1")
@@ -179,7 +179,10 @@ pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> 
     Ok(configs)
 }
 
-pub async fn get_active_tenant_rate_limit(pool: &PgPool, tenant_id: uuid::Uuid) -> Result<Option<i32>> {
+pub async fn get_active_tenant_rate_limit(
+    pool: &PgPool,
+    tenant_id: uuid::Uuid,
+) -> Result<Option<i32>> {
     with_timeout(
         QueryTier::Read,
         "SELECT rate_limit_per_minute FROM tenants WHERE tenant_id = $1 AND is_active = true",
@@ -315,6 +318,76 @@ pub async fn set_tenant_context(
     Ok(())
 }
 
+/// Execute work in a transaction with tenant context set via SET LOCAL.
+///
+/// This is the leak-proof way to handle tenant-scoped database access:
+/// - `SET LOCAL` sets GUCs transaction-scoped (auto-cleared on commit/rollback)
+/// - GUCs cannot persist on the pooled connection after the transaction ends
+/// - If context is not set, queries fail closed (RLS policy sees NULL and denies access)
+///
+/// # Justification for Leak-Proof Design
+///
+/// **Why SET LOCAL is safe under connection pooling:**
+/// - Session-scoped `set_config(..., false)` persists on the connection
+/// - Transaction-scoped `SET LOCAL` is cleared automatically on commit/rollback
+/// - Even if the same physical connection serves tenant A then tenant B,
+///   A's context is guaranteed cleared before B starts its transaction
+/// - Failed transactions (rollback) also clear the GUCs
+///
+/// **Why this fails closed without context:**
+/// - If a request forgets to call this helper, GUCs default to empty strings
+/// - RLS policies check `current_setting('app.tenant_id') = tenant_id::text`
+/// - Empty string != any UUID, so queries return empty result (deny)
+/// - Queries never accidentally see all tenants' data
+///
+/// # Example
+///
+/// ```ignore
+/// let result = with_tenant(pool, Some(tenant_id), false, |tx| Box::pin(async move {
+///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
+///         .bind(id)
+///         .fetch_one(&mut **tx)
+///         .await
+/// })).await?;
+/// ```
+///
+/// # Parameters
+/// - `pool`: Connection pool
+/// - `tenant_id`: Some(uuid) for tenant, None for admin context
+/// - `is_admin`: If true, sets app.is_admin='true' and bypasses RLS
+/// - `work`: Async closure receiving the transaction
+pub async fn with_tenant<T>(
+    pool: &PgPool,
+    tenant_id: Option<Uuid>,
+    is_admin: bool,
+    work: impl for<'c> FnOnce(
+        &'c mut SqlxTransaction<'_, Postgres>,
+    ) -> futures::future::BoxFuture<'c, Result<T>>,
+) -> Result<T> {
+    let mut tx = pool.begin().await?;
+
+    // Set context using SET LOCAL (transaction-scoped, auto-cleared on commit/rollback)
+    if is_admin {
+        sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+            .execute(&mut *tx)
+            .await?;
+    } else if let Some(tid) = tenant_id {
+        sqlx::query("SELECT set_config('app.tenant_id', $1, true), set_config('app.is_admin', 'false', true)")
+            .bind(tid.to_string())
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        // Fail closed: if no context provided, set to unreachable values
+        sqlx::query("SELECT set_config('app.tenant_id', '', true), set_config('app.is_admin', 'false', true)")
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let result = work(&mut tx).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
 // --- Transaction Queries ---
 
 /// Insert a transaction created from an inbound webhook/callback payload.
@@ -323,38 +396,113 @@ pub async fn set_tenant_context(
 /// entry in the same SQL transaction, and invalidates aggregate caches only
 /// after commit. Handlers should use this helper instead of issuing their own
 /// INSERT so webhook persistence remains auditable and timeout protected.
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
+///
+/// This is wrapped in [`crate::utils::retry::retry_with_backoff`], so the
+/// insert is keyed on the caller-generated `tx.id`/`tx.created_at` (the
+/// partitioned table's primary key) and uses
+/// `ON CONFLICT (id, created_at) DO NOTHING`: if an earlier attempt's commit
+/// actually succeeded but the client saw a transient error anyway (e.g. the
+/// connection dropped right after `COMMIT`), the retry observes the existing
+/// row instead of inserting a duplicate or double-writing the audit log.
+/// Coordinates with the `anchor_transaction_id` idempotency guard so the
+/// same inbound Anchor callback can't be persisted twice either.
+/// Returns `(transaction, is_new)`.
+/// `is_new = true` means this delivery created a fresh row.
+/// `is_new = false` means a prior delivery already owns the `anchor_transaction_id`
+/// and the returned transaction is that existing row - no new row was written.
+pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<(Transaction, bool)> {
     with_timeout(
         QueryTier::Write,
         "INSERT INTO transactions ... RETURNING *",
         crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
             let mut db_tx = pool.begin().await?;
 
-            let result = persist_transaction(&mut db_tx, tx).await?;
-            audit_transaction_creation(&mut db_tx, &result).await?;
+            let (result, is_new) = persist_transaction(&mut db_tx, tx).await?;
+            if is_new {
+                audit_transaction_creation(&mut db_tx, &result).await?;
+            }
 
             db_tx.commit().await?;
 
-            // Invalidate cache after successful commit
-            invalidate_transaction_caches(&result.asset_code).await;
+            if is_new {
+                invalidate_transaction_caches(&result.asset_code).await;
+            }
 
-            Ok(result)
+            Ok((result, is_new))
         }),
     )
     .await
 }
 
+/// Inserts `tx`, returning `(row, is_new)`.
+///
+/// `is_new = true`  - this call wrote the row (first delivery or first successful retry).
+/// `is_new = false` - a prior delivery already owns `anchor_transaction_id`; the
+///                    returned row is that existing transaction. No second row is written.
+///
+/// Idempotency strategy:
+/// - When `anchor_transaction_id` is `Some`, we first attempt to claim it in
+///   `anchor_transaction_dedup`, a non-partitioned table whose PRIMARY KEY enforces
+///   cross-partition uniqueness. The claim and the transaction INSERT share the same
+///   DB transaction so they are atomic.
+/// - When `anchor_transaction_id` is `None`, no cross-delivery dedup is possible;
+///   each delivery creates a new row. The PK `(id, created_at)` guard still protects
+///   against retry-duplicates of the same `tx` object.
 async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
-) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+) -> Result<(Transaction, bool)> {
+    // === Anchor-ID dedup guard (cross-partition uniqueness)
+    if let Some(ref anchor_id) = tx.anchor_transaction_id {
+        let claimed = sqlx::query(
+            r#"
+            INSERT INTO anchor_transaction_dedup
+                (anchor_transaction_id, transaction_id, transaction_created_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (anchor_transaction_id) DO NOTHING
+            "#,
+        )
+        .bind(anchor_id)
+        .bind(tx.id)
+        .bind(tx.created_at)
+        .execute(&mut **db_tx)
+        .await?;
+
+        if claimed.rows_affected() == 0 {
+            // Another delivery (or a previously committed retry) already owns this key.
+            let row = sqlx::query(
+                "SELECT transaction_id, transaction_created_at \
+                 FROM anchor_transaction_dedup WHERE anchor_transaction_id = $1",
+            )
+            .bind(anchor_id)
+            .fetch_one(&mut **db_tx)
+            .await?;
+
+            let existing_id: Uuid = row.get("transaction_id");
+            let existing_created_at: chrono::DateTime<Utc> = row.get("transaction_created_at");
+
+            let existing = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE id = $1 AND created_at = $2",
+            )
+            .bind(existing_id)
+            .bind(existing_created_at)
+            .fetch_one(&mut **db_tx)
+            .await?;
+
+            return Ok((existing, false));
+        }
+    }
+
+    // === Main insert (PK guard for retry safety)
+    let inserted = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
             settlement_id, memo, memo_type, metadata
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        -- Partitioned by created_at; only (id, created_at) is a valid conflict target.
+        ON CONFLICT (id, created_at) DO NOTHING
         RETURNING *
         "#,
     )
@@ -372,8 +520,23 @@ async fn persist_transaction(
     .bind(&tx.memo)
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
-    .fetch_one(&mut **db_tx)
-    .await
+    .fetch_optional(&mut **db_tx)
+    .await?;
+
+    match inserted {
+        Some(row) => Ok((row, true)),
+        None => {
+            // PK conflict: an earlier retry already committed this exact row.
+            let row = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE id = $1 AND created_at = $2",
+            )
+            .bind(tx.id)
+            .bind(tx.created_at)
+            .fetch_one(&mut **db_tx)
+            .await?;
+            Ok((row, false))
+        }
+    }
 }
 
 async fn audit_transaction_creation(
@@ -742,6 +905,7 @@ pub async fn list_settlements_cursor(
 pub async fn update_settlement_status(
     pool: &PgPool,
     id: Uuid,
+    expected_from_status: &str,
     new_status: &str,
     reason: Option<&str>,
     new_total: Option<&sqlx::types::BigDecimal>,
@@ -755,6 +919,14 @@ pub async fn update_settlement_status(
             .fetch_optional(&mut *db_tx)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
+
+    // Validate transition against the locked row (not the pre-lock read).
+    // This catches concurrent modifications: if the status changed or no-op transition is detected,
+    // mark as stale by returning RowNotFound (which will be converted to StaleTransition in service layer).
+    if current.status != expected_from_status || current.status == new_status {
+        db_tx.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    }
 
     // Preserve original amount on first adjustment
     let original_total = if current.original_total_amount.is_none() && new_total.is_some() {
@@ -773,7 +945,7 @@ pub async fn update_settlement_status(
             reviewed_by = $5,
             reviewed_at = NOW(),
             updated_at = NOW()
-        WHERE id = $6
+        WHERE id = $6 AND status = $7
         RETURNING *
         "#,
     )
@@ -783,8 +955,10 @@ pub async fn update_settlement_status(
     .bind(original_total)
     .bind(actor)
     .bind(id)
-    .fetch_one(&mut *db_tx)
-    .await?;
+    .bind(expected_from_status)
+    .fetch_optional(&mut *db_tx)
+    .await?
+    .ok_or(sqlx::Error::RowNotFound)?;
 
     // If voided, release transactions back to unsettled
     if new_status == "voided" {
@@ -1583,13 +1757,14 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+mod integration_tests {
     use super::*;
     use sqlx::{migrate::Migrator, PgPool};
     use std::path::Path;
 
     async fn setup_test_db() -> PgPool {
-        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
         let pool = PgPool::connect(&database_url)
             .await
             .expect("Failed to connect to test DB");
@@ -1600,6 +1775,131 @@ mod tests {
         pool
     }
 
+    // === Idempotency tests
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_duplicate_anchor_id_returns_same_row() {
+        let pool = setup_test_db().await;
+        let anchor_id = format!("anchor-{}", uuid::Uuid::new_v4());
+        let stellar = "G".to_string() + &"A".repeat(55);
+
+        let tx1 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(100u32),
+            "USD".to_string(),
+            Some(anchor_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let (t1, is_new1) = insert_transaction(&pool, &tx1).await.unwrap();
+        assert!(is_new1, "first delivery must be new");
+
+        // Second delivery with same anchor_transaction_id but different tx object
+        let tx2 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(200u32),
+            "EUR".to_string(),
+            Some(anchor_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let (t2, is_new2) = insert_transaction(&pool, &tx2).await.unwrap();
+        assert!(!is_new2, "duplicate delivery must not be new");
+        assert_eq!(
+            t1.id, t2.id,
+            "both deliveries must return the same transaction id"
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transactions WHERE anchor_transaction_id = $1",
+        )
+        .bind(&anchor_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "exactly one row must exist in the DB");
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_null_anchor_id_always_inserts() {
+        let pool = setup_test_db().await;
+        let stellar = "G".to_string() + &"A".repeat(55);
+
+        let tx1 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(100u32),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let tx2 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(100u32),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let (_, is_new1) = insert_transaction(&pool, &tx1).await.unwrap();
+        let (_, is_new2) = insert_transaction(&pool, &tx2).await.unwrap();
+        assert!(is_new1, "first null-key delivery must be new");
+        assert!(
+            is_new2,
+            "second null-key delivery must also be new (different tx)"
+        );
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_retry_after_commit_no_duplicate() {
+        let pool = setup_test_db().await;
+        let anchor_id = format!("retry-{}", uuid::Uuid::new_v4());
+        let stellar = "G".to_string() + &"A".repeat(55);
+
+        let tx = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(50u32),
+            "USD".to_string(),
+            Some(anchor_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let (t1, is_new1) = insert_transaction(&pool, &tx).await.unwrap();
+        assert!(is_new1);
+
+        // Simulate retry: same tx object, same id, same anchor_transaction_id
+        let (t2, is_new2) = insert_transaction(&pool, &tx).await.unwrap();
+        assert!(!is_new2, "retry must not create a new row");
+        assert_eq!(t1.id, t2.id);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE id = $1")
+            .bind(t1.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "retry must not produce a duplicate row");
+    }
+
     #[ignore = "Requires DATABASE_URL"]
     #[tokio::test]
     async fn test_get_active_tenant_rate_limit() {
@@ -1607,10 +1907,11 @@ mod tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind("test tenant")
+        .bind(format!("key-{tenant_id}"))
         .bind("secret")
         .bind("GTESTACCOUNT")
         .bind(420)
@@ -1633,10 +1934,11 @@ mod tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind("test tenant 2")
+        .bind(format!("key-{tenant_id}"))
         .bind("secret2")
         .bind("GTESTACCOUNT2")
         .bind(50)
@@ -1646,7 +1948,9 @@ mod tests {
         .unwrap();
 
         let configs = get_all_tenant_configs(&pool).await.unwrap();
-        assert!(configs.iter().any(|cfg| cfg.tenant_id == tenant_id && cfg.rate_limit_per_minute == 50));
+        assert!(configs
+            .iter()
+            .any(|cfg| cfg.tenant_id == tenant_id && cfg.rate_limit_per_minute == 50));
     }
 
     // --- Rate limit validation unit tests (no DB required) ---
@@ -1690,9 +1994,14 @@ mod tests {
     #[tokio::test]
     async fn test_update_tenant_rate_limit_validation_exceeds_max() {
         let pool = PgPool::connect_lazy("postgres://localhost/nonexistent").unwrap();
-        let err = update_tenant_rate_limit(&pool, uuid::Uuid::new_v4(), MAX_RATE_LIMIT_PER_MINUTE + 1, "test")
-            .await
-            .unwrap_err();
+        let err = update_tenant_rate_limit(
+            &pool,
+            uuid::Uuid::new_v4(),
+            MAX_RATE_LIMIT_PER_MINUTE + 1,
+            "test",
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().contains("exceeds maximum"),
             "unexpected error: {err}"
@@ -1706,10 +2015,11 @@ mod tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind("rl-test-tenant")
+        .bind(format!("key-{tenant_id}"))
         .bind("secret")
         .bind("GTESTACCOUNT3")
         .bind(60)

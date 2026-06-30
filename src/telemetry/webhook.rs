@@ -81,11 +81,10 @@ pub struct WebhookResult {
 
 impl WebhookResult {
     fn accepted(message: impl Into<String>) -> Self {
-        Self { accepted: true, message: message.into() }
-    }
-
-    fn rejected(message: impl Into<String>) -> Self {
-        Self { accepted: false, message: message.into() }
+        Self {
+            accepted: true,
+            message: message.into(),
+        }
     }
 }
 
@@ -134,11 +133,7 @@ impl TelemetryWebhookHandler {
     ///
     /// # Errors
     /// Returns a [`TelemetryError`] variant describing the first validation failure.
-    pub fn process(
-        &self,
-        body: &[u8],
-        signature: &str,
-    ) -> Result<WebhookResult, TelemetryError> {
+    pub fn process(&self, body: &[u8], signature: &str) -> Result<WebhookResult, TelemetryError> {
         // 1. Size check — before any allocation-heavy work.
         if body.len() > MAX_PAYLOAD_BYTES {
             tracing::warn!(
@@ -153,12 +148,14 @@ impl TelemetryWebhookHandler {
         self.verify_signature(body, signature)?;
 
         // 3. Deserialize.
-        let payload: WebhookPayload = serde_json::from_slice(body)
-            .map_err(|e| TelemetryError::ValidationError(
-                crate::telemetry::input_validation::ValidationError::InvalidFormat(
-                    format!("invalid JSON: {}", e),
-                ),
-            ))?;
+        let payload: WebhookPayload = serde_json::from_slice(body).map_err(|e| {
+            TelemetryError::ValidationError(
+                crate::telemetry::input_validation::ValidationError::InvalidFormat(format!(
+                    "invalid JSON: {}",
+                    e
+                )),
+            )
+        })?;
 
         // 4. Replay protection.
         self.check_timestamp(payload.timestamp_ms)?;
@@ -201,12 +198,14 @@ impl TelemetryWebhookHandler {
             )
         })?;
 
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret)
-            .map_err(|e| TelemetryError::ValidationError(
-                crate::telemetry::input_validation::ValidationError::InvalidFormat(
-                    format!("HMAC init error: {}", e),
-                ),
-            ))?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret).map_err(|e| {
+            TelemetryError::ValidationError(
+                crate::telemetry::input_validation::ValidationError::InvalidFormat(format!(
+                    "HMAC init error: {}",
+                    e
+                )),
+            )
+        })?;
         mac.update(body);
 
         mac.verify_slice(&expected).map_err(|_| {

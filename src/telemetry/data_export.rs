@@ -263,6 +263,7 @@ impl Default for ExportConfig {
 /// Service for exporting telemetry data
 #[derive(Debug)]
 pub struct DataExportService {
+    #[allow(dead_code)]
     config: ExportConfig,
     buffer: Arc<RwLock<ExportBuffer>>,
 }
@@ -393,11 +394,7 @@ pub fn create_trace_record(
 }
 
 /// Creates a new metric record
-pub fn create_metric_record(
-    name: &str,
-    metric_type: MetricType,
-    value: f64,
-) -> TelemetryRecord {
+pub fn create_metric_record(name: &str, metric_type: MetricType, value: f64) -> TelemetryRecord {
     TelemetryRecord {
         id: uuid::Uuid::new_v4().to_string(),
         record_type: RecordType::Metric,
@@ -424,7 +421,7 @@ mod tests {
     fn test_export_batch_creation() {
         let record = create_trace_record("trace1", "span1", "test_op", 100, 200, TraceStatus::Ok);
         let batch = ExportBatch::new(vec![record]);
-        
+
         assert!(batch.is_valid());
         assert!(!batch.batch_id.is_empty());
     }
@@ -432,7 +429,7 @@ mod tests {
     #[test]
     fn test_export_buffer_push() {
         let mut buffer = ExportBuffer::new(100, 10);
-        
+
         for i in 0..15 {
             let record = create_trace_record(
                 &format!("trace{}", i),
@@ -443,7 +440,7 @@ mod tests {
                 TraceStatus::Ok,
             );
             let batch = buffer.push(record);
-            
+
             // First batch should be created at 10 records
             if i == 9 {
                 assert!(batch.is_some());
@@ -455,7 +452,7 @@ mod tests {
     #[test]
     fn test_export_buffer_full() {
         let mut buffer = ExportBuffer::new(5, 10);
-        
+
         for i in 0..10 {
             let record = create_trace_record(
                 &format!("trace{}", i),
@@ -467,22 +464,25 @@ mod tests {
             );
             buffer.push(record);
         }
-        
+
         // Should have max 5 records (oldest dropped)
         assert_eq!(buffer.len(), 5);
     }
 
     #[test]
     fn test_data_export_service_record() {
-        let service = DataExportService::with_default_config();
-        
+        // Use a batch size of 1 so a single record flushes a batch immediately.
+        let config = ExportConfig {
+            batch_size: 1,
+            ..ExportConfig::default()
+        };
+        let service = DataExportService::new(config);
+
         let record = create_trace_record("trace1", "span1", "test", 100, 200, TraceStatus::Ok);
-        
+
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let batch = runtime.block_on(async {
-            service.record(record).await
-        });
-        
+        let batch = runtime.block_on(async { service.record(record).await });
+
         assert!(batch.is_some());
     }
 
@@ -504,7 +504,7 @@ mod tests {
             }),
             attributes: vec![],
         };
-        
+
         assert!(DataExportService::validate_record(&record).is_err());
     }
 
@@ -536,7 +536,7 @@ mod tests {
             }),
             attributes: vec![],
         };
-        
+
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("warn"));
     }

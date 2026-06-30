@@ -1,9 +1,9 @@
 //! Secure health check logic with input validation, response redaction, and call-frequency caching.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Configuration for health check caching and rate limiting.

@@ -1,5 +1,5 @@
 //! Reconnection Logic for WebSocket connections
-//! 
+//!
 //! Provides endpoints for clients to manage reconnection state after network interruptions.
 //! Includes support for exponential backoff, state recovery, and connection validation.
 
@@ -12,8 +12,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::error::AppError;
+use crate::AppState;
 
 /// Maximum number of reconnection attempts allowed
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -33,6 +33,7 @@ pub struct ReconnectQuery {
     /// Client's last known sequence number (for gap recovery)
     last_sequence: Option<i64>,
     /// Timestamp of last connection (for stale connection detection)
+    #[allow(dead_code)]
     last_connected: Option<i64>,
 }
 
@@ -99,7 +100,8 @@ impl ConnectionState {
     fn calculate_backoff(&self) -> u64 {
         let base = 2_u64.pow(self.reconnect_attempts.min(8));
         let jitter = rand_simple(self.reconnect_attempts);
-        (base * DEFAULT_RECONNECT_TIMEOUT / 10).min(MAX_RECONNECT_TIMEOUT) + jitter
+        // Cap the final value (including jitter) so the backoff never exceeds the maximum.
+        (base * DEFAULT_RECONNECT_TIMEOUT / 10 + jitter).min(MAX_RECONNECT_TIMEOUT)
     }
 }
 
@@ -113,19 +115,19 @@ fn rand_simple(attempt: u32) -> u64 {
 
 lazy_static::lazy_static! {
     /// Global connection state store
-    static ref SESSION_STORE: Arc<Mutex<std::collections::HashMap<Uuid, ConnectionState>>> = 
+    static ref SESSION_STORE: Arc<Mutex<std::collections::HashMap<Uuid, ConnectionState>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// Check reconnection status for a client
-/// 
+///
 /// Clients call this endpoint before attempting to reconnect to determine:
 /// - If they can reconnect immediately
 /// - How long to wait (if rate limited)
 /// - If their session has expired
-/// 
+///
 /// This helps clients avoid hammering the server and implements proper
 /// exponential backoff on the client side.
 #[utoipa::path(
@@ -144,7 +146,7 @@ lazy_static::lazy_static! {
 )]
 pub async fn reconnect_status(
     Query(query): Query<ReconnectQuery>,
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
     tracing::debug!(
         token_present = query.token.is_some(),
@@ -166,19 +168,19 @@ pub async fn reconnect_status(
 
     // Get current connection state from session store
     let mut store = SESSION_STORE.lock().await;
-    
+
     // For new connections, create a fresh session
     if query.token.is_none() {
         let new_state = ConnectionState::new();
         let session_id = new_state.session_id;
         store.insert(session_id, new_state);
-        
+
         let response = ReconnectionResponse::Reconnect {
             status: ReconnectStatus::Ready { session_id },
             backoff_seconds: 1,
             requires_resync: true,
         };
-        
+
         tracing::info!(session_id = %session_id, "New reconnection session created");
         return Ok((axum::http::StatusCode::OK, axum::Json(response)));
     }
@@ -243,7 +245,7 @@ pub async fn reconnect_status(
 }
 
 /// Attempt to reconnect a WebSocket client
-/// 
+///
 /// This endpoint handles the actual reconnection attempt, updating the session
 /// state and returning the appropriate response for the client to proceed.
 #[utoipa::path(
@@ -258,7 +260,7 @@ pub async fn reconnect_status(
     tag = "WebSocket"
 )]
 pub async fn reconnect(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     axum::Json(payload): axum::Json<ReconnectRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let session_id = match Uuid::parse_str(&payload.session_id) {
@@ -274,7 +276,7 @@ pub async fn reconnect(
     };
 
     let mut store = SESSION_STORE.lock().await;
-    
+
     let session = match store.get_mut(&session_id) {
         Some(s) => s,
         None => {
@@ -338,12 +340,10 @@ pub struct ReconnectRequest {
 pub async fn cleanup_stale_sessions() {
     let mut store = SESSION_STORE.lock().await;
     let now = std::time::Instant::now();
-    
+
     // Remove sessions older than 1 hour
-    store.retain(|_, state| {
-        now.duration_since(state.created_at).as_secs() < 3600
-    });
-    
+    store.retain(|_, state| now.duration_since(state.created_at).as_secs() < 3600);
+
     tracing::debug!(active_sessions = store.len(), "Stale sessions cleaned up");
 }
 
@@ -371,10 +371,10 @@ mod tests {
     fn test_backoff_increases_with_attempts() {
         let mut state = ConnectionState::new();
         let backoff1 = state.calculate_backoff();
-        
+
         state.increment_attempt();
         let backoff2 = state.calculate_backoff();
-        
+
         // Backoff should increase (or stay same, but not decrease)
         assert!(backoff2 >= backoff1);
     }

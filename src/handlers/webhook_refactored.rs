@@ -166,13 +166,19 @@ pub async fn transaction_callback(
         None, // metadata
     );
 
-    let inserted = queries::insert_transaction(&state.db, &tx).await?;
+    let (result, is_new) = queries::insert_transaction(&state.db, &tx).await?;
+
+    let status = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
 
     Ok((
-        StatusCode::CREATED,
+        status,
         Json(WebhookTransactionResponse {
-            id: inserted.id.to_string(),
-            status: inserted.status,
+            id: result.id.to_string(),
+            status: result.status,
         }),
     ))
 }

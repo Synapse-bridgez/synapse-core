@@ -7,7 +7,7 @@
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use hmac::{Hmac, Mac};
-use redis::{AsyncCommands, Client};
+use redis::{AsyncCommands, Client, Script};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
@@ -18,6 +18,13 @@ use uuid::Uuid;
 const MAX_ATTEMPTS: i32 = 5;
 /// Base delay in seconds for exponential backoff (2^attempt * BASE_DELAY_SECS)
 const BASE_DELAY_SECS: i64 = 10;
+/// How long (seconds) before a claimed in_progress delivery can be reclaimed
+/// by another worker (crash recovery).
+const CLAIM_TIMEOUT_SECS: i64 = 300;
+/// Circuit breaker: consecutive failures before tripping open.
+const CB_FAILURE_THRESHOLD: u32 = 3;
+/// Circuit breaker: seconds before an open breaker transitions to half-open.
+const CB_RESET_TIMEOUT_SECS: i64 = 300;
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
@@ -49,6 +56,8 @@ pub struct WebhookDelivery {
     pub response_body: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
     pub max_delivery_rate: i32,
+    pub attempt_history: Option<serde_json::Value>,
+    pub claimed_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Payload sent to external endpoints.
@@ -137,20 +146,37 @@ impl WebhookDispatcher {
     }
 
     /// Process all pending deliveries concurrently using `buffer_unordered`.
-    /// Batch-loads all endpoints in a single query to avoid N+1 pattern.
+    /// Uses `FOR UPDATE SKIP LOCKED` in a CTE to claim rows atomically so
+    /// concurrent replicas never deliver the same event twice.
+    /// Also reclaims stuck `in_progress` rows past `CLAIM_TIMEOUT_SECS`.
     pub async fn process_pending(&self) -> anyhow::Result<()> {
+        let reclaim_cutoff = Utc::now() - chrono::Duration::seconds(CLAIM_TIMEOUT_SECS);
+
+        // Atomic claim via a CTE: the inner SELECT … FOR UPDATE SKIP LOCKED
+        // picks rows that are not already locked by another transaction, then
+        // the outer UPDATE claims them and returns the joined result.
         let deliveries: Vec<WebhookDelivery> = sqlx::query_as(
             r#"
-            SELECT wd.*, we.max_delivery_rate
-            FROM webhook_deliveries wd
-            JOIN webhook_endpoints we ON wd.endpoint_id = we.id
-            WHERE wd.status = 'pending'
-              AND (wd.next_attempt_at IS NULL OR wd.next_attempt_at <= NOW())
+            WITH candidate AS (
+                SELECT id FROM webhook_deliveries
+                WHERE (status = 'pending'
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))
+                   OR (status = 'in_progress' AND claimed_at <= $1)
+                ORDER BY created_at
+                LIMIT 100
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE webhook_deliveries wd
+            SET status   = 'in_progress',
+                claimed_at = NOW()
+            FROM webhook_endpoints we, candidate c
+            WHERE wd.id = c.id
+              AND wd.endpoint_id = we.id
               AND we.enabled = true
-            ORDER BY wd.created_at
-            LIMIT 100
+            RETURNING wd.*, we.max_delivery_rate
             "#,
         )
+        .bind(reclaim_cutoff)
         .fetch_all(&self.pool)
         .await?;
 
@@ -158,13 +184,13 @@ impl WebhookDispatcher {
             return Ok(());
         }
 
-        // Batch-load all unique endpoints in a single query
-        let endpoint_ids: Vec<Uuid> = deliveries
-            .iter()
-            .map(|d| d.endpoint_id)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        // Group claimed deliveries by endpoint for circuit-breaker checks.
+        let mut by_endpoint: HashMap<Uuid, Vec<WebhookDelivery>> = HashMap::new();
+        for d in deliveries {
+            by_endpoint.entry(d.endpoint_id).or_default().push(d);
+        }
+
+        let endpoint_ids: Vec<Uuid> = by_endpoint.keys().copied().collect();
 
         let endpoints: Vec<WebhookEndpoint> =
             sqlx::query_as("SELECT * FROM webhook_endpoints WHERE id = ANY($1) AND enabled = true")
@@ -172,19 +198,63 @@ impl WebhookDispatcher {
                 .fetch_all(&self.pool)
                 .await?;
 
-        // Create HashMap for O(1) lookups
         let endpoint_map: HashMap<Uuid, WebhookEndpoint> =
             endpoints.into_iter().map(|ep| (ep.id, ep)).collect();
 
-        let query_count = 2; // 1 for deliveries + 1 for endpoints
+        for ep_id in &endpoint_ids {
+            if let Some(ep) = endpoint_map.get(ep_id) {
+                let blocked = self
+                    .circuit_breaker_is_open(ep_id, &ep.url)
+                    .await
+                    .unwrap_or(false);
+
+                if blocked {
+                    // Reschedule every delivery for this endpoint without
+                    // burning an attempt, then release the claim.
+                    if let Some(deliveries) = by_endpoint.get(ep_id) {
+                        let next_cycle =
+                            Utc::now() + chrono::Duration::seconds(CB_RESET_TIMEOUT_SECS);
+                        for d in deliveries {
+                            sqlx::query(
+                                r#"
+                                UPDATE webhook_deliveries
+                                SET status        = 'pending',
+                                    claimed_at    = NULL,
+                                    next_attempt_at = $1
+                                WHERE id = $2
+                                "#,
+                            )
+                            .bind(next_cycle)
+                            .bind(d.id)
+                            .execute(&self.pool)
+                            .await?;
+
+                            tracing::warn!(
+                                delivery_id = %d.id,
+                                endpoint_id = %ep_id,
+                                "Circuit breaker open, rescheduled delivery without consuming attempt"
+                            );
+                        }
+                    }
+                    by_endpoint.remove(ep_id);
+                }
+            }
+        }
+
+        // Flatten remaining (non-blocked) deliveries
+        let remaining: Vec<WebhookDelivery> = by_endpoint.into_values().flatten().collect();
+
+        if remaining.is_empty() {
+            return Ok(());
+        }
+
         tracing::info!(
-            delivery_count = deliveries.len(),
+            delivery_count = remaining.len(),
             endpoint_count = endpoint_map.len(),
-            query_count = query_count,
-            "Webhook dispatcher batch-loaded endpoints (N+1 optimization)"
+            "Webhook dispatcher processing claimed deliveries"
         );
 
-        stream::iter(deliveries)
+        stream::iter(remaining)
             .map(|delivery| {
                 let dispatcher = self.clone();
                 let endpoint_map = endpoint_map.clone();
@@ -256,7 +326,9 @@ impl WebhookDispatcher {
             sqlx::query(
                 r#"
                 UPDATE webhook_deliveries
-                SET next_attempt_at = $1
+                SET status = 'pending',
+                    claimed_at = NULL,
+                    next_attempt_at = $1
                 WHERE id = $2
                 "#,
             )
@@ -280,11 +352,63 @@ impl WebhookDispatcher {
                     endpoint_id = %delivery.endpoint_id,
                     "Endpoint not found in batch-loaded map"
                 );
+                // Release claim so it can be picked up next cycle
+                sqlx::query(
+                    "UPDATE webhook_deliveries SET status = 'pending', claimed_at = NULL WHERE id = $1",
+                )
+                .bind(delivery.id)
+                .execute(&self.pool)
+                .await?;
                 return Ok(());
             }
         };
 
-        self.send_webhook(delivery, endpoint).await
+        let result = self.send_webhook(delivery, endpoint).await;
+
+        // Record circuit breaker outcome
+        match &result {
+            Ok(()) => {
+                let _ = self.circuit_breaker_succeeded(&delivery.endpoint_id).await;
+            }
+            Err(_) => {
+                let _ = self.circuit_breaker_failed(&delivery.endpoint_id).await;
+            }
+        }
+
+        result
+    }
+
+    /// Build an attempt-history entry and append it to the delivery's JSONB column.
+    async fn append_attempt_history(
+        &self,
+        delivery_id: Uuid,
+        attempt: i32,
+        attempted_at: chrono::DateTime<Utc>,
+        response_status: Option<i32>,
+        response_body: Option<String>,
+        error: Option<String>,
+    ) -> anyhow::Result<()> {
+        let entry = serde_json::json!({
+            "attempt": attempt,
+            "attempted_at": attempted_at.to_rfc3339(),
+            "response_status": response_status,
+            "response_body": response_body,
+            "error": error,
+        });
+
+        sqlx::query(
+            r#"
+            UPDATE webhook_deliveries
+            SET attempt_history = COALESCE(attempt_history, '[]'::jsonb) || $1::jsonb
+            WHERE id = $2
+            "#,
+        )
+        .bind(entry.to_string())
+        .bind(delivery_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     async fn send_webhook(
@@ -305,14 +429,13 @@ impl WebhookDispatcher {
         let signature = sign_payload_with_version(&endpoint.secret, &timestamp, &body);
 
         // Get trace_id from transaction if available
-        let trace_id: Option<String> = sqlx::query_scalar(
-            "SELECT trace_id FROM transactions WHERE id = $1"
-        )
-        .bind(delivery.transaction_id)
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten();
+        let trace_id: Option<String> =
+            sqlx::query_scalar("SELECT trace_id FROM transactions WHERE id = $1")
+                .bind(delivery.transaction_id)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten();
 
         let mut request = self
             .http
@@ -326,10 +449,7 @@ impl WebhookDispatcher {
             request = request.header("X-Trace-Id", trace_id);
         }
 
-        let response = request
-            .body(body)
-            .send()
-            .await;
+        let response = request.body(body).send().await;
 
         let new_attempt_count = delivery.attempt_count + 1;
         let now = Utc::now();
@@ -340,6 +460,17 @@ impl WebhookDispatcher {
                 let resp_body = resp.text().await.unwrap_or_default();
                 let success = (200..300).contains(&(status_code as u16));
 
+                // Record attempt history
+                self.append_attempt_history(
+                    delivery.id,
+                    new_attempt_count,
+                    now,
+                    Some(status_code),
+                    Some(resp_body.clone()),
+                    None,
+                )
+                .await?;
+
                 if success {
                     sqlx::query(
                         r#"
@@ -348,7 +479,8 @@ impl WebhookDispatcher {
                             attempt_count = $1,
                             last_attempt_at = $2,
                             response_status = $3,
-                            response_body = $4
+                            response_body = $4,
+                            claimed_at = NULL
                         WHERE id = $5
                         "#,
                     )
@@ -377,7 +509,20 @@ impl WebhookDispatcher {
                 }
             }
             Err(e) => {
-                self.handle_failure(delivery, new_attempt_count, now, None, Some(e.to_string()))
+                let err_msg = e.to_string();
+
+                // Record attempt history
+                self.append_attempt_history(
+                    delivery.id,
+                    new_attempt_count,
+                    now,
+                    None,
+                    None,
+                    Some(err_msg.clone()),
+                )
+                .await?;
+
+                self.handle_failure(delivery, new_attempt_count, now, None, Some(err_msg))
                     .await?;
             }
         }
@@ -397,7 +542,9 @@ impl WebhookDispatcher {
             sqlx::query(
                 r#"
                 UPDATE webhook_deliveries
-                SET next_attempt_at = $1
+                SET status = 'pending',
+                    claimed_at = NULL,
+                    next_attempt_at = $1
                 WHERE id = $2
                 "#,
             )
@@ -422,6 +569,12 @@ impl WebhookDispatcher {
         self.send_webhook(delivery, &endpoint).await
     }
 
+    /// Handle a failed delivery attempt.
+    ///
+    /// * If `attempt_count < MAX_ATTEMPTS`: schedule a retry with exponential
+    ///   backoff and keep the status as `pending`.
+    /// * If `attempt_count >= MAX_ATTEMPTS`: move the delivery to the DLQ table
+    ///   with full attempt history, set status to `failed`.
     async fn handle_failure(
         &self,
         delivery: &WebhookDelivery,
@@ -433,8 +586,9 @@ impl WebhookDispatcher {
         let (new_status, next_attempt_at) = if attempt_count >= MAX_ATTEMPTS {
             tracing::warn!(
                 delivery_id = %delivery.id,
-                "Webhook delivery permanently failed after {} attempts",
-                attempt_count
+                endpoint_id = %delivery.endpoint_id,
+                attempt_count = attempt_count,
+                "Webhook delivery exhausted, routing to DLQ"
             );
             ("failed", None)
         } else {
@@ -449,6 +603,7 @@ impl WebhookDispatcher {
             ("pending", Some(next))
         };
 
+        // Update delivery record
         sqlx::query(
             r#"
             UPDATE webhook_deliveries
@@ -457,7 +612,8 @@ impl WebhookDispatcher {
                 last_attempt_at = $3,
                 next_attempt_at = $4,
                 response_status = $5,
-                response_body = $6
+                response_body = $6,
+                claimed_at = NULL
             WHERE id = $7
             "#,
         )
@@ -466,12 +622,227 @@ impl WebhookDispatcher {
         .bind(now)
         .bind(next_attempt_at)
         .bind(response_status)
-        .bind(response_body)
+        .bind(response_body.clone())
         .bind(delivery.id)
         .execute(&self.pool)
         .await?;
 
+        // Route to DLQ on exhaustion
+        if attempt_count >= MAX_ATTEMPTS {
+            self.route_to_dlq(delivery, attempt_count, response_status, response_body)
+                .await?;
+        }
+
         Ok(())
+    }
+
+    /// Insert an exhausted delivery into the DLQ table with the full attempt
+    /// history so operators can inspect and replay.
+    async fn route_to_dlq(
+        &self,
+        delivery: &WebhookDelivery,
+        attempt_count: i32,
+        response_status: Option<i32>,
+        response_body: Option<String>,
+    ) -> anyhow::Result<()> {
+        // Fetch the latest attempt_history persisted by append_attempt_history
+        let history: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT attempt_history FROM webhook_deliveries WHERE id = $1")
+                .bind(delivery.id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_delivery_dlq
+                (delivery_id, endpoint_id, transaction_id, event_type,
+                 payload, attempt_history, attempt_count,
+                 last_response_status, last_response_body, last_error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (delivery_id) DO NOTHING
+            "#,
+        )
+        .bind(delivery.id)
+        .bind(delivery.endpoint_id)
+        .bind(delivery.transaction_id)
+        .bind(&delivery.event_type)
+        .bind(&delivery.payload)
+        .bind(history.unwrap_or(serde_json::Value::Array(vec![])))
+        .bind(attempt_count)
+        .bind(response_status)
+        .bind(response_body)
+        .bind(None::<String>)
+        .execute(&self.pool)
+        .await?;
+
+        tracing::info!(
+            delivery_id = %delivery.id,
+            endpoint_id = %delivery.endpoint_id,
+            "Webhook delivery moved to DLQ"
+        );
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Circuit breaker helpers (Redis-backed)
+    // -------------------------------------------------------------------
+
+    /// Check whether the circuit breaker is open for this endpoint.
+    /// Returns `true` if the endpoint is temporarily blocked.
+    async fn circuit_breaker_is_open(
+        &self,
+        endpoint_id: &Uuid,
+        _url: &str,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let key = format!("webhook_cb:{endpoint_id}");
+        let data: Option<String> = conn.get(&key).await?;
+
+        match data {
+            Some(json) => {
+                let state: serde_json::Value = serde_json::from_str(&json)?;
+                if state["state"] == "open" {
+                    let opened_at = state["opened_at"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or(Utc::now());
+                    let elapsed = Utc::now() - opened_at;
+                    if elapsed < chrono::Duration::seconds(CB_RESET_TIMEOUT_SECS) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Record a successful delivery — reset the circuit breaker.
+    async fn circuit_breaker_succeeded(&self, endpoint_id: &Uuid) -> anyhow::Result<()> {
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let key = format!("webhook_cb:{endpoint_id}");
+        let _: i32 = redis::cmd("DEL").arg(&key).query_async(&mut conn).await?;
+        Ok(())
+    }
+
+    /// Record a failed delivery — may trip the circuit breaker open.
+    async fn circuit_breaker_failed(&self, endpoint_id: &Uuid) -> anyhow::Result<()> {
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let key = format!("webhook_cb:{endpoint_id}");
+
+        // Use a Redis Lua script for atomic read-modify-write
+        let script = Script::new(
+            r#"
+            local data = redis.call('GET', KEYS[1])
+            local state
+            if data then
+                state = cjson.decode(data)
+                state.failure_count = (state.failure_count or 0) + 1
+            else
+                state = { state = 'closed', failure_count = 1, opened_at = nil, last_error = nil }
+            end
+            state.last_error = ARGV[1]
+            if state.failure_count >= tonumber(ARGV[2]) then
+                state.state = 'open'
+                state.opened_at = ARGV[3]
+            else
+                state.state = 'closed'
+            end
+            redis.call('SETEX', KEYS[1], ARGV[4], cjson.encode(state))
+            return state.failure_count
+            "#,
+        );
+
+        let _: i32 = script
+            .key(&key)
+            .arg("delivery failed")
+            .arg(CB_FAILURE_THRESHOLD)
+            .arg(Utc::now().to_rfc3339())
+            .arg(CB_RESET_TIMEOUT_SECS)
+            .invoke_async(&mut conn)
+            .await?;
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // DLQ replay
+    // -------------------------------------------------------------------
+
+    /// Replay a webhook delivery from the DLQ back into the delivery table.
+    /// The delivery is re-enqueued as a fresh `pending` row with the original
+    /// payload and a reset attempt counter. Returns the new delivery id.
+    pub async fn replay_from_dlq(&self, dlq_id: Uuid) -> anyhow::Result<Uuid> {
+        let dlq_row = sqlx::query(
+            r#"
+            SELECT delivery_id, endpoint_id, transaction_id, event_type, payload
+            FROM webhook_delivery_dlq
+            WHERE id = $1
+            "#,
+        )
+        .bind(dlq_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (delivery_id, endpoint_id, transaction_id, event_type, payload) = match dlq_row {
+            Some(row) => (
+                row.try_get::<Uuid, _>("delivery_id")?,
+                row.try_get::<Uuid, _>("endpoint_id")?,
+                row.try_get::<Uuid, _>("transaction_id")?,
+                row.try_get::<String, _>("event_type")?,
+                row.try_get::<serde_json::Value, _>("payload")?,
+            ),
+            None => anyhow::bail!("DLQ entry {dlq_id} not found"),
+        };
+
+        // Re-insert into deliveries (ON CONFLICT DO NOTHING means if the
+        // original row still exists we reuse it)
+        let new_id = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO webhook_deliveries
+                (endpoint_id, transaction_id, event_type, payload, status, next_attempt_at, attempt_history)
+            VALUES ($1, $2, $3, $4, 'pending', NOW(), '[]'::jsonb)
+            ON CONFLICT (endpoint_id, transaction_id, event_type)
+            DO UPDATE SET status = 'pending',
+                          next_attempt_at = NOW(),
+                          attempt_count = 0,
+                          response_status = NULL,
+                          response_body = NULL,
+                          attempt_history = '[]'::jsonb,
+                          claimed_at = NULL
+            RETURNING id
+            "#,
+        )
+        .bind(endpoint_id)
+        .bind(transaction_id)
+        .bind(&event_type)
+        .bind(&payload)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Increment replay counter on DLQ entry
+        sqlx::query(
+            r#"
+            UPDATE webhook_delivery_dlq
+            SET replay_count = replay_count + 1,
+                replayed_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(dlq_id)
+        .execute(&self.pool)
+        .await?;
+
+        tracing::info!(
+            dlq_id = %dlq_id,
+            delivery_id = %delivery_id,
+            new_delivery_id = %new_id,
+            "Webhook delivery replayed from DLQ"
+        );
+
+        Ok(new_id)
     }
 
     async fn endpoints_for_event(

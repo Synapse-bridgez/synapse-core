@@ -76,7 +76,9 @@ impl CacheValidator {
     /// ```
     pub fn validate_key(key: &str) -> Result<(), ValidationError> {
         if key.is_empty() {
-            return Err(ValidationError::InvalidKey("key cannot be empty".to_string()));
+            return Err(ValidationError::InvalidKey(
+                "key cannot be empty".to_string(),
+            ));
         }
 
         if key.len() > MAX_KEY_LENGTH {
@@ -283,7 +285,10 @@ mod tests {
     fn test_validate_ttl_invalid() {
         let result = CacheValidator::validate_ttl(0);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "Invalid TTL: must be positive");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid TTL: must be positive"
+        );
 
         let result = CacheValidator::validate_ttl(-1);
         assert!(result.is_err());

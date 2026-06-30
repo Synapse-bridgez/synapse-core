@@ -5,5 +5,7 @@ pub mod ip_filter;
 pub mod panic_recovery;
 pub mod quota;
 pub mod request_logger;
+pub mod signature_verification;
+pub mod tenant;
 pub mod validate;
 pub mod versioning;

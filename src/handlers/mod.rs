@@ -5,6 +5,7 @@ pub mod graphql;
 pub mod idempotency;
 pub mod pagination;
 pub mod profiling;
+pub mod reconnection;
 pub mod search;
 pub mod session;
 pub mod settlements;
@@ -12,11 +13,12 @@ pub mod stats;
 pub mod v1;
 pub mod v2;
 pub mod webhook;
-pub mod reconnection;
 pub mod ws;
 pub mod ws_error;
 
-pub use pagination::{PaginationQuery, PaginatedListResponse, PaginationHelper, validate_pagination};
+pub use pagination::{
+    validate_pagination, PaginatedListResponse, PaginationHelper, PaginationQuery,
+};
 
 use crate::error::AppError;
 use crate::ApiState;
@@ -197,7 +199,6 @@ pub async fn health(State(state): State<ApiState>) -> Result<impl IntoResponse, 
 
     Ok((db_status_code, Json(health_response)))
 }
-
 
 /// Response from the liveness probe endpoint (/live).
 ///

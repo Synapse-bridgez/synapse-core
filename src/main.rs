@@ -10,7 +10,9 @@ use synapse_core::{
     middleware::idempotency::IdempotencyService,
     schemas,
     secrets::SecretsStore,
-    services::{FeatureFlagService, ResourceLimiter, SettlementService, TaskLimits, WebhookDispatcher},
+    services::{
+        FeatureFlagService, ResourceLimiter, SettlementService, TaskLimits, WebhookDispatcher,
+    },
     stellar::HorizonClient,
     AppState, ReadinessState,
 };
@@ -21,6 +23,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 mod cli;
 use cli::{BackupCommands, Cli, Commands, DbCommands, GraphqlCommands, StatsCommands, TxCommands};
+use cli::{BackupCommands, Cli, Commands, DbCommands, SettlementsCommands, TxCommands};
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -69,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     // Init OTel tracer early so the tracing layer can reference it.
-    let _tracer_provider =
+    let tracer_manager =
         synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
             .expect("failed to initialise OpenTelemetry tracer");
 
@@ -89,18 +92,61 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Serve) | None => serve(config).await,
+        Some(Commands::Serve) | None => serve(config, tracer_manager).await,
         Some(Commands::Tx(tx_cmd)) => match tx_cmd {
             TxCommands::ForceComplete { tx_id } => {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
+            TxCommands::List {
+                cursor,
+                limit,
+                from_date,
+                to_date,
+                format,
+            } => cli::handle_tx_list(cursor, limit, from_date, to_date, &format).await,
+            TxCommands::Search {
+                status,
+                asset_code,
+                min_amount,
+                max_amount,
+                from,
+                to,
+                stellar_account,
+                cursor,
+                limit,
+                format,
+            } => cli::handle_tx_search(
+                status, asset_code, min_amount, max_amount, from, to, stellar_account, cursor,
+                limit, &format,
+            )
+            .await,
             TxCommands::Reconcile {
                 account,
                 start,
                 end,
                 format,
             } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
+            TxCommands::Search {
+                status,
+                asset_code,
+                min_amount,
+                max_amount,
+                from,
+                to,
+                stellar_account,
+                cursor,
+                limit,
+                format,
+            } => cli::handle_tx_search(&config, status, asset_code, min_amount, max_amount, from, to, stellar_account, cursor, limit, &format).await,
+        },
+        Some(Commands::Settlements(settlements_cmd)) => match settlements_cmd {
+            SettlementsCommands::List { format } => {
+                cli::handle_settlements_list(&config, &format).await
+            }
+            SettlementsCommands::Get { id, format } => {
+                cli::handle_settlements_get(&config, &id, &format).await
+            }
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
@@ -143,12 +189,19 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn serve(config: config::Config) -> anyhow::Result<()> {
+async fn serve(
+    config: config::Config,
+    tracer_manager: synapse_core::telemetry::TracerManager,
+) -> anyhow::Result<()> {
     let pool = db::create_pool(&config).await?;
 
     // Initialize pool manager for multi-region failover
-    let pool_manager =
-        PoolManager::new(&config.database_url, config.database_replica_url.as_deref(), config.db_max_connections).await?;
+    let pool_manager = PoolManager::new(
+        &config.database_url,
+        config.database_replica_url.as_deref(),
+        config.db_max_connections,
+    )
+    .await?;
 
     if pool_manager.replica().is_some() {
         tracing::info!("Database replica configured - read queries will be routed to replica");
@@ -162,13 +215,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     tracing::info!("Database migrations completed");
 
     // Initialize resource limiters for background tasks
-    let processor_limiter = ResourceLimiter::new(
-        TaskLimits::new(config.processor_workers, 30),
-        "processor",
-    );
     let settlement_limiter = ResourceLimiter::new(TaskLimits::new(1, 120), "settlement");
     let webhook_limiter = ResourceLimiter::new(TaskLimits::new(10, 60), "webhook");
-    let partition_limiter = Arc::new(ResourceLimiter::new(TaskLimits::new(1, 300), "partition"));
 
     // Initialize partition manager (runs every 24 hours)
     let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24, None);
@@ -205,9 +253,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
             interval.tick().await;
             tracing::info!("Running scheduled settlement job...");
             match settlement_limiter_clone
-                .run(async {
-                    service.run_settlements().await
-                })
+                .run(async { service.run_settlements().await })
                 .await
             {
                 Ok(Ok(results)) => {
@@ -232,9 +278,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             match webhook_limiter_clone
-                .run(async {
-                    dispatcher.process_pending().await
-                })
+                .run(async { dispatcher.process_pending().await })
                 .await
             {
                 Ok(Ok(())) => {}
@@ -489,7 +533,7 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     synapse_core::db::graceful_shutdown(&pool).await;
 
     // Flush and shut down the OTel exporter on clean exit.
-    opentelemetry::global::shutdown_tracer_provider();
+    tracer_manager.shutdown();
 
     Ok(())
 }

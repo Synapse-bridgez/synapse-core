@@ -16,22 +16,42 @@ The helper `crate::utils::retry::is_transient_db_error` marks the following case
 
 - `sqlx::Error::Io(_)`
 - `sqlx::Error::PoolTimedOut`
-- PostgreSQL connection errors such as `connection reset`, `could not connect`, and recognized SQLSTATE codes
-- Deadlock (`40P01`) and serialization failure (`40001`)
+- For `sqlx::Error::Database`, the PostgreSQL SQLSTATE code (`db_err.code()`) is
+  checked first — codes such as `40P01` (deadlock), `40001` (serialization
+  failure), `08000`/`08001`/`08003`/`08004`/`08006` (connection failures),
+  `57P03` (cannot connect now), and `53300` (too many connections) are
+  treated as transient
+- Message-substring matching (`"deadlock detected"`, `"could not connect"`, …)
+  is used **only** as a fallback when the driver doesn't surface a SQLSTATE
+  code, since message text is locale- and version-dependent
 
 Permanent errors such as `RowNotFound` or `PoolClosed` are not retried.
 
-### Exponential backoff
+### Exponential backoff with decorrelated jitter
 
 `crate::utils::retry::retry_with_backoff` provides:
 
 - configurable `max_retries`
 - base delay in milliseconds
-- exponential backoff with a jitter window
+- decorrelated jitter (`min(cap, random(base, prev_delay * 3))`) drawn from a
+  real RNG (`rand::thread_rng()`) per call, instead of a wall-clock-derived
+  offset — this avoids correlated "thundering herd" retries when many
+  callers fail at the same instant (e.g. a primary failover)
 - a hard cap at 10 seconds per retry
 - retry metrics emitted via tracing
 
 This lets database queries recover from brief outages or connection hiccups while preventing hot loops.
+
+### Idempotency requirement
+
+`retry_with_backoff` may invoke the wrapped operation more than once for the
+same logical call, so it must only wrap idempotent operations: SELECTs,
+upserts (`ON CONFLICT DO NOTHING`/`DO UPDATE`), or writes guarded by a stable
+idempotency key. `db::queries::insert_transaction` wraps its INSERT in
+`ON CONFLICT (id, created_at) DO NOTHING` keyed on the caller-generated
+transaction id, and only writes the audit log entry when the row didn't
+already exist — so a retry after a transient post-commit error returns the
+existing row instead of duplicating the write or the audit trail.
 
 ## Connection Pool Behavior
 

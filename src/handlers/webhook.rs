@@ -129,34 +129,24 @@ fn validate_webhook_payload(
 /// Process a raw transaction callback from an external anchor.
 ///
 /// Validates and sanitizes all fields before inserting the transaction into the
-/// database. Returns `201 Created` with the new transaction ID and initial status.
+/// database. Idempotent on `anchor_transaction_id`: a duplicate delivery returns
+/// `200 OK` with the existing transaction rather than creating a second row.
 ///
 /// # Errors
 /// - `400 Bad Request` – validation fails (invalid address, amount, field length, etc.)
 /// - `500 Internal Server Error` – database insertion fails
 #[instrument(name = "webhook.transaction_callback", skip(state, payload))]
 pub async fn transaction_callback(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Json(payload): Json<WebhookTransactionRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Validate and sanitize all inputs before any DB interaction.
     let payload = validate_webhook_payload(payload)?;
 
-    // Extract trace context from current span
-    let trace_id = tracing::Span::current()
-        .extensions()
-        .get::<String>()
-        .cloned()
-        .or_else(|| {
-            opentelemetry::global::get_text_map_propagator(|propagator| {
-                let mut carrier = std::collections::HashMap::new();
-                propagator.inject_context(
-                    &opentelemetry::Context::current(),
-                    &mut carrier,
-                );
-                carrier.get("traceparent").cloned()
-            })
-        });
+    let trace_id = opentelemetry::global::get_text_map_propagator(|propagator| {
+        let mut carrier = std::collections::HashMap::new();
+        propagator.inject_context(&opentelemetry::Context::current(), &mut carrier);
+        carrier.get("traceparent").cloned()
+    });
 
     let tx = Transaction::new(
         payload.stellar_address,
@@ -171,13 +161,19 @@ pub async fn transaction_callback(
     )
     .with_trace_id(trace_id);
 
-    let inserted = queries::insert_transaction(&state.db, &tx).await?;
+    let (result, is_new) = queries::insert_transaction(&state.app_state.db, &tx).await?;
+
+    let status = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
 
     Ok((
-        StatusCode::CREATED,
+        status,
         Json(WebhookTransactionResponse {
-            id: inserted.id.to_string(),
-            status: inserted.status,
+            id: result.id.to_string(),
+            status: result.status,
         }),
     ))
 }
@@ -401,9 +397,15 @@ pub async fn callback(
         payload.metadata,
     );
 
-    let inserted = queries::insert_transaction(&state.app_state.db, &tx).await?;
+    let (result, is_new) = queries::insert_transaction(&state.app_state.db, &tx).await?;
 
-    Ok((StatusCode::CREATED, Json(inserted)).into_response())
+    let status = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(result)).into_response())
 }
 
 /// Generic webhook receiver for event-driven integrations.
@@ -504,6 +506,8 @@ pub struct ListQuery {
 /// - `400 Bad Request` – invalid cursor, unparseable dates, or `from_date >= to_date`
 /// - `500 Internal Server Error` – database error
 #[utoipa::path(
+    get,
+    path = "/transactions",
     params(
         ("cursor" = Option<String>, Query, description = "Cursor for pagination"),
         ("limit" = Option<i64>, Query, description = "Page size"),

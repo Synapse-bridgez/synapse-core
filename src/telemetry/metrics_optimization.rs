@@ -1,9 +1,10 @@
 //! Optimized metrics collection with instrument reuse and off-hot-path export.
 
-use std::sync::Arc;
-use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
 use opentelemetry::metrics::MeterProvider;
+use opentelemetry::metrics::{Counter, Histogram, ObservableGauge};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Pre-initialized metric instruments for reuse.
@@ -15,8 +16,10 @@ pub struct MetricsInstruments {
     request_count: Counter<u64>,
     /// Counter for error count (bounded cardinality via error_type)
     error_count: Counter<u64>,
-    /// Gauge for active connections
-    active_connections: Gauge<u64>,
+    /// Current active connection count, observed by `active_connections_gauge`.
+    active_connections: Arc<AtomicU64>,
+    /// Observable gauge reporting `active_connections` (kept alive for its callback).
+    _active_connections_gauge: ObservableGauge<u64>,
     /// Histogram for request latency in milliseconds
     request_latency_ms: Histogram<u64>,
     /// Counter for processed items
@@ -29,9 +32,7 @@ impl MetricsInstruments {
     /// This ensures instruments are created exactly once and reused throughout
     /// the application lifetime, eliminating per-request allocation overhead.
     pub fn initialize(provider: &impl MeterProvider) -> Result<Self, String> {
-        let meter = provider
-            .meter("synapse-core")
-            .scope();
+        let meter = provider.meter("synapse-core");
 
         let request_count = meter
             .u64_counter("http_requests_total")
@@ -43,9 +44,14 @@ impl MetricsInstruments {
             .with_description("Total number of errors")
             .init();
 
-        let active_connections = meter
-            .u64_gauge("active_connections")
+        let active_connections = Arc::new(AtomicU64::new(0));
+        let active_connections_observed = active_connections.clone();
+        let active_connections_gauge = meter
+            .u64_observable_gauge("active_connections")
             .with_description("Number of active connections")
+            .with_callback(move |observer| {
+                observer.observe(active_connections_observed.load(Ordering::Relaxed), &[]);
+            })
             .init();
 
         let request_latency_ms = meter
@@ -62,6 +68,7 @@ impl MetricsInstruments {
             request_count,
             error_count,
             active_connections,
+            _active_connections_gauge: active_connections_gauge,
             request_latency_ms,
             items_processed,
         })
@@ -70,26 +77,38 @@ impl MetricsInstruments {
     /// Record a request metric (operation already pre-computed, not dynamic).
     pub fn record_request(&self, operation: &str, latency_ms: u64) {
         // Instruments are already initialized; no allocation here
-        self.request_count.add(1, &[
-            opentelemetry::KeyValue::new("operation", operation.to_string()),
-        ]);
+        self.request_count.add(
+            1,
+            &[opentelemetry::KeyValue::new(
+                "operation",
+                operation.to_string(),
+            )],
+        );
 
-        self.request_latency_ms.record(latency_ms, &[
-            opentelemetry::KeyValue::new("operation", operation.to_string()),
-        ]);
+        self.request_latency_ms.record(
+            latency_ms,
+            &[opentelemetry::KeyValue::new(
+                "operation",
+                operation.to_string(),
+            )],
+        );
     }
 
     /// Record an error metric (error type already pre-validated).
     pub fn record_error(&self, error_type: &str) {
         // No allocation; bounded cardinality via pre-validated error_type
-        self.error_count.add(1, &[
-            opentelemetry::KeyValue::new("error_type", error_type.to_string()),
-        ]);
+        self.error_count.add(
+            1,
+            &[opentelemetry::KeyValue::new(
+                "error_type",
+                error_type.to_string(),
+            )],
+        );
     }
 
     /// Update active connection count (idempotent, no repeat creation).
     pub fn set_active_connections(&self, count: u64) {
-        self.active_connections.record(count, &[]);
+        self.active_connections.store(count, Ordering::Relaxed);
     }
 
     /// Record items processed (pre-batched counter increment).
@@ -144,9 +163,7 @@ impl CardinalityLimiter {
 /// Instead of exporting metrics synchronously on every request,
 /// spawn a background task to periodically flush metrics to avoid
 /// blocking the request handler.
-pub async fn spawn_background_metrics_export(
-    _export_interval_secs: u64,
-) -> Result<(), String> {
+pub async fn spawn_background_metrics_export(_export_interval_secs: u64) -> Result<(), String> {
     // In a real implementation, this would spawn a background task
     // that periodically calls the exporter's flush method.
     // For now, this is a placeholder that shows the pattern.

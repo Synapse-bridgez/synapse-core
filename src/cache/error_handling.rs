@@ -3,8 +3,6 @@
 //! Provides structured error types for Redis cache operations with support for
 //! distinguishing between cache misses (not an error) and actual errors.
 
-use std::fmt;
-
 /// Errors that can occur during cache operations
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -39,9 +37,7 @@ pub type CacheResult<T> = Result<T, CacheError>;
 /// Converts redis::RedisError to CacheError with appropriate handling
 pub fn convert_redis_error(error: redis::RedisError) -> CacheError {
     match error.kind() {
-        redis::ErrorKind::IoError => {
-            CacheError::ConnectionFailed(format!("I/O error: {}", error))
-        }
+        redis::ErrorKind::IoError => CacheError::ConnectionFailed(format!("I/O error: {}", error)),
         redis::ErrorKind::TypeError => {
             if error.to_string().contains("deserialization") {
                 CacheError::SerializationError(error.to_string())

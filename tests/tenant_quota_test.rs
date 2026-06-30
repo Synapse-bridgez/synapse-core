@@ -1,3 +1,4 @@
+use redis::AsyncCommands;
 /// Tests for #271 — Tenant-Specific Rate Limiting and Quota Management
 ///
 /// Validates:
@@ -113,4 +114,30 @@ async fn test_quota_reset_clears_usage() {
 
     let after = mgr.check_quota_with_limit(&k, 10).await.unwrap();
     assert_eq!(after.used, 0, "usage should be 0 after reset");
+}
+
+#[tokio::test]
+#[ignore = "Requires Redis"]
+async fn test_new_counter_always_has_a_ttl() {
+    let mgr = make_manager();
+    let k = key("atomic_ttl");
+
+    // Reproduce the state left by the former INCR-then-EXPIRE race: a usage
+    // counter exists but the process died before assigning its expiry.
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let usage_key = format!("quota:usage:{k}");
+    let _: () = conn.set(&usage_key, 1_u32).await.unwrap();
+    let ttl_before: i64 = conn.ttl(&usage_key).await.unwrap();
+    assert_eq!(ttl_before, -1, "test setup must create a TTL-less counter");
+
+    assert!(mgr.consume_quota_with_window(&k, 10, 60).await.unwrap());
+
+    let status = mgr.check_quota_with_limit(&k, 10).await.unwrap();
+    assert!(
+        status.reset_in_seconds > 0 && status.reset_in_seconds <= 60,
+        "the atomic increment must never leave a counter without a TTL"
+    );
 }

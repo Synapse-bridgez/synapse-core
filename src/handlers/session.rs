@@ -5,8 +5,8 @@
 
 use axum::{
     async_trait,
-    extract::{FromRequest, Request},
-    http::{HeaderMap, StatusCode},
+    extract::FromRequest,
+    http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
 use redis::aio::ConnectionManager;
@@ -88,15 +88,18 @@ impl SessionManager {
         };
 
         let key = format!("{}{}", SESSION_PREFIX, session_id);
-        let ttl = self.config.expiry.as_secs() as usize;
+        // Redis rejects an `EX` of 0, so floor the TTL at 1 second. Sub-second
+        // expiries (used in tests) are still enforced via `expires_at`/`is_expired`.
+        let ttl = (self.config.expiry.as_secs() as usize).max(1);
 
-        let serialized = serde_json::to_string(&session)
-            .map_err(|_| SessionError::SerializationError)?;
+        let serialized =
+            serde_json::to_string(&session).map_err(|_| SessionError::SerializationError)?;
 
         redis::cmd("SET")
             .arg(&key)
             .arg(&serialized)
-            .expire(ttl)
+            .arg("EX")
+            .arg(ttl)
             .query_async::<_, ()>(&mut self.redis.clone())
             .await
             .map_err(|_| SessionError::RedisError)?;
@@ -118,8 +121,8 @@ impl SessionManager {
             .map_err(|_| SessionError::RedisError)?;
 
         let serialized = value.ok_or(SessionError::NotFound)?;
-        let session: Session = serde_json::from_str(&serialized)
-            .map_err(|_| SessionError::DeserializationError)?;
+        let session: Session =
+            serde_json::from_str(&serialized).map_err(|_| SessionError::DeserializationError)?;
 
         if session.is_expired() {
             return Err(SessionError::Expired);
@@ -166,18 +169,14 @@ impl IntoResponse for SessionError {
             SessionError::NotFound | SessionError::Expired => {
                 (StatusCode::UNAUTHORIZED, "Invalid or expired session")
             }
-            SessionError::MissingHeader => {
-                (StatusCode::UNAUTHORIZED, "Missing session ID header")
-            }
+            SessionError::MissingHeader => (StatusCode::UNAUTHORIZED, "Missing session ID header"),
             SessionError::RedisError => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Session service error")
             }
             SessionError::SerializationError | SessionError::DeserializationError => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Session data error")
             }
-            SessionError::SystemTime => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "System time error")
-            }
+            SessionError::SystemTime => (StatusCode::INTERNAL_SERVER_ERROR, "System time error"),
         };
 
         tracing::warn!("Session error: {:?}", self);
@@ -194,14 +193,14 @@ pub struct SessionContext {
 }
 
 #[async_trait]
-impl<S> FromRequest<S> for SessionContext
+impl<S, B> FromRequest<S, B> for SessionContext
 where
     S: Send + Sync + 'static,
-    crate::AppState: FromRequest<S, Rejection = std::convert::Infallible>,
+    B: Send + 'static,
 {
     type Rejection = SessionError;
 
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request<B>, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = req.headers();
 
         // Extract session ID from header.
@@ -210,17 +209,14 @@ where
             .and_then(|h| h.to_str().ok())
             .ok_or(SessionError::MissingHeader)?;
 
-        let session_id = Uuid::parse_str(session_id_str)
-            .map_err(|_| SessionError::NotFound)?;
+        let session_id = Uuid::parse_str(session_id_str).map_err(|_| SessionError::NotFound)?;
 
         // Create a session manager (in a real app, this would come from AppState).
         // For now, we'll create a temporary one for this test.
         // In production, SessionManager should be part of AppState.
         let redis_url = "redis://localhost:6379";
-        let client = redis::Client::open(redis_url)
-            .map_err(|_| SessionError::RedisError)?;
-        let manager = client
-            .get_connection_manager()
+        let client = redis::Client::open(redis_url).map_err(|_| SessionError::RedisError)?;
+        let manager = ConnectionManager::new(client)
             .await
             .map_err(|_| SessionError::RedisError)?;
 
@@ -236,11 +232,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderMap;
 
     #[tokio::test]
+    #[ignore = "requires a running Redis instance"]
     async fn test_session_creation() {
         let client = redis::Client::open("redis://localhost:6379").unwrap();
-        let manager = client.get_connection_manager().await.unwrap();
+        let manager = ConnectionManager::new(client).await.unwrap();
         let session_mgr = SessionManager::new(manager, SessionConfig::default());
 
         let session = session_mgr
@@ -253,9 +251,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a running Redis instance"]
     async fn test_session_lookup_succeeds() {
         let client = redis::Client::open("redis://localhost:6379").unwrap();
-        let manager = client.get_connection_manager().await.unwrap();
+        let manager = ConnectionManager::new(client).await.unwrap();
         let session_mgr = SessionManager::new(manager, SessionConfig::default());
 
         let created = session_mgr
@@ -269,9 +268,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a running Redis instance"]
     async fn test_expired_session_returns_error() {
         let client = redis::Client::open("redis://localhost:6379").unwrap();
-        let manager = client.get_connection_manager().await.unwrap();
+        let manager = ConnectionManager::new(client).await.unwrap();
 
         let config = SessionConfig {
             expiry: Duration::from_millis(1),
@@ -290,9 +290,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a running Redis instance"]
     async fn test_invalidated_session_returns_not_found() {
         let client = redis::Client::open("redis://localhost:6379").unwrap();
-        let manager = client.get_connection_manager().await.unwrap();
+        let manager = ConnectionManager::new(client).await.unwrap();
         let session_mgr = SessionManager::new(manager, SessionConfig::default());
 
         let session = session_mgr

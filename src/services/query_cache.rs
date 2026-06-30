@@ -67,6 +67,16 @@ pub struct QueryCache {
     lru: Arc<Mutex<LruCache<String, String>>>,
 }
 
+impl std::fmt::Debug for QueryCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryCache")
+            .field("pool_config", &self.pool_config)
+            .field("hits", &self.hits)
+            .field("misses", &self.misses)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheConfig {
     pub status_counts_ttl: u64,
@@ -304,7 +314,9 @@ impl QueryCache {
     pub async fn health_check(&self) -> Result<(), redis::RedisError> {
         // OPT: Use pooled connection for health check
         let mut conn = self.pool.clone();
-        redis::cmd("PING").query_async::<_, String>(&mut conn).await?;
+        redis::cmd("PING")
+            .query_async::<_, String>(&mut conn)
+            .await?;
         Ok(())
     }
 
@@ -448,12 +460,10 @@ mod tests {
         };
         let result = cache.get::<String>("invalid key").await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("cache validation failed")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cache validation failed"));
     }
 
     #[tokio::test]

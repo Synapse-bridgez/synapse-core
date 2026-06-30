@@ -125,16 +125,12 @@ impl WebSocketMetrics {
 
     /// Gets the time since last connection
     pub fn time_since_last_connection(&self) -> Option<Duration> {
-        self.last_connection_time
-            .lock()
-            .map(|t| t.elapsed())
+        self.last_connection_time.lock().map(|t| t.elapsed())
     }
 
     /// Gets the time since last message
     pub fn time_since_last_message(&self) -> Option<Duration> {
-        self.last_message_time
-            .lock()
-            .map(|t| t.elapsed())
+        self.last_message_time.lock().map(|t| t.elapsed())
     }
 
     /// Calculates the error rate as a percentage (0-100)
@@ -257,7 +253,7 @@ mod tests {
         metrics.record_message_sent(100);
         metrics.record_message_received(50);
         metrics.record_disconnection();
-        
+
         assert_eq!(metrics.total_connections(), 1);
         assert_eq!(metrics.active_connections(), 0);
         assert_eq!(metrics.messages_sent(), 1);
@@ -270,7 +266,7 @@ mod tests {
         metrics.record_message_sent(100);
         metrics.record_message_error();
         metrics.record_message_received(50);
-        
+
         // 1 error / 2 messages = 50%
         assert_eq!(metrics.error_rate(), 50.0);
     }
@@ -286,7 +282,7 @@ mod tests {
         let metrics = WebSocketMetrics::new();
         metrics.record_message_sent(100);
         metrics.record_message_received(50);
-        
+
         // (100 + 50) / 2 = 75
         assert_eq!(metrics.average_message_size(), 75.0);
     }
@@ -301,7 +297,7 @@ mod tests {
     fn test_time_since_last_connection() {
         let metrics = WebSocketMetrics::new();
         assert!(metrics.time_since_last_connection().is_none());
-        
+
         metrics.record_connection();
         let elapsed = metrics.time_since_last_connection();
         assert!(elapsed.is_some());
@@ -312,7 +308,7 @@ mod tests {
     fn test_time_since_last_message() {
         let metrics = WebSocketMetrics::new();
         assert!(metrics.time_since_last_message().is_none());
-        
+
         metrics.record_message_sent(100);
         let elapsed = metrics.time_since_last_message();
         assert!(elapsed.is_some());
@@ -325,9 +321,9 @@ mod tests {
         metrics.record_connection();
         metrics.record_message_sent(100);
         metrics.record_connection_error();
-        
+
         metrics.reset();
-        
+
         assert_eq!(metrics.total_connections(), 0);
         assert_eq!(metrics.active_connections(), 0);
         assert_eq!(metrics.messages_sent(), 0);
@@ -341,11 +337,11 @@ mod tests {
         let metrics = WebSocketMetrics::new();
         metrics.record_connection();
         metrics.record_message_sent(100);
-        
+
         let cloned = metrics.clone();
         assert_eq!(cloned.total_connections(), 1);
         assert_eq!(cloned.messages_sent(), 1);
-        
+
         cloned.record_message_received(50);
         assert_eq!(metrics.messages_received(), 1);
     }
@@ -354,7 +350,7 @@ mod tests {
     fn test_concurrent_updates() {
         let metrics = Arc::new(WebSocketMetrics::new());
         let mut handles = vec![];
-        
+
         for _ in 0..10 {
             let metrics_clone = Arc::clone(&metrics);
             let handle = std::thread::spawn(move || {
@@ -364,11 +360,11 @@ mod tests {
             });
             handles.push(handle);
         }
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         assert_eq!(metrics.total_connections(), 10);
         assert_eq!(metrics.messages_sent(), 10);
         assert_eq!(metrics.messages_received(), 10);
@@ -380,7 +376,7 @@ mod tests {
         metrics.record_message_sent(100);
         metrics.record_message_sent(50);
         metrics.record_message_received(75);
-        
+
         assert_eq!(metrics.bytes_sent(), 150);
         assert_eq!(metrics.bytes_received(), 75);
     }
@@ -391,7 +387,7 @@ mod tests {
         metrics.record_connection_error();
         metrics.record_connection_error();
         metrics.record_message_error();
-        
+
         assert_eq!(metrics.connection_errors(), 2);
         assert_eq!(metrics.message_errors(), 1);
     }

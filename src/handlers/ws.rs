@@ -15,9 +15,8 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::health::DependencySeverity;
 
-use crate::handlers::ws_error::{validate_ws_token, validate_message_size, validate_message_structure};
+use crate::handlers::ws_error::{validate_message_size, validate_ws_token};
 
 /// How often to send a ping frame to the client.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -300,6 +299,7 @@ async fn handle_client_message(
 
 // ── Token validation ─────────────────────────────────────────────────────────
 
+#[cfg(test)]
 fn validate_token(token: &str) -> bool {
     !token.is_empty()
 }
@@ -307,6 +307,7 @@ fn validate_token(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::health::DependencySeverity;
 
     #[test]
     fn test_validate_token_empty() {

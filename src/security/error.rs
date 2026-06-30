@@ -107,6 +107,9 @@ mod tests {
     #[test]
     fn session_validation_display_includes_inner() {
         let e = SecurityError::SessionValidation(SessionValidationError::Expired);
-        assert!(e.to_string().contains("expired") || e.to_string().contains("Session validation failed"));
+        assert!(
+            e.to_string().contains("expired")
+                || e.to_string().contains("Session validation failed")
+        );
     }
 }

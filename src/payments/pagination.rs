@@ -1,9 +1,9 @@
 //! Pagination support for payments queries with caching and optimization.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Configuration for pagination caching.

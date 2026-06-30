@@ -223,10 +223,10 @@ mod tests {
     #[test]
     fn test_no_sensitive_data_in_invalid_credentials_display() {
         let sensitive_values = vec![
-            "sk_live_abcd1234",        // API key-like
-            "eyJhbGc...",              // JWT-like
-            "password123!@#",          // Password-like
-            "$2b$12$...",              // Hash-like
+            "sk_live_abcd1234", // API key-like
+            "eyJhbGc...",       // JWT-like
+            "password123!@#",   // Password-like
+            "$2b$12$...",       // Hash-like
         ];
 
         for value in sensitive_values {
@@ -296,7 +296,11 @@ mod tests {
         let mut unique_codes = codes.clone();
         unique_codes.sort();
         unique_codes.dedup();
-        assert_eq!(unique_codes.len(), codes.len(), "Error codes should be unique");
+        assert_eq!(
+            unique_codes.len(),
+            codes.len(),
+            "Error codes should be unique"
+        );
     }
 
     // --- Retryability Tests ---

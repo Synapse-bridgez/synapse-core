@@ -47,10 +47,7 @@ pub fn validate_pagination(
     config: &ApiPaginationConfig,
 ) -> Result<(), (StatusCode, String)> {
     if query.page < 1 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "page must be >= 1".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "page must be >= 1".to_string()));
     }
 
     if query.page_size < 1 {
@@ -140,12 +137,12 @@ impl PaginationHelper {
 
     /// Calculate the total number of pages for a given total count.
     pub fn total_pages(&self, total: u64) -> u32 {
-        ((total + self.page_size as u64 - 1) / self.page_size as u64) as u32
+        total.div_ceil(self.page_size as u64) as u32
     }
 
-    /// Check if the current page is beyond the available data.
+    /// Check if the current page extends past the available data.
     pub fn is_beyond_total(&self, total: u64) -> bool {
-        self.offset() as u64 >= total
+        self.offset() as u64 + self.page_size as u64 > total
     }
 }
 

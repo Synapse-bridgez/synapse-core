@@ -25,6 +25,10 @@ pub enum Commands {
     #[command(subcommand)]
     Tx(TxCommands),
 
+    /// Settlement management commands
+    #[command(subcommand)]
+    Settlements(SettlementsCommands),
+
     /// Database management commands
     #[command(subcommand)]
     Db(DbCommands),
@@ -70,6 +74,88 @@ pub enum TxCommands {
         tx_id: Uuid,
     },
 
+    #[command(long_about = "List transactions with cursor-based pagination and optional date filters.
+
+All flags are optional. Cursors are opaque — always use next_cursor from previous response.
+Invalid or expired cursors return an error and must not be retried as-is.
+
+Examples:
+  synapse-core tx list --limit 50
+  synapse-core tx list --from-date 2024-01-01T00:00:00Z --to-date 2024-02-01T00:00:00Z
+  synapse-core tx list --cursor <cursor> --format json")]
+    List {
+        /// Opaque pagination cursor (use next_cursor from previous response)
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Maximum records per page (server default: 25, max: 100)
+        #[arg(long, short = 'l')]
+        limit: Option<i64>,
+
+        /// Inclusive ISO 8601 date range start (e.g., 2024-01-01T00:00:00Z)
+        #[arg(long)]
+        from_date: Option<String>,
+
+        /// Exclusive ISO 8601 date range end (e.g., 2024-02-01T00:00:00Z)
+        #[arg(long)]
+        to_date: Option<String>,
+
+        /// Output format (json or table; default: table)
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    #[command(long_about = "Search transactions by filter, returning a single page of matches.
+
+All filters are optional — omit a field to leave that dimension unfiltered.
+A search with no matches returns total=0 and empty results, not an error.
+
+Examples:
+  synapse-core tx search --status completed --asset-code USD
+  synapse-core tx search --min-amount 10.00 --max-amount 500.00
+  synapse-core tx search --stellar-account GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJIIAY3XDBKWV3UYSI7IFYWU4")]
+    Search {
+        /// Exact transaction status (e.g., pending, completed)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Exact asset code (e.g., USD)
+        #[arg(long)]
+        asset_code: Option<String>,
+
+        /// Inclusive minimum amount as decimal (e.g., 10.00)
+        #[arg(long)]
+        min_amount: Option<String>,
+
+        /// Inclusive maximum amount as decimal (e.g., 500.00)
+        #[arg(long)]
+        max_amount: Option<String>,
+
+        /// Inclusive RFC 3339 range start (e.g., 2024-01-01T00:00:00Z)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Exclusive RFC 3339 range end (e.g., 2024-02-01T00:00:00Z)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Exact Stellar account to filter by
+        #[arg(long)]
+        stellar_account: Option<String>,
+
+        /// Opaque pagination cursor (use next_cursor from previous response)
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Maximum records per page (server default: 25, max: 100)
+        #[arg(long, short = 'l')]
+        limit: Option<i64>,
+
+        /// Output format (json or table; default: table)
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
     /// Run reconciliation report
     Reconcile {
         /// Stellar account to reconcile
@@ -86,6 +172,100 @@ pub enum TxCommands {
 
         /// Output format (json or text)
         #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Search transactions by filters
+    ///
+    /// Search for transactions using optional filters like status, asset code, amount range,
+    /// date range, and Stellar account. Results are paginated with cursor-based navigation.
+    ///
+    /// # Examples
+    ///
+    /// Search all pending transactions:
+    /// ```sh
+    /// synapse-core tx search --status pending
+    /// ```
+    ///
+    /// Search completed USD transactions with amount between 100 and 500:
+    /// ```sh
+    /// synapse-core tx search --status completed --asset-code USD --min-amount 100.00 --max-amount 500.00
+    /// ```
+    ///
+    /// Search transactions in a date range:
+    /// ```sh
+    /// synapse-core tx search --from 2024-01-01T00:00:00Z --to 2024-01-31T23:59:59Z
+    /// ```
+    ///
+    /// Get results as JSON:
+    /// ```sh
+    /// synapse-core tx search --status completed --format json
+    /// ```
+    ///
+    /// Use pagination cursor for next page:
+    /// ```sh
+    /// synapse-core tx search --cursor <cursor-from-previous-response>
+    /// ```
+    Search {
+        /// Transaction status (pending, processing, completed, failed)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Asset code (e.g., USD)
+        #[arg(long)]
+        asset_code: Option<String>,
+
+        /// Minimum amount (inclusive)
+        #[arg(long)]
+        min_amount: Option<String>,
+
+        /// Maximum amount (inclusive)
+        #[arg(long)]
+        max_amount: Option<String>,
+
+        /// Start date (ISO 8601 format, inclusive)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (ISO 8601 format, exclusive)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Stellar account to filter by
+        #[arg(long)]
+        stellar_account: Option<String>,
+
+        /// Pagination cursor
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Maximum records per page
+        #[arg(long, default_value = "25")]
+        limit: i64,
+
+        /// Output format (json or table)
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SettlementsCommands {
+    /// List all settlements
+    List {
+        /// Output format (json or table)
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Get a specific settlement by ID
+    Get {
+        /// Settlement UUID
+        #[arg(value_name = "SETTLEMENT_ID")]
+        id: String,
+
+        /// Output format (json or table)
+        #[arg(long, default_value = "table")]
         format: String,
     },
 }
@@ -986,5 +1166,149 @@ mod tests {
         let result = handle_stats_cache(&server.url(), true).await;
         mock.assert_async().await;
         assert!(result.is_ok());
+pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+    let params = synapse_sdk::ListParams::default();
+
+    match client.settlements().list(params).await {
+        Ok(response) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&response)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!("{:<36} {:<12} {:<15} {:<10}", "ID", "Status", "Total Amount", "Tx Count");
+                    println!("{}", "-".repeat(73));
+                    for settlement in &response.settlements {
+                        println!(
+                            "{:<36} {:<12} {:<15} {:<10}",
+                            settlement.id, settlement.status, settlement.total_amount, settlement.tx_count
+                        );
+                    }
+                    if response.has_more {
+                        println!("\n✓ {} settlements (more available)", response.settlements.len());
+                    } else {
+                        println!("\n✓ {} settlements", response.settlements.len());
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to list settlements: {}", e);
+            anyhow::bail!("Failed to list settlements: {}", e)
+        }
+    }
+}
+
+pub async fn handle_settlements_get(config: &Config, id: &str, format: &str) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+
+    match client.settlements().get(id).await {
+        Ok(settlement) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&settlement)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!("ID:                    {}", settlement.id);
+                    println!("Asset Code:            {}", settlement.asset_code);
+                    println!("Total Amount:          {}", settlement.total_amount);
+                    println!("Transaction Count:     {}", settlement.tx_count);
+                    println!("Status:                {}", settlement.status);
+                    println!("Period Start:          {}", settlement.period_start);
+                    println!("Period End:            {}", settlement.period_end);
+                    println!("Created At:            {}", settlement.created_at);
+                    println!("Updated At:            {}", settlement.updated_at);
+                    if let Some(reason) = settlement.dispute_reason {
+                        println!("Dispute Reason:        {}", reason);
+                    }
+                    if let Some(amount) = settlement.original_total_amount {
+                        println!("Original Total Amount: {}", amount);
+                    }
+                    if let Some(reviewer) = settlement.reviewed_by {
+                        println!("Reviewed By:           {}", reviewer);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(synapse_sdk::SynapseError::Http { status: 404, body }) => {
+            tracing::warn!("Settlement {} not found: {}", id, body);
+            anyhow::bail!("Settlement {} not found", id)
+        }
+        Err(e) => {
+            tracing::error!("Failed to get settlement: {}", e);
+            anyhow::bail!("Failed to get settlement: {}", e)
+        }
+    }
+}
+
+pub async fn handle_tx_search(
+    config: &Config,
+    status: Option<String>,
+    asset_code: Option<String>,
+    min_amount: Option<String>,
+    max_amount: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    stellar_account: Option<String>,
+    cursor: Option<String>,
+    limit: i64,
+    format: &str,
+) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+    let params = synapse_sdk::SearchParams {
+        status,
+        asset_code,
+        min_amount,
+        max_amount,
+        from,
+        to,
+        stellar_account,
+        cursor,
+        limit: Some(limit),
+    };
+
+    match client.transactions().search(params).await {
+        Ok(response) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&response)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!("{:<36} {:<12} {:<12} {:<15}", "ID", "Status", "Asset", "Amount");
+                    println!("{}", "-".repeat(75));
+                    for tx in &response.results {
+                        println!(
+                            "{:<36} {:<12} {:<12} {:<15}",
+                            tx.id, tx.status, tx.asset_code, tx.amount
+                        );
+                    }
+                    println!("\n✓ {} results (total: {}", response.results.len(), response.total);
+                    if response.next_cursor.is_some() {
+                        println!("  Use --cursor {} for next page", response.next_cursor.as_ref().unwrap());
+                    }
+                    println!();
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to search transactions: {}", e);
+            anyhow::bail!("Failed to search transactions: {}", e)
+        }
     }
 }

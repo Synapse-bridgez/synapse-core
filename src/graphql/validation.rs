@@ -5,14 +5,8 @@ use regex::Regex;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
-/// Maximum length for string fields
-const MAX_STRING_LENGTH: usize = 255;
-
 /// Maximum length for asset codes
 const MAX_ASSET_CODE_LENGTH: usize = 12;
-
-/// Maximum length for Stellar account IDs
-const MAX_STELLAR_ACCOUNT_LENGTH: usize = 56;
 
 /// Minimum length for Stellar account IDs
 const MIN_STELLAR_ACCOUNT_LENGTH: usize = 56;
@@ -20,17 +14,13 @@ const MIN_STELLAR_ACCOUNT_LENGTH: usize = 56;
 /// Cached regex for alphanumeric validation
 fn alphanumeric_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r"^[a-zA-Z0-9_\-\.]+$").expect("Invalid regex pattern")
-    })
+    PATTERN.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_\-\.]+$").expect("Invalid regex pattern"))
 }
 
 /// Cached regex for Stellar account validation (public key format)
 fn stellar_account_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r"^[G][A-Z0-9]{55}$").expect("Invalid regex pattern")
-    })
+    PATTERN.get_or_init(|| Regex::new(r"^[G][A-Z0-9]{55}$").expect("Invalid regex pattern"))
 }
 
 /// Validates a string field for length and allowed characters.
@@ -47,7 +37,11 @@ fn stellar_account_pattern() -> &'static Regex {
 /// # Security
 /// - Enforces maximum length to prevent DoS attacks
 /// - Validates character set to prevent injection attacks
-pub fn validate_string_field(field_name: &str, value: &str, max_length: usize) -> Result<(), String> {
+pub fn validate_string_field(
+    field_name: &str,
+    value: &str,
+    max_length: usize,
+) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("{} cannot be empty", field_name));
     }
@@ -86,7 +80,10 @@ pub fn validate_asset_code(asset_code: &str) -> Result<(), String> {
         ));
     }
 
-    if !asset_code.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !asset_code
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Asset code contains invalid characters".to_string());
     }
 
@@ -243,7 +240,10 @@ mod tests {
 
     #[test]
     fn test_stellar_account_invalid_format() {
-        assert!(validate_stellar_account("XAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").is_err());
+        assert!(validate_stellar_account(
+            "XAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )
+        .is_err());
     }
 
     #[test]

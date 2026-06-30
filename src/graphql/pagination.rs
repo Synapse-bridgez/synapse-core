@@ -111,7 +111,7 @@
 //!
 //! ## Example Implementation
 //!
-//! ```rust
+//! ```text
 //! use async_graphql::{InputObject, Object, Result};
 //!
 //! #[derive(InputObject)]

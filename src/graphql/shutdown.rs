@@ -86,10 +86,7 @@ impl ShutdownHandler {
 
         match timeout(self.config.drain_timeout, self.wait_for_drain()).await {
             Ok(Ok(drained_count)) => {
-                tracing::info!(
-                    count = drained_count,
-                    "Subscriptions drained successfully"
-                );
+                tracing::info!(count = drained_count, "Subscriptions drained successfully");
                 Ok(())
             }
             Ok(Err(e)) => {

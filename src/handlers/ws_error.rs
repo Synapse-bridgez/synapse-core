@@ -1,8 +1,8 @@
-/// Secure error handling for WebSocket connections
-/// 
-/// This module provides validation and security checks for WebSocket error handling,
-/// ensuring that sensitive information is not leaked to clients and that all errors
-/// are properly logged and categorized.
+//! Secure error handling for WebSocket connections
+//!
+//! This module provides validation and security checks for WebSocket error handling,
+//! ensuring that sensitive information is not leaked to clients and that all errors
+//! are properly logged and categorized.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -42,7 +42,7 @@ impl fmt::Display for WsError {
 
 impl WsError {
     /// Get the client-safe error message
-    /// 
+    ///
     /// Returns a message that is safe to send to the client without leaking
     /// sensitive information about the system.
     pub fn client_message(&self) -> &'static str {
@@ -73,7 +73,7 @@ impl WsError {
 }
 
 /// Validates WebSocket token format
-/// 
+///
 /// # Security
 /// - Rejects empty tokens
 /// - Rejects tokens with suspicious patterns
@@ -98,7 +98,7 @@ pub fn validate_ws_token(token: &str) -> Result<(), WsError> {
 }
 
 /// Validates client message size to prevent DoS attacks
-/// 
+///
 /// # Security
 /// - Enforces maximum message size
 /// - Prevents memory exhaustion attacks
@@ -113,7 +113,7 @@ pub fn validate_message_size(message: &str) -> Result<(), WsError> {
 }
 
 /// Validates JSON message structure
-/// 
+///
 /// # Security
 /// - Ensures message is valid JSON
 /// - Prevents malformed message attacks
@@ -122,7 +122,7 @@ pub fn validate_message_structure(message: &str) -> Result<serde_json::Value, Ws
 }
 
 /// Validates resync limit parameter
-/// 
+///
 /// # Security
 /// - Enforces minimum limit (prevents empty results)
 /// - Enforces maximum limit (prevents resource exhaustion)
@@ -132,7 +132,7 @@ pub fn validate_resync_limit(limit: Option<i64>) -> Result<i64, WsError> {
 
     let limit = limit.unwrap_or(20);
 
-    if limit < MIN_LIMIT || limit > MAX_LIMIT {
+    if !(MIN_LIMIT..=MAX_LIMIT).contains(&limit) {
         return Err(WsError::InvalidMessageFormat);
     }
 

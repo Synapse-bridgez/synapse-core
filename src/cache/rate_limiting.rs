@@ -25,7 +25,7 @@ use std::time::Duration;
 /// # Example
 ///
 /// ```
-/// use cache::rate_limiting::{RateLimitConfig, RateLimitStrategy};
+/// use synapse_core::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy};
 /// use std::time::Duration;
 ///
 /// let config = RateLimitConfig {
@@ -184,7 +184,12 @@ impl RateLimiter {
             if self
                 .inner
                 .tokens
-                .compare_exchange(current, current - count, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(
+                    current,
+                    current - count,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
                 self.inner.acquired.fetch_add(1, Ordering::Relaxed);
@@ -212,7 +217,8 @@ impl RateLimiter {
         if self.available_tokens() > 0 {
             return Some(Duration::ZERO);
         }
-        let elapsed_ms = epoch_ms().saturating_sub(self.inner.last_refill_ms.load(Ordering::Acquire));
+        let elapsed_ms =
+            epoch_ms().saturating_sub(self.inner.last_refill_ms.load(Ordering::Acquire));
         let window_ms = self.config.window.as_millis() as u64;
         let remaining_ms = window_ms.saturating_sub(elapsed_ms);
         Some(Duration::from_millis(remaining_ms))
@@ -229,17 +235,12 @@ impl RateLimiter {
 
     /// Resets the rate limiter to a full token bucket.
     pub fn reset(&self) {
-        self.inner.tokens.store(self.config.max_requests, Ordering::Release);
-        self.inner.last_refill_ms.store(epoch_ms(), Ordering::Release);
-    }
-
-    /// Returns a snapshot of the current metrics (acquired, rejected, refill events).
-    pub fn metrics(&self) -> CacheMetrics {
-        CacheMetrics {
-            acquired_requests: self.inner.acquired.load(Ordering::Relaxed),
-            rejected_requests: self.inner.rejected.load(Ordering::Relaxed),
-            refill_events: self.inner.refills.load(Ordering::Relaxed),
-        }
+        self.inner
+            .tokens
+            .store(self.config.max_requests, Ordering::Release);
+        self.inner
+            .last_refill_ms
+            .store(epoch_ms(), Ordering::Release);
     }
 
     fn refill_tokens(&self) {
@@ -255,13 +256,14 @@ impl RateLimiter {
 
         if elapsed_ms >= window_ms {
             // Full window elapsed — reset to max.
-            self.inner.tokens.store(self.config.max_requests, Ordering::Release);
+            self.inner
+                .tokens
+                .store(self.config.max_requests, Ordering::Release);
             self.inner.last_refill_ms.store(now_ms, Ordering::Release);
             self.inner.refills.fetch_add(1, Ordering::Relaxed);
         } else {
             // Partial refill: tokens_to_add = max * elapsed / window (integer, no float).
-            let tokens_to_add =
-                (self.config.max_requests as u64 * elapsed_ms / window_ms) as u32;
+            let tokens_to_add = (self.config.max_requests as u64 * elapsed_ms / window_ms) as u32;
             if tokens_to_add > 0 {
                 let current = self.inner.tokens.load(Ordering::Acquire);
                 let new_val = (current + tokens_to_add).min(self.config.max_requests);
@@ -364,7 +366,7 @@ mod tests {
             window: Duration::from_secs(60),
             strategy: RateLimitStrategy::TokenBucket,
         };
-        let mut limiter = RateLimiter::with_config(config);
+        let limiter = RateLimiter::with_config(config);
 
         assert!(limiter.try_acquire());
         assert_eq!(limiter.metrics().acquired_requests(), 1);
@@ -382,7 +384,7 @@ mod tests {
             window: Duration::from_secs(60),
             strategy: RateLimitStrategy::TokenBucket,
         };
-        let mut limiter = RateLimiter::with_config(config);
+        let limiter = RateLimiter::with_config(config);
 
         assert!(limiter.try_acquire_batch(2));
         assert_eq!(limiter.metrics().acquired_requests(), 1);
@@ -400,7 +402,7 @@ mod tests {
             window: Duration::from_secs(1),
             strategy: RateLimitStrategy::TokenBucket,
         };
-        let mut limiter = RateLimiter::with_config(config);
+        let limiter = RateLimiter::with_config(config);
 
         assert!(limiter.try_acquire());
         assert_eq!(limiter.available_tokens(), 0);
@@ -617,7 +619,7 @@ mod tests {
         // Approximately 5 tokens should be refilled (half the window)
         let refilled = limiter.available_tokens();
         assert!(
-            refilled >= 4 && refilled <= 6,
+            (4..=6).contains(&refilled),
             "Expected 5 tokens after 50% window, got {}",
             refilled
         );
@@ -643,12 +645,24 @@ mod tests {
                     i + 1
                 );
             }
-            // After 3 bursts of 30 = 90 requests, 10 tokens remain
-            assert_eq!(limiter.available_tokens(), 10, "Burst {} complete", burst);
+        }
+        // After 3 bursts of 30 = 90 requests, 10 tokens remain
+        assert_eq!(limiter.available_tokens(), 10, "after all bursts");
+
+        // Consume the remaining 10 tokens.
+        for i in 0..10 {
+            assert!(
+                limiter.try_acquire(),
+                "remaining request {} should succeed",
+                i + 1
+            );
         }
 
-        // Should be exhausted
-        assert!(!limiter.try_acquire(), "Should be exhausted after 90 requests");
+        // Should be exhausted after all 100 tokens are spent.
+        assert!(
+            !limiter.try_acquire(),
+            "Should be exhausted after 100 requests"
+        );
     }
 
     #[test]
@@ -665,7 +679,10 @@ mod tests {
         let time_until = limiter.time_until_available().unwrap();
 
         // Should be between 9 and 10 seconds
-        assert!(time_until >= Duration::from_secs(9) && time_until <= Duration::from_secs(10),
-            "time_until_available should report ~10 seconds, got {:?}", time_until);
+        assert!(
+            time_until >= Duration::from_secs(9) && time_until <= Duration::from_secs(10),
+            "time_until_available should report ~10 seconds, got {:?}",
+            time_until
+        );
     }
 }

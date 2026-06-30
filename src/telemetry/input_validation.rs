@@ -34,7 +34,9 @@ impl InputValidator {
     /// Returns error if name is empty, too long, or contains invalid characters
     pub fn validate_span_name(name: &str) -> Result<(), ValidationError> {
         if name.is_empty() {
-            return Err(ValidationError::EmptyValue("span name cannot be empty".into()));
+            return Err(ValidationError::EmptyValue(
+                "span name cannot be empty".into(),
+            ));
         }
 
         if name.len() > MAX_STRING_LENGTH {
@@ -122,7 +124,9 @@ impl InputValidator {
     /// Returns error if endpoint is invalid or potentially malicious
     pub fn validate_endpoint(endpoint: &str) -> Result<(), ValidationError> {
         if endpoint.is_empty() {
-            return Err(ValidationError::EmptyValue("endpoint cannot be empty".into()));
+            return Err(ValidationError::EmptyValue(
+                "endpoint cannot be empty".into(),
+            ));
         }
 
         if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {

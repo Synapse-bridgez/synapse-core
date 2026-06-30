@@ -10,7 +10,7 @@ pub enum ExportFormat {
 
 impl ExportFormat {
     /// Parse from a string slice; defaults to CSV on unknown input.
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_str_or_default(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "json" => ExportFormat::Json,
             _ => ExportFormat::Csv,
@@ -40,6 +40,20 @@ pub struct SettlementExportRow {
 /// Serialize rows to CSV string.
 pub fn to_csv(rows: &[SettlementExportRow]) -> Result<String, String> {
     let mut wtr = csv::Writer::from_writer(vec![]);
+    // The csv writer only emits a header when a record is serialized. Write the
+    // header explicitly for an empty export so the output always carries one.
+    if rows.is_empty() {
+        wtr.write_record([
+            "id",
+            "asset_code",
+            "total_amount",
+            "tx_count",
+            "status",
+            "period_start",
+            "period_end",
+        ])
+        .map_err(|e| e.to_string())?;
+    }
     for row in rows {
         wtr.serialize(row).map_err(|e| e.to_string())?;
     }
@@ -80,10 +94,19 @@ mod tests {
 
     #[test]
     fn test_export_format_from_str() {
-        assert_eq!(ExportFormat::from_str("json"), ExportFormat::Json);
-        assert_eq!(ExportFormat::from_str("JSON"), ExportFormat::Json);
-        assert_eq!(ExportFormat::from_str("csv"), ExportFormat::Csv);
-        assert_eq!(ExportFormat::from_str("unknown"), ExportFormat::Csv);
+        assert_eq!(
+            ExportFormat::from_str_or_default("json"),
+            ExportFormat::Json
+        );
+        assert_eq!(
+            ExportFormat::from_str_or_default("JSON"),
+            ExportFormat::Json
+        );
+        assert_eq!(ExportFormat::from_str_or_default("csv"), ExportFormat::Csv);
+        assert_eq!(
+            ExportFormat::from_str_or_default("unknown"),
+            ExportFormat::Csv
+        );
     }
 
     #[test]

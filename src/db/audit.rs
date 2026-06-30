@@ -300,6 +300,11 @@ pub async fn run_retention(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `AUDIT_LOG_RETENTION_DAYS` is process-wide state; without this lock the
+    // retention_days() tests race against each other under parallel test execution.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_audit_log_creation() {
@@ -326,12 +331,14 @@ mod tests {
 
     #[test]
     fn test_retention_days_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
         assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
     }
 
     #[test]
     fn test_retention_days_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "90");
         assert_eq!(retention_days(), 90);
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
@@ -339,6 +346,7 @@ mod tests {
 
     #[test]
     fn test_retention_days_invalid_env_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "not-a-number");
         assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
@@ -346,6 +354,7 @@ mod tests {
 
     #[test]
     fn test_retention_days_zero_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "0");
         assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");

@@ -223,6 +223,11 @@ fn test_cli_stats_daily_help() {
 fn test_cli_stats_assets_help() {
     let mut cmd = synapse_cmd();
     cmd.arg("stats").arg("assets").arg("--help");
+#[ignore = "Requires Docker/external services"]
+#[test]
+fn test_cli_tx_list_help() {
+    let mut cmd = synapse_cmd();
+    cmd.arg("tx").arg("list").arg("--help");
     cmd.assert().success();
 }
 
@@ -440,4 +445,9 @@ async fn test_handle_graphql_query_rejects_non_object_variables() {
         msg.contains("JSON object"),
         "expected object error, got: {msg}"
     );
+}
+fn test_cli_tx_search_help() {
+    let mut cmd = synapse_cmd();
+    cmd.arg("tx").arg("search").arg("--help");
+    cmd.assert().success();
 }

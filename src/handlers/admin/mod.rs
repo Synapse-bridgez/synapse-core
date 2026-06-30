@@ -119,10 +119,8 @@ pub async fn update_flag(
     Json(payload): Json<UpdateFlagRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Validate flag name: must not be empty and not exceed 255 characters
-    validate_required("name", &name)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    validate_max_len("name", &name, 255)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    validate_required("name", &name).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    validate_max_len("name", &name, 255).map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let flag = state
         .feature_flags

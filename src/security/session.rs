@@ -77,7 +77,10 @@ pub struct SessionRecord {
 /// # Caller responsibility
 /// If validation fails, reject the session creation request and log the error.
 /// Do not attempt to create a session with invalid parameters.
-pub fn validate_session_params(user_id: &str, ttl_seconds: i64) -> Result<(), SessionValidationError> {
+pub fn validate_session_params(
+    user_id: &str,
+    ttl_seconds: i64,
+) -> Result<(), SessionValidationError> {
     if user_id.is_empty() {
         return Err(SessionValidationError::EmptyUserId);
     }

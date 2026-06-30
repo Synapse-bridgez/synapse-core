@@ -4,6 +4,7 @@ use std::fmt;
 
 pub mod schemas;
 pub mod state_machine;
+pub mod state_transitions;
 
 pub const STELLAR_ACCOUNT_LEN: usize = 56;
 pub const ASSET_CODE_MAX_LEN: usize = 12;
@@ -158,12 +159,7 @@ pub fn validate_positive_amount(amount: &BigDecimal) -> ValidationResult {
     Ok(())
 }
 
-pub fn validate_range(
-    field: &'static str,
-    value: i64,
-    min: i64,
-    max: i64,
-) -> ValidationResult {
+pub fn validate_range(field: &'static str, value: i64, min: i64, max: i64) -> ValidationResult {
     if value < min || value > max {
         return Err(ValidationError::new(
             field,

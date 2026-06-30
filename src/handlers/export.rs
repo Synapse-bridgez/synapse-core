@@ -58,15 +58,11 @@ impl ExportQuery {
         }
 
         if let Some(ref from) = self.from {
-            parse_date(from)
-                .map(|_| ())
-                .map_err(|msg| AppError::Validation(msg))?;
+            parse_date(from).map(|_| ()).map_err(AppError::Validation)?;
         }
 
         if let Some(ref to) = self.to {
-            parse_date(to)
-                .map(|_| ())
-                .map_err(|msg| AppError::Validation(msg))?;
+            parse_date(to).map(|_| ()).map_err(AppError::Validation)?;
         }
 
         Ok(())
@@ -292,7 +288,7 @@ fn create_csv_stream(
                             memo: row.get("memo"),
                             memo_type: row.get("memo_type"),
                             metadata: row.get("metadata"),
-                            tenant_id: None,
+                            trace_id: None,
                         };
 
                         last_id = Some(tx.id);
@@ -389,7 +385,7 @@ fn create_json_stream(
                             memo: row.get("memo"),
                             memo_type: row.get("memo_type"),
                             metadata: row.get("metadata"),
-                            tenant_id: None,
+                            trace_id: None,
                         };
 
                         last_id = Some(tx.id);
@@ -553,7 +549,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
-            tenant_id: None,
+            trace_id: None,
         };
 
         let csv_row = TransactionCsvRow::from(&tx);
@@ -581,7 +577,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
-            tenant_id: None,
+            trace_id: None,
         };
 
         let json_row = TransactionJsonRow::from(&tx);
@@ -694,7 +690,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
-            tenant_id: None,
+            trace_id: None,
         };
 
         let row = TransactionCsvRow::from(&tx);
@@ -723,7 +719,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
-            tenant_id: None,
+            trace_id: None,
         };
 
         let row = TransactionJsonRow::from(&tx);
@@ -753,7 +749,7 @@ mod tests {
             memo: None,
             memo_type: None,
             metadata: None,
-            tenant_id: None,
+            trace_id: None,
         };
 
         let row = TransactionCsvRow::from(&tx);

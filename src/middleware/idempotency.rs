@@ -111,6 +111,16 @@ pub struct CachedResponse {
     pub status: u16,
     pub body: String,
     pub content_type: Option<String>,
+    #[serde(default)]
+    pub encoding: BodyEncoding,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyEncoding {
+    #[default]
+    Utf8,
+    Base64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,7 +131,7 @@ pub struct IdempotencyKey {
 
 #[derive(Debug)]
 pub enum IdempotencyStatus {
-    New,
+    New { lock_token: Option<String> },
     Processing,
     Completed(CachedResponse),
 }
@@ -131,6 +141,8 @@ pub enum IdempotencyStatus {
 struct LockValue {
     instance_id: String,
     locked_at: u64,
+    #[serde(default)]
+    token: String,
 }
 
 fn _cache_key(tenant_id: &str, key: &str) -> String {
@@ -141,7 +153,7 @@ fn _lock_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:lock:{tenant_id}:{key}")
 }
 
-fn _lock_value() -> String {
+fn _lock_value(token: &str) -> String {
     let instance_id =
         std::env::var("INSTANCE_ID").unwrap_or_else(|_| std::process::id().to_string());
     let locked_at = std::time::SystemTime::now()
@@ -151,8 +163,9 @@ fn _lock_value() -> String {
     serde_json::to_string(&LockValue {
         instance_id,
         locked_at,
+        token: token.to_string(),
     })
-    .unwrap_or_else(|_| "processing".to_string())
+    .expect("serializing an idempotency lock value cannot fail")
 }
 
 impl IdempotencyService {
@@ -212,9 +225,10 @@ impl IdempotencyService {
 
                 // Try to acquire lock; store a JSON lock value so
                 // recover_stale_locks can inspect the locked_at timestamp.
+                let lock_token = uuid::Uuid::new_v4().to_string();
                 let acquired: bool = redis::cmd("SET")
                     .arg(&lock_key)
-                    .arg(_lock_value())
+                    .arg(_lock_value(&lock_token))
                     .arg("NX")
                     .arg("EX")
                     .arg(300) // 5 minute lock
@@ -223,7 +237,9 @@ impl IdempotencyService {
 
                 if acquired {
                     self.lock_acquired.fetch_add(1, Ordering::Relaxed);
-                    Ok(IdempotencyStatus::New)
+                    Ok(IdempotencyStatus::New {
+                        lock_token: Some(lock_token),
+                    })
                 } else {
                     self.lock_contention.fetch_add(1, Ordering::Relaxed);
                     Ok(IdempotencyStatus::Processing)
@@ -266,10 +282,15 @@ impl IdempotencyService {
                             .get("content_type")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
+                        let encoding = response_json
+                            .get("encoding")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
                         let cached = CachedResponse {
                             status,
                             body,
                             content_type,
+                            encoding,
                         };
                         Ok(IdempotencyStatus::Completed(cached))
                     } else {
@@ -291,7 +312,7 @@ impl IdempotencyService {
                 expires_at,
             )
             .await?;
-            Ok(IdempotencyStatus::New)
+            Ok(IdempotencyStatus::New { lock_token: None })
         }
     }
 
@@ -299,34 +320,29 @@ impl IdempotencyService {
         &self,
         tenant_id: &str,
         key: &str,
-        status: u16,
-        body: String,
-        content_type: Option<String>,
+        response: CachedResponse,
+        lock_token: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if lock_token.is_none() {
+            return self.store_response_db(key, &response).await;
+        }
+
         let cache_key = _cache_key(tenant_id, key);
         let lock_key = _lock_key(tenant_id, key);
-
-        let cached = CachedResponse {
-            status,
-            body: body.clone(),
-            content_type: content_type.clone(),
-        };
-        let data = serde_json::to_string(&cached)?;
+        let data = serde_json::to_string(&response)?;
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
-                // Store response with 24 hour TTL
-                redis::cmd("SETEX")
-                    .arg(&cache_key)
+                // Store and release as one ownership-checked transaction. A
+                // worker whose lock expired or was recovered cannot overwrite
+                // the new owner's response or release its lock.
+                redis::Script::new(STORE_RESPONSE_AND_RELEASE_SCRIPT)
+                    .key(&lock_key)
+                    .key(&cache_key)
+                    .arg(lock_token.expect("checked above"))
                     .arg(86400)
                     .arg(&data)
-                    .query_async::<_, ()>(&mut conn)
-                    .await?;
-
-                // Release lock
-                redis::cmd("DEL")
-                    .arg(&lock_key)
-                    .query_async::<_, ()>(&mut conn)
+                    .invoke_async::<_, u32>(&mut conn)
                     .await?;
 
                 Ok(())
@@ -338,37 +354,39 @@ impl IdempotencyService {
                     redis_err
                 );
 
-                let response_json = serde_json::json!({
-                    "status": status,
-                    "body": body,
-                    "content_type": content_type
-                });
-
-                crate::db::queries::update_idempotency_key_response(
-                    &self.pool,
-                    key,
-                    &response_json,
-                )
-                .await?;
-
-                Ok(())
+                self.store_response_db(key, &response).await
             }
         }
+    }
+
+    async fn store_response_db(
+        &self,
+        key: &str,
+        response: &CachedResponse,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let response_json = serde_json::to_value(response)?;
+        crate::db::queries::update_idempotency_key_response(&self.pool, key, &response_json)
+            .await?;
+        Ok(())
     }
 
     pub async fn release_lock(
         &self,
         tenant_id: &str,
         key: &str,
+        lock_token: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let lock_key = _lock_key(tenant_id, key);
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
-                redis::cmd("DEL")
-                    .arg(&lock_key)
-                    .query_async::<_, ()>(&mut conn)
-                    .await?;
+                if let Some(lock_token) = lock_token {
+                    redis::Script::new(COMPARE_AND_DELETE_TOKEN_SCRIPT)
+                        .key(&lock_key)
+                        .arg(lock_token)
+                        .invoke_async::<_, u32>(&mut conn)
+                        .await?;
+                }
                 Ok(())
             }
             Err(_) => {
@@ -416,52 +434,115 @@ impl IdempotencyService {
             .await
             .map_err(RedisError::Redis)?;
 
-        let lock_keys: Vec<String> = redis::cmd("KEYS")
-            .arg("idempotency:lock:*")
-            .query_async(&mut conn)
-            .await
-            .map_err(RedisError::Redis)?;
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        for lk in lock_keys {
-            let raw: Option<String> = redis::cmd("GET")
-                .arg(&lk)
+        let mut cursor = 0_u64;
+        loop {
+            let (next_cursor, lock_keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("idempotency:lock:*")
+                .arg("COUNT")
+                .arg(100)
                 .query_async(&mut conn)
                 .await
                 .map_err(RedisError::Redis)?;
 
-            let Some(raw) = raw else { continue };
-
-            let locked_at = serde_json::from_str::<LockValue>(&raw)
-                .map(|v| v.locked_at)
-                .unwrap_or(0);
-
-            if locked_at == 0 || now.saturating_sub(locked_at) < 120 {
-                continue;
-            }
-
-            let ck = lk.replacen("idempotency:lock:", "idempotency:", 1);
-            let cached: Option<String> = redis::cmd("GET")
-                .arg(&ck)
-                .query_async(&mut conn)
-                .await
-                .map_err(RedisError::Redis)?;
-
-            if cached.is_none() {
-                tracing::warn!(lock_key = %lk, "Recovering stale idempotency lock");
-                redis::cmd("DEL")
+            for lk in lock_keys {
+                let raw: Option<String> = redis::cmd("GET")
                     .arg(&lk)
-                    .query_async::<_, ()>(&mut conn)
+                    .query_async(&mut conn)
                     .await
                     .map_err(RedisError::Redis)?;
+
+                let Some(raw) = raw else { continue };
+
+                let locked_at = serde_json::from_str::<LockValue>(&raw)
+                    .map(|v| v.locked_at)
+                    .unwrap_or(0);
+
+                if locked_at == 0 || now.saturating_sub(locked_at) < 120 {
+                    continue;
+                }
+
+                let ck = lk.replacen("idempotency:lock:", "idempotency:", 1);
+                let cached: Option<String> = redis::cmd("GET")
+                    .arg(&ck)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(RedisError::Redis)?;
+
+                if cached.is_none() {
+                    tracing::warn!(lock_key = %lk, "Recovering stale idempotency lock");
+                    redis::Script::new(COMPARE_AND_DELETE_VALUE_SCRIPT)
+                        .key(&lk)
+                        .arg(&raw)
+                        .invoke_async::<_, u32>(&mut conn)
+                        .await
+                        .map_err(RedisError::Redis)?;
+                }
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
             }
         }
 
         Ok(())
+    }
+}
+
+const COMPARE_AND_DELETE_TOKEN_SCRIPT: &str = r#"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, lock = pcall(cjson.decode, raw)
+if ok and lock.token == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"#;
+
+const COMPARE_AND_DELETE_VALUE_SCRIPT: &str = r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"#;
+
+const STORE_RESPONSE_AND_RELEASE_SCRIPT: &str = r#"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, lock = pcall(cjson.decode, raw)
+if not ok or lock.token ~= ARGV[1] then return 0 end
+redis.call('SETEX', KEYS[2], ARGV[2], ARGV[3])
+redis.call('DEL', KEYS[1])
+return 1
+"#;
+
+fn encode_body(body: &[u8]) -> (String, BodyEncoding) {
+    match std::str::from_utf8(body) {
+        Ok(body) => (body.to_string(), BodyEncoding::Utf8),
+        Err(_) => {
+            use base64::Engine;
+            (
+                base64::engine::general_purpose::STANDARD.encode(body),
+                BodyEncoding::Base64,
+            )
+        }
+    }
+}
+
+fn decode_body(cached: &CachedResponse) -> Result<Vec<u8>, base64::DecodeError> {
+    match cached.encoding {
+        BodyEncoding::Utf8 => Ok(cached.body.as_bytes().to_vec()),
+        BodyEncoding::Base64 => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(&cached.body)
+        }
     }
 }
 
@@ -525,7 +606,7 @@ pub async fn idempotency_middleware(
         .check_idempotency(&tenant_id, &idempotency_key)
         .await
     {
-        Ok(IdempotencyStatus::New) => {
+        Ok(IdempotencyStatus::New { lock_token }) => {
             let response: Response = next.run(request).await;
 
             if response.status().is_success() {
@@ -541,6 +622,15 @@ pub async fn idempotency_middleware(
                     Ok(bytes) => bytes,
                     Err(e) => {
                         tracing::error!("Failed to read response body for caching: {}", e);
+                        if let Err(release_error) = service
+                            .release_lock(&tenant_id, &idempotency_key, lock_token.as_deref())
+                            .await
+                        {
+                            tracing::error!(
+                                "Failed to release idempotency lock: {}",
+                                release_error
+                            );
+                        }
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(serde_json::json!({"error": "Failed to cache response"})),
@@ -549,47 +639,51 @@ pub async fn idempotency_middleware(
                     }
                 };
 
-                let body_string = if body_bytes.len() > 64 * 1024 {
-                    // Body too large, cache status only
-                    tracing::warn!("Response body exceeds 64KB limit, caching status only");
-                    serde_json::json!({"status": "success"}).to_string()
-                } else {
-                    match std::str::from_utf8(&body_bytes) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => {
-                            // Binary body, base64 encode
-                            use base64::Engine;
-                            base64::engine::general_purpose::STANDARD.encode(&body_bytes)
-                        }
+                let cacheable = body_bytes.len() <= 64 * 1024;
+
+                if cacheable {
+                    let (body_string, encoding) = encode_body(&body_bytes);
+                    if let Err(e) = service
+                        .store_response(
+                            &tenant_id,
+                            &idempotency_key,
+                            CachedResponse {
+                                status,
+                                body: body_string,
+                                content_type: content_type.clone(),
+                                encoding,
+                            },
+                            lock_token.as_deref(),
+                        )
+                        .await
+                    {
+                        tracing::error!("Failed to store idempotency response: {}", e);
                     }
-                };
-
-                // Recreate the response for the client
-                let client_response = Response::builder()
-                    .status(status)
-                    .header(
-                        "content-type",
-                        content_type.as_deref().unwrap_or("application/json"),
-                    )
-                    .body(axum::body::boxed(Body::from(body_bytes)))
-                    .unwrap();
-
-                if let Err(e) = service
-                    .store_response(
-                        &tenant_id,
-                        &idempotency_key,
-                        status,
-                        body_string,
-                        content_type,
-                    )
-                    .await
-                {
-                    tracing::error!("Failed to store idempotency response: {}", e);
+                } else {
+                    tracing::warn!("Response body exceeds 64KB limit; not caching response");
+                    if let Err(e) = service
+                        .release_lock(&tenant_id, &idempotency_key, lock_token.as_deref())
+                        .await
+                    {
+                        tracing::error!("Failed to release idempotency lock: {}", e);
+                    }
                 }
 
-                client_response
+                // Recreate the response for the client without changing its
+                // body bytes or content type.
+                let mut client_response_builder = Response::builder().status(status);
+                if let Some(content_type) = &content_type {
+                    client_response_builder =
+                        client_response_builder.header("content-type", content_type);
+                }
+                client_response_builder
+                    .body(axum::body::boxed(Body::from(body_bytes)))
+                    .unwrap()
             } else {
-                if let Err(e) = service.release_lock(&tenant_id, &idempotency_key).await {
+                if let Err(e) = service
+                    .release_lock(&tenant_id, &idempotency_key, lock_token.as_deref())
+                    .await
+                {
                     tracing::error!("Failed to release idempotency lock: {}", e);
                 }
                 response
@@ -606,22 +700,12 @@ pub async fn idempotency_middleware(
         Ok(IdempotencyStatus::Completed(cached)) => {
             let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
 
-            // Reconstruct the response body
-            let body_bytes = if cached.body.starts_with("ey") || cached.body.contains("{") {
-                // Assume it's JSON or base64
-                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&cached.body) {
-                    // It's JSON
-                    serde_json::to_vec(&json_value)
-                        .unwrap_or_else(|_| cached.body.as_bytes().to_vec())
-                } else {
-                    // Try base64 decode
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&cached.body)
-                        .unwrap_or_else(|_| cached.body.as_bytes().to_vec())
+            let body_bytes = match decode_body(&cached) {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::error!(%error, "Invalid cached idempotency response encoding");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
-            } else {
-                cached.body.as_bytes().to_vec()
             };
 
             let mut response_builder = Response::builder()
@@ -685,9 +769,17 @@ pub fn validate_idempotency_key(key: &str) -> Result<String, crate::error::AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, fmt, sync::{Arc, Mutex}};
+    use std::{
+        collections::HashMap,
+        fmt,
+        sync::{Arc, Mutex},
+    };
     use tracing::field::{Field, Visit};
-    use tracing_subscriber::{layer::Context, registry::Registry, Layer};
+    use tracing_subscriber::{
+        layer::{Context, SubscriberExt},
+        registry::Registry,
+        Layer,
+    };
 
     struct FieldCollector {
         fields: Mutex<HashMap<String, String>>,
@@ -741,7 +833,12 @@ mod tests {
     where
         S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
     {
-        fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, _id: &tracing::Id, _ctx: Context<'_, S>) {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::Id,
+            _ctx: Context<'_, S>,
+        ) {
             let mut visitor = FieldCollector::new();
             attrs.record(&mut visitor);
             let fields = visitor.fields.lock().unwrap().clone();

@@ -187,14 +187,27 @@ impl HorizonClient {
         }
     }
 
-    /// Stream payments for an account via SSE with automatic reconnection
-    #[instrument(name = "horizon.stream_payments", skip(self), fields(stellar.account = %account))]
+    /// Stream payments for an account via SSE with automatic reconnection.
+    ///
+    /// Resumes from `initial_cursor` (the Horizon paging token of the last
+    /// successfully processed payment) on first connect and on every reconnect,
+    /// so no on-chain payment in a disconnect window is missed or replayed.
+    /// Pass `None` to start from the current live position ("now").
+    ///
+    /// Backoff is saturating: the shift exponent is capped at 5 (max 32 s,
+    /// clamped to 30 s) so the counter can never overflow regardless of how
+    /// many reconnects occur. The counter resets after any session that delivers
+    /// at least one event.
+    #[instrument(name = "horizon.stream_payments", skip(self, tx), fields(stellar.account = %account))]
     pub async fn stream_payments(
         &self,
         account: &str,
         tx: mpsc::Sender<Result<StreamPayment, HorizonError>>,
+        initial_cursor: Option<String>,
     ) -> Result<(), HorizonError> {
-        let mut reconnect_count = 0u64;
+        let mut last_cursor = initial_cursor;
+        // u32 so .min(5) is always safe and we never approach the shift limit.
+        let mut reconnect_count: u32 = 0;
         let metrics = Arc::new(tokio::sync::Mutex::new(StreamMetrics {
             reconnections: 0,
             events_received: 0,
@@ -202,28 +215,44 @@ impl HorizonClient {
         }));
 
         loop {
-            let url = format!(
+            let mut url = format!(
                 "{}/accounts/{}/payments?order=asc&stream=true",
                 self.base_url.trim_end_matches('/'),
                 account
             );
+            if let Some(ref cursor) = last_cursor {
+                url.push_str(&format!("&cursor={}", cursor));
+            }
 
             match self.connect_stream(&url, &tx, &metrics).await {
-                Ok(_) => {
-                    // Stream ended normally
-                    reconnect_count += 1;
-                    let mut m = metrics.lock().await;
-                    m.reconnections = reconnect_count;
-                    drop(m);
+                Ok((events_in_session, new_cursor)) => {
+                    if let Some(c) = new_cursor {
+                        last_cursor = Some(c);
+                    }
+
+                    // A session that delivered at least one event is "healthy";
+                    // reset backoff so a brief outage after a long healthy run
+                    // doesn't impose unnecessary delay.
+                    if events_in_session > 0 {
+                        reconnect_count = 0;
+                    } else {
+                        reconnect_count = reconnect_count.saturating_add(1);
+                    }
+
+                    {
+                        let mut m = metrics.lock().await;
+                        m.reconnections += 1;
+                    }
 
                     tracing::warn!(
-                        "Stream disconnected for {}, reconnecting (attempt {})",
                         account,
-                        reconnect_count
+                        reconnect_count,
+                        last_cursor = ?last_cursor,
+                        "SSE stream disconnected, reconnecting"
                     );
 
-                    // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-                    let backoff_secs = std::cmp::min(1u64 << reconnect_count, 30);
+                    // Cap exponent at 5: max shift is 1<<5 = 32, clamped to 30 s.
+                    let backoff_secs = std::cmp::min(1u64 << reconnect_count.min(5), 30);
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                 }
                 Err(e) => {
@@ -234,12 +263,20 @@ impl HorizonClient {
         }
     }
 
-    async fn connect_stream(
+    /// Connect to an SSE stream and forward complete events to `tx`.
+    ///
+    /// Accumulates raw bytes across TCP chunks in a `String` buffer and only
+    /// parses a payment once a complete SSE event (delimited by `\n\n`) is
+    /// assembled. Multi-line `data:` fields are concatenated before parsing.
+    ///
+    /// Returns `(events_sent, last_cursor)`. `last_cursor` is the Horizon
+    /// paging token (`payment.id`) of the last payment forwarded to `tx`.
+    pub(crate) async fn connect_stream(
         &self,
         url: &str,
         tx: &mpsc::Sender<Result<StreamPayment, HorizonError>>,
         metrics: &Arc<tokio::sync::Mutex<StreamMetrics>>,
-    ) -> Result<(), HorizonError> {
+    ) -> Result<(u64, Option<String>), HorizonError> {
         let response = self
             .client
             .get(url)
@@ -255,41 +292,70 @@ impl HorizonClient {
         }
 
         let mut stream = response.bytes_stream();
+        let mut buf = String::new();
+        let mut events_sent: u64 = 0;
+        let mut last_cursor: Option<String> = None;
 
         while let Some(chunk) = stream.next().await {
             let chunk: bytes::Bytes = chunk?;
-            let text = String::from_utf8_lossy(&chunk);
+            buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            for line in text.lines() {
-                if let Some(json_str) = line.strip_prefix("data: ") {
-                    match serde_json::from_str::<StreamPayment>(json_str) {
-                        Ok(payment) => {
+            // Split on the SSE event delimiter. Only process complete events.
+            while let Some(pos) = buf.find("\n\n") {
+                let raw_event = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+
+                let data = parse_sse_event(&raw_event);
+                if data.is_empty() {
+                    // Heartbeat or comment-only event.
+                    continue;
+                }
+
+                match serde_json::from_str::<StreamPayment>(&data) {
+                    Ok(payment) => {
+                        {
                             let mut m = metrics.lock().await;
                             m.events_received += 1;
                             m.last_event_time = Some(std::time::Instant::now());
-                            drop(m);
+                        }
 
-                            if tx.send(Ok(payment)).await.is_err() {
-                                return Ok(());
-                            }
+                        last_cursor = Some(payment.id.clone());
+
+                        if tx.send(Ok(payment)).await.is_err() {
+                            // Receiver dropped — shut down cleanly.
+                            return Ok((events_sent, last_cursor));
                         }
-                        Err(e) => {
-                            tracing::warn!("Failed to parse payment event: {}", e);
-                        }
+                        events_sent += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            raw_event = %data,
+                            "Unparseable SSE payment event; payment may be lost"
+                        );
+                        tracing::info!(counter.sse_parse_errors = 1u64);
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok((events_sent, last_cursor))
     }
+}
 
-    pub async fn get_stream_metrics(
-        &self,
-        metrics: &Arc<tokio::sync::Mutex<StreamMetrics>>,
-    ) -> StreamMetrics {
-        *metrics.lock().await
+/// Assemble the `data` payload from a raw SSE event block (text between two
+/// `\n\n` delimiters). Multi-line `data:` fields are concatenated in order.
+/// Returns an empty string for heartbeat/comment-only events.
+pub(crate) fn parse_sse_event(raw_event: &str) -> String {
+    let mut data = String::new();
+    for line in raw_event.lines() {
+        if let Some(value) = line.strip_prefix("data: ") {
+            data.push_str(value);
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data.push_str(value.trim_start());
+        }
     }
+    data
 }
 
 #[cfg(test)]
@@ -382,6 +448,139 @@ mod tests {
         );
         let state = client.circuit_state();
         assert_eq!(state, "closed");
+    }
+
+    // === Horizon stream resumption tests
+
+    #[test]
+    fn test_backoff_never_overflows_past_64_reconnects() {
+        for count in 0u32..=100 {
+            let backoff = std::cmp::min(1u64 << count.min(5), 30);
+            assert!(backoff <= 30, "backoff exceeded 30 s at count={count}");
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_event_complete_single_line() {
+        let raw = r#"data: {"id":"p1","from":"G1","to":"G2","amount":"10","asset_code":"USD","memo":null,"memo_type":null,"created_at":"2024-01-01"}"#;
+        let data = parse_sse_event(raw);
+        assert!(!data.is_empty());
+        let payment = serde_json::from_str::<StreamPayment>(&data).unwrap();
+        assert_eq!(payment.id, "p1");
+    }
+
+    #[test]
+    fn test_parse_sse_event_heartbeat_returns_empty() {
+        assert_eq!(parse_sse_event(": heartbeat"), "");
+        assert_eq!(parse_sse_event(""), "");
+    }
+
+    #[test]
+    fn test_sse_buffer_reassembles_chunk_split_event() {
+        let payment_json = r#"{"id":"split-1","from":"GA","to":"GB","amount":"5","asset_code":"EUR","memo":null,"memo_type":null,"created_at":"2024-06-01"}"#;
+
+        // Split the SSE event across two chunks at an arbitrary byte boundary.
+        let full_event = format!("data: {}\n\n", payment_json);
+        let split_at = full_event.len() / 2;
+        let chunk1 = &full_event[..split_at];
+        let chunk2 = &full_event[split_at..];
+
+        let mut buf = String::new();
+        let mut parsed: Vec<StreamPayment> = Vec::new();
+
+        // Simulate chunk1 arriving: no complete event yet.
+        buf.push_str(chunk1);
+        while let Some(pos) = buf.find("\n\n") {
+            let raw = buf[..pos].to_string();
+            buf = buf[pos + 2..].to_string();
+            let data = parse_sse_event(&raw);
+            if !data.is_empty() {
+                parsed.push(serde_json::from_str(&data).unwrap());
+            }
+        }
+        assert!(parsed.is_empty(), "no complete event after chunk1 alone");
+
+        // Simulate chunk2 completing the event.
+        buf.push_str(chunk2);
+        while let Some(pos) = buf.find("\n\n") {
+            let raw = buf[..pos].to_string();
+            buf = buf[pos + 2..].to_string();
+            let data = parse_sse_event(&raw);
+            if !data.is_empty() {
+                parsed.push(serde_json::from_str(&data).unwrap());
+            }
+        }
+
+        assert_eq!(parsed.len(), 1, "exactly one event after both chunks");
+        assert_eq!(parsed[0].id, "split-1");
+    }
+
+    #[tokio::test]
+    async fn test_stream_resumes_with_cursor_after_disconnect() {
+        let mut server = mockito::Server::new_async().await;
+
+        let p1 = r#"{"id":"cursor-1","from":"GA","to":"GB","amount":"10","asset_code":"USD","memo":null,"memo_type":null,"created_at":"2024-01-01"}"#;
+        let p2 = r#"{"id":"cursor-2","from":"GA","to":"GB","amount":"20","asset_code":"USD","memo":null,"memo_type":null,"created_at":"2024-01-02"}"#;
+
+        // First connection (no cursor): returns p1 then closes.
+        let _mock1 = server
+            .mock("GET", "/accounts/GTEST/payments?order=asc&stream=true")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(format!("data: {}\n\n", p1))
+            .create_async()
+            .await;
+
+        // Second connection (cursor=cursor-1): returns p2 then closes.
+        let _mock2 = server
+            .mock(
+                "GET",
+                "/accounts/GTEST/payments?order=asc&stream=true&cursor=cursor-1",
+            )
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(format!("data: {}\n\n", p2))
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let metrics = Arc::new(tokio::sync::Mutex::new(StreamMetrics {
+            reconnections: 0,
+            events_received: 0,
+            last_event_time: None,
+        }));
+        let (tx, mut rx) = mpsc::channel(10);
+
+        // First session: no cursor.
+        let url1 = format!(
+            "{}/accounts/GTEST/payments?order=asc&stream=true",
+            server.url()
+        );
+        let (n1, cursor1) = client.connect_stream(&url1, &tx, &metrics).await.unwrap();
+        assert_eq!(n1, 1, "first session must deliver p1");
+        assert_eq!(cursor1.as_deref(), Some("cursor-1"));
+
+        // Second session: resume from cursor-1.
+        let url2 = format!(
+            "{}/accounts/GTEST/payments?order=asc&stream=true&cursor=cursor-1",
+            server.url()
+        );
+        let (n2, cursor2) = client.connect_stream(&url2, &tx, &metrics).await.unwrap();
+        assert_eq!(n2, 1, "second session must deliver p2");
+        assert_eq!(cursor2.as_deref(), Some("cursor-2"));
+
+        drop(tx);
+
+        let mut received_ids: Vec<String> = Vec::new();
+        while let Some(Ok(p)) = rx.recv().await {
+            received_ids.push(p.id.clone());
+        }
+
+        assert_eq!(
+            received_ids,
+            vec!["cursor-1", "cursor-2"],
+            "no gaps, no duplicates"
+        );
     }
 
     #[tokio::test]

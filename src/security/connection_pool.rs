@@ -20,7 +20,7 @@
 //!
 //! # Usage
 //!
-//! ```rust,ignore
+//! ```text
 //! use synapse_core::security::connection_pool::{SecurityConnectionPool, SecurityPoolConfig};
 //!
 //! let pool = SecurityConnectionPool::new()?;
@@ -140,6 +140,7 @@ impl SecurityConnection {
     }
 }
 
+#[derive(Debug)]
 struct PoolState {
     available: VecDeque<SecurityConnection>,
     /// Total connections in existence (idle + currently in use).
@@ -253,18 +254,12 @@ impl SecurityConnectionPool {
 
     /// Number of idle connections currently available in the pool.
     pub fn idle_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.available.len())
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
     }
 
     /// Total connections managed by the pool (idle + currently in use).
     pub fn total_count(&self) -> usize {
-        self.state
-            .lock()
-            .map(|s| s.total)
-            .unwrap_or(0)
+        self.state.lock().map(|s| s.total).unwrap_or(0)
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {

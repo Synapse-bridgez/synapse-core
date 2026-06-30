@@ -244,14 +244,10 @@ mod tests {
         let query = DailyTotalsQuery { days: MAX_DAYS };
         assert!(query.validate().is_ok(), "should accept MAX_DAYS");
 
-        let query = DailyTotalsQuery {
-            days: MIN_DAYS - 1,
-        };
+        let query = DailyTotalsQuery { days: MIN_DAYS - 1 };
         assert!(query.validate().is_err(), "should reject below MIN_DAYS");
 
-        let query = DailyTotalsQuery {
-            days: MAX_DAYS + 1,
-        };
+        let query = DailyTotalsQuery { days: MAX_DAYS + 1 };
         assert!(query.validate().is_err(), "should reject above MAX_DAYS");
     }
 }

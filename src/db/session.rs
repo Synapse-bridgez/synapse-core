@@ -79,7 +79,7 @@ impl SessionManager {
     /// # Returns
     ///
     /// `Ok(())` if the token is in valid format, `Err(SessionError::InvalidTokenFormat)` otherwise.
-    pub fn validate_token_format(session_id: Uuid) -> Result<(), SessionError> {
+    pub fn validate_token_format(_session_id: Uuid) -> Result<(), SessionError> {
         // UUIDs are validated at the type level, but we explicitly document this check
         // to be clear that token format validation is a security requirement.
         Ok(())
@@ -114,27 +114,24 @@ impl SessionManager {
         .await
         .map_err(|_| SessionError::FetchFailed)?;
 
-        Ok(row.map(|(id, user_id, created_at, expires_at, is_active)| Session {
-            id,
-            user_id,
-            created_at,
-            expires_at,
-            is_active,
-        }))
+        Ok(
+            row.map(|(id, user_id, created_at, expires_at, is_active)| Session {
+                id,
+                user_id,
+                created_at,
+                expires_at,
+                is_active,
+            }),
+        )
     }
 
     /// Invalidate a single session.
-    pub async fn invalidate_session(
-        pool: &PgPool,
-        session_id: Uuid,
-    ) -> Result<(), SessionError> {
-        sqlx::query(
-            "UPDATE sessions SET is_active = false WHERE id = $1 AND is_active = true",
-        )
-        .bind(session_id)
-        .execute(pool)
-        .await
-        .map_err(|_| SessionError::InvalidationFailed)?;
+    pub async fn invalidate_session(pool: &PgPool, session_id: Uuid) -> Result<(), SessionError> {
+        sqlx::query("UPDATE sessions SET is_active = false WHERE id = $1 AND is_active = true")
+            .bind(session_id)
+            .execute(pool)
+            .await
+            .map_err(|_| SessionError::InvalidationFailed)?;
 
         Ok(())
     }

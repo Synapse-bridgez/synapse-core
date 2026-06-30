@@ -8,4 +8,4 @@ pub mod pagination;
 pub use connection_pool::{PaymentsConnectionPool, PaymentsPoolConfig, PaymentsPoolError};
 pub use error::PaymentError;
 pub use export::*;
-pub use pagination::{PaginationManager, PaginationParams, PaginationConfig, PaginatedResponse};
+pub use pagination::{PaginatedResponse, PaginationConfig, PaginationManager, PaginationParams};

@@ -1,5 +1,5 @@
-/// Input validation for authentication operations.
-/// Provides secure validation of API keys, tokens, and credentials.
+//! Input validation for authentication operations.
+//! Provides secure validation of API keys, tokens, and credentials.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -19,9 +19,7 @@ const MAX_TOKEN_LENGTH: usize = 1024;
 /// Cached regex for API key validation
 fn api_key_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r"^[a-zA-Z0-9_\-\.]+$").expect("Invalid regex pattern")
-    })
+    PATTERN.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_\-\.]+$").expect("Invalid regex pattern"))
 }
 
 /// Validates an API key for format and length.
