@@ -275,6 +275,76 @@ enum EventsCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Attempt to reconnect a WebSocket session (`POST /reconnect`).
+    ///
+    /// Sends the opaque `cursor` (session ID) from a previous connection to the
+    /// server. The server validates the session and returns backoff guidance and
+    /// whether a full state resync is required.
+    ///
+    /// Edge cases:
+    ///   - An expired session returns status `session_expired`, not an error.
+    ///   - An invalid cursor returns status `invalid_token`, not an error.
+    ///
+    /// Exit codes:
+    ///   0 - success (including expired/invalid token responses)
+    ///   1 - network or server error
+    ///
+    /// Example:
+    ///   synapse admin events reconnect --cursor 550e8400-e29b-41d4-a716-446655440000
+    ///   synapse admin events reconnect --cursor 550e8400-e29b-41d4-a716-446655440000 --json
+    #[command(
+        name = "reconnect",
+        about = "Attempt to reconnect a WebSocket session (POST /reconnect)",
+        long_about = "Sends the cursor from a previous connection to POST /reconnect.\n\n\
+                      Exit codes:\n  0 - Success (including session_expired / invalid_token)\n  \
+                      1 - Network or server error"
+    )]
+    Reconnect {
+        /// Opaque session cursor (UUID) obtained from a previous reconnect-status call.
+        #[arg(long, value_name = "CURSOR")]
+        cursor: String,
+
+        /// Print output as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Check reconnection status without committing an attempt (`GET /reconnect/status`).
+    ///
+    /// When there is no active session (no cursor supplied), the server creates a
+    /// fresh session and returns `status: ready`. Callers should inspect the
+    /// `status` field to decide how to proceed.
+    ///
+    /// Edge case: calling without `--cursor` is always valid; the server returns a
+    /// clean `ready` response.
+    ///
+    /// Exit codes:
+    ///   0 - success (including no-session case)
+    ///   1 - network or server error
+    ///
+    /// Example:
+    ///   synapse admin events reconnect-status
+    ///   synapse admin events reconnect-status --cursor 550e8400-e29b-41d4-a716-446655440000
+    ///   synapse admin events reconnect-status --json
+    #[command(
+        name = "reconnect-status",
+        about = "Check reconnection status without committing an attempt (GET /reconnect/status)",
+        long_about = "Queries GET /reconnect/status.\n\n\
+                      Omit --cursor to get a fresh ready status (no active session required).\n\n\
+                      Exit codes:\n  0 - Success (including no-session case)\n  \
+                      1 - Network or server error"
+    )]
+    ReconnectStatus {
+        /// Optional opaque session cursor to query status for a specific session.
+        /// Omit to get a fresh ready status (no active session required).
+        #[arg(long, value_name = "CURSOR")]
+        cursor: Option<String>,
+
+        /// Print output as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -737,6 +807,61 @@ struct Event {
     message: Option<String>,
 }
 
+// ── Reconnect response types ──────────────────────────────────────────────────
+// Mirrors src/handlers/reconnection.rs ReconnectionResponse / ReconnectStatus.
+
+/// Top-level response for `POST /reconnect` and `GET /reconnect/status`.
+/// The server serialises as `{"type": "reconnect", ...}` or `{"type": "error", ...}`.
+#[derive(Debug, Deserialize, Serialize)]
+struct ReconnectResponse {
+    /// Discriminant: `"reconnect"` or `"error"`.
+    #[serde(rename = "type")]
+    kind: String,
+    /// Embedded status payload (present when `kind == "reconnect"`).
+    status: Option<ReconnectStatusPayload>,
+    /// Suggested backoff in seconds before the next attempt.
+    backoff_seconds: Option<u64>,
+    /// Whether a full state resync is required after reconnecting.
+    requires_resync: Option<bool>,
+    /// Human-readable error message (present when `kind == "error"`).
+    message: Option<String>,
+}
+
+/// Inner status object: mirrors `ReconnectStatus` in the server handler.
+/// Tagged with `"status"` field, values snake_cased.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ReconnectStatusPayload {
+    /// Reconnect immediately; `session_id` is the new opaque cursor.
+    Ready { session_id: String },
+    /// Rate-limited; wait `wait_seconds` before retrying.
+    RetryAfter { wait_seconds: u64 },
+    /// Previous session has expired — start a fresh connection.
+    SessionExpired,
+    /// Supplied token/cursor is not a valid session identifier.
+    InvalidToken,
+}
+
+impl ReconnectStatusPayload {
+    fn label(&self) -> &str {
+        match self {
+            ReconnectStatusPayload::Ready { .. } => "ready",
+            ReconnectStatusPayload::RetryAfter { .. } => "retry_after",
+            ReconnectStatusPayload::SessionExpired => "session_expired",
+            ReconnectStatusPayload::InvalidToken => "invalid_token",
+        }
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        match self {
+            ReconnectStatusPayload::Ready { session_id } => Some(session_id.as_str()),
+            _ => None,
+        }
+    }
+}
+
+// ── Events handler ────────────────────────────────────────────────────────────
+
 async fn handle_events(
     client: &reqwest::Client,
     base_url: &str,
@@ -747,6 +872,29 @@ async fn handle_events(
             let url = format!("{base_url}/events");
             let events = send_json_request::<Vec<Event>>(client.get(url)).await?;
             println!("{}", output::render(&events, json, format_events_table)?);
+        }
+
+        // ── synapse admin events reconnect --cursor <CURSOR> ──────────────
+        EventsCommands::Reconnect { cursor, json } => {
+            let url = format!("{base_url}/reconnect");
+            let body = serde_json::json!({ "session_id": cursor });
+            let response =
+                send_json_request::<ReconnectResponse>(client.post(url).json(&body)).await?;
+            println!("{}", output::render(&response, json, format_reconnect_table)?);
+        }
+
+        // ── synapse admin events reconnect-status [--cursor <CURSOR>] ─────
+        //
+        // Edge case: omitting --cursor is always valid; the server creates a
+        // fresh session and returns `status: ready`.
+        EventsCommands::ReconnectStatus { cursor, json } => {
+            let url = format!("{base_url}/reconnect/status");
+            let mut req = client.get(&url);
+            if let Some(ref token) = cursor {
+                req = req.query(&[("token", token.as_str())]);
+            }
+            let response = send_json_request::<ReconnectResponse>(req).await?;
+            println!("{}", output::render(&response, json, format_reconnect_table)?);
         }
     }
     Ok(())
@@ -773,6 +921,42 @@ fn format_events_table(events: &Vec<Event>) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_reconnect_table(response: &ReconnectResponse) -> String {
+    let status_label = response
+        .status
+        .as_ref()
+        .map(|s| s.label())
+        .unwrap_or("-");
+
+    let session_id = response
+        .status
+        .as_ref()
+        .and_then(|s| s.session_id())
+        .unwrap_or("-");
+
+    let backoff = response
+        .backoff_seconds
+        .map(|b| b.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let resync = response
+        .requires_resync
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let msg = response.message.as_deref().unwrap_or("-");
+
+    [
+        format!("TYPE             {}", response.kind),
+        format!("STATUS           {status_label}"),
+        format!("SESSION ID       {session_id}"),
+        format!("BACKOFF (s)      {backoff}"),
+        format!("REQUIRES RESYNC  {resync}"),
+        format!("MESSAGE          {msg}"),
+    ]
+    .join("\n")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
