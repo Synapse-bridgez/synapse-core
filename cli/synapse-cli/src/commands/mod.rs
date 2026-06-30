@@ -1,7 +1,16 @@
+pub mod graphql;
+pub mod events;
 pub mod health;
 pub mod settlements;
 pub mod stats;
 pub mod transactions;
+
+pub use settlements::SettlementsCmd;
+pub use transactions::TransactionsCmd;
+
+pub use events::EventsCmd;
+pub use settlements::SettlementsCmd;
+pub use transactions::TransactionsCmd;
 
 use clap::{Parser, Subcommand};
 
@@ -47,6 +56,12 @@ pub enum Commands {
                       check   — Full health check including DB and pool stats\n  \
                       errors  — List all registered error codes"
     )]
+    /// Real-time event streaming commands
+    #[command(subcommand)]
+    Events(events::EventsSubcommand),
+
+    /// Health and readiness probe commands
+    #[command(subcommand)]
     Health(health::HealthCommand),
 
     /// Transaction statistics commands (status, daily, assets, cache)

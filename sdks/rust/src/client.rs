@@ -8,7 +8,7 @@ use crate::error::{
 };
 use crate::resources::transactions::Transactions;
 use crate::retry::{retry_with_backoff, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_ATTEMPTS};
-use crate::resources::admin::{AdminReconciliation, AdminSettlements};
+use crate::resources::admin::{AdminDlq, AdminReconciliation, AdminSettlements, AdminWebhookReplay};
 use crate::resources::transactions::Transactions;
 use crate::resources::{health::Health, transactions::Transactions};
 use serde::de::DeserializeOwned;
@@ -836,6 +836,16 @@ impl AdminSynapseClient {
             }
         })
         .await
+    }
+
+    /// Access admin dead-letter queue operations.
+    pub fn dlq(&self) -> AdminDlq {
+        AdminDlq::new(self)
+    }
+
+    /// Access admin webhook replay operations.
+    pub fn webhook_replay(&self) -> AdminWebhookReplay {
+        AdminWebhookReplay::new(self)
     }
 
     /// Access admin reconciliation operations.

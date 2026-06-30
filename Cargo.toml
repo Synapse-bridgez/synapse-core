@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "cli/synapse-cli"]
+members = [".", "sdks/rust", "cli/synapse-cli"]
 
 [package]
 name = "synapse-core"
