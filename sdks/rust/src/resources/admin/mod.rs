@@ -1,10 +1,13 @@
+pub mod dlq;
+pub mod locks;
 pub mod reconciliation;
 pub mod settlements;
+pub mod webhook_replay;
 
+pub use dlq::AdminDlq;
 pub use reconciliation::AdminReconciliation;
 pub use settlements::AdminSettlements;
-pub mod locks;
-pub mod settlements;
+pub use webhook_replay::AdminWebhookReplay;
 
 use crate::client::SynapseClient;
 

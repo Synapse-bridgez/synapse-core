@@ -1,0 +1,49 @@
+name: Workspace CI (sdk + cli)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'sdks/rust/**'
+      - 'cli/synapse-cli/**'
+      - 'src/**'
+      - '.github/workflows/sdk-cli-workspace-ci.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'sdks/rust/**'
+      - 'cli/synapse-cli/**'
+      - 'src/**'
+      - '.github/workflows/sdk-cli-workspace-ci.yml'
+
+jobs:
+  workspace-check:
+    name: cargo build + test (workspace)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-workspace-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-workspace-
+
+      - name: Build entire workspace
+        run: cargo build --workspace
+
+      - name: Run workspace lib tests
+        run: cargo test --workspace --lib

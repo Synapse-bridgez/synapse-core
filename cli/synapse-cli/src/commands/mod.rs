@@ -1,10 +1,16 @@
-pub mod transactions;
-pub mod settlements;
-
-pub use transactions::TransactionsCmd;
-pub use settlements::SettlementsCmd;
+pub mod graphql;
+pub mod events;
 pub mod health;
+pub mod settlements;
 pub mod stats;
+pub mod transactions;
+
+pub use settlements::SettlementsCmd;
+pub use transactions::TransactionsCmd;
+
+pub use events::EventsCmd;
+pub use settlements::SettlementsCmd;
+pub use transactions::TransactionsCmd;
 
 use clap::{Parser, Subcommand};
 
@@ -36,6 +42,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Real-time event streaming commands
+    #[command(subcommand)]
+    Events(events::EventsSubcommand),
+
     /// Health and readiness probe commands
     #[command(subcommand)]
     Health(health::HealthCommand),
