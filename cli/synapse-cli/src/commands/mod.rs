@@ -40,7 +40,22 @@ pub enum Commands {
     #[command(subcommand)]
     Health(health::HealthCommand),
 
-    /// Transaction statistics commands
-    #[command(subcommand)]
+    /// Query transaction and cache statistics from the Synapse API.
+    #[command(
+        about = "Query transaction and cache statistics",
+        long_about = "Query transaction and cache statistics from the running Synapse server.\n\n\
+SUBCOMMANDS:\n\
+  status   Transaction counts grouped by status (pending, completed, failed, …)\n\
+  daily    Daily transaction totals for the last N days (default 7)\n\
+  assets   Transaction totals grouped by asset code (USD, EUR, USDC, …)\n\
+  cache    Cache hit/miss counters for the query and idempotency caches\n\n\
+All subcommands default to table output. Pass --json to receive raw JSON.\n\n\
+EXAMPLES:\n\
+  synapse stats status\n\
+  synapse stats daily --days 30\n\
+  synapse stats assets --json\n\
+  synapse stats cache",
+        subcommand
+    )]
     Stats(stats::StatsCommand),
 }
