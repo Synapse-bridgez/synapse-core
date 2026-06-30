@@ -1,4 +1,23 @@
-use std::io::{BufRead, BufReader, Write};
+//! Mock HTTP server binary used by CLI integration tests.
+//!
+//! Binds to the address given in `MOCK_SERVER_ADDR` (default `127.0.0.1:4010`).
+//! The `MOCK_SERVER_SCENARIO` env-var selects the response scenario:
+//!
+//! | Scenario  | Description                                              |
+//! |-----------|----------------------------------------------------------|
+//! | `happy`   | (default) Normal responses with canned non-empty data.  |
+//! | `edge`    | Edge-case responses (empty lists, session_expired, …).  |
+//!
+//! Routes served:
+//!   POST /admin/reconciliation/run
+//!   GET  /admin/reconciliation/reports?…
+//!   GET  /admin/reconciliation/reports/<id>
+//!   GET  /events
+//!   POST /reconnect
+//!   GET  /reconnect/status
+//!   GET  /reconnect/status?token=…
+
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
@@ -38,9 +57,10 @@ fn main() -> std::io::Result<()> {
 
 fn handle_connection(stream: TcpStream, scenario: &str) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
+
+    // Read the request line (e.g. "POST /reconnect HTTP/1.1").
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
-
     if request_line.is_empty() {
         return Ok(());
     }
@@ -333,6 +353,8 @@ fn locks_body() -> String {
 }}"#
     )
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn json_response(status: u16, body: &str) -> String {
     let reason = match status {
