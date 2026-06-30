@@ -21,6 +21,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stats(cmd) => {
             synapse_cli::commands::stats::run(cmd, base_url, api_key).await?;
         }
+        Commands::Settlements(cmd) => {
+            synapse_cli::commands::settlements::run(cmd.command, base_url, api_key).await?;
+        }
+        Commands::Transactions(cmd) => {
+            synapse_cli::commands::transactions::run(cmd.command, base_url, api_key).await?;
+        }
     }
 
     Ok(())

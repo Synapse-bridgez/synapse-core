@@ -1,5 +1,7 @@
 pub mod health;
+pub mod settlements;
 pub mod stats;
+pub mod transactions;
 
 use clap::{Parser, Subcommand};
 
@@ -58,4 +60,26 @@ pub enum Commands {
                       cache   — Query and idempotency cache hit/miss metrics"
     )]
     Stats(stats::StatsCommand),
+
+    /// Settlement management commands (list, get)
+    #[command(
+        about = "Settlement management commands",
+        long_about = "Query settlements from the Synapse API.\n\n\
+                      Subcommands:\n  \
+                      list  — List settlements with cursor-based pagination\n  \
+                      get   — Get a specific settlement by UUID\n\n\
+                      Output defaults to a human-readable table; add --json for raw JSON."
+    )]
+    Settlements(settlements::SettlementsCmd),
+
+    /// Transaction lookup commands (get, export)
+    #[command(
+        about = "Transaction lookup commands",
+        long_about = "Look up individual transactions or export bulk data.\n\n\
+                      Subcommands:\n  \
+                      get     — Fetch a single transaction by UUID\n  \
+                      export  — Export transactions as CSV or JSON\n\n\
+                      Output defaults to a human-readable table; add --json for raw JSON."
+    )]
+    Transactions(transactions::TransactionsCmd),
 }
