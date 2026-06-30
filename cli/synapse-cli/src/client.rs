@@ -1,3 +1,6 @@
+use anyhow::{bail, Context, Result};
+use reqwest::Client;
+use serde::de::DeserializeOwned;
 use anyhow::{bail, Result};
 use reqwest::Client;
 use serde::Serialize;
@@ -96,6 +99,67 @@ impl ApiClient {
 // Legacy client used by the transactions/settlements handlers; kept for
 // backward compatibility.
 
+// ── ApiClient (used by health.rs and stats.rs commands) ───────────────────────
+
+pub struct ApiClient {
+    client: Client,
+    base_url: String,
+    api_key: String,
+}
+
+impl ApiClient {
+    pub fn new(base_url: &str, api_key: &str) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+        }
+    }
+
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .context("request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("server returned {}: {}", status.as_u16(), body);
+        }
+
+        resp.json::<T>().await.context("failed to parse response JSON")
+    }
+
+    pub async fn get_with_query<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<T> {
+    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self.client.get(&url).header("X-API-Key", &self.api_key);
+        for (k, v) in params {
+            req = req.query(&[(k, v)]);
+        }
+        let resp = req.send().await.context("request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("server returned {}: {}", status.as_u16(), body);
+        }
+
+        resp.json::<T>().await.context("failed to parse response JSON")
+    }
+}
+
+// ── SynapseCliClient (used by settlements / transactions / export) ─────────────
+
 pub struct SynapseCliClient {
     client: Client,
     base_url: String,
@@ -109,14 +173,14 @@ impl SynapseCliClient {
         }
     }
 
-    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let response = self.client.get(&url).send().await?;
         response.json().await.map_err(|e| anyhow::anyhow!(e))
         self.send(self.client.get(self.url(path))).await
     }
 
-    pub async fn get_with_query<T: serde::de::DeserializeOwned>(
+    pub async fn get_with_query<T: DeserializeOwned>(
         &self,
         path: &str,
         query_params: &[(&str, &str)],
@@ -139,6 +203,8 @@ impl SynapseCliClient {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
+        let url = format!("{}{}", self.base_url, path);
     /// POST a JSON body to `path` and deserialize the response as `T`.
     ///
     /// Returns an error for non-2xx HTTP status codes. On success the raw
@@ -205,6 +271,11 @@ impl ApiClient {
             req = req.query(&[(key, value)]);
         }
         let response = req.send().await?;
+        response.bytes().await.map(|b| b.to_vec()).map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+// ── SynapseApiClient (transactions get) ───────────────────────────────────────
         response
             .bytes()
             .await
@@ -279,13 +350,13 @@ impl std::fmt::Display for ClientError {
         format!("{}{}", self.base_url, path)
     }
 
+    pub async fn get_transaction(&self, id: &str) -> Result<serde_json::Value, ClientError> {
     /// Fetch a transaction by ID. Returns `NotFound` for 404, `Http` for other errors.
     /// Fetch a transaction by ID. Returns `NotFound` for 404, `Http` for other
     /// non-success statuses.
     pub async fn get_transaction(&self, id: &str) -> Result<Value, ClientError> {
         let url = format!("{}/transactions/{}", self.base_url, id);
-        let client = reqwest::Client::new();
-
+        let client = Client::new();
         let resp = client
             .get(&url)
             .header("X-API-Key", &self.api_key)
@@ -299,6 +370,20 @@ impl std::fmt::Display for ClientError {
         let body = response
             .text()
             .await
+            .map_err(|e| ClientError::Network(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if status == 404 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ClientError::NotFound(body));
+        }
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ClientError::Http { status, body });
+        }
+        resp.json::<serde_json::Value>()
+            .await
+            .map_err(|e| ClientError::Network(e.to_string()))
             .context("failed to read response body")?;
 
         if !status.is_success() {

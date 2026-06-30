@@ -1,3 +1,5 @@
+use synapse_cli::commands::{Cli, Commands};
+use clap::Parser;
 use clap::{Parser, Subcommand};
 use synapse_cli::{CliConfig, OutputFormat};
 
@@ -640,6 +642,26 @@ struct TenantQuotaView {
     quota_status: Option<serde_json::Value>,
 }
 
+    let cli = Cli::parse();
+    let base_url = &cli.base_url;
+    let api_key = &cli.api_key;
+
+    match cli.command {
+        Commands::Health(cmd) => {
+            synapse_cli::commands::health::run(cmd, base_url, api_key).await?;
+        }
+        Commands::Stats(cmd) => {
+            synapse_cli::commands::stats::run(cmd, base_url, api_key).await?;
+        }
+        Commands::Settlements(cmd) => {
+            synapse_cli::commands::settlements::run(cmd.command, base_url, api_key).await?;
+        }
+        Commands::Transactions(cmd) => {
+            synapse_cli::commands::transactions::run(cmd.command, base_url, api_key).await?;
+        }
+    }
+
+    Ok(())
 #[derive(Debug, Deserialize, Serialize)]
 struct ListLocksResponse {
     active_locks: Vec<ActiveLockView>,

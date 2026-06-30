@@ -78,32 +78,43 @@ impl TableDisplay for AssetStats {
 
 #[derive(Subcommand)]
 pub enum StatsCommand {
-    /// Transaction counts grouped by status (pending, completed, failed, …).
-    ///
-    /// Calls GET /stats/status. Results are cached server-side; stale data is
-    /// possible on replicas (X-Read-Consistency: eventual header).
-    /// Edge case: an empty dataset returns a valid zeroed list, never null.
-    ///
-    /// Example:
-    ///   synapse stats status
-    ///   synapse stats status --json
+    #[command(
+        about = "Transaction counts grouped by status",
+        long_about = "Show transaction counts grouped by status (pending, completed, failed, …).\n\n\
+                      Calls GET /stats/status.\n\n\
+                      Results are cached server-side; on read-replicas a short staleness window\n\
+                      is possible (indicated by the X-Read-Consistency: eventual response header).\n\n\
+                      Edge case: an empty dataset returns a valid empty list, never null.\n\n\
+                      Flags:\n  \
+                      --json    Print raw JSON instead of a table\n\n\
+                      Examples:\n  \
+                      synapse stats status\n  \
+                      synapse stats status --json"
+    )]
     Status {
         /// Print output as JSON instead of a table
         #[arg(long)]
         json: bool,
     },
 
-    /// Daily transaction totals for the last N days (1–365, default 7).
-    ///
-    /// Calls GET /stats/daily?days=<N>.
-    /// Edge case: an empty dataset returns a valid zeroed list, never null.
-    ///
-    /// Example:
-    ///   synapse stats daily
-    ///   synapse stats daily --days 30 --json
+    #[command(
+        about = "Daily transaction totals for the last N days",
+        long_about = "Show daily transaction totals for the last N days (1–365, default 7).\n\n\
+                      Calls GET /stats/daily?days=<N>.\n\n\
+                      Each row contains the calendar date, the total number of transactions\n\
+                      processed that day, and the aggregate fiat amount across all assets.\n\n\
+                      Edge case: an empty dataset returns a valid empty list, never null.\n\n\
+                      Flags:\n  \
+                      --days <N>    Number of past days to include (1–365, default: 7)\n  \
+                      --json        Print raw JSON instead of a table\n\n\
+                      Examples:\n  \
+                      synapse stats daily\n  \
+                      synapse stats daily --days 30\n  \
+                      synapse stats daily --days 90 --json"
+    )]
     Daily {
         /// Number of past days to include (1–365, default 7)
-        #[arg(long, default_value = "7")]
+        #[arg(long, default_value = "7", value_name = "N")]
         days: i32,
 
         /// Print output as JSON instead of a table
@@ -111,29 +122,46 @@ pub enum StatsCommand {
         json: bool,
     },
 
-    /// Transaction totals grouped by asset code.
-    ///
-    /// Calls GET /stats/assets. Results are cached server-side.
-    /// Edge case: an empty dataset returns a valid zeroed list, never null.
-    ///
-    /// Example:
-    ///   synapse stats assets
-    ///   synapse stats assets --json
+    #[command(
+        about = "Transaction totals grouped by asset code",
+        long_about = "Show transaction totals grouped by asset code (USD, EUR, USDC, …).\n\n\
+                      Calls GET /stats/assets.\n\n\
+                      Each row contains the asset code, the total transaction count,\n\
+                      and the aggregate amount processed for that asset.\n\n\
+                      Results are cached server-side.\n\n\
+                      Edge case: an empty dataset returns a valid empty list, never null.\n\n\
+                      Flags:\n  \
+                      --json    Print raw JSON instead of a table\n\n\
+                      Examples:\n  \
+                      synapse stats assets\n  \
+                      synapse stats assets --json"
+    )]
     Assets {
         /// Print output as JSON instead of a table
         #[arg(long)]
         json: bool,
     },
 
-    /// Cache hit/miss metrics for the query and idempotency caches.
-    ///
-    /// Calls GET /cache/metrics.
-    ///
-    /// Example:
-    ///   synapse stats cache
-    ///   synapse stats cache --json
+    #[command(
+        about = "Cache hit/miss metrics for query and idempotency caches",
+        long_about = "Show cache hit/miss metrics for the query cache and idempotency cache.\n\n\
+                      Calls GET /cache/metrics.\n\n\
+                      Fields returned:\n  \
+                      query_cache              — Internal query cache statistics (hits, misses, size)\n  \
+                      idempotency_cache_hits   — Idempotency key lookups served from cache\n  \
+                      idempotency_cache_misses — Idempotency key lookups that missed the cache\n  \
+                      idempotency_lock_acquired   — Distributed locks successfully acquired\n  \
+                      idempotency_lock_contention — Requests that waited for a held lock\n  \
+                      idempotency_errors          — Errors during idempotency key processing\n  \
+                      idempotency_fallback_count  — Requests that fell back to DB after cache miss\n\n\
+                      Flags:\n  \
+                      --json    Print raw JSON instead of a key-value table\n\n\
+                      Examples:\n  \
+                      synapse stats cache\n  \
+                      synapse stats cache --json"
+    )]
     Cache {
-        /// Print output as JSON instead of a table
+        /// Print output as JSON instead of a key-value table
         #[arg(long)]
         json: bool,
     },
@@ -434,157 +462,5 @@ mod tests {
         let client = ApiClient::new(&server.url(), "test-key");
         let result: Result<CacheMetrics> = client.get("/cache/metrics").await;
         assert!(result.is_err());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mockito::Server;
-
-    #[tokio::test]
-    async fn stats_status_happy_path() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/status").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[{"status":"pending","count":5},{"status":"completed","count":10}]"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<StatusCount> = client.get("/stats/status").await.unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].count, 5);
-    }
-
-    #[tokio::test]
-    async fn stats_status_empty_is_valid() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/status").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[]"#).create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<StatusCount> = client.get("/stats/status").await.unwrap();
-        assert!(items.is_empty());
-    }
-
-    #[tokio::test]
-    async fn stats_status_json_mode() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/status").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[{"status":"completed","count":3}]"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<StatusCount> = client.get("/stats/status").await.unwrap();
-        let json = serde_json::to_string_pretty(&items).unwrap();
-        assert!(json.contains("completed"));
-    }
-
-    #[tokio::test]
-    async fn stats_daily_happy_path() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/daily").match_query(mockito::Matcher::UrlEncoded("days".into(), "7".into()))
-            .with_status(200).with_header("content-type", "application/json")
-            .with_body(r#"[{"date":"2026-06-27","total_amount":"500.00","transaction_count":10}]"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<DailyTotal> = client.get_with_query("/stats/daily", &[("days", "7")]).await.unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].transaction_count, 10);
-    }
-
-    #[tokio::test]
-    async fn stats_daily_empty_is_valid() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/daily").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[]"#).create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<DailyTotal> = client.get_with_query("/stats/daily", &[("days", "7")]).await.unwrap();
-        assert!(items.is_empty());
-    }
-
-    #[tokio::test]
-    async fn stats_daily_json_mode() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/daily").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[{"date":"2026-06-27","total_amount":"100.00","transaction_count":2}]"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<DailyTotal> = client.get_with_query("/stats/daily", &[("days", "7")]).await.unwrap();
-        let json = serde_json::to_string_pretty(&items).unwrap();
-        assert!(json.contains("2026-06-27"));
-    }
-
-    #[tokio::test]
-    async fn stats_assets_happy_path() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/assets").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[{"asset_code":"USD","total_amount":"1000.00","transaction_count":20}]"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<AssetStats> = client.get("/stats/assets").await.unwrap();
-        assert_eq!(items[0].asset_code, "USD");
-    }
-
-    #[tokio::test]
-    async fn stats_assets_empty_is_valid() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/assets").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[]"#).create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<AssetStats> = client.get("/stats/assets").await.unwrap();
-        assert!(items.is_empty());
-    }
-
-    #[tokio::test]
-    async fn stats_assets_json_mode() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/assets").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"[{"asset_code":"XLM","total_amount":"50.00","transaction_count":5}]"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let items: Vec<AssetStats> = client.get("/stats/assets").await.unwrap();
-        let json = serde_json::to_string_pretty(&items).unwrap();
-        assert!(json.contains("XLM"));
-    }
-
-    #[tokio::test]
-    async fn stats_cache_happy_path() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/cache/metrics").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"query_cache":{},"idempotency_cache_hits":10,"idempotency_cache_misses":2,"idempotency_lock_acquired":5,"idempotency_lock_contention":0,"idempotency_errors":0,"idempotency_fallback_count":0}"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let m: CacheMetrics = client.get("/cache/metrics").await.unwrap();
-        assert_eq!(m.idempotency_cache_hits, 10);
-    }
-
-    #[tokio::test]
-    async fn stats_cache_json_mode() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/cache/metrics").with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"query_cache":{},"idempotency_cache_hits":0,"idempotency_cache_misses":0,"idempotency_lock_acquired":0,"idempotency_lock_contention":0,"idempotency_errors":0,"idempotency_fallback_count":0}"#)
-            .create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let m: CacheMetrics = client.get("/cache/metrics").await.unwrap();
-        let json = serde_json::to_string_pretty(&m).unwrap();
-        assert!(json.contains("idempotency_cache_hits"));
-    }
-
-    #[tokio::test]
-    async fn stats_server_error_returns_err() {
-        let mut server = Server::new_async().await;
-        server.mock("GET", "/stats/status").with_status(500)
-            .with_body("internal error").create_async().await;
-        let client = ApiClient::new(&server.url(), "key");
-        let result: Result<Vec<StatusCount>> = client.get("/stats/status").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("500"));
     }
 }

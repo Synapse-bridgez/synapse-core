@@ -21,6 +21,14 @@ path = "src/bin/mock-server.rs"
 name = "synapse_cli"
 path = "src/lib.rs"
 
+[[bin]]
+name = "mock-server"
+path = "src/bin/mock-server.rs"
+
+[lib]
+name = "synapse_cli"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

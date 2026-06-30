@@ -2,6 +2,7 @@ pub mod client;
 pub mod commands;
 pub mod formatter;
 
+pub use formatter::{Formatter, OutputFormat};
 pub use client::{ApiClient, SynapseCliClient};
 pub use formatter::{print, print_one, Formatter, OutputFormat, TableDisplay};
 pub mod error;
@@ -22,6 +23,11 @@ pub struct CliConfig {
 
 impl CliConfig {
     pub fn from_env() -> anyhow::Result<Self> {
+        let base_url = std::env::var("SYNAPSE_BASE_URL")
+            .or_else(|_| std::env::var("SYNAPSE_URL"))
+            .unwrap_or_else(|_| "http://localhost:3000".to_string());
+        let api_key = std::env::var("SYNAPSE_API_KEY").ok();
+        Ok(CliConfig { base_url, api_key })
         let base_url =
             std::env::var("SYNAPSE_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
         let api_key = std::env::var("SYNAPSE_API_KEY").ok();
