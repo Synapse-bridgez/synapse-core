@@ -51,6 +51,46 @@ synapse --base-url https://api.synapse.example.com --api-key your-key transactio
 
 ## Commands
 
+### Admin Locks
+
+#### List Active Locks
+
+List active distributed locks currently held by the Synapse instance.
+
+```bash
+synapse admin locks list [--json]
+```
+
+**Required flags:** none
+
+**Optional flags:**
+- `--json`: Print the raw API response as pretty JSON instead of the default table.
+
+**Mock server example:**
+
+Start the mock server in one terminal:
+
+```bash
+cd cli/synapse-cli
+MOCK_SERVER_ADDR=127.0.0.1:4010 MOCK_SERVER_SCENARIO=happy cargo run --bin mock-server
+```
+
+Then run the CLI against it:
+
+```bash
+cargo run --bin synapse -- --base-url http://127.0.0.1:4010 admin locks list
+```
+
+Sample output:
+
+```text
+Active locks: 2 total (1 overdue)
+Resource | Token | Acquired At | TTL | Expected Duration | Overdue
+-------- | ----- | ----------- | --- | ----------------- | -------
+settlement:550e8400-e29b-41d4-a716-446655440000 | 4e4e9e47-7e0f-4f2f-8d63-323c61279209 | 1782540612 | 30 | 30 | no
+payout-batch:daily | 89ca5ddc-51bd-44bd-817e-f4175dcab0bc | 1782540400 | 30 | 30 | yes
+```
+
 ### Transactions
 
 #### Export Transactions
@@ -407,142 +447,41 @@ Run all tests:
 cargo test
 ```
 
-## Events
+## Settlement Example
 
-### events reconnect-status
+In one terminal, start the mock API:
 
-Check whether the server will accept a reconnection before committing an attempt.
-No flags are required — omitting `--token` asks the server to create a new session.
-
-```
-synapse events reconnect-status [OPTIONS]
-
-OPTIONS:
-    --token <UUID>          Session token from a previous connection (optional).
-                            Omit to get a fresh session with status=ready.
-    --last-sequence <N>     Last event sequence number received (optional).
-                            The server uses this to advise whether requires_resync is true.
-    --format <FORMAT>       Output format: table (default) or json.
+```powershell
+cargo run --manifest-path cli/synapse-cli/Cargo.toml --bin mock-server
 ```
 
-**Status values returned:**
+Then update a settlement status against it and print the resulting settlement:
 
-| status           | meaning                                                       |
-|------------------|---------------------------------------------------------------|
-| ready            | Reconnect immediately; use the returned session_id            |
-| retry_after      | Rate-limited; wait `backoff_seconds` before retrying          |
-| session_expired  | Session is gone; start a new connection (omit --token)        |
-| invalid_token    | Token is malformed; check the UUID you are passing            |
-
-**Example — new session (no --token):**
-
-```bash
-$ synapse --url http://localhost:3000 events reconnect-status
-type: reconnect
-status: ready
-session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
-backoff_seconds: 1
-requires_resync: true
+```powershell
+cargo run --manifest-path cli/synapse-cli/Cargo.toml -- `
+  --base-url http://127.0.0.1:4010 `
+  admin settlements update-status `
+  8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11 `
+  --status adjusted `
+  --reason "Audit correction" `
+  --new-total 125.0000000
 ```
 
-**Example — existing session:**
+Sample output:
 
-```bash
-$ synapse --url http://localhost:3000 events reconnect-status \
-    --token 3fa85f64-5717-4562-b3fc-2c963f66afa6 \
-    --last-sequence 42
-type: reconnect
-status: ready
-session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
-backoff_seconds: 3
-requires_resync: false
+```text
+Settlement updated successfully
+
+Settlement ID: 8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11
+Asset code: USDC
+Status: adjusted
+Total amount: 125.0000000
+Tx count: 8
+Period: 2026-06-26T00:00:00Z to 2026-06-27T00:00:00Z
+Dispute reason: Audit correction
+Original total amount: 130.0000000
+Reviewed by: admin
+Reviewed at: 2026-06-27T09:15:00Z
+Created at: 2026-06-27T09:00:00Z
+Updated at: 2026-06-27T09:15:00Z
 ```
-
-**Example — JSON output (useful for scripting):**
-
-```bash
-$ synapse --url http://localhost:3000 events reconnect-status \
-    --token 3fa85f64-5717-4562-b3fc-2c963f66afa6 \
-    --format json
-{
-  "type": "reconnect",
-  "status": {
-    "status": "ready",
-    "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-  },
-  "backoff_seconds": 3,
-  "requires_resync": false
-}
-```
-
----
-
-### events reconnect
-
-Resume a previous WebSocket session (POST /reconnect).
-Registers a reconnection attempt and returns backoff guidance.
-
-```
-synapse events reconnect --session-id <UUID> [OPTIONS]
-
-REQUIRED:
-    --session-id <UUID>     UUID of the session to resume.
-                            Obtain from a prior reconnect-status run.
-
-OPTIONS:
-    --last-sequence <N>     Last event sequence number received (optional).
-                            Enables gap detection; omit to force a full resync.
-    --force-resync          Always request a full state resync (optional, default: false).
-    --format <FORMAT>       Output format: table (default) or json.
-```
-
-**Exit codes:**
-- `0` — Request completed (inspect `status` field for the outcome)
-- `1` — Network error or server returned a non-200 response
-
-**Example — resume a session:**
-
-```bash
-$ synapse --url http://localhost:3000 events reconnect \
-    --session-id 3fa85f64-5717-4562-b3fc-2c963f66afa6
-type: reconnect
-status: ready
-session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
-backoff_seconds: 3
-requires_resync: false
-```
-
-**Example — resume with sequence hint and forced resync:**
-
-```bash
-$ synapse --url http://localhost:3000 events reconnect \
-    --session-id 3fa85f64-5717-4562-b3fc-2c963f66afa6 \
-    --last-sequence 99 \
-    --force-resync \
-    --format json
-{
-  "type": "reconnect",
-  "status": {
-    "status": "ready",
-    "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-  },
-  "backoff_seconds": 3,
-  "requires_resync": true
-}
-```
-
-**Example — expired session:**
-
-```bash
-$ synapse --url http://localhost:3000 events reconnect \
-    --session-id 00000000-0000-0000-0000-000000000000
-error: Session not found or expired
-
-$ echo $?
-1
-```
-
-> **Tip — copy-paste against the mock server:**
-> Start the mock server with `cargo run --bin mock-server`, then run any of
-> the examples above substituting `http://localhost:3000` for the address
-> printed at startup.

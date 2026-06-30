@@ -1,26 +1,29 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
+mod formatter;
 mod output;
 
+use formatter::{Formatter, OutputFormat};
+
 #[derive(Parser, Debug)]
-#[command(
-    name = "synapse",
-    version,
-    about = "Synapse admin CLI",
-    long_about = "Manage Synapse admin commands.\n\nUse the nested subcommands to interact with reconciliation reports or inspect webhook endpoint health.",
-    arg_required_else_help = true
-)]
+#[command(name = "synapse", version, about = "Synapse CLI")]
 struct Cli {
     /// Base URL of the Synapse API.
     #[arg(
-        long,
-        value_name = "URL",
+        long = "base-url",
+        alias = "url",
+        env = "SYNAPSE_BASE_URL",
         default_value = "http://127.0.0.1:3000"
     )]
     base_url: String,
+
+    /// API key for authenticated requests.
+    #[arg(long, env = "SYNAPSE_API_KEY", default_value = "")]
+    api_key: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -28,36 +31,131 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Admin operations exposed by the Synapse API.
-    #[command(
-        about = "Admin operations",
-        long_about = "Admin operations exposed by the Synapse API."
-    )]
+    /// Admin operations.
+    #[command(subcommand)]
     Admin(AdminCommands),
+
+    /// Transaction commands.
+    #[command(subcommand)]
+    Transactions(TransactionsCommands),
+
+    /// Settlement commands.
+    #[command(subcommand)]
+    Settlements(SettlementsCommands),
+
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for: bash, zsh, or fish.
+        shell: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum AdminCommands {
     /// Reconciliation reports and runs.
-    #[command(
-        about = "Reconciliation reports",
-        long_about = "List, inspect, or run reconciliation reports through the admin API."
-    )]
+    #[command(subcommand)]
     Reconciliation(ReconciliationCommands),
 
-    /// Webhook endpoint health scores.
-    #[command(
-        about = "Webhook endpoint health",
-        long_about = "Inspect the health score of webhook endpoints through the admin API."
-    )]
-    Webhooks(WebhooksCommands),
+    /// Settlement administration.
+    #[command(subcommand)]
+    Settlements(AdminSettlementCommands),
 
-    /// Active distributed locks held by the server.
+    /// Distributed lock administration.
+    #[command(subcommand)]
+    Locks(LockCommands),
+
+    /// Tenant quota administration.
+    #[command(subcommand)]
+    Quotas(QuotaCommands),
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminSettlementCommands {
+    /// Update a settlement status through the admin API.
+    UpdateStatus {
+        /// Settlement UUID.
+        settlement_id: Uuid,
+
+        /// New settlement status.
+        new_status: String,
+
+        /// Optional reason recorded with the status change.
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Optional adjusted total amount. Only meaningful for adjusted settlements.
+        #[arg(long)]
+        new_total: Option<String>,
+
+        /// Actor recorded with the status change. Defaults to the server's admin actor.
+        #[arg(long)]
+        actor: Option<String>,
+
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LockCommands {
     #[command(
-        about = "Distributed lock inspection",
-        long_about = "List all active distributed locks held by this server instance."
+        about = "List active distributed locks",
+        long_about = "List active distributed locks currently held by this Synapse instance.\n\nRequired flags: none.\nOptional flags:\n  --json            Print the raw API response as pretty JSON instead of the default table.\n\nOutput fields:\n  resource          Protected resource name for the lock.\n  token             Lock owner token.\n  acquired_at       Unix timestamp, in seconds, when the lock was acquired.\n  ttl_secs          Lock TTL in seconds.\n  expected_duration_secs  Expected lock hold duration in seconds.\n  overdue           Whether the lock has exceeded twice its expected duration."
     )]
-    Locks(LocksCommands),
+    List {
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QuotaCommands {
+    /// List quota usage for all active tenants.
+    List {
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Get quota usage for one tenant.
+    Get {
+        /// Tenant UUID.
+        tenant_id: Uuid,
+
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Set a tenant quota override.
+    Set {
+        /// Tenant UUID.
+        tenant_id: Uuid,
+
+        /// Positive quota limit.
+        #[arg(value_name = "LIMIT", conflicts_with = "limit_flag")]
+        limit: Option<u32>,
+
+        /// Positive quota limit.
+        #[arg(long = "limit", value_name = "LIMIT")]
+        limit_flag: Option<u32>,
+
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Reset the current usage counter for one tenant.
+    Reset {
+        /// Tenant UUID.
+        tenant_id: Uuid,
+
+        /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ── Reconciliation subcommands ────────────────────────────────────────────────
@@ -69,15 +167,12 @@ enum ReconciliationCommands {
         long_about = "List reconciliation reports generated by the admin API.\n\nRequired flags: none.\nOptional flags:\n  --limit <LIMIT>   Maximum number of reports to return (default: 20).\n  --offset <OFFSET>  Number of reports to skip before returning results (default: 0).\n  --json            Print the raw API response as JSON."
     )]
     Reports {
-        /// Maximum number of reports to return.
         #[arg(long, value_name = "LIMIT", default_value_t = 20)]
         limit: u32,
 
-        /// Number of reports to skip before returning results.
         #[arg(long, value_name = "OFFSET", default_value_t = 0)]
         offset: u32,
 
-        /// Print the raw API response as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -87,11 +182,9 @@ enum ReconciliationCommands {
         long_about = "Fetch one reconciliation report by UUID and print the full response body.\n\nRequired flags:\n  <REPORT_ID>       UUID of the report to fetch.\nOptional flags:\n  --json            Print the raw API response as JSON."
     )]
     Report {
-        /// UUID of the reconciliation report to fetch.
         #[arg(value_name = "REPORT_ID")]
         report_id: Uuid,
 
-        /// Print the raw API response as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -101,65 +194,97 @@ enum ReconciliationCommands {
         long_about = "Run a reconciliation pass for one Stellar account and persist the result.\n\nRequired flags:\n  --account <ACCOUNT>      Stellar account to reconcile.\nOptional flags:\n  --period-hours <HOURS>   Hours of history to include (default: 24).\n  --json                   Print the raw API response as JSON."
     )]
     Run {
-        /// Stellar account to reconcile.
         #[arg(long, value_name = "ACCOUNT")]
         account: String,
 
-        /// Hours of history to include.
-        #[arg(long, value_name = "HOURS")]
-        period_hours: Option<u32>,
+        #[arg(long, value_name = "HOURS", default_value_t = 24)]
+        period_hours: u32,
 
-        /// Print the raw API response as JSON.
         #[arg(long)]
         json: bool,
     },
 }
 
-// ── Webhooks subcommands ──────────────────────────────────────────────────────
-
 #[derive(Subcommand, Debug)]
-enum WebhooksCommands {
-    #[command(
-        about = "List webhook endpoint health scores",
-        long_about = "List health scores for all webhook endpoints.\n\nOptional flags:\n  --json   Print the raw API response as JSON."
-    )]
-    Health {
-        /// Print the raw API response as JSON.
-        #[arg(long)]
-        json: bool,
-    },
+enum TransactionsCommands {
+    /// Export transactions to CSV or JSON format with optional filters.
+    Export {
+        /// Export format: csv or json.
+        #[arg(long, default_value = "csv")]
+        format: String,
 
-    #[command(
-        about = "Show webhook endpoint health by ID",
-        long_about = "Fetch the health score for one webhook endpoint by UUID.\n\nRequired args:\n  <ENDPOINT_ID>   UUID of the webhook endpoint.\nOptional flags:\n  --json          Print the raw API response as JSON.\n\nEdge case: a non-existent endpoint ID returns exit code 1 with an error message."
-    )]
-    HealthGet {
-        /// UUID of the webhook endpoint.
-        #[arg(value_name = "ENDPOINT_ID")]
-        endpoint_id: Uuid,
-
-        /// Print the raw API response as JSON.
+        /// Start date filter, inclusive, in YYYY-MM-DD format.
         #[arg(long)]
-        json: bool,
+        from: Option<String>,
+
+        /// End date filter, inclusive, in YYYY-MM-DD format.
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Filter by transaction status.
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by asset code.
+        #[arg(long)]
+        asset_code: Option<String>,
+
+        /// Save output to a file instead of stdout.
+        #[arg(long)]
+        output: Option<String>,
     },
 }
 
-// ── Locks subcommands ─────────────────────────────────────────────────────────
-
 #[derive(Subcommand, Debug)]
-enum LocksCommands {
-    #[command(
-        about = "List active distributed locks",
-        long_about = "List all active distributed locks held by this server instance.\n\nOptional flags:\n  --json   Print the raw API response as JSON."
-    )]
+enum SettlementsCommands {
+    /// List settlements with cursor-based pagination.
     List {
-        /// Print the raw API response as JSON.
         #[arg(long)]
-        json: bool,
+        cursor: Option<String>,
+
+        #[arg(long, default_value_t = 10)]
+        limit: i64,
+
+        #[arg(long, default_value = "forward")]
+        direction: String,
+
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+
+    /// Get a specific settlement by ID.
+    Get {
+        settlement_id: String,
+
+        #[arg(long, default_value = "table")]
+        format: String,
     },
 }
 
-// ── Response types ────────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize, Serialize)]
+struct TenantQuotaView {
+    tenant_id: Uuid,
+    name: String,
+    rate_limit_per_minute: i32,
+    quota_status: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ListLocksResponse {
+    active_locks: Vec<ActiveLockView>,
+    total: usize,
+    overdue: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ActiveLockView {
+    resource: String,
+    token: String,
+    acquired_at: u64,
+    ttl_secs: u64,
+    expected_duration_secs: u64,
+    overdue: bool,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ListReportsResponse {
@@ -190,9 +315,9 @@ struct ReportDetailResponse {
     period_start: String,
     period_end: String,
     summary: ReportDetailSummary,
-    missing_on_chain: Vec<MissingTransactionOutput>,
-    orphaned_payments: Vec<OrphanedPaymentOutput>,
-    amount_mismatches: Vec<AmountMismatchOutput>,
+    missing_on_chain: Vec<serde_json::Value>,
+    orphaned_payments: Vec<serde_json::Value>,
+    amount_mismatches: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -203,35 +328,6 @@ struct ReportDetailSummary {
     orphaned_payments_count: i32,
     amount_mismatches_count: i32,
     has_discrepancies: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct MissingTransactionOutput {
-    id: Uuid,
-    stellar_account: String,
-    amount: String,
-    asset_code: String,
-    memo: Option<String>,
-    created_at: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OrphanedPaymentOutput {
-    payment_id: String,
-    from: String,
-    to: String,
-    amount: String,
-    asset_code: String,
-    memo: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct AmountMismatchOutput {
-    transaction_id: Uuid,
-    payment_id: String,
-    db_amount: String,
-    chain_amount: String,
-    memo: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -246,79 +342,286 @@ struct RunRequest<'a> {
     period_hours: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct WebhookHealthEntry {
-    id: Uuid,
-    url: String,
-    enabled: bool,
-    success_rate: f64,
-    total_deliveries: i32,
-    last_success_at: Option<String>,
+#[derive(Debug, Serialize)]
+struct UpdateSettlementStatusRequest<'a> {
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_total: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<&'a str>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct LockEntry {
-    resource: String,
-    token: String,
-    acquired_at: u64,
-    ttl_secs: u64,
-    expected_duration_secs: u64,
-    overdue: bool,
+struct ApiClient {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct LocksListResponse {
-    #[serde(default)]
-    active_locks: Vec<LockEntry>,
-    total: usize,
-    overdue: usize,
+impl ApiClient {
+    fn new(base_url: String, api_key: String) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+        }
+    }
+
+    async fn get<T>(&self, path: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.send(self.http.get(self.url(path))).await
+    }
+
+    async fn put_json<T>(&self, path: &str, body: serde_json::Value) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.send(self.http.put(self.url(path)).json(&body)).await
+    }
+
+    async fn post_json<T, B>(&self, path: &str, body: &B) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+        B: Serialize + ?Sized,
+    {
+        self.send(self.http.post(self.url(path)).json(body)).await
+    }
+
+    async fn patch_json<T, B>(&self, path: &str, body: &B) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+        B: Serialize + ?Sized,
+    {
+        self.send(self.http.patch(self.url(path)).json(body)).await
+    }
+
+    async fn delete<T>(&self, path: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.send(self.http.delete(self.url(path))).await
+    }
+
+    async fn get_bytes(&self, path: &str, query: &[(&str, String)]) -> Result<Vec<u8>> {
+        let response = self
+            .with_auth(self.http.get(self.url(path)).query(query))
+            .send()
+            .await
+            .context("request failed")?;
+
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read response body")?;
+        if !status.is_success() {
+            bail!(
+                "server returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+
+        Ok(body.to_vec())
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    fn with_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.api_key.is_empty() {
+            request
+        } else {
+            request.header("X-API-Key", &self.api_key)
+        }
+    }
+
+    async fn send<T>(&self, request: reqwest::RequestBuilder) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let response = self
+            .with_auth(request)
+            .send()
+            .await
+            .context("request failed")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("failed to read response body")?;
+
+        if !status.is_success() {
+            bail!("{}", server_error_message(&body));
+        }
+
+        serde_json::from_str(&body).context("failed to parse response JSON")
+    }
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+fn server_error_message(body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            ["error", "detail", "message"]
+                .into_iter()
+                .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.to_string());
+
+    message
+        .strip_prefix("Bad request: ")
+        .unwrap_or(&message)
+        .to_string()
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = reqwest::Client::new();
-    let base_url = cli.base_url.trim_end_matches('/').to_string();
+    let client = ApiClient::new(cli.base_url, cli.api_key);
 
     match cli.command {
-        Commands::Admin(admin) => match admin {
-            AdminCommands::Reconciliation(command) => {
-                handle_reconciliation(&client, &base_url, command).await?
-            }
-            AdminCommands::Webhooks(command) => {
-                handle_webhooks(&client, &base_url, command).await?
-            }
-            AdminCommands::Locks(command) => {
-                handle_locks(&client, &base_url, command).await?
-            }
-        },
+        Commands::Admin(command) => handle_admin(&client, command).await?,
+        Commands::Transactions(command) => handle_transactions(&client, command).await?,
+        Commands::Settlements(command) => handle_settlements(&client, command).await?,
+        Commands::Completions { shell } => print_completions(&shell)?,
     }
 
     Ok(())
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+async fn handle_admin(client: &ApiClient, command: AdminCommands) -> Result<()> {
+    match command {
+        AdminCommands::Reconciliation(command) => handle_reconciliation(client, command).await,
+        AdminCommands::Settlements(command) => handle_admin_settlements(client, command).await,
+        AdminCommands::Locks(command) => handle_locks(client, command).await,
+        AdminCommands::Quotas(command) => handle_quotas(client, command).await,
+    }
+}
 
-async fn handle_reconciliation(
-    client: &reqwest::Client,
-    base_url: &str,
-    command: ReconciliationCommands,
+async fn handle_admin_settlements(
+    client: &ApiClient,
+    command: AdminSettlementCommands,
 ) -> Result<()> {
+    match command {
+        AdminSettlementCommands::UpdateStatus {
+            settlement_id,
+            new_status,
+            reason,
+            new_total,
+            actor,
+            json,
+        } => {
+            let response: serde_json::Value = client
+                .patch_json(
+                    &format!("/admin/settlements/{settlement_id}/status"),
+                    &UpdateSettlementStatusRequest {
+                        status: &new_status,
+                        reason: reason.as_deref(),
+                        new_total: new_total.as_deref(),
+                        actor: actor.as_deref(),
+                    },
+                )
+                .await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_locks(client: &ApiClient, command: LockCommands) -> Result<()> {
+    match command {
+        LockCommands::List { json } => {
+            let response: ListLocksResponse = client.get("/admin/locks").await?;
+            println!("{}", output::render(&response, json, format_locks_table)?);
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_quotas(client: &ApiClient, command: QuotaCommands) -> Result<()> {
+    match command {
+        QuotaCommands::List { json } => {
+            let response: Vec<TenantQuotaView> = client.get("/admin/quotas").await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
+            );
+        }
+        QuotaCommands::Get { tenant_id, json } => {
+            let response: TenantQuotaView =
+                client.get(&format!("/admin/quotas/{tenant_id}")).await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
+            );
+        }
+        QuotaCommands::Set {
+            tenant_id,
+            limit,
+            limit_flag,
+            json: as_json,
+        } => {
+            let Some(limit) = limit.or(limit_flag) else {
+                bail!("quota limit is required");
+            };
+
+            if limit == 0 {
+                bail!("quota limit must be positive");
+            }
+
+            let response: serde_json::Value = client
+                .put_json(
+                    &format!("/admin/quotas/{tenant_id}"),
+                    json!({ "custom_limit": limit }),
+                )
+                .await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_json_flag(as_json))?
+            );
+        }
+        QuotaCommands::Reset { tenant_id, json } => {
+            let response: serde_json::Value = client
+                .delete(&format!("/admin/quotas/{tenant_id}/reset"))
+                .await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_reconciliation(client: &ApiClient, command: ReconciliationCommands) -> Result<()> {
     match command {
         ReconciliationCommands::Reports {
             limit,
             offset,
             json,
         } => {
-            let url = format!("{base_url}/admin/reconciliation/reports?limit={limit}&offset={offset}");
-            let response = send_json_request::<ListReportsResponse>(client.get(url)).await?;
+            let response: ListReportsResponse = client
+                .get(&format!(
+                    "/admin/reconciliation/reports?limit={limit}&offset={offset}"
+                ))
+                .await?;
             println!("{}", output::render(&response, json, format_reports_table)?);
         }
         ReconciliationCommands::Report { report_id, json } => {
-            let url = format!("{base_url}/admin/reconciliation/reports/{report_id}");
-            let response = send_json_request::<ReportDetailResponse>(client.get(url)).await?;
+            let response: ReportDetailResponse = client
+                .get(&format!("/admin/reconciliation/reports/{report_id}"))
+                .await?;
             println!("{}", output::render(&response, json, format_report_table)?);
         }
         ReconciliationCommands::Run {
@@ -326,14 +629,15 @@ async fn handle_reconciliation(
             period_hours,
             json,
         } => {
-            let url = format!("{base_url}/admin/reconciliation/run");
-            let response = send_json_request::<RunResponse>(
-                client.post(url).json(&RunRequest {
-                    account: &account,
-                    period_hours,
-                }),
-            )
-            .await?;
+            let response: RunResponse = client
+                .post_json(
+                    "/admin/reconciliation/run",
+                    &RunRequest {
+                        account: &account,
+                        period_hours: Some(period_hours),
+                    },
+                )
+                .await?;
             println!("{}", output::render(&response, json, format_run_table)?);
         }
     }
@@ -341,56 +645,90 @@ async fn handle_reconciliation(
     Ok(())
 }
 
-async fn handle_webhooks(
-    client: &reqwest::Client,
-    base_url: &str,
-    command: WebhooksCommands,
-) -> Result<()> {
+async fn handle_transactions(client: &ApiClient, command: TransactionsCommands) -> Result<()> {
     match command {
-        WebhooksCommands::Health { json } => {
-            let url = format!("{base_url}/admin/webhooks/health");
-            let response = send_json_request::<Vec<WebhookHealthEntry>>(client.get(url)).await?;
-            println!("{}", output::render(&response, json, format_webhook_health_table)?);
+        TransactionsCommands::Export {
+            format,
+            from,
+            to,
+            status,
+            asset_code,
+            output,
+        } => {
+            let mut query = vec![("format", format)];
+            push_optional_query(&mut query, "from", from);
+            push_optional_query(&mut query, "to", to);
+            push_optional_query(&mut query, "status", status);
+            push_optional_query(&mut query, "asset_code", asset_code);
+
+            let bytes = client.get_bytes("/export", &query).await?;
+            if let Some(path) = output {
+                std::fs::write(&path, bytes)?;
+                println!("Exported to {path}");
+            } else {
+                println!("{}", String::from_utf8(bytes)?);
+            }
         }
-        WebhooksCommands::HealthGet { endpoint_id, json } => {
-            let url = format!("{base_url}/admin/webhooks/health/{endpoint_id}");
-            let response = send_json_request::<WebhookHealthEntry>(client.get(url)).await?;
-            println!("{}", output::render(&response, json, format_webhook_health_entry)?);
+    }
+
+    Ok(())
+}
+
+async fn handle_settlements(client: &ApiClient, command: SettlementsCommands) -> Result<()> {
+    match command {
+        SettlementsCommands::List {
+            cursor,
+            limit,
+            direction,
+            format,
+        } => {
+            let mut query = vec![("limit", limit.to_string()), ("direction", direction)];
+            push_optional_query(&mut query, "cursor", cursor);
+            let query = query
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            let response: serde_json::Value = client.get(&format!("/settlements?{query}")).await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_str(&format))?
+            );
+        }
+        SettlementsCommands::Get {
+            settlement_id,
+            format,
+        } => {
+            let response: serde_json::Value =
+                client.get(&format!("/settlements/{settlement_id}")).await?;
+            println!(
+                "{}",
+                Formatter::format_json_output(&response, OutputFormat::from_str(&format))?
+            );
         }
     }
     Ok(())
 }
 
-async fn handle_locks(
-    client: &reqwest::Client,
-    base_url: &str,
-    command: LocksCommands,
-) -> Result<()> {
-    match command {
-        LocksCommands::List { json } => {
-            let url = format!("{base_url}/admin/locks");
-            let response = send_json_request::<LocksListResponse>(client.get(url)).await?;
-            println!("{}", output::render(&response, json, format_locks_table)?);
-        }
+fn push_optional_query(
+    query: &mut Vec<(&'static str, String)>,
+    key: &'static str,
+    value: Option<String>,
+) {
+    if let Some(value) = value {
+        query.push((key, value));
     }
-    Ok(())
 }
 
-// ── Shared request helper ─────────────────────────────────────────────────────
-
-async fn send_json_request<T>(request: reqwest::RequestBuilder) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let response = request.send().await.context("request failed")?;
-    let status = response.status();
-    let body = response.text().await.context("failed to read response body")?;
-
-    if !status.is_success() {
-        bail!("server returned {status}: {body}");
+fn print_completions(shell: &str) -> Result<()> {
+    match shell {
+        "bash" => println!("_synapse() {{\n    :\n}}\ncomplete -F _synapse synapse"),
+        "zsh" => println!("#compdef synapse\ncompdef _synapse synapse\n_synapse() {{\n    :\n}}"),
+        "fish" => println!("complete -c synapse -f"),
+        _ => bail!("Unsupported shell: {shell}"),
     }
 
-    serde_json::from_str(&body).context("failed to parse response JSON")
+    Ok(())
 }
 
 // ── Table formatters ──────────────────────────────────────────────────────────
@@ -439,12 +777,27 @@ fn format_report_table(report: &ReportDetailResponse) -> String {
         format!("Period: {} to {}", report.period_start, report.period_end),
         String::new(),
         "Summary:".to_string(),
-        format!("  Database transactions: {}", report.summary.total_db_transactions),
+        format!(
+            "  Database transactions: {}",
+            report.summary.total_db_transactions
+        ),
         format!("  Chain payments: {}", report.summary.total_chain_payments),
-        format!("  Missing on chain: {}", report.summary.missing_on_chain_count),
-        format!("  Orphaned payments: {}", report.summary.orphaned_payments_count),
-        format!("  Amount mismatches: {}", report.summary.amount_mismatches_count),
-        format!("  Has discrepancies: {}", yes_no(report.summary.has_discrepancies)),
+        format!(
+            "  Missing on chain: {}",
+            report.summary.missing_on_chain_count
+        ),
+        format!(
+            "  Orphaned payments: {}",
+            report.summary.orphaned_payments_count
+        ),
+        format!(
+            "  Amount mismatches: {}",
+            report.summary.amount_mismatches_count
+        ),
+        format!(
+            "  Has discrepancies: {}",
+            yes_no(report.summary.has_discrepancies)
+        ),
     ];
 
     if report.missing_on_chain.is_empty()
@@ -456,10 +809,6 @@ fn format_report_table(report: &ReportDetailResponse) -> String {
     }
 
     lines.join("\n")
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
 }
 
 fn format_run_table(response: &RunResponse) -> String {
@@ -482,9 +831,40 @@ fn format_run_table(response: &RunResponse) -> String {
     .join("\n")
 }
 
-fn format_webhook_health_table(entries: &Vec<WebhookHealthEntry>) -> String {
-    if entries.is_empty() {
-        return "No webhook endpoints found".to_string();
+fn format_locks_table(response: &ListLocksResponse) -> String {
+    let mut lines = vec![format!(
+        "Active locks: {} total ({} overdue)",
+        response.total, response.overdue
+    )];
+
+    if response.active_locks.is_empty() {
+        lines.push("No active locks found".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push("Resource | Token | Acquired At | TTL | Expected Duration | Overdue".to_string());
+    lines.push("-------- | ----- | ----------- | --- | ----------------- | -------".to_string());
+
+    for lock in &response.active_locks {
+        lines.push(format!(
+            "{} | {} | {} | {} | {} | {}",
+            lock.resource,
+            lock.token,
+            lock.acquired_at,
+            lock.ttl_secs,
+            lock.expected_duration_secs,
+            yes_no(lock.overdue)
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
     }
     let mut lines = vec![
         "ID | URL | Enabled | Success Rate | Deliveries | Last Success".to_string(),
