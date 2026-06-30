@@ -221,6 +221,109 @@ fn route(request_line: &str) -> String {
             )
         }
 
+        // ── Settlements ────────────────────────────────────────────────────────
+        ("GET", "/settlements") => {
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let params = parse_query(query);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(10);
+            let direction = params
+                .get("direction")
+                .cloned()
+                .unwrap_or_else(|| "forward".to_string());
+            let _ = direction; // used for routing logic in real server
+
+            json_response(
+                200,
+                &format!(
+                    r#"{{
+  "settlements": [
+    {{
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "asset_code": "USD",
+      "total_amount": "14250.00",
+      "tx_count": 47,
+      "status": "completed",
+      "period_start": "2026-06-01T00:00:00Z",
+      "period_end": "2026-06-30T23:59:59Z",
+      "created_at": "2026-06-30T06:00:00Z",
+      "updated_at": "2026-06-30T06:00:00Z"
+    }},
+    {{
+      "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "asset_code": "EUR",
+      "total_amount": "8730.50",
+      "tx_count": 22,
+      "status": "pending",
+      "period_start": "2026-06-01T00:00:00Z",
+      "period_end": "2026-06-30T23:59:59Z",
+      "created_at": "2026-06-30T05:30:00Z",
+      "updated_at": "2026-06-30T05:30:00Z"
+    }}
+  ],
+  "next_cursor": null,
+  "has_more": false
+}}"#
+                ),
+            )
+        }
+
+        ("GET", path_ref) if path_ref.starts_with("/settlements/") => {
+            let settlement_id = path_only.trim_start_matches("/settlements/");
+            // 404 for the all-zeros UUID used in not-found tests
+            if settlement_id == "00000000-0000-0000-0000-000000000000" {
+                return json_response(404, r#"{"error":"settlement not found"}"#);
+            }
+            json_response(
+                200,
+                &format!(
+                    r#"{{
+  "id": "{settlement_id}",
+  "asset_code": "USD",
+  "total_amount": "14250.00",
+  "tx_count": 47,
+  "status": "completed",
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-06-30T23:59:59Z",
+  "created_at": "2026-06-30T06:00:00Z",
+  "updated_at": "2026-06-30T06:00:00Z"
+}}"#
+                ),
+            )
+        }
+
+        // ── Transactions ───────────────────────────────────────────────────────
+        ("GET", path_ref) if path_ref.starts_with("/transactions/") => {
+            let tx_id = path_only.trim_start_matches("/transactions/");
+            // 404 for the all-zeros UUID used in not-found tests
+            if tx_id == "00000000-0000-0000-0000-000000000000" {
+                return json_response(404, r#"{"error":"transaction not found"}"#);
+            }
+            json_response(
+                200,
+                &format!(
+                    r#"{{
+  "id": "{tx_id}",
+  "stellar_account": "GABC1234567890DEFG5678901234HIJK5678901234LMNO5678901234",
+  "amount": "100.00",
+  "asset_code": "USD",
+  "status": "pending",
+  "created_at": "2026-06-30T06:00:00Z",
+  "updated_at": "2026-06-30T06:00:00Z",
+  "anchor_transaction_id": null,
+  "callback_type": null,
+  "callback_status": null,
+  "settlement_id": null,
+  "memo": null,
+  "memo_type": null,
+  "metadata": null
+}}"#
+                ),
+            )
+        }
+
         _ => json_response(404, r#"{"error":"Not found"}"#),
     }
 }
