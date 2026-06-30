@@ -1,5 +1,65 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use reqwest::Client;
+use serde::de::DeserializeOwned;
+
+// ── ApiClient (used by commands::stats) ──────────────────────────────────────
+
+/// Thin HTTP client used by all stats subcommands.
+pub struct ApiClient {
+    client: Client,
+    base_url: String,
+    api_key: String,
+}
+
+impl ApiClient {
+    pub fn new(base_url: &str, api_key: &str) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+        }
+    }
+
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP {}: {}", status.as_u16(), body));
+        }
+        resp.json::<T>().await.map_err(|e| anyhow!(e))
+    }
+
+    pub async fn get_with_query<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self
+            .client
+            .get(&url)
+            .header("X-API-Key", &self.api_key);
+        for (k, v) in query {
+            req = req.query(&[(k, v)]);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("HTTP {}: {}", status.as_u16(), body));
+        }
+        resp.json::<T>().await.map_err(|e| anyhow!(e))
+    }
+}
+
+// ── SynapseCliClient (used by handlers in main.rs) ────────────────────────────
 
 pub struct SynapseCliClient {
     client: Client,
@@ -14,45 +74,42 @@ impl SynapseCliClient {
         }
     }
 
-    pub async fn get_json<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-    ) -> Result<T> {
+    pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.client.get(&url).send().await?;
-        response.json().await.map_err(|e| anyhow::anyhow!(e))
+        let resp = self.client.get(&url).send().await?;
+        resp.json().await.map_err(|e| anyhow!(e))
     }
 
-    pub async fn get_with_query<T: serde::de::DeserializeOwned>(
+    pub async fn get_with_query<T: DeserializeOwned>(
         &self,
         path: &str,
         query_params: &[(&str, &str)],
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.client.get(&url);
-
         for (key, value) in query_params {
             req = req.query(&[(key, value)]);
         }
-
-        let response = req.send().await?;
-        response.json().await.map_err(|e| anyhow::anyhow!(e))
+        let resp = req.send().await?;
+        resp.json().await.map_err(|e| anyhow!(e))
     }
 
-    pub async fn get_bytes(
-        &self,
-        path: &str,
-        query_params: &[(&str, &str)],
-    ) -> Result<Vec<u8>> {
+    pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.client.get(&url);
-
         for (key, value) in query_params {
             req = req.query(&[(key, value)]);
         }
+        let resp = req.send().await?;
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| anyhow!(e))
+    }
+}
 
-        let response = req.send().await?;
-        response.bytes().await.map(|b| b.to_vec()).map_err(|e| anyhow::anyhow!(e))
+// ── SynapseApiClient (used by transactions get) ───────────────────────────────
+
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -85,10 +142,10 @@ impl SynapseApiClient {
         }
     }
 
-    /// Fetch a transaction by ID. Returns NotFound for 404, Http for other errors.
-    pub async fn get_transaction(&self, id: &str) -> Result<Value, ClientError> {
+    /// Fetch a transaction by ID. Returns `NotFound` for HTTP 404.
+    pub async fn get_transaction(&self, id: &str) -> std::result::Result<Value, ClientError> {
         let url = format!("{}/transactions/{}", self.base_url, id);
-        let client = reqwest::Client::new();
+        let client = Client::new();
 
         let resp = client
             .get(&url)
