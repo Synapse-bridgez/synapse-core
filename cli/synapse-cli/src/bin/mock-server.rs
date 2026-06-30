@@ -1,7 +1,12 @@
 /// Minimal HTTP mock server for CLI integration tests.
 ///
-/// Reads MOCK_SERVER_ADDR (default 127.0.0.1:4010) and serves a fixed set of
-/// Synapse API routes with realistic payloads.
+/// Reads MOCK_SERVER_ADDR (default 127.0.0.1:4010) and MOCK_SERVER_SCENARIO
+/// (default "happy") to select which response set to serve.
+///
+/// Scenarios:
+///   happy      — realistic success payloads for all routes (default)
+///   edge       — empty/minimal payloads; reconciliation has 0 reports
+///   not_found  — transactions and settlements return 404 for all IDs
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -37,11 +42,107 @@ fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let response = route(request_line.trim_end());
+    let scenario = std::env::var("MOCK_SERVER_SCENARIO")
+        .unwrap_or_else(|_| "happy".to_string());
+
+    let response = match scenario.as_str() {
+        "edge" => route_edge(request_line.trim_end()),
+        "not_found" => route_not_found(request_line.trim_end()),
+        _ => route(request_line.trim_end()),
+    };
     let mut stream = stream;
     stream.write_all(response.as_bytes())?;
     stream.flush()?;
     Ok(())
+}
+
+/// Scenario: "not_found" — every transactions and settlements endpoint returns 404.
+fn route_not_found(request_line: &str) -> String {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    let path_only = path.split('?').next().unwrap_or(path);
+
+    match (method, path_only) {
+        ("GET", p) if p.starts_with("/transactions/") => {
+            json_response(404, r#"{"error":"transaction not found"}"#)
+        }
+        ("GET", p) if p.starts_with("/settlements/") => {
+            json_response(404, r#"{"error":"settlement not found"}"#)
+        }
+        ("GET", "/settlements") => {
+            json_response(404, r#"{"error":"not found"}"#)
+        }
+        // Fall back to happy-path for all other routes (health, stats, etc.)
+        _ => route(request_line),
+    }
+}
+
+/// Scenario: "edge" — empty/minimal payloads for reconciliation; everything
+/// else falls through to the happy-path handler.
+fn route_edge(request_line: &str) -> String {
+    let mut parts = request_line.split_whitespace();
+    let _method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    let path_only = path.split('?').next().unwrap_or(path);
+
+    match path_only {
+        // Return empty report list for the "edge" scenario
+        p if p.starts_with("/admin/reconciliation/reports") && !p[1..].contains('/') => {
+            json_response(
+                200,
+                r#"{"reports":[],"total":0,"limit":20,"offset":0}"#,
+            )
+        }
+        // Individual report endpoint still returns a minimal no-discrepancy report
+        p if p.starts_with("/admin/reconciliation/reports/") => {
+            let report_id = path_only.rsplit('/').next()
+                .unwrap_or("3f1d8c31-5f1d-4fb8-93e0-112233445566");
+            json_response(
+                200,
+                &format!(
+                    r#"{{
+  "id": "{report_id}",
+  "generated_at": "2026-06-30T06:15:00Z",
+  "period_start": "2026-06-29T06:15:00Z",
+  "period_end": "2026-06-30T06:15:00Z",
+  "summary": {{
+    "total_db_transactions": 0,
+    "total_chain_payments": 0,
+    "missing_on_chain_count": 0,
+    "orphaned_payments_count": 0,
+    "amount_mismatches_count": 0,
+    "has_discrepancies": false
+  }},
+  "missing_on_chain": [],
+  "orphaned_payments": [],
+  "amount_mismatches": []
+}}"#
+                ),
+            )
+        }
+        // Run reconciliation: return a no-discrepancy result
+        "/admin/reconciliation/run" => json_response(
+            200,
+            r#"{
+  "message": "Reconciliation completed successfully",
+  "report": {
+    "id": "3f1d8c31-5f1d-4fb8-93e0-112233445566",
+    "generated_at": "2026-06-30T06:15:00Z",
+    "period_start": "2026-06-29T06:15:00Z",
+    "period_end": "2026-06-30T06:15:00Z",
+    "total_db_transactions": 0,
+    "total_chain_payments": 0,
+    "missing_on_chain_count": 0,
+    "orphaned_payments_count": 0,
+    "amount_mismatches_count": 0,
+    "has_discrepancies": false
+  }
+}"#,
+        ),
+        // All other routes: delegate to happy-path
+        _ => route(request_line),
+    }
 }
 
 fn route(request_line: &str) -> String {
