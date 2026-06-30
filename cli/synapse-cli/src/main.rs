@@ -158,6 +158,8 @@ enum QuotaCommands {
     },
 }
 
+// ── Reconciliation subcommands ────────────────────────────────────────────────
+
 #[derive(Subcommand, Debug)]
 enum ReconciliationCommands {
     #[command(
@@ -705,7 +707,6 @@ async fn handle_settlements(client: &ApiClient, command: SettlementsCommands) ->
             );
         }
     }
-
     Ok(())
 }
 
@@ -729,6 +730,8 @@ fn print_completions(shell: &str) -> Result<()> {
 
     Ok(())
 }
+
+// ── Table formatters ──────────────────────────────────────────────────────────
 
 fn format_reports_table(response: &ListReportsResponse) -> String {
     let mut lines = vec![format!(
@@ -863,4 +866,63 @@ fn yes_no(value: bool) -> &'static str {
     } else {
         "no"
     }
+    let mut lines = vec![
+        "ID | URL | Enabled | Success Rate | Deliveries | Last Success".to_string(),
+        "-- | --- | ------- | ------------ | ---------- | ------------".to_string(),
+    ];
+    for e in entries {
+        lines.push(format!(
+            "{} | {} | {} | {:.1}% | {} | {}",
+            e.id,
+            e.url,
+            yes_no(e.enabled),
+            e.success_rate,
+            e.total_deliveries,
+            e.last_success_at.as_deref().unwrap_or("never"),
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_webhook_health_entry(entry: &WebhookHealthEntry) -> String {
+    [
+        format!("ID: {}", entry.id),
+        format!("URL: {}", entry.url),
+        format!("Enabled: {}", yes_no(entry.enabled)),
+        format!("Success Rate: {:.1}%", entry.success_rate),
+        format!("Total Deliveries: {}", entry.total_deliveries),
+        format!(
+            "Last Success: {}",
+            entry.last_success_at.as_deref().unwrap_or("never")
+        ),
+    ]
+    .join("\n")
+}
+
+fn format_locks_table(response: &LocksListResponse) -> String {
+    let mut lines = vec![format!(
+        "Active locks: {} total, {} overdue",
+        response.total, response.overdue
+    )];
+
+    if response.active_locks.is_empty() {
+        lines.push("No locks currently held.".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push("Resource | Token | Acquired At | TTL (s) | Overdue".to_string());
+    lines.push("-------- | ----- | ----------- | ------- | -------".to_string());
+
+    for lock in &response.active_locks {
+        lines.push(format!(
+            "{} | {} | {} | {} | {}",
+            lock.resource,
+            lock.token,
+            lock.acquired_at,
+            lock.ttl_secs,
+            yes_no(lock.overdue),
+        ));
+    }
+
+    lines.join("\n")
 }

@@ -40,6 +40,7 @@ fn route(request_line: &str, scenario: &str) -> String {
     let path = parts.next().unwrap_or_default();
 
     match (method, path) {
+        // ── Reconciliation ────────────────────────────────────────────────────
         ("POST", "/admin/reconciliation/run") => {
             if scenario == "edge" {
                 json_response(200, &run_body(false, 0, 0))
@@ -82,6 +83,7 @@ fn route(request_line: &str, scenario: &str) -> String {
                 )
             }
         }
+
         ("GET", path) if path.starts_with("/admin/reconciliation/reports/") => {
             let report_id = path.rsplit('/').next().unwrap_or(SAMPLE_REPORT_ID);
             if scenario == "edge" {
@@ -187,7 +189,6 @@ fn json_response(status: u16, body: &str) -> String {
         404 => "Not Found",
         _ => "OK",
     };
-
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -198,6 +199,6 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
-        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
