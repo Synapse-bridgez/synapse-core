@@ -1,9 +1,5 @@
 use wiremock::MockServer;
 
-/// Spawns a mock HTTP server for testing.
-///
-/// Returns a running MockServer instance that can be configured with route stubs.
-/// The server automatically shuts down when dropped.
 pub async fn spawn_mock_server() -> MockServer {
     MockServer::start().await
 }

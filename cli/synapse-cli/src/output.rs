@@ -3,13 +3,15 @@ use serde::Serialize;
 
 /// Render a value as either pretty-printed JSON or a table string produced by
 /// the provided `table_renderer` closure.
+use crate::formatter::{Formatter, OutputFormat};
+
 pub fn render<T, F>(value: &T, json: bool, table_renderer: F) -> Result<String>
 where
     T: Serialize,
     F: FnOnce(&T) -> String,
 {
     if json {
-        Ok(serde_json::to_string_pretty(value)?)
+        Formatter::format_json_output(value, OutputFormat::Json)
     } else {
         Ok(table_renderer(value))
     }

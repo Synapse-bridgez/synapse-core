@@ -1,16 +1,17 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::Value;
+use anyhow::{bail, Context, Result};
 
 pub struct SynapseCliClient {
-    client: Client,
+    client: reqwest::Client,
     base_url: String,
 }
 
 impl SynapseCliClient {
     pub fn new(base_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
@@ -19,6 +20,7 @@ impl SynapseCliClient {
         let url = format!("{}{}", self.base_url, path);
         let response = self.client.get(&url).send().await?;
         response.json().await.map_err(|e| anyhow::anyhow!(e))
+        self.send(self.client.get(self.url(path))).await
     }
 
     pub async fn get_with_query<T: serde::de::DeserializeOwned>(
@@ -26,15 +28,8 @@ impl SynapseCliClient {
         path: &str,
         query_params: &[(&str, &str)],
     ) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let mut req = self.client.get(&url);
-
-        for (key, value) in query_params {
-            req = req.query(&[(key, value)]);
-        }
-
-        let response = req.send().await?;
-        response.json().await.map_err(|e| anyhow::anyhow!(e))
+        self.send(self.client.get(self.url(path)).query(query_params))
+            .await
     }
 
     pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
@@ -122,9 +117,24 @@ impl ApiClient {
             .client
             .get(&url)
             .header("X-API-Key", &self.api_key);
+        let response = self
+            .client
+            .get(self.url(path))
+            .query(query_params)
+            .send()
+            .await
+            .context("request failed")?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .context("failed to read response body")?;
 
-        for (key, value) in query_params {
-            req = req.query(&[(key, value)]);
+        if !status.is_success() {
+            bail!(
+                "server returned {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
         }
 
         let resp = req.send().await?;
@@ -154,20 +164,11 @@ impl std::fmt::Display for ClientError {
             ClientError::Http { status, body } => write!(f, "HTTP {}: {}", status, body),
             ClientError::Network(msg) => write!(f, "Network error: {}", msg),
         }
+        Ok(bytes.to_vec())
     }
-}
 
-pub struct SynapseApiClient {
-    base_url: String,
-    api_key: String,
-}
-
-impl SynapseApiClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self {
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-        }
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
     }
 
     /// Fetch a transaction by ID. Returns `NotFound` for 404, `Http` for other
@@ -180,23 +181,21 @@ impl SynapseApiClient {
             .get(&url)
             .header("X-API-Key", &self.api_key)
             .send()
+    async fn send<T: serde::de::DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T> {
+        let response = request.send().await.context("request failed")?;
+        let status = response.status();
+        let body = response
+            .text()
             .await
-            .map_err(|e| ClientError::Network(e.to_string()))?;
+            .context("failed to read response body")?;
 
-        let status = resp.status().as_u16();
-
-        if status == 404 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::NotFound(body));
+        if !status.is_success() {
+            bail!("server returned {status}: {body}");
         }
 
-        if status >= 400 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Http { status, body });
-        }
-
-        resp.json::<Value>()
-            .await
-            .map_err(|e| ClientError::Network(e.to_string()))
+        serde_json::from_str(&body).context("failed to parse response JSON")
     }
 }
