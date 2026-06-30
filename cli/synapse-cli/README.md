@@ -51,26 +51,44 @@ synapse --base-url https://api.synapse.example.com --api-key your-key transactio
 
 ## Commands
 
-### Events
+### Admin Locks
 
-#### Watch transaction events
+#### List Active Locks
 
-Stream transaction status updates from the Synapse API. The command requires a token and accepts optional limits and JSON output.
+List active distributed locks currently held by the Synapse instance.
 
 ```bash
-synapse events watch --token demo-token --limit 2
+synapse admin locks list [--json]
 ```
 
-Example output:
+**Required flags:** none
+
+**Optional flags:**
+- `--json`: Print the raw API response as pretty JSON instead of the default table.
+
+**Mock server example:**
+
+Start the mock server in one terminal:
+
+```bash
+cd cli/synapse-cli
+MOCK_SERVER_ADDR=127.0.0.1:4010 MOCK_SERVER_SCENARIO=happy cargo run --bin mock-server
+```
+
+Then run the CLI against it:
+
+```bash
+cargo run --bin synapse -- --base-url http://127.0.0.1:4010 admin locks list
+```
+
+Sample output:
+
 ```text
-550e8400-e29b-41d4-a716-446655440000 | completed | 2024-01-15T10:30:00Z | Settlement finalized
-550e8401-e29b-41d4-a716-446655440001 | pending | 2024-01-15T10:31:00Z
-```
-
-This example is copy-paste runnable against the mock server when you start the CLI with a base URL that points to the mock server, for example:
-
-```bash
-cargo run --bin synapse -- --base-url http://127.0.0.1:4010 events watch --token demo-token --limit 2
+Active locks: 2 total (1 overdue)
+Resource | Token | Acquired At | TTL | Expected Duration | Overdue
+-------- | ----- | ----------- | --- | ----------------- | -------
+settlement:550e8400-e29b-41d4-a716-446655440000 | 4e4e9e47-7e0f-4f2f-8d63-323c61279209 | 1782540612 | 30 | 30 | no
+payout-batch:daily | 89ca5ddc-51bd-44bd-817e-f4175dcab0bc | 1782540400 | 30 | 30 | yes
 ```
 
 ### Transactions
@@ -447,4 +465,43 @@ Run all tests:
 
 ```bash
 cargo test
+```
+
+## Settlement Example
+
+In one terminal, start the mock API:
+
+```powershell
+cargo run --manifest-path cli/synapse-cli/Cargo.toml --bin mock-server
+```
+
+Then update a settlement status against it and print the resulting settlement:
+
+```powershell
+cargo run --manifest-path cli/synapse-cli/Cargo.toml -- `
+  --base-url http://127.0.0.1:4010 `
+  admin settlements update-status `
+  8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11 `
+  --status adjusted `
+  --reason "Audit correction" `
+  --new-total 125.0000000
+```
+
+Sample output:
+
+```text
+Settlement updated successfully
+
+Settlement ID: 8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11
+Asset code: USDC
+Status: adjusted
+Total amount: 125.0000000
+Tx count: 8
+Period: 2026-06-26T00:00:00Z to 2026-06-27T00:00:00Z
+Dispute reason: Audit correction
+Original total amount: 130.0000000
+Reviewed by: admin
+Reviewed at: 2026-06-27T09:15:00Z
+Created at: 2026-06-27T09:00:00Z
+Updated at: 2026-06-27T09:15:00Z
 ```
