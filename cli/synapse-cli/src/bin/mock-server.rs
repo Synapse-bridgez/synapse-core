@@ -186,6 +186,24 @@ fn route(request_line: &str) -> String {
                 ),
             )
         }
+        ("GET", "/events") => json_response(
+            200,
+            r#"[
+  {
+    "transaction_id": "aaaaaaaa-0000-0000-0000-000000000001",
+    "status": "pending",
+    "timestamp": "2026-06-27T06:00:00Z",
+    "message": null
+  },
+  {
+    "transaction_id": "aaaaaaaa-0000-0000-0000-000000000002",
+    "status": "completed",
+    "timestamp": "2026-06-27T06:05:00Z",
+    "message": "settled"
+  }
+]"#,
+        ),
+        ("GET", "/events?empty=1") => json_response(200, "[]"),
         _ => json_response(
             404,
             r#"{

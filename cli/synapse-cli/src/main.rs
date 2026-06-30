@@ -241,6 +241,40 @@ enum AdminCommands {
         long_about = "List, inspect, or run reconciliation reports through the admin API."
     )]
     Reconciliation(ReconciliationCommands),
+
+    /// Synapse event stream commands.
+    #[command(
+        about = "Event stream commands",
+        long_about = "Watch or query the Synapse event stream."
+    )]
+    Events(EventsCommands),
+}
+
+#[derive(Subcommand, Debug)]
+enum EventsCommands {
+    /// Fetch recent transaction status-change events.
+    ///
+    /// Calls GET /events and prints each event's transaction_id, status, and
+    /// timestamp.  An empty event list is a valid response, not an error.
+    ///
+    /// Exit codes:
+    ///   0 - Success (including empty list)
+    ///   1 - Server error or network failure
+    ///
+    /// Example:
+    ///   synapse admin events watch
+    ///   synapse admin events watch --json
+    #[command(
+        about = "Fetch recent transaction status-change events",
+        long_about = "Fetch recent transaction status-change events from GET /events.\n\n\
+                      Exit codes:\n  0 - Success\n  1 - Server error\n\n\
+                      Edge case: an empty event list is valid and exits with 0."
+    )]
+    Watch {
+        /// Print the raw API response as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -391,6 +425,9 @@ async fn main() -> Result<()> {
         Commands::Admin(admin) => match admin {
             AdminCommands::Reconciliation(command) => {
                 handle_reconciliation(&client, &base_url, command).await?
+            }
+            AdminCommands::Events(command) => {
+                handle_events(&client, &base_url, command).await?
             }
         },
     }
@@ -689,6 +726,56 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Event {
+    transaction_id: Uuid,
+    status: String,
+    timestamp: String,
+    message: Option<String>,
+}
+
+async fn handle_events(
+    client: &reqwest::Client,
+    base_url: &str,
+    command: EventsCommands,
+) -> Result<()> {
+    match command {
+        EventsCommands::Watch { json } => {
+            let url = format!("{base_url}/events");
+            let events = send_json_request::<Vec<Event>>(client.get(url)).await?;
+            println!("{}", output::render(&events, json, format_events_table)?);
+        }
+    }
+    Ok(())
+}
+
+fn format_events_table(events: &Vec<Event>) -> String {
+    if events.is_empty() {
+        return "No events".to_string();
+    }
+
+    let mut lines = vec![
+        "TRANSACTION ID | STATUS | TIMESTAMP | MESSAGE".to_string(),
+        "-------------- | ------ | --------- | -------".to_string(),
+    ];
+
+    for ev in events {
+        lines.push(format!(
+            "{} | {} | {} | {}",
+            ev.transaction_id,
+            ev.status,
+            ev.timestamp,
+            ev.message.as_deref().unwrap_or("-"),
+        ));
+    }
+
+    lines.join("\n")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 async fn send_json_request<T>(request: reqwest::RequestBuilder) -> Result<T>
 where
