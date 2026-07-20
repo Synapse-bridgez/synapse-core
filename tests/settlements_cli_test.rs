@@ -53,7 +53,10 @@ async fn test_settlements_list_table_format() {
 
     let mut cmd = synapse_cmd();
     cmd.env("SYNAPSE_API_URL", server.uri());
-    cmd.arg("settlements").arg("list").arg("--format").arg("table");
+    cmd.arg("settlements")
+        .arg("list")
+        .arg("--format")
+        .arg("table");
 
     cmd.assert().success();
 }
@@ -94,7 +97,10 @@ async fn test_settlements_list_json_format() {
 
     let mut cmd = synapse_cmd();
     cmd.env("SYNAPSE_API_URL", server.uri());
-    cmd.arg("settlements").arg("list").arg("--format").arg("json");
+    cmd.arg("settlements")
+        .arg("list")
+        .arg("--format")
+        .arg("json");
 
     cmd.assert().success();
 }

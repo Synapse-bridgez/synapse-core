@@ -39,7 +39,14 @@ pub struct SettlementListResponse {
 
 impl TableDisplay for Settlement {
     fn headers() -> Vec<&'static str> {
-        vec!["ID", "ASSET", "AMOUNT", "TX COUNT", "STATUS", "PERIOD START"]
+        vec![
+            "ID",
+            "ASSET",
+            "AMOUNT",
+            "TX COUNT",
+            "STATUS",
+            "PERIOD START",
+        ]
     }
 
     fn row(&self) -> Vec<String> {
@@ -126,7 +133,8 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
             json,
         } => {
             let limit_str = limit.to_string();
-            let mut params: Vec<(&str, &str)> = vec![("limit", &limit_str), ("direction", &direction)];
+            let mut params: Vec<(&str, &str)> =
+                vec![("limit", &limit_str), ("direction", &direction)];
             // Keep cursor borrow alive for the duration of the call
             let cursor_val;
             if let Some(ref c) = cursor {
@@ -134,17 +142,19 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
                 params.push(("cursor", &cursor_val));
             }
 
-            let resp: SettlementListResponse = client
-                .get_with_query("/settlements", &params)
-                .await?;
+            let resp: SettlementListResponse =
+                client.get_with_query("/settlements", &params).await?;
 
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
 
             if fmt == OutputFormat::Json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&resp)
-                        .unwrap_or_else(|_| "{}".into())
+                    serde_json::to_string_pretty(&resp).unwrap_or_else(|_| "{}".into())
                 );
             } else {
                 // Table mode: show pagination metadata then the rows
@@ -161,11 +171,18 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
             }
         }
 
-        SettlementsSubcommand::Get { settlement_id, json } => {
+        SettlementsSubcommand::Get {
+            settlement_id,
+            json,
+        } => {
             let path = format!("/settlements/{}", settlement_id);
             let settlement: Settlement = client.get(&path).await?;
 
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&settlement, fmt);
         }
     }
@@ -335,10 +352,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let settlement: Settlement = client
-            .get(&format!("/settlements/{}", id))
-            .await
-            .unwrap();
+        let settlement: Settlement = client.get(&format!("/settlements/{}", id)).await.unwrap();
         assert_eq!(settlement.id, id);
         assert_eq!(settlement.total_amount, "1000.00");
         assert_eq!(settlement.tx_count, 5);
@@ -357,10 +371,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let settlement: Settlement = client
-            .get(&format!("/settlements/{}", id))
-            .await
-            .unwrap();
+        let settlement: Settlement = client.get(&format!("/settlements/{}", id)).await.unwrap();
         let json = serde_json::to_string_pretty(&settlement).unwrap();
         assert!(json.contains("\"id\""));
         assert!(json.contains(id));

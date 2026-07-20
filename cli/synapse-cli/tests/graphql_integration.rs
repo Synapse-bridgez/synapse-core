@@ -106,7 +106,9 @@ async fn graphql_query_json_output_exit_0() {
         .success()
         // Pretty-printed JSON: must contain both a key and the transaction id
         .stdout(predicate::str::contains("\"data\""))
-        .stdout(predicate::str::contains("550e8400-e29b-41d4-a716-446655440000"))
+        .stdout(predicate::str::contains(
+            "550e8400-e29b-41d4-a716-446655440000",
+        ))
         .stdout(predicate::str::contains("\"status\""))
         .stdout(predicate::str::contains("pending"));
 }
@@ -155,12 +157,7 @@ async fn graphql_query_application_level_error_exits_nonzero() {
 async fn graphql_query_http_400_exits_nonzero() {
     let server = spawn_mock_server().await;
 
-    stub_graphql(
-        &server,
-        400,
-        serde_json::json!({ "error": "bad request" }),
-    )
-    .await;
+    stub_graphql(&server, 400, serde_json::json!({ "error": "bad request" })).await;
 
     let mut cmd = synapse_cmd();
     cmd.arg("--url")

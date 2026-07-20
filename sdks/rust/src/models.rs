@@ -80,7 +80,7 @@ pub struct Settlement {
 }
 
 /// Paginated list of settlements.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SettlementList {
     pub settlements: Vec<Settlement>,
     pub next_cursor: Option<String>,
@@ -107,6 +107,24 @@ pub struct ListParams {
     pub limit: Option<i64>,
     pub from_date: Option<String>,
     pub to_date: Option<String>,
+}
+
+/// Filters for [`Transactions::export`].
+///
+/// The SDK returns raw export bytes unchanged so callers can process CSV or
+/// JSON themselves.
+#[derive(Debug, Default)]
+pub struct TransactionExportFilters {
+    /// Export format, either `csv` or `json`. Defaults to CSV.
+    pub format: Option<String>,
+    /// Inclusive start date filter (YYYY-MM-DD).
+    pub from: Option<String>,
+    /// Inclusive end date filter (YYYY-MM-DD).
+    pub to: Option<String>,
+    /// Transaction status filter.
+    pub status: Option<String>,
+    /// Asset code filter.
+    pub asset_code: Option<String>,
 }
 
 // ============================================================================
@@ -221,9 +239,9 @@ pub struct RunReconciliationRequest {
 // Admin: Settlement Models
 // ============================================================================
 
-/// A settlement record.
+/// A settlement record as returned by the admin status-update endpoint.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Settlement {
+pub struct AdminSettlement {
     pub id: Uuid,
     pub status: String,
     pub total_amount: String,
@@ -245,22 +263,31 @@ pub struct UpdateSettlementStatusRequest {
     /// Actor performing the change (defaults to "admin").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
-/// Filters for [`Transactions::export`].
-///
-/// The SDK returns raw export bytes unchanged so callers can process CSV or
-/// JSON themselves.
-#[derive(Debug, Default)]
-pub struct TransactionExportFilters {
-    /// Export format, either `csv` or `json`. Defaults to CSV.
-    pub format: Option<String>,
-    /// Inclusive start date filter (YYYY-MM-DD).
-    pub from: Option<String>,
-    /// Inclusive end date filter (YYYY-MM-DD).
-    pub to: Option<String>,
-    /// Transaction status filter.
-    pub status: Option<String>,
-    /// Asset code filter.
-    pub asset_code: Option<String>,
+}
+
+// ============================================================================
+// Admin: Locks Models
+// ============================================================================
+
+/// A single distributed lock currently held by the server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActiveLock {
+    pub resource: String,
+    pub token: String,
+    pub acquired_at: u64,
+    pub ttl_secs: u64,
+    pub expected_duration_secs: u64,
+    pub overdue: bool,
+}
+
+/// Response from `GET /admin/locks`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LocksListResponse {
+    pub active_locks: Vec<ActiveLock>,
+    pub total: i64,
+    pub overdue: i64,
+}
+
 // ── GraphQL models (issue #634) ───────────────────────────────────────────────
 
 /// Request body for `POST /graphql`.
@@ -324,7 +351,14 @@ pub struct CacheMetrics {
 
 impl Default for CacheMetrics {
     fn default() -> Self {
-        Self { hits: 0, misses: 0, hit_rate: 0.0, evictions: 0, size: 0, capacity: 0 }
+        Self {
+            hits: 0,
+            misses: 0,
+            hit_rate: 0.0,
+            evictions: 0,
+            size: 0,
+            capacity: 0,
+        }
     }
 }
 

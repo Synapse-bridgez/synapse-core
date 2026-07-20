@@ -1,12 +1,11 @@
+use crate::config::Config;
 use clap::{Parser, Subcommand};
 use sqlx::PgPool;
-use synapse_core::config::Config;
 use uuid::Uuid;
 
 // Re-export handler functions used in tests and from main dispatch.
 // `reqwest` and `serde_json` are regular [dependencies] so they are available
 // to every module in the binary crate without an explicit `extern crate`.
-
 
 #[derive(Parser)]
 #[command(name = "synapse-core")]
@@ -74,7 +73,8 @@ pub enum TxCommands {
         tx_id: Uuid,
     },
 
-    #[command(long_about = "List transactions with cursor-based pagination and optional date filters.
+    #[command(
+        long_about = "List transactions with cursor-based pagination and optional date filters.
 
 All flags are optional. Cursors are opaque — always use next_cursor from previous response.
 Invalid or expired cursors return an error and must not be retried as-is.
@@ -82,7 +82,8 @@ Invalid or expired cursors return an error and must not be retried as-is.
 Examples:
   synapse-core tx list --limit 50
   synapse-core tx list --from-date 2024-01-01T00:00:00Z --to-date 2024-02-01T00:00:00Z
-  synapse-core tx list --cursor <cursor> --format json")]
+  synapse-core tx list --cursor <cursor> --format json"
+    )]
     List {
         /// Opaque pagination cursor (use next_cursor from previous response)
         #[arg(long)]
@@ -99,57 +100,6 @@ Examples:
         /// Exclusive ISO 8601 date range end (e.g., 2024-02-01T00:00:00Z)
         #[arg(long)]
         to_date: Option<String>,
-
-        /// Output format (json or table; default: table)
-        #[arg(long, default_value = "table")]
-        format: String,
-    },
-
-    #[command(long_about = "Search transactions by filter, returning a single page of matches.
-
-All filters are optional — omit a field to leave that dimension unfiltered.
-A search with no matches returns total=0 and empty results, not an error.
-
-Examples:
-  synapse-core tx search --status completed --asset-code USD
-  synapse-core tx search --min-amount 10.00 --max-amount 500.00
-  synapse-core tx search --stellar-account GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJIIAY3XDBKWV3UYSI7IFYWU4")]
-    Search {
-        /// Exact transaction status (e.g., pending, completed)
-        #[arg(long)]
-        status: Option<String>,
-
-        /// Exact asset code (e.g., USD)
-        #[arg(long)]
-        asset_code: Option<String>,
-
-        /// Inclusive minimum amount as decimal (e.g., 10.00)
-        #[arg(long)]
-        min_amount: Option<String>,
-
-        /// Inclusive maximum amount as decimal (e.g., 500.00)
-        #[arg(long)]
-        max_amount: Option<String>,
-
-        /// Inclusive RFC 3339 range start (e.g., 2024-01-01T00:00:00Z)
-        #[arg(long)]
-        from: Option<String>,
-
-        /// Exclusive RFC 3339 range end (e.g., 2024-02-01T00:00:00Z)
-        #[arg(long)]
-        to: Option<String>,
-
-        /// Exact Stellar account to filter by
-        #[arg(long)]
-        stellar_account: Option<String>,
-
-        /// Opaque pagination cursor (use next_cursor from previous response)
-        #[arg(long)]
-        cursor: Option<String>,
-
-        /// Maximum records per page (server default: 25, max: 100)
-        #[arg(long, short = 'l')]
-        limit: Option<i64>,
 
         /// Output format (json or table; default: table)
         #[arg(long, default_value = "table")]
@@ -667,9 +617,7 @@ pub async fn handle_graphql_query(
     let mut body = serde_json::json!({ "query": query });
     if let Some(vars_str) = variables {
         let vars: serde_json::Value = serde_json::from_str(vars_str).map_err(|e| {
-            anyhow::anyhow!(
-                "--variables must be a valid JSON object, got parse error: {e}"
-            )
+            anyhow::anyhow!("--variables must be a valid JSON object, got parse error: {e}")
         })?;
         if !vars.is_object() {
             anyhow::bail!("--variables must be a JSON object, e.g. '{{\"key\": \"value\"}}'");
@@ -746,6 +694,59 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
     }
 }
 
+pub async fn handle_tx_list(
+    config: &Config,
+    cursor: Option<String>,
+    limit: Option<i64>,
+    from_date: Option<String>,
+    to_date: Option<String>,
+    format: &str,
+) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+    let params = synapse_sdk::ListParams {
+        cursor,
+        limit,
+        from_date,
+        to_date,
+    };
+
+    match client.transactions().list(params).await {
+        Ok(response) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&response)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!(
+                        "{:<36} {:<12} {:<12} {:<15}",
+                        "ID", "Status", "Asset", "Amount"
+                    );
+                    println!("{}", "-".repeat(75));
+                    for tx in &response.data {
+                        println!(
+                            "{:<36} {:<12} {:<12} {:<15}",
+                            tx.id, tx.status, tx.asset_code, tx.amount
+                        );
+                    }
+                    println!("\n✓ {} transactions", response.data.len());
+                    if let Some(cursor) = response.meta.next_cursor {
+                        println!("  Use --cursor {} for next page", cursor);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to list transactions: {}", e);
+            anyhow::bail!("Failed to list transactions: {}", e)
+        }
+    }
+}
+
 pub async fn handle_db_migrate(config: &Config) -> anyhow::Result<()> {
     use sqlx::migrate::Migrator;
     use std::path::Path;
@@ -814,9 +815,9 @@ pub async fn handle_tx_reconcile(
     end: &str,
     format: &str,
 ) -> anyhow::Result<()> {
+    use crate::services::ReconciliationService;
+    use crate::stellar::HorizonClient;
     use chrono::DateTime;
-    use synapse_core::services::ReconciliationService;
-    use synapse_core::stellar::HorizonClient;
 
     let pool = crate::db::create_pool(config).await?;
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -919,8 +920,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_query_rejects_invalid_json_variables() {
-        let result =
-            handle_graphql_query("http://localhost:9999", "{ transactions { id } }", Some("not json")).await;
+        let result = handle_graphql_query(
+            "http://localhost:9999",
+            "{ transactions { id } }",
+            Some("not json"),
+        )
+        .await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("parse error"), "unexpected error: {msg}");
@@ -952,8 +957,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result =
-            handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
+        let result = handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
         mock.assert_async().await;
         assert!(result.is_ok(), "expected success but got: {result:?}");
     }
@@ -970,8 +974,7 @@ mod tests {
             .await;
 
         // Empty errors array → should be treated as success
-        let result =
-            handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
+        let result = handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
         mock.assert_async().await;
         assert!(result.is_ok(), "empty errors should not fail: {result:?}");
     }
@@ -1063,9 +1066,7 @@ mod tests {
             .mock("GET", "/stats/daily?days=14")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"[{"date":"2026-06-29","total_amount":"5000.00","tx_count":10}]"#,
-            )
+            .with_body(r#"[{"date":"2026-06-29","total_amount":"5000.00","tx_count":10}]"#)
             .create_async()
             .await;
 
@@ -1166,12 +1167,15 @@ mod tests {
         let result = handle_stats_cache(&server.url(), true).await;
         mock.assert_async().await;
         assert!(result.is_ok());
+    }
+}
+
 pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::Result<()> {
     let base_url = format!("http://localhost:{}", config.server_port);
     let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
-    let params = synapse_sdk::ListParams::default();
+    let params = synapse_sdk::SettlementParams::default();
 
     match client.settlements().list(params).await {
         Ok(response) => {
@@ -1181,16 +1185,25 @@ pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::R
                     println!("{}", json);
                 }
                 _ => {
-                    println!("{:<36} {:<12} {:<15} {:<10}", "ID", "Status", "Total Amount", "Tx Count");
+                    println!(
+                        "{:<36} {:<12} {:<15} {:<10}",
+                        "ID", "Status", "Total Amount", "Tx Count"
+                    );
                     println!("{}", "-".repeat(73));
                     for settlement in &response.settlements {
                         println!(
                             "{:<36} {:<12} {:<15} {:<10}",
-                            settlement.id, settlement.status, settlement.total_amount, settlement.tx_count
+                            settlement.id,
+                            settlement.status,
+                            settlement.total_amount,
+                            settlement.tx_count
                         );
                     }
                     if response.has_more {
-                        println!("\n✓ {} settlements (more available)", response.settlements.len());
+                        println!(
+                            "\n✓ {} settlements (more available)",
+                            response.settlements.len()
+                        );
                     } else {
                         println!("\n✓ {} settlements", response.settlements.len());
                     }
@@ -1252,6 +1265,7 @@ pub async fn handle_settlements_get(config: &Config, id: &str, format: &str) -> 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_tx_search(
     config: &Config,
     status: Option<String>,
@@ -1289,7 +1303,10 @@ pub async fn handle_tx_search(
                     println!("{}", json);
                 }
                 _ => {
-                    println!("{:<36} {:<12} {:<12} {:<15}", "ID", "Status", "Asset", "Amount");
+                    println!(
+                        "{:<36} {:<12} {:<12} {:<15}",
+                        "ID", "Status", "Asset", "Amount"
+                    );
                     println!("{}", "-".repeat(75));
                     for tx in &response.results {
                         println!(
@@ -1297,9 +1314,13 @@ pub async fn handle_tx_search(
                             tx.id, tx.status, tx.asset_code, tx.amount
                         );
                     }
-                    println!("\n✓ {} results (total: {}", response.results.len(), response.total);
-                    if response.next_cursor.is_some() {
-                        println!("  Use --cursor {} for next page", response.next_cursor.as_ref().unwrap());
+                    println!(
+                        "\n✓ {} results (total: {}",
+                        response.results.len(),
+                        response.total
+                    );
+                    if let Some(cursor) = &response.next_cursor {
+                        println!("  Use --cursor {} for next page", cursor);
                     }
                     println!();
                 }

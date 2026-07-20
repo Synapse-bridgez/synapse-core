@@ -55,7 +55,9 @@ impl<'a> Stats<'a> {
         match params.days {
             Some(d) => {
                 let d = d.to_string();
-                self.client.get_query("/stats/daily", &[("days", d.as_str())]).await
+                self.client
+                    .get_query("/stats/daily", &[("days", d.as_str())])
+                    .await
             }
             None => self.client.get("/stats/daily").await,
         }

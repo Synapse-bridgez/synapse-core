@@ -114,9 +114,10 @@ impl<'a> AdminDlq<'a> {
         let path = format!("/dlq/{}/requeue", id);
         let empty = serde_json::json!({});
         match self.client.post::<_, RequeueResponse>(&path, &empty).await {
-            Err(SynapseError::Api { status: 404, message }) => {
-                Err(SynapseError::NotFound(message))
-            }
+            Err(SynapseError::Api {
+                status: 404,
+                message,
+            }) => Err(SynapseError::NotFound(message)),
             other => other,
         }
     }
@@ -190,10 +191,17 @@ mod tests {
         let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
         let result = AdminDlq::new(&client).list().await;
 
-        assert!(result.is_ok(), "empty DLQ must be Ok, not an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty DLQ must be Ok, not an error: {:?}",
+            result
+        );
         let resp = result.unwrap();
         assert_eq!(resp.count, 0);
-        assert!(resp.dlq_entries.is_empty(), "dlq_entries must be an empty Vec, not null");
+        assert!(
+            resp.dlq_entries.is_empty(),
+            "dlq_entries must be an empty Vec, not null"
+        );
     }
 
     #[tokio::test]
@@ -214,7 +222,11 @@ mod tests {
         let result = AdminDlq::new(&client).list().await;
 
         // If the test passes the mock matched, meaning X-Admin-Key was sent, not X-API-Key.
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -264,7 +276,11 @@ mod tests {
             .await;
 
         // Mock only matches X-Admin-Key header; success proves the right key was sent.
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -275,9 +291,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/dlq/{}/requeue", missing_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(404).set_body_string("DLQ entry not found"),
-            )
+            .respond_with(ResponseTemplate::new(404).set_body_string("DLQ entry not found"))
             .mount(&server)
             .await;
 
@@ -289,10 +303,7 @@ mod tests {
         assert!(result.is_err(), "expected Err for missing DLQ ID");
         match result {
             Err(SynapseError::NotFound(msg)) => {
-                assert!(
-                    !msg.is_empty(),
-                    "NotFound message must be non-empty"
-                );
+                assert!(!msg.is_empty(), "NotFound message must be non-empty");
             }
             other => panic!("expected SynapseError::NotFound, got: {:?}", other),
         }

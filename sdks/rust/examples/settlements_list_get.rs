@@ -6,7 +6,7 @@
 //! A 404 on an unknown settlement ID is surfaced as [`SynapseError::NotFound`],
 //! which is distinct from any transport-level [`SynapseError::Network`] error.
 
-use synapse_sdk::{SynapseClient, SynapseError};
+use synapse_sdk::{SettlementParams, SynapseClient, SynapseError};
 
 #[tokio::main]
 async fn main() {
@@ -16,14 +16,18 @@ async fn main() {
     );
 
     // ── List settlements (first page) ────────────────────────────────────────
-    match client.settlements().list(None, Some(10)).await {
+    let params = SettlementParams {
+        limit: Some(10),
+        ..Default::default()
+    };
+    match client.settlements().list(params).await {
         Ok(page) => {
             println!("settlements on page: {}", page.settlements.len());
             for s in &page.settlements {
                 println!("  {} {} {}", s.id, s.status, s.total_amount);
             }
-            if page.meta.has_more {
-                println!("more pages available; next_cursor: {:?}", page.meta.next_cursor);
+            if page.has_more {
+                println!("more pages available; next_cursor: {:?}", page.next_cursor);
             }
         }
         Err(e) => eprintln!("list error: {e}"),

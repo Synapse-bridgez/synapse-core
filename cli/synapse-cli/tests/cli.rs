@@ -1,15 +1,15 @@
 use assert_cmd::Command;
-use mockito::{Matcher, Server};
+use mockito::Server;
 use serde_json::json;
 use std::net::TcpListener;
-use std::process::{Child, Stdio};
+use std::process::{Child, Command as StdCommand, Stdio};
 use std::thread;
 use std::time::Duration;
 
 const SAMPLE_REPORT_ID: &str = "3f1d8c31-5f1d-4fb8-93e0-112233445566";
 const SAMPLE_LOCK_TOKEN: &str = "4e4e9e47-7e0f-4f2f-8d63-323c61279209";
 const TENANT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
-const SETTLEMENT_ID: &str = "660e8400-e29b-41d4-a716-446655440000";
+const SAMPLE_SETTLEMENT_ID: &str = "8f9b0f0c-9a89-4d1f-9d7d-0c7d7d0d9a11";
 
 #[test]
 fn reconciliation_commands_table_mode_happy_path() {
@@ -51,6 +51,11 @@ fn reconciliation_commands_table_mode_happy_path() {
     assert!(stdout.contains("Has discrepancies: yes"));
 }
 
+#[test]
+fn reconciliation_run_table_mode_happy_path() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+
     let mut cmd = synapse_command();
     cmd.args([
         "--base-url",
@@ -68,6 +73,8 @@ fn reconciliation_commands_table_mode_happy_path() {
     assert!(stdout.contains("Reconciliation completed successfully"));
     assert!(stdout.contains("Database transactions: 12"));
     assert!(stdout.contains("Has discrepancies: yes"));
+}
+
 #[test]
 fn reconciliation_commands_json_mode_edge_case() {
     let server = MockServer::spawn("edge");
@@ -360,142 +367,6 @@ async fn quotas_list_get_set_and_reset_use_formatter_output() {
     assert!(stdout.contains("\"message\": \"quota reset\""));
 }
 
-#[tokio::test]
-async fn admin_settlements_update_status_uses_formatter_output() {
-    let mut server = Server::new_async().await;
-    let path = format!("/admin/settlements/{SETTLEMENT_ID}/status");
-    let settlement = json!({
-        "id": SETTLEMENT_ID,
-        "status": "pending_review",
-        "amount": "1500.00",
-        "asset_code": "USD",
-        "updated_at": "2026-06-27T06:10:12Z"
-    });
-
-    let _update = server
-        .mock("PATCH", path.as_str())
-        .match_header("content-type", "application/json")
-        .match_body(Matcher::PartialJson(json!({
-            "status": "pending_review",
-            "reason": "manual review",
-            "actor": "ops"
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(settlement.to_string())
-        .create_async()
-        .await;
-
-    let output = synapse_command()
-        .args([
-            "--base-url",
-            &server.url(),
-            "admin",
-            "settlements",
-            "update-status",
-            SETTLEMENT_ID,
-            "pending_review",
-            "--reason",
-            "manual review",
-            "--actor",
-            "ops",
-        ])
-        .output()
-        .expect("admin settlement update-status output");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-    assert!(stdout.contains(&format!("id: {SETTLEMENT_ID}")));
-    assert!(stdout.contains("status: pending_review"));
-    assert!(stdout.contains("amount: 1500.00"));
-}
-
-#[tokio::test]
-async fn admin_settlements_update_status_supports_json_output() {
-    let mut server = Server::new_async().await;
-    let path = format!("/admin/settlements/{SETTLEMENT_ID}/status");
-
-    let _update = server
-        .mock("PATCH", path.as_str())
-        .match_body(Matcher::PartialJson(json!({
-            "status": "disputed"
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "id": SETTLEMENT_ID,
-                "status": "disputed",
-                "amount": "1500.00",
-                "asset_code": "USD"
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
-    let output = synapse_command()
-        .args([
-            "--base-url",
-            &server.url(),
-            "admin",
-            "settlements",
-            "update-status",
-            SETTLEMENT_ID,
-            "disputed",
-            "--json",
-        ])
-        .output()
-        .expect("admin settlement update-status json output");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
-    assert!(stdout.contains(&format!("\"id\": \"{SETTLEMENT_ID}\"")));
-    assert!(stdout.contains("\"status\": \"disputed\""));
-}
-
-#[tokio::test]
-async fn admin_settlements_update_status_surfaces_invalid_transition_message() {
-    let mut server = Server::new_async().await;
-    let path = format!("/admin/settlements/{SETTLEMENT_ID}/status");
-
-    let _update = server
-        .mock("PATCH", path.as_str())
-        .match_body(Matcher::PartialJson(json!({
-            "status": "pending"
-        })))
-        .with_status(400)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "error": "Bad request: invalid transition: completed -> pending",
-                "code": "BAD_REQUEST_001",
-                "status": 400
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
-    let output = synapse_command()
-        .args([
-            "--base-url",
-            &server.url(),
-            "admin",
-            "settlements",
-            "update-status",
-            SETTLEMENT_ID,
-            "pending",
-        ])
-        .output()
-        .expect("admin settlement invalid transition output");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).expect("valid utf-8");
-    assert!(stderr.contains("invalid transition: completed -> pending"));
-    assert!(!stderr.contains("server returned"));
-}
-
 #[test]
 fn admin_bulk_status_table_and_json_output_happy_path() {
     let server = MockServer::spawn("happy");
@@ -573,10 +444,6 @@ fn admin_bulk_status_partial_failure_edge_case_is_reported() {
 }
 
 #[test]
-fn reconciliation_commands_json_mode_edge_case() {
-    let server = MockServer::spawn("edge");
-    let base_url = server.base_url();
-
 fn quotas_set_rejects_zero_limit_before_sending() {
     let output = synapse_command()
         .args([

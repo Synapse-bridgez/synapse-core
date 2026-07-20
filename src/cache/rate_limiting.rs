@@ -266,7 +266,9 @@ impl RateLimiter {
             let tokens_to_add = (self.config.max_requests as u64 * elapsed_ms / window_ms) as u32;
             if tokens_to_add > 0 {
                 let current = self.inner.tokens.load(Ordering::Acquire);
-                let new_val = (current + tokens_to_add).min(self.config.max_requests);
+                let new_val = current
+                    .saturating_add(tokens_to_add)
+                    .min(self.config.max_requests);
                 self.inner.tokens.store(new_val, Ordering::Release);
                 self.inner.last_refill_ms.store(now_ms, Ordering::Release);
                 self.inner.refills.fetch_add(1, Ordering::Relaxed);

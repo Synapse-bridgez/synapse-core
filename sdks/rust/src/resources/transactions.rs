@@ -1,7 +1,9 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
-use crate::models::{ListParams, SearchParams, Transaction, TransactionExportFilters, TransactionList, TransactionSearch};
-use crate::models::{ExportFilters, ListParams, SearchParams, Transaction, TransactionList, TransactionSearch};
+use crate::models::{
+    ListParams, SearchParams, Transaction, TransactionExportFilters, TransactionList,
+    TransactionSearch,
+};
 
 pub struct Transactions<'a> {
     pub(crate) client: &'a SynapseClient,
@@ -12,7 +14,6 @@ impl<'a> Transactions<'a> {
     pub fn new(client: &'a SynapseClient) -> Self {
         Transactions { client }
     }
-
 
     /// Fetch a single transaction by its UUID.
     ///
@@ -247,11 +248,6 @@ impl<'a> Transactions<'a> {
         }
     }
 
-    /// Export transactions using raw bytes from the server response.
-    ///
-    /// This method returns the raw CSV/JSON payload untouched. Callers should
-    /// parse the bytes themselves and must not rely on the SDK to interpret
-    /// formatted export rows.
     /// Download a raw export of transactions (CSV or JSON bytes).
     ///
     /// Calls `GET /export` and returns the **raw response bytes** untouched.
@@ -273,7 +269,6 @@ impl<'a> Transactions<'a> {
     ///
     /// ```no_run
     /// use synapse_sdk::{SynapseClient, TransactionExportFilters};
-    /// use synapse_sdk::{ExportFilters, SynapseClient};
     ///
     /// # #[tokio::main]
     /// # async fn main() {
@@ -289,23 +284,6 @@ impl<'a> Transactions<'a> {
     /// # }
     /// ```
     pub async fn export(&self, filters: TransactionExportFilters) -> Result<Vec<u8>, SynapseError> {
-        let mut query: Vec<(&str, &str)> = Vec::new();
-
-    ///
-    /// let bytes = client
-    ///     .transactions()
-    ///     .export(ExportFilters {
-    ///         format: Some("csv".to_string()),
-    ///         status: Some("completed".to_string()),
-    ///         ..Default::default()
-    ///     })
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// println!("received {} bytes", bytes.len());
-    /// # }
-    /// ```
-    pub async fn export(&self, filters: ExportFilters) -> Result<Vec<u8>, SynapseError> {
         let mut query: Vec<(&str, &str)> = Vec::new();
         if let Some(ref v) = filters.format {
             query.push(("format", v.as_str()));
@@ -324,7 +302,6 @@ impl<'a> Transactions<'a> {
         }
 
         self.client.get_query_bytes("/export", &query).await
-        self.client.get_bytes("/export", &query).await
     }
 }
 
@@ -465,40 +442,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_returns_raw_bytes() {
-        let server = MockServer::start().await;
-        let body = "id,stellar_account,amount,asset_code,status\n1,GABC,100.00,USD,completed\n";
-    // ── export tests (Issue #626) ────────────────────────────────────────────
-
-    #[tokio::test]
     async fn export_returns_raw_bytes_on_200() {
         let server = MockServer::start().await;
-        let csv_body = "id,stellar_account,amount,asset_code,status\nabc,GABC,100.00,USD,completed\n";
+        let csv_body =
+            "id,stellar_account,amount,asset_code,status\nabc,GABC,100.00,USD,completed\n";
 
         Mock::given(method("GET"))
             .and(path("/export"))
             .and(header("X-API-Key", "test-key"))
             .and(query_param("format", "csv"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .and(query_param("status", "completed"))
             .respond_with(ResponseTemplate::new(200).set_body_string(csv_body))
             .mount(&server)
             .await;
 
         let client = SynapseClient::new(server.uri(), "test-key");
-        let bytes = client
-            .transactions()
-            .export(crate::models::TransactionExportFilters {
-                format: Some("csv".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(bytes, body.as_bytes());
         let result = client
             .transactions()
-            .export(ExportFilters {
+            .export(TransactionExportFilters {
                 format: Some("csv".to_string()),
                 status: Some("completed".to_string()),
                 ..Default::default()
@@ -507,7 +468,11 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let bytes = result.unwrap();
-        assert_eq!(bytes, csv_body.as_bytes(), "raw bytes must be returned untouched");
+        assert_eq!(
+            bytes,
+            csv_body.as_bytes(),
+            "raw bytes must be returned untouched"
+        );
     }
 
     #[tokio::test]
@@ -523,10 +488,14 @@ mod tests {
         let client = SynapseClient::new(server.uri(), "test-key");
         let result = client
             .transactions()
-            .export(ExportFilters::default())
+            .export(TransactionExportFilters::default())
             .await;
 
-        assert!(result.is_ok(), "empty export must not be an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty export must not be an error: {:?}",
+            result
+        );
         assert!(result.unwrap().is_empty());
     }
 
@@ -543,7 +512,10 @@ mod tests {
             .await;
 
         let client = SynapseClient::new(server.uri(), "public-key");
-        let result = client.transactions().export(ExportFilters::default()).await;
+        let result = client
+            .transactions()
+            .export(TransactionExportFilters::default())
+            .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     }
 }

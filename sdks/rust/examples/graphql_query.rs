@@ -8,7 +8,7 @@
 //!   cargo run --example graphql_query
 //!
 //! GraphQL errors (HTTP 200 + `"errors"` array) are surfaced as
-//! `SynapseError::GraphqlErrors` and are distinct from transport failures.
+//! `SynapseError::GraphQL` and are distinct from transport failures.
 
 use synapse_sdk::{SynapseClient, SynapseError};
 
@@ -23,16 +23,16 @@ async fn main() {
     let query = r#"{ transactions { id status } }"#;
 
     match client.graphql().query(query, None).await {
-        Ok(data) => {
-            println!("data: {}", serde_json::to_string_pretty(&data).unwrap());
+        Ok(resp) => {
+            println!(
+                "data: {}",
+                serde_json::to_string_pretty(&resp.data).unwrap()
+            );
         }
         // GraphQL-level errors come back as HTTP 200 with an `errors` array.
         // They must be handled separately from transport/network failures.
-        Err(SynapseError::GraphqlErrors(errs)) => {
-            eprintln!("GraphQL errors ({} total):", errs.len());
-            for err in &errs {
-                eprintln!("  - {}", err["message"].as_str().unwrap_or("(no message)"));
-            }
+        Err(SynapseError::GraphQL(msg)) => {
+            eprintln!("GraphQL errors: {}", msg);
             std::process::exit(1);
         }
         Err(e) => {

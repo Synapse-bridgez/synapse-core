@@ -14,7 +14,7 @@
 //! emitting a raw network-error stack trace.
 
 use crate::client::ApiClient;
-use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
+use crate::formatter::{print, OutputFormat, TableDisplay};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,34 @@ pub struct EndpointHealth {
     pub last_success_at: Option<String>,
 }
 
+// ── JSON display view ─────────────────────────────────────────────────────────
+// `EndpointHealth::success_rate` is kept as a `[0.0, 1.0]` fraction internally
+// (matching the wire format and the table row's `* 100.0` formatting below),
+// but JSON output presents it as a percentage for consistency with the table.
+
+#[derive(Serialize)]
+struct EndpointHealthJson<'a> {
+    id: &'a str,
+    url: &'a str,
+    enabled: bool,
+    success_rate: f64,
+    total_deliveries: i32,
+    last_success_at: Option<&'a str>,
+}
+
+impl<'a> From<&'a EndpointHealth> for EndpointHealthJson<'a> {
+    fn from(e: &'a EndpointHealth) -> Self {
+        Self {
+            id: &e.id,
+            url: &e.url,
+            enabled: e.enabled,
+            success_rate: e.success_rate * 100.0,
+            total_deliveries: e.total_deliveries,
+            last_success_at: e.last_success_at.as_deref(),
+        }
+    }
+}
+
 // ── TableDisplay ───────────────────────────────────────────────────────────────
 
 impl TableDisplay for EndpointHealth {
@@ -65,10 +93,7 @@ impl TableDisplay for EndpointHealth {
             self.enabled.to_string(),
             format!("{:.1}%", self.success_rate * 100.0),
             self.total_deliveries.to_string(),
-            self.last_success_at
-                .as_deref()
-                .unwrap_or("-")
-                .to_string(),
+            self.last_success_at.as_deref().unwrap_or("-").to_string(),
         ]
     }
 }
@@ -151,14 +176,17 @@ pub async fn run(cmd: WebhooksCommand, base_url: &str, api_key: &str) -> Result<
     match cmd {
         // ── synapse admin webhooks health ─────────────────────────────────
         WebhooksCommand::Health { json } => {
-            let endpoints: Vec<EndpointHealth> =
-                client.get("/admin/webhooks/health").await?;
-            let fmt = if json {
-                OutputFormat::Json
+            let endpoints: Vec<EndpointHealth> = client.get("/admin/webhooks/health").await?;
+            if json {
+                let views: Vec<EndpointHealthJson> =
+                    endpoints.iter().map(EndpointHealthJson::from).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&views).unwrap_or_else(|_| "[]".into())
+                );
             } else {
-                OutputFormat::Table
-            };
-            print(&endpoints, fmt);
+                print(&endpoints, OutputFormat::Table);
+            }
         }
 
         // ── synapse admin webhooks health-get <ID> ────────────────────────
@@ -179,12 +207,23 @@ pub async fn run(cmd: WebhooksCommand, base_url: &str, api_key: &str) -> Result<
                 Ok((_status, body)) => {
                     let endpoint: EndpointHealth = serde_json::from_str(&body)
                         .map_err(|e| anyhow::anyhow!("failed to decode response: {}", e))?;
-                    let fmt = if json {
-                        OutputFormat::Json
+                    if json {
+                        let view = EndpointHealthJson::from(&endpoint);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&view).unwrap_or_else(|_| "{}".into())
+                        );
                     } else {
-                        OutputFormat::Table
-                    };
-                    print_one(&endpoint, fmt);
+                        println!("id: {}", endpoint.id);
+                        println!("url: {}", endpoint.url);
+                        println!("enabled: {}", endpoint.enabled);
+                        println!("success_rate: {:.1}%", endpoint.success_rate * 100.0);
+                        println!("total_deliveries: {}", endpoint.total_deliveries);
+                        println!(
+                            "last_success_at: {}",
+                            endpoint.last_success_at.as_deref().unwrap_or("-")
+                        );
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -245,8 +284,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> =
-            client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let endpoints = result.unwrap();
@@ -272,8 +310,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> =
-            client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
 
         assert!(
             result.is_ok(),
@@ -297,8 +334,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> =
-            client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
 
         assert!(result.is_err());
         assert!(
@@ -331,10 +367,7 @@ mod tests {
         assert_eq!(ep.url, "https://example.com/webhook");
         assert!(ep.enabled);
         assert_eq!(ep.total_deliveries, 250);
-        assert_eq!(
-            ep.last_success_at.as_deref(),
-            Some("2026-06-30T03:00:00Z")
-        );
+        assert_eq!(ep.last_success_at.as_deref(), Some("2026-06-30T03:00:00Z"));
     }
 
     /// Edge case: HTTP 404 must be distinguishable from a transport error.

@@ -66,7 +66,13 @@ impl ReconnectStatusPayload {
 
 impl TableDisplay for ReconnectResponse {
     fn headers() -> Vec<&'static str> {
-        vec!["TYPE", "STATUS", "SESSION ID", "BACKOFF (s)", "REQUIRES RESYNC"]
+        vec![
+            "TYPE",
+            "STATUS",
+            "SESSION ID",
+            "BACKOFF (s)",
+            "REQUIRES RESYNC",
+        ]
     }
 
     fn row(&self) -> Vec<String> {
@@ -170,7 +176,11 @@ pub async fn run(cmd: EventsCommand, base_url: &str, api_key: &str) -> Result<()
         EventsCommand::Reconnect { cursor, json } => {
             let body = json!({ "session_id": cursor });
             let response: ReconnectResponse = client.post("/reconnect", &body).await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&response, fmt);
         }
 
@@ -179,7 +189,11 @@ pub async fn run(cmd: EventsCommand, base_url: &str, api_key: &str) -> Result<()
         // Edge case: no cursor → server always returns a clean ready response.
         // We never error here; any non-2xx is a genuine server/network fault.
         EventsCommand::ReconnectStatus { cursor, json } => {
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             let response: ReconnectResponse = match cursor {
                 Some(ref token) => {
                     client
@@ -264,10 +278,7 @@ mod tests {
         let mut server = Server::new_async().await;
         server
             .mock("GET", "/reconnect/status")
-            .match_query(mockito::Matcher::UrlEncoded(
-                "token".into(),
-                cursor.into(),
-            ))
+            .match_query(mockito::Matcher::UrlEncoded("token".into(), cursor.into()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(ready_body(cursor))
@@ -275,8 +286,9 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<ReconnectResponse> =
-            client.get_with_query("/reconnect/status", &[("token", cursor)]).await;
+        let result: Result<ReconnectResponse> = client
+            .get_with_query("/reconnect/status", &[("token", cursor)])
+            .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let resp = result.unwrap();
         assert_eq!(resp.kind, "reconnect");
@@ -298,7 +310,11 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let result: Result<ReconnectResponse> = client.get("/reconnect/status").await;
-        assert!(result.is_ok(), "session_expired must not be an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "session_expired must not be an error: {:?}",
+            result
+        );
         let resp = result.unwrap();
         assert_eq!(resp.kind, "reconnect");
         let label = resp.status.as_ref().map(|s| s.label()).unwrap_or("-");
@@ -345,7 +361,11 @@ mod tests {
         let result: Result<ReconnectResponse> = client.post("/reconnect", &body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("429"), "error should mention 429, got: {}", err);
+        assert!(
+            err.contains("429"),
+            "error should mention 429, got: {}",
+            err
+        );
     }
 
     // ── reconnect: error type response ────────────────────────────────────
@@ -364,13 +384,14 @@ mod tests {
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": "bad-cursor" });
         let result: Result<ReconnectResponse> = client.post("/reconnect", &body).await;
-        assert!(result.is_ok(), "HTTP 200 with error type must not fail: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "HTTP 200 with error type must not fail: {:?}",
+            result
+        );
         let resp = result.unwrap();
         assert_eq!(resp.kind, "error");
-        assert_eq!(
-            resp.message.as_deref(),
-            Some("Invalid session ID format")
-        );
+        assert_eq!(resp.message.as_deref(), Some("Invalid session ID format"));
     }
 
     // ── TableDisplay ─────────────────────────────────────────────────────────
@@ -432,15 +453,25 @@ mod tests {
         let row = resp.row();
         assert_eq!(row[1], "session_expired");
         assert_eq!(row[2], "-"); // no session_id
-use anyhow::Result;
+        assert_eq!(row[3], "0");
+        assert_eq!(row[4], "false");
+    }
+}
+
+// ── Top-level `synapse events watch` (WebSocket-based) ────────────────────────
+//
+// This is a separate command tree from the `EventsCommand`/`run()` pair above
+// (which backs `synapse admin events reconnect` / `reconnect-status`). The
+// top-level `events watch` subcommand streams live updates over a real
+// WebSocket connection.
+
 use chrono::{DateTime, Utc};
-use clap::{Args, Subcommand};
+use clap::Args;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
-use crate::formatter::{Formatter, OutputFormat};
+use crate::formatter::Formatter;
 
 /// A real-time transaction status update pushed by the server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -636,7 +667,7 @@ where
 pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
     match cmd.command {
         EventsSubcommand::Watch { token, format } => {
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
 
             subscribe(
                 base_url,
@@ -662,7 +693,7 @@ pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
             force_resync,
             format,
         } => {
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
             let url = format!("{}/reconnect", base_url.trim_end_matches('/'));
             let mut body = serde_json::json!({ "session_id": session_id });
             if let Some(seq) = last_sequence {
@@ -689,7 +720,7 @@ pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
             last_sequence,
             format,
         } => {
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
             let base = base_url.trim_end_matches('/');
             let client = reqwest::Client::new();
             let mut req = client.get(format!("{}/reconnect/status", base));

@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use mockito::Server;
 
 fn synapse_cmd() -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("synapse-core");
@@ -63,7 +64,23 @@ fn test_cli_tx_force_complete_help() {
     cmd.assert().success();
 }
 
-// ─── Stats --help (no server required) ───────────────────────────────────────
+#[ignore = "Requires Docker/external services"]
+#[test]
+fn test_cli_tx_list_help() {
+    let mut cmd = synapse_cmd();
+    cmd.arg("tx").arg("list").arg("--help");
+    cmd.assert().success();
+}
+
+#[ignore = "Requires Docker/external services"]
+#[test]
+fn test_cli_tx_search_help() {
+    let mut cmd = synapse_cmd();
+    cmd.arg("tx").arg("search").arg("--help");
+    cmd.assert().success();
+}
+
+// ─── Stats subcommand --help tests (no server required) ──────────────────────
 
 #[ignore = "Requires Docker/external services"]
 #[test]
@@ -105,7 +122,7 @@ fn test_cli_stats_cache_help() {
     cmd.assert().success();
 }
 
-// ─── GraphQL --help (no server required) ─────────────────────────────────────
+// ─── GraphQL subcommand --help tests (no server required) ────────────────────
 
 #[ignore = "Requires Docker/external services"]
 #[test]
@@ -146,117 +163,6 @@ fn test_cli_stats_daily_out_of_range() {
     cmd.assert().failure();
 }
 
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_config_help() {
-    let mut cmd = synapse_cmd();
-    // Using --help is a foolproof way to test the CLI parser
-    // without triggering the full app initialization logic
-    cmd.arg("config").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_db_migrate_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("db").arg("migrate").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_backup_list_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("backup").arg("list").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_tx_force_complete_invalid_uuid() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("tx")
-        .arg("force-complete")
-        .arg("invalid-uuid-format");
-
-    // This tests that the CLI validator for UUID is working
-    cmd.assert().failure();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_tx_force_complete_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("tx").arg("force-complete").arg("--help");
-    cmd.assert().success();
-}
-
-// ─── Stats subcommand --help tests (no server required) ──────────────────────
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_stats_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("stats").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_stats_status_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("stats").arg("status").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_stats_daily_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("stats").arg("daily").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_stats_assets_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("stats").arg("assets").arg("--help");
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_tx_list_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("tx").arg("list").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_stats_cache_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("stats").arg("cache").arg("--help");
-    cmd.assert().success();
-}
-
-// ─── GraphQL subcommand --help tests (no server required) ────────────────────
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_graphql_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("graphql").arg("--help");
-    cmd.assert().success();
-}
-
-#[ignore = "Requires Docker/external services"]
-#[test]
-fn test_cli_graphql_query_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("graphql").arg("query").arg("--help");
-    cmd.assert().success();
-}
-
 // ─── Unit tests for handler functions (mock HTTP server) ─────────────────────
 
 /// Verify that `handle_stats_status` correctly parses and formats a JSON array
@@ -278,9 +184,12 @@ async fn test_handle_stats_status_table_format() {
         .create_async()
         .await;
 
-    let result = synapse_core_cli::handle_stats_status(&server.url(), false).await;
+    let result = synapse_core::cli::handle_stats_status(&server.url(), false).await;
     mock.assert_async().await;
-    assert!(result.is_ok(), "handle_stats_status should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "handle_stats_status should succeed: {result:?}"
+    );
 }
 
 /// Verify JSON pass-through for `handle_stats_status`.
@@ -295,7 +204,7 @@ async fn test_handle_stats_status_json_format() {
         .create_async()
         .await;
 
-    let result = synapse_core_cli::handle_stats_status(&server.url(), true).await;
+    let result = synapse_core::cli::handle_stats_status(&server.url(), true).await;
     mock.assert_async().await;
     assert!(result.is_ok());
 }
@@ -312,7 +221,7 @@ async fn test_handle_stats_daily_sends_days_param() {
         .create_async()
         .await;
 
-    let result = synapse_core_cli::handle_stats_daily(&server.url(), 14, false).await;
+    let result = synapse_core::cli::handle_stats_daily(&server.url(), 14, false).await;
     mock.assert_async().await;
     assert!(result.is_ok());
 }
@@ -331,7 +240,7 @@ async fn test_handle_stats_assets_table_format() {
         .create_async()
         .await;
 
-    let result = synapse_core_cli::handle_stats_assets(&server.url(), false).await;
+    let result = synapse_core::cli::handle_stats_assets(&server.url(), false).await;
     mock.assert_async().await;
     assert!(result.is_ok());
 }
@@ -362,7 +271,7 @@ async fn test_handle_stats_cache_table_format() {
         .create_async()
         .await;
 
-    let result = synapse_core_cli::handle_stats_cache(&server.url(), false).await;
+    let result = synapse_core::cli::handle_stats_cache(&server.url(), false).await;
     mock.assert_async().await;
     assert!(result.is_ok());
 }
@@ -382,7 +291,7 @@ async fn test_handle_graphql_query_success() {
         .await;
 
     let result =
-        synapse_core_cli::handle_graphql_query(&server.url(), "{ transactions { id } }", None)
+        synapse_core::cli::handle_graphql_query(&server.url(), "{ transactions { id } }", None)
             .await;
     mock.assert_async().await;
     assert!(result.is_ok());
@@ -409,17 +318,20 @@ async fn test_handle_graphql_query_exits_on_graphql_errors() {
 
     // Empty errors array → should still return Ok (empty array = no errors)
     let result =
-        synapse_core_cli::handle_graphql_query(&server.url(), "{ transactions { id } }", None)
+        synapse_core::cli::handle_graphql_query(&server.url(), "{ transactions { id } }", None)
             .await;
     mock.assert_async().await;
-    assert!(result.is_ok(), "empty errors array should not fail: {result:?}");
+    assert!(
+        result.is_ok(),
+        "empty errors array should not fail: {result:?}"
+    );
 }
 
 /// Verify --variables JSON validation rejects non-objects.
 #[tokio::test]
 async fn test_handle_graphql_query_rejects_invalid_variables() {
     // No mock needed – validation happens before the network call
-    let result = synapse_core_cli::handle_graphql_query(
+    let result = synapse_core::cli::handle_graphql_query(
         "http://localhost:9999",
         "{ transactions { id } }",
         Some("not-valid-json"),
@@ -427,13 +339,16 @@ async fn test_handle_graphql_query_rejects_invalid_variables() {
     .await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("valid JSON"), "expected JSON parse error, got: {msg}");
+    assert!(
+        msg.contains("valid JSON"),
+        "expected JSON parse error, got: {msg}"
+    );
 }
 
 /// Verify that a non-array value passed as --variables is rejected.
 #[tokio::test]
 async fn test_handle_graphql_query_rejects_non_object_variables() {
-    let result = synapse_core_cli::handle_graphql_query(
+    let result = synapse_core::cli::handle_graphql_query(
         "http://localhost:9999",
         "{ transactions { id } }",
         Some("[\"wrong_type\"]"),
@@ -445,9 +360,4 @@ async fn test_handle_graphql_query_rejects_non_object_variables() {
         msg.contains("JSON object"),
         "expected object error, got: {msg}"
     );
-}
-fn test_cli_tx_search_help() {
-    let mut cmd = synapse_cmd();
-    cmd.arg("tx").arg("search").arg("--help");
-    cmd.assert().success();
 }

@@ -1,19 +1,15 @@
 pub mod client;
 pub mod commands;
-pub mod formatter;
-
-pub use formatter::{Formatter, OutputFormat};
-pub use client::{ApiClient, SynapseCliClient};
-pub use formatter::{print, print_one, Formatter, OutputFormat, TableDisplay};
 pub mod error;
 pub mod formatter;
+pub mod output;
 
-pub use client::SynapseCliClient;
+pub use client::{ApiClient, SynapseCliClient};
 pub use error::{
     handle_error, map_http_error, map_network_error, CliError, EXIT_AUTH_FAILURE, EXIT_NOT_FOUND,
     EXIT_OTHER,
 };
-pub use formatter::{Formatter, OutputFormat};
+pub use formatter::{print, print_one, Formatter, OutputFormat, TableDisplay};
 
 #[derive(Debug)]
 pub struct CliConfig {
@@ -26,10 +22,6 @@ impl CliConfig {
         let base_url = std::env::var("SYNAPSE_BASE_URL")
             .or_else(|_| std::env::var("SYNAPSE_URL"))
             .unwrap_or_else(|_| "http://localhost:3000".to_string());
-        let api_key = std::env::var("SYNAPSE_API_KEY").ok();
-        Ok(CliConfig { base_url, api_key })
-        let base_url =
-            std::env::var("SYNAPSE_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
         let api_key = std::env::var("SYNAPSE_API_KEY").ok();
 
         Ok(Self { base_url, api_key })

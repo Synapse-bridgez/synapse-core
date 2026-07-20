@@ -65,10 +65,19 @@ fn settlements_list_table_output_happy_path() {
     );
     // Column headers from TableDisplay::headers()
     assert!(stdout.contains("ID"), "stdout should contain ID header");
-    assert!(stdout.contains("ASSET"), "stdout should contain ASSET header");
-    assert!(stdout.contains("STATUS"), "stdout should contain STATUS header");
+    assert!(
+        stdout.contains("ASSET"),
+        "stdout should contain ASSET header"
+    );
+    assert!(
+        stdout.contains("STATUS"),
+        "stdout should contain STATUS header"
+    );
     // At least one data row from the mock server
-    assert!(stdout.contains("USD") || stdout.contains("EUR"), "stdout should contain asset code");
+    assert!(
+        stdout.contains("USD") || stdout.contains("EUR"),
+        "stdout should contain asset code"
+    );
 }
 
 /// JSON output (`--json` flag): exit 0, valid JSON object with `settlements` key.
@@ -105,12 +114,21 @@ fn settlements_list_json_output_happy_path() {
     );
 
     let settlements = parsed["settlements"].as_array().unwrap();
-    assert!(!settlements.is_empty(), "settlements array should be non-empty");
+    assert!(
+        !settlements.is_empty(),
+        "settlements array should be non-empty"
+    );
     // Verify first item has required fields
     let first = &settlements[0];
     assert!(first["id"].is_string(), "settlement should have id");
-    assert!(first["asset_code"].is_string(), "settlement should have asset_code");
-    assert!(first["total_amount"].is_string(), "settlement should have total_amount");
+    assert!(
+        first["asset_code"].is_string(),
+        "settlement should have asset_code"
+    );
+    assert!(
+        first["total_amount"].is_string(),
+        "settlement should have total_amount"
+    );
     assert!(first["status"].is_string(), "settlement should have status");
 }
 
@@ -128,11 +146,7 @@ fn settlements_list_json_contains_required_keys() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
 
-    for key in &[
-        "\"settlements\"",
-        "\"has_more\"",
-        "\"next_cursor\"",
-    ] {
+    for key in &["\"settlements\"", "\"has_more\"", "\"next_cursor\""] {
         assert!(
             stdout.contains(key),
             "JSON output should contain key {key}\nstdout: {stdout}"
@@ -204,7 +218,10 @@ fn settlements_get_table_output_happy_path() {
         "stdout should contain settlement id\nstdout: {stdout}"
     );
     assert!(stdout.contains("USD"), "stdout should contain asset_code");
-    assert!(stdout.contains("14250.00"), "stdout should contain total_amount");
+    assert!(
+        stdout.contains("14250.00"),
+        "stdout should contain total_amount"
+    );
     assert!(stdout.contains("completed"), "stdout should contain status");
 }
 
@@ -243,7 +260,10 @@ fn settlements_get_json_output_happy_path() {
     assert_eq!(parsed["tx_count"], 47);
 
     // Pretty-printed (has newlines)
-    assert!(stdout.contains('\n'), "--json output should be pretty-printed");
+    assert!(
+        stdout.contains('\n'),
+        "--json output should be pretty-printed"
+    );
 }
 
 /// JSON output: all required settlement fields present.

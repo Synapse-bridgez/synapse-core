@@ -48,7 +48,7 @@ home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json", "stream"] }
 bytes = "1"
 failsafe = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.4", features = ["cors", "limit"] }
 hyper = "0.14"

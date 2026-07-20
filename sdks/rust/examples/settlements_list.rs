@@ -38,7 +38,11 @@ async fn main() {
 
         match client.settlements().list(params).await {
             Ok(result) => {
-                println!("--- page {} ({} records) ---", page, result.settlements.len());
+                println!(
+                    "--- page {} ({} records) ---",
+                    page,
+                    result.settlements.len()
+                );
                 for s in &result.settlements {
                     println!(
                         "{}  {:<12}  {} {}",

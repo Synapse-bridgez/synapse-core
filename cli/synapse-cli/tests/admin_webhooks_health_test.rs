@@ -21,8 +21,8 @@ struct MockServer {
 impl MockServer {
     fn spawn() -> Self {
         let port = free_port();
-        let binary = std::env::var_os("CARGO_BIN_EXE_mock-server")
-            .expect("mock-server binary path");
+        let binary =
+            std::env::var_os("CARGO_BIN_EXE_mock-server").expect("mock-server binary path");
         let child = StdCommand::new(binary)
             .env("MOCK_SERVER_ADDR", format!("127.0.0.1:{port}"))
             .env("MOCK_SERVER_SCENARIO", "happy")
@@ -74,7 +74,13 @@ fn webhooks_health_table_mode_happy_path() {
     let server = MockServer::spawn();
 
     let output = synapse_command()
-        .args(["--base-url", &server.base_url(), "admin", "webhooks", "health"])
+        .args([
+            "--base-url",
+            &server.base_url(),
+            "admin",
+            "webhooks",
+            "health",
+        ])
         .output()
         .expect("command output");
 
@@ -186,7 +192,10 @@ fn webhooks_health_get_unknown_id_returns_nonzero_exit() {
         .output()
         .expect("command output");
 
-    assert!(!output.status.success(), "exit code must be non-zero for 404");
+    assert!(
+        !output.status.success(),
+        "exit code must be non-zero for 404"
+    );
     let stderr = String::from_utf8(output.stderr).expect("valid utf-8");
     assert!(
         stderr.contains("404") || stderr.contains("not found") || stderr.contains("error"),

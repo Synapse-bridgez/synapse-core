@@ -1,8 +1,8 @@
 use crate::client::AdminSynapseClient;
 use crate::error::SynapseError;
 use crate::models::{
-    BatchReplayRequest, BatchWebhookReplayResponse, FailedWebhooksResponse, ListFailedWebhooksFilters,
-    ReplayWebhookRequest, WebhookReplayResult,
+    BatchReplayRequest, BatchWebhookReplayResponse, FailedWebhooksResponse,
+    ListFailedWebhooksFilters, ReplayWebhookRequest, WebhookReplayResult,
 };
 use uuid::Uuid;
 
@@ -154,7 +154,9 @@ impl<'a> AdminWebhookReplay<'a> {
     ) -> Result<WebhookReplayResult, SynapseError> {
         let path = format!("/admin/webhooks/replay/{}", id);
         let body = ReplayWebhookRequest { dry_run };
-        self.client.post::<_, WebhookReplayResult>(&path, &body).await
+        self.client
+            .post::<_, WebhookReplayResult>(&path, &body)
+            .await
     }
 
     /// Replay multiple failed webhooks in a single batch request.
@@ -316,7 +318,11 @@ mod tests {
             .await;
 
         // Mock only matches X-Admin-Key; success proves the right header was sent.
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -356,8 +362,7 @@ mod tests {
             .and(path(format!("/admin/webhooks/replay/{}", txid)))
             .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(replay_result_json(txid, true, false)),
+                ResponseTemplate::new(200).set_body_json(replay_result_json(txid, true, false)),
             )
             .mount(&server)
             .await;
@@ -383,8 +388,7 @@ mod tests {
             .and(path(format!("/admin/webhooks/replay/{}", txid)))
             .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(replay_result_json(txid, true, true)),
+                ResponseTemplate::new(200).set_body_json(replay_result_json(txid, true, true)),
             )
             .mount(&server)
             .await;
@@ -410,8 +414,7 @@ mod tests {
             .and(path(format!("/admin/webhooks/replay/{}", txid)))
             .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(replay_result_json(txid, true, false)),
+                ResponseTemplate::new(200).set_body_json(replay_result_json(txid, true, false)),
             )
             .mount(&server)
             .await;
@@ -422,7 +425,11 @@ mod tests {
             .await;
 
         // Mock requires X-Admin-Key; success confirms correct header.
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -491,6 +498,10 @@ mod tests {
             .await;
 
         // Mock requires X-Admin-Key; success confirms correct header.
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 }

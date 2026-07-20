@@ -53,7 +53,10 @@ fn transactions_get_table_output_happy_path() {
 
     let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
     // The formatter's print_one() renders key: value lines for the object fields
-    assert!(stdout.contains(KNOWN_TX_ID), "stdout should contain transaction id");
+    assert!(
+        stdout.contains(KNOWN_TX_ID),
+        "stdout should contain transaction id"
+    );
     assert!(stdout.contains("USD"), "stdout should contain asset code");
     assert!(stdout.contains("100.00"), "stdout should contain amount");
     assert!(stdout.contains("pending"), "stdout should contain status");
@@ -92,7 +95,10 @@ fn transactions_get_json_output_happy_path() {
     assert_eq!(parsed["amount"], "100.00");
     assert_eq!(parsed["status"], "pending");
     // Confirm it's the pretty-printed JSON (has newlines)
-    assert!(stdout.contains('\n'), "--json output should be pretty-printed");
+    assert!(
+        stdout.contains('\n'),
+        "--json output should be pretty-printed"
+    );
 }
 
 /// JSON output: field set includes all mandatory transaction keys.

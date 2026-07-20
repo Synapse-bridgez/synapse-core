@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod cli;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -208,12 +209,18 @@ pub fn create_app(app_state: AppState) -> Router {
         middleware::versioning::v2_version_middleware,
     ));
 
-    // Admin routes — auth + SecretsStore injected for rotation-aware auth
-    let mut admin_router = Router::new()
+    // Health/liveness/readiness probes: intentionally unauthenticated so load
+    // balancers and orchestrators (e.g. Kubernetes) can reach them without an
+    // API key. Must NOT be added to `admin_router` below, since that router
+    // is wrapped in `admin_auth`.
+    let health_routes = Router::new()
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))
-        .route("/errors", get(handlers::error_catalog))
+        .route("/errors", get(handlers::error_catalog));
+
+    // Admin routes — auth + SecretsStore injected for rotation-aware auth
+    let mut admin_router = Router::new()
         .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
@@ -275,6 +282,8 @@ pub fn create_app(app_state: AppState) -> Router {
     }
 
     admin_router
+        // Unauthenticated health/liveness/readiness probes
+        .merge(health_routes)
         // Unversioned routes default to V2 behaviour
         .merge(core_routes.layer(axum_middleware::from_fn(
             middleware::versioning::v2_version_middleware,

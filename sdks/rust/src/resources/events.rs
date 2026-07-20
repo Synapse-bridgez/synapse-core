@@ -8,36 +8,6 @@ pub struct Events<'a> {
     pub(crate) client: &'a SynapseClient,
 }
 
-/// A real-time transaction status update pushed by the server over the
-/// WebSocket connection.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TransactionStatusUpdate {
-    pub transaction_id: Uuid,
-    pub tenant_id: Uuid,
-    pub status: String,
-    pub timestamp: DateTime<Utc>,
-    pub message: Option<String>,
-}
-
-impl<'a> Events<'a> {
-    /// Subscribe to real-time transaction events via `GET /ws`.
-    ///
-    /// Connects to the server's WebSocket endpoint, forwarding each incoming
-    /// event to `on_event` and any error to `on_error`.  Returns only when the
-    /// connection is closed — either by the server or because `on_event` /
-    /// `on_error` returns `false`.
-    ///
-    /// **Connection lifecycle**: the socket is closed cleanly before this
-    /// function returns and no background task is left running.
-    ///
-    /// # Parameters
-    /// - `on_event` – called for each [`TransactionStatusUpdate`] received.
-    ///   Return `true` to continue, `false` to close the subscription.
-    /// - `on_error` – called when a message cannot be parsed or a connection
-    ///   error occurs. Return `true` to continue, `false` to close.
-    ///
-    /// # Errors
-    /// Returns [`SynapseError::Http`] if the initial WebSocket handshake fails.
 impl<'a> Events<'a> {
     /// Attempt to reconnect a WebSocket session (`POST /reconnect`).
     ///

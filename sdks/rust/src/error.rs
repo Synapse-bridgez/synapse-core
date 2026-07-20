@@ -40,86 +40,14 @@ pub enum SynapseError {
     #[error("HTTP {status}: {body}")]
     Http { status: u16, body: String },
 
-    /// A 4xx API error with parsed message.
-    #[error("API error {status}: {message}")]
-    Api { status: u16, message: String },
-
-    /// Resource not found (HTTP 404).
-    #[error("not found: {0}")]
-    NotFound(String),
-
-    /// Invalid pagination cursor (malformed or expired).
-    #[error("invalid cursor: {0}")]
-    InvalidCursor(String),
-
-    /// The server returned a not-found result for a resource lookup.
-    #[error("not found: {0}")]
-    NotFound(String),
-
-    /// The server rejected a cursor or pagination token.
-    #[error("invalid cursor: {0}")]
-    InvalidCursor(String),
-
-    /// The server returned a non-2xx response for an API request.
-    /// A non-success API response with a structured message.
-    #[error("API error {status}: {message}")]
-    Api { status: u16, message: String },
-
-    /// The requested resource was not found (HTTP 404).
-    #[error("{0}")]
-    NotFound(String),
-
-    /// The pagination cursor is invalid or expired (HTTP 400 with "cursor").
-    #[error("invalid cursor: {0}")]
-    InvalidCursor(String),
-
-    #[error("not found: {0}")]
-    NotFound(String),
-
-    /// A pagination cursor was rejected by the server (HTTP 400 with cursor error).
-    #[error("invalid cursor: {0}")]
-    InvalidCursor(String),
-
-    /// The GraphQL response contained application-level errors (HTTP 200 with `errors` array).
+    /// The server returned HTTP 200 but the GraphQL response contained an
+    /// `errors` array. Distinct from transport/network errors.
     #[error("GraphQL errors: {0}")]
     GraphQL(String),
 
     /// A network-level failure occurred before a response was received.
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
-
-    /// Failed to decode response JSON.
-    #[error("failed to decode response: {0}")]
-    Decode(#[from] serde_json::Error),
-    /// The body could not be decoded from the server response.
-    #[error("decode error: {0}")]
-    Decode(#[from] serde_json::Error),
-    /// The response body could not be decoded as valid JSON.
-    #[error("decode error: {0}")]
-    Decode(String),
-    /// The server returned a non-success status with a JSON error message.
-    #[error("API error {status}: {message}")]
-    Api { status: u16, message: String },
-
-    /// The requested resource was not found (HTTP 404).
-    #[error("not found: {0}")]
-    NotFound(String),
-
-    /// A pagination cursor is malformed or has expired (HTTP 400).
-    #[error("invalid cursor: {0}")]
-    InvalidCursor(String),
-
-    /// The server returned HTTP 200 but the GraphQL response contained an
-    /// `errors` array. These are distinct from transport/network errors.
-    #[error("GraphQL errors: {0:?}")]
-    GraphqlErrors(Vec<serde_json::Value>),
-    /// The pagination cursor is malformed or expired (HTTP 400 with cursor message).
-    #[error("invalid cursor: {0}")]
-    InvalidCursor(String),
-
-    /// The server returned a non-success status with a structured error message.
-    #[error("API error {status}: {message}")]
-    Api { status: u16, message: String },
 }
 
 impl SynapseError {
@@ -127,14 +55,6 @@ impl SynapseError {
     pub fn is_transient(&self) -> bool {
         match self {
             SynapseError::Network(_) => true,
-            SynapseError::Api { status, .. } => *status >= 500,
-            SynapseError::Http { status, .. } => *status >= 500,
-            SynapseError::Api { status, .. } => *status >= 500,
-            SynapseError::Decode(_) => false,
-            SynapseError::Api { status, .. } => *status >= 500,
-            SynapseError::NotFound(_)
-            | SynapseError::InvalidCursor(_)
-            | SynapseError::GraphqlErrors(_) => false,
             SynapseError::Http { status, .. } | SynapseError::Api { status, .. } => *status >= 500,
             _ => false,
         }
@@ -158,7 +78,10 @@ pub struct CatalogResponse {
 /// Parse an API error body into (optional error code, message string).
 pub(crate) fn parse_api_error(body: &str) -> (Option<String>, String) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        let code = v.get("code").and_then(|c| c.as_str()).map(|s| s.to_string());
+        let code = v
+            .get("code")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string());
         let message = v
             .get("error")
             .or_else(|| v.get("detail"))
@@ -173,10 +96,7 @@ pub(crate) fn parse_api_error(body: &str) -> (Option<String>, String) {
 }
 
 /// Map an HTTP status + optional catalog lookup to a typed [`SynapseError`].
-pub(crate) fn map_status_to_error(
-    status: u16,
-    message: String,
-) -> SynapseError {
+pub(crate) fn map_status_to_error(status: u16, message: String) -> SynapseError {
     match status {
         401 => SynapseError::Unauthorized(message),
         403 => SynapseError::Forbidden(message),

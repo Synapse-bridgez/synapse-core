@@ -57,15 +57,18 @@ async fn main() {
     // Example 2: Get details of a specific report
     println!("\n=== Getting Report Details ===");
     // Replace with an actual report ID from your system
-    let example_report_id = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
-        .expect("invalid UUID");
+    let example_report_id =
+        uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("invalid UUID");
 
     match reconciliation.get_report(example_report_id).await {
         Ok(report) => {
             println!("Report ID: {}", report.id);
             println!("Period: {} to {}", report.period_start, report.period_end);
             println!("\nSummary:");
-            println!("  Total DB transactions: {}", report.summary.total_db_transactions);
+            println!(
+                "  Total DB transactions: {}",
+                report.summary.total_db_transactions
+            );
             println!(
                 "  Total chain payments: {}",
                 report.summary.total_chain_payments
@@ -82,10 +85,7 @@ async fn main() {
                 "  Amount mismatches: {}",
                 report.summary.amount_mismatches_count
             );
-            println!(
-                "  Has discrepancies: {}",
-                report.summary.has_discrepancies
-            );
+            println!("  Has discrepancies: {}", report.summary.has_discrepancies);
 
             // Show details of discrepancies
             if !report.missing_on_chain.is_empty() {
@@ -141,10 +141,7 @@ async fn main() {
                 "  DB Transactions: {}",
                 response.report.total_db_transactions
             );
-            println!(
-                "  Chain Payments: {}",
-                response.report.total_chain_payments
-            );
+            println!("  Chain Payments: {}", response.report.total_chain_payments);
 
             if response.report.has_discrepancies {
                 println!(

@@ -1,12 +1,25 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::net::TcpListener;
+
+/// Reserve an ephemeral port and immediately release it, so callers get an
+/// address nothing else is listening on (unlike a hardcoded port, which can
+/// collide with an unrelated service already running on the host).
+fn unused_base_url() -> String {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    format!("http://127.0.0.1:{port}")
+}
 
 #[test]
 fn test_export_passes_through_raw_bytes() {
     let mut cmd = Command::cargo_bin("synapse").expect("Failed to find binary");
 
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--format")
@@ -48,7 +61,7 @@ fn test_export_supports_output_file() {
     let output_file = temp_dir.path().join("test_export.csv");
 
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--output")
@@ -86,13 +99,13 @@ fn test_export_unrecognized_format() {
     let mut cmd = Command::cargo_bin("synapse").expect("Failed to find binary");
 
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--format")
         .arg("invalid");
 
-    let output = cmd.output().expect("Failed to execute");
+    cmd.output().expect("Failed to execute");
 }
 
 #[test]

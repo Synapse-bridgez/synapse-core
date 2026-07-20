@@ -36,7 +36,14 @@ pub struct Transaction {
 
 impl TableDisplay for Transaction {
     fn headers() -> Vec<&'static str> {
-        vec!["ID", "ASSET", "AMOUNT", "STATUS", "STELLAR ACCOUNT", "CREATED"]
+        vec![
+            "ID",
+            "ASSET",
+            "AMOUNT",
+            "STATUS",
+            "STELLAR ACCOUNT",
+            "CREATED",
+        ]
     }
 
     fn row(&self) -> Vec<String> {
@@ -127,11 +134,18 @@ pub async fn run(cmd: TransactionsSubcommand, base_url: &str, api_key: &str) -> 
     let client = ApiClient::new(base_url, api_key);
 
     match cmd {
-        TransactionsSubcommand::Get { transaction_id, json } => {
+        TransactionsSubcommand::Get {
+            transaction_id,
+            json,
+        } => {
             let path = format!("/transactions/{}", transaction_id);
             let tx: Transaction = client.get(&path).await?;
 
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&tx, fmt);
         }
 
@@ -163,7 +177,7 @@ pub async fn run(cmd: TransactionsSubcommand, base_url: &str, api_key: &str) -> 
 
             let query: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
             let bytes = cli_client.get_bytes("/transactions/export", &query).await?;
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
             let result = Formatter::format_bytes_output(&bytes, fmt)?;
 
             if let Some(ref path) = output {
@@ -218,10 +232,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let tx: Transaction = client
-            .get(&format!("/transactions/{}", id))
-            .await
-            .unwrap();
+        let tx: Transaction = client.get(&format!("/transactions/{}", id)).await.unwrap();
         assert_eq!(tx.id, id);
         assert_eq!(tx.amount, "100.00");
         assert_eq!(tx.asset_code, "USD");
@@ -241,10 +252,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let tx: Transaction = client
-            .get(&format!("/transactions/{}", id))
-            .await
-            .unwrap();
+        let tx: Transaction = client.get(&format!("/transactions/{}", id)).await.unwrap();
         let json = serde_json::to_string_pretty(&tx).unwrap();
         assert!(json.contains("\"id\""));
         assert!(json.contains(id));
@@ -291,8 +299,7 @@ mod tests {
         let id = "550e8400-e29b-41d4-a716-446655440000";
         let tx = Transaction {
             id: id.to_string(),
-            stellar_account: "GABC1234567890123456789012345678901234567890123456789012"
-                .to_string(),
+            stellar_account: "GABC1234567890123456789012345678901234567890123456789012".to_string(),
             amount: "100.00".to_string(),
             asset_code: "USD".to_string(),
             status: "pending".to_string(),

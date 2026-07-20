@@ -102,13 +102,19 @@ fn events_watch_happy_path_table() {
         stdout.contains("aaaaaaaa-0000-0000-0000-000000000001"),
         "expected first transaction_id in: {stdout}"
     );
-    assert!(stdout.contains("pending"), "expected status 'pending' in: {stdout}");
+    assert!(
+        stdout.contains("pending"),
+        "expected status 'pending' in: {stdout}"
+    );
     // Second event
     assert!(
         stdout.contains("aaaaaaaa-0000-0000-0000-000000000002"),
         "expected second transaction_id in: {stdout}"
     );
-    assert!(stdout.contains("completed"), "expected status 'completed' in: {stdout}");
+    assert!(
+        stdout.contains("completed"),
+        "expected status 'completed' in: {stdout}"
+    );
 }
 
 // ── Happy-path: JSON mode ─────────────────────────────────────────────────────
@@ -172,20 +178,28 @@ fn events_watch_empty_list_is_not_an_error() {
     // The mock server serves [] for the path /events?empty=1.
     // We point the CLI at a minimal server that always returns [].
     let port = free_port();
-    let binary = std::env::var_os("CARGO_BIN_EXE_mock-server")
-        .expect("CARGO_BIN_EXE_mock-server must be set");
 
     // Spawn a second mock-server instance; we'll send a normal /events request
     // but rely on the fact that we can verify "No events" by hitting a custom
     // tiny server below.  Because we cannot easily reconfigure the mock binary
     // per-request, we instead spawn a minimal TCP server inline.
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).expect("bind");
-    // Spawn a thread that serves exactly one request with an empty JSON array.
+    // Spawn a thread that serves the first real HTTP request with an empty
+    // JSON array. `wait_for_port`'s readiness probe below also opens (and
+    // immediately drops) a connection, which would otherwise race for this
+    // listener's single `accept()`; skip over any such empty connections and
+    // wait for one that actually carries a request line.
     let handle = thread::spawn(move || {
         use std::io::{BufRead, BufReader, Write};
-        if let Ok((mut stream, _)) = listener.accept() {
-            // Drain the request headers
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first_line = String::new();
+            if reader.read_line(&mut first_line).unwrap_or(0) == 0 || first_line.trim().is_empty() {
+                continue;
+            }
             loop {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -200,6 +214,7 @@ fn events_watch_empty_list_is_not_an_error() {
                 body
             );
             stream.write_all(response.as_bytes()).unwrap();
+            break;
         }
     });
 
@@ -235,8 +250,15 @@ fn events_watch_empty_list_json_mode() {
 
     let handle = thread::spawn(move || {
         use std::io::{BufRead, BufReader, Write};
-        if let Ok((mut stream, _)) = listener.accept() {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first_line = String::new();
+            if reader.read_line(&mut first_line).unwrap_or(0) == 0 || first_line.trim().is_empty() {
+                continue;
+            }
             loop {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -251,6 +273,7 @@ fn events_watch_empty_list_json_mode() {
                 body
             );
             stream.write_all(response.as_bytes()).unwrap();
+            break;
         }
     });
 
@@ -258,7 +281,14 @@ fn events_watch_empty_list_json_mode() {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let output = synapse_cmd()
-        .args(["--base-url", &base_url, "admin", "events", "watch", "--json"])
+        .args([
+            "--base-url",
+            &base_url,
+            "admin",
+            "events",
+            "watch",
+            "--json",
+        ])
         .output()
         .expect("command output");
 

@@ -175,7 +175,11 @@ pub async fn run(cmd: StatsCommand, base_url: &str, api_key: &str) -> Result<()>
     match cmd {
         StatsCommand::Status { json } => {
             let items: Vec<StatusCount> = client.get("/stats/status").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print(&items, fmt);
         }
         StatsCommand::Daily { days, json } => {
@@ -183,17 +187,29 @@ pub async fn run(cmd: StatsCommand, base_url: &str, api_key: &str) -> Result<()>
             let items: Vec<DailyTotal> = client
                 .get_with_query("/stats/daily", &[("days", &days_str)])
                 .await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print(&items, fmt);
         }
         StatsCommand::Assets { json } => {
             let items: Vec<AssetStats> = client.get("/stats/assets").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print(&items, fmt);
         }
         StatsCommand::Cache { json } => {
             let metrics: CacheMetrics = client.get("/cache/metrics").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&metrics, fmt);
         }
     }
@@ -242,7 +258,10 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let items: Vec<StatusCount> = client.get("/stats/status").await.unwrap();
-        assert!(items.is_empty(), "empty dataset must be an empty vec, not an error");
+        assert!(
+            items.is_empty(),
+            "empty dataset must be an empty vec, not an error"
+        );
     }
 
     #[tokio::test]

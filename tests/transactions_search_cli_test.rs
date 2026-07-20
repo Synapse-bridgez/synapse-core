@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use serde_json::json;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn synapse_cmd() -> Command {

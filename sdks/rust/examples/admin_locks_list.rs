@@ -6,20 +6,17 @@
 //!   cargo run --example admin_locks_list
 //! ```
 
-use synapse_sdk::client::SynapseClient;
+use synapse_sdk::AdminSynapseClient;
 
 #[tokio::main]
 async fn main() {
-    let base_url = std::env::var("SYNAPSE_BASE_URL")
-        .unwrap_or_else(|_| "https://api.example.com".to_string());
-    let api_key = std::env::var("SYNAPSE_API_KEY").expect("SYNAPSE_API_KEY required");
+    let base_url =
+        std::env::var("SYNAPSE_BASE_URL").unwrap_or_else(|_| "https://api.example.com".to_string());
     let admin_key = std::env::var("SYNAPSE_ADMIN_KEY").expect("SYNAPSE_ADMIN_KEY required");
 
-    let client = SynapseClient::builder(base_url, api_key)
-        .admin_key(admin_key)
-        .build();
+    let admin = AdminSynapseClient::builder(base_url, admin_key).build();
 
-    match client.admin().locks().list().await {
+    match admin.locks().list().await {
         Ok(response) => {
             println!(
                 "Active locks: {} total, {} overdue",

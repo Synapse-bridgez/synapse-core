@@ -1,14 +1,13 @@
-pub mod graphql;
+pub mod admin;
 pub mod events;
+pub mod graphql;
 pub mod health;
 pub mod settlements;
 pub mod stats;
 pub mod transactions;
+pub mod webhooks;
 
-pub use settlements::SettlementsCmd;
-pub use transactions::TransactionsCmd;
-
-pub use events::EventsCmd;
+pub use events::{EventsCmd, EventsSubcommand};
 pub use settlements::SettlementsCmd;
 pub use transactions::TransactionsCmd;
 
@@ -30,7 +29,8 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     /// Base URL of the Synapse server (e.g. http://localhost:3000)
     #[arg(
-        long,
+        long = "base-url",
+        alias = "url",
         env = "SYNAPSE_BASE_URL",
         default_value = "http://localhost:3000"
     )]
@@ -46,8 +46,17 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Health and readiness probe commands (live, ready, check, errors)
+    /// Administrative operations (locks, quotas, reconciliation, webhooks, …)
+    #[command(subcommand)]
+    Admin(admin::AdminCommands),
+
+    /// Real-time event streaming commands
+    #[command(subcommand)]
+    Events(events::EventsSubcommand),
+
+    /// Health and readiness probe commands
     #[command(
+        subcommand,
         about = "Health and readiness probe commands",
         long_about = "Liveness, readiness, and dependency-health probes.\n\n\
                       Subcommands:\n  \
@@ -56,16 +65,11 @@ pub enum Commands {
                       check   — Full health check including DB and pool stats\n  \
                       errors  — List all registered error codes"
     )]
-    /// Real-time event streaming commands
-    #[command(subcommand)]
-    Events(events::EventsSubcommand),
-
-    /// Health and readiness probe commands
-    #[command(subcommand)]
     Health(health::HealthCommand),
 
     /// Transaction statistics commands (status, daily, assets, cache)
     #[command(
+        subcommand,
         about = "Transaction statistics commands",
         long_about = "Query live transaction statistics from the Synapse API.\n\n\
                       Subcommands:\n  \
@@ -97,4 +101,13 @@ pub enum Commands {
                       Output defaults to a human-readable table; add --json for raw JSON."
     )]
     Transactions(transactions::TransactionsCmd),
+
+    /// Send a raw GraphQL query to the Synapse API
+    Graphql(graphql::GraphqlCmd),
+
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for: bash, zsh, or fish.
+        shell: String,
+    },
 }
