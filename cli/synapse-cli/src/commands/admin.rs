@@ -75,28 +75,6 @@ impl AdminClient {
         self.send(self.http.delete(self.url(path))).await
     }
 
-    async fn get_bytes(&self, path: &str, query: &[(&str, String)]) -> Result<Vec<u8>> {
-        let response = self
-            .with_auth(self.http.get(self.url(path)).query(query))
-            .send()
-            .await
-            .context("request failed")?;
-
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .context("failed to read response body")?;
-        if !status.is_success() {
-            bail!(
-                "server returned {status}: {}",
-                String::from_utf8_lossy(&body)
-            );
-        }
-
-        Ok(body.to_vec())
-    }
-
     async fn send<T: for<'de> Deserialize<'de>>(
         &self,
         request: reqwest::RequestBuilder,

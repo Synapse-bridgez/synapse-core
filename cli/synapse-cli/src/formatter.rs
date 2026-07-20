@@ -18,7 +18,7 @@ impl OutputFormat {
         }
     }
 
-    pub fn from_str(value: &str) -> Self {
+    pub fn from_format_str(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
             "json" => Self::Json,
             _ => Self::Table,

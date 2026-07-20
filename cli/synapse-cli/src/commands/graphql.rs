@@ -53,7 +53,7 @@ pub async fn run(cmd: GraphqlSubcommand, base_url: &str) -> Result<()> {
             let body = serde_json::json!({ "query": query, "variables": null });
             let response: serde_json::Value = client.post_json("/graphql", &body).await?;
 
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
 
             // Surface application-level GraphQL errors (HTTP 200 + errors array).
             if let Some(errors) = response.get("errors").and_then(|e| e.as_array()) {

@@ -1265,6 +1265,7 @@ pub async fn handle_settlements_get(config: &Config, id: &str, format: &str) -> 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_tx_search(
     config: &Config,
     status: Option<String>,
@@ -1318,11 +1319,8 @@ pub async fn handle_tx_search(
                         response.results.len(),
                         response.total
                     );
-                    if response.next_cursor.is_some() {
-                        println!(
-                            "  Use --cursor {} for next page",
-                            response.next_cursor.as_ref().unwrap()
-                        );
+                    if let Some(cursor) = &response.next_cursor {
+                        println!("  Use --cursor {} for next page", cursor);
                     }
                     println!();
                 }

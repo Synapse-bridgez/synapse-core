@@ -177,7 +177,7 @@ pub async fn run(cmd: TransactionsSubcommand, base_url: &str, api_key: &str) -> 
 
             let query: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
             let bytes = cli_client.get_bytes("/transactions/export", &query).await?;
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
             let result = Formatter::format_bytes_output(&bytes, fmt)?;
 
             if let Some(ref path) = output {

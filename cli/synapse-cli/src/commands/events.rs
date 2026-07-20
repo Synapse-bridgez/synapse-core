@@ -667,7 +667,7 @@ where
 pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
     match cmd.command {
         EventsSubcommand::Watch { token, format } => {
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
 
             subscribe(
                 base_url,
@@ -693,7 +693,7 @@ pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
             force_resync,
             format,
         } => {
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
             let url = format!("{}/reconnect", base_url.trim_end_matches('/'));
             let mut body = serde_json::json!({ "session_id": session_id });
             if let Some(seq) = last_sequence {
@@ -720,7 +720,7 @@ pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
             last_sequence,
             format,
         } => {
-            let fmt = OutputFormat::from_str(&format);
+            let fmt = OutputFormat::from_format_str(&format);
             let base = base_url.trim_end_matches('/');
             let client = reqwest::Client::new();
             let mut req = client.get(format!("{}/reconnect/status", base));
