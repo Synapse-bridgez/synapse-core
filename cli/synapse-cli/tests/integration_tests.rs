@@ -1,16 +1,28 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::fs;
+use std::net::TcpListener;
 
 fn synapse_cmd() -> Command {
     Command::cargo_bin("synapse").expect("Failed to find binary")
+}
+
+/// Reserve an ephemeral port and immediately release it, so callers get an
+/// address nothing else is listening on (unlike a hardcoded port, which can
+/// collide with an unrelated service already running on the host).
+fn unused_base_url() -> String {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    format!("http://127.0.0.1:{port}")
 }
 
 #[test]
 fn test_export_csv_default_format() {
     let mut cmd = synapse_cmd();
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export");
 
@@ -23,7 +35,7 @@ fn test_export_csv_default_format() {
 fn test_export_with_filters() {
     let mut cmd = synapse_cmd();
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--format")
@@ -42,7 +54,7 @@ fn test_export_with_filters() {
 fn test_export_json_format() {
     let mut cmd = synapse_cmd();
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--format")
@@ -57,7 +69,7 @@ fn test_export_json_format() {
 fn test_export_with_date_filters() {
     let mut cmd = synapse_cmd();
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--from")
@@ -77,7 +89,7 @@ fn test_export_to_file() {
 
     let mut cmd = synapse_cmd();
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--output")
@@ -116,7 +128,7 @@ fn test_export_help() {
 fn test_export_with_all_filters() {
     let mut cmd = synapse_cmd();
     cmd.arg("--url")
-        .arg("http://localhost:3000")
+        .arg(unused_base_url())
         .arg("transactions")
         .arg("export")
         .arg("--format")

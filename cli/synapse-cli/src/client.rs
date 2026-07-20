@@ -1,105 +1,13 @@
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
-use anyhow::{bail, Result};
-use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 
 // ── ApiClient ─────────────────────────────────────────────────────────────────
-// Shared HTTP client used by all commands (health, stats, events, …).
-// Sends X-API-Key on every request and surfaces non-2xx responses as errors.
-
-pub struct ApiClient {
-    client: Client,
-use serde_json::Value;
-use anyhow::{bail, Context, Result};
-
-pub struct SynapseCliClient {
-    client: reqwest::Client,
-    base_url: String,
-    api_key: String,
-}
-
-impl ApiClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let base_url = base_url.into();
-        Self {
-            client: reqwest::Client::new(),
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: api_key.into(),
-        }
-    }
-
-    /// `GET <base_url><path>` — deserialise JSON body into `T`.
-    pub async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("server returned {}: {}", status.as_u16(), body);
-        }
-        resp.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
-    }
-
-    /// `GET <base_url><path>?key=value&…` — deserialise JSON body into `T`.
-    pub async fn get_with_query<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        query_params: &[(&str, &str)],
-    ) -> Result<T> {
-    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let mut req = self
-            .client
-            .get(&url)
-            .header("X-API-Key", &self.api_key);
-        for (k, v) in query_params {
-            req = req.query(&[(k, v)]);
-        }
-        let resp = req.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("server returned {}: {}", status.as_u16(), body);
-        }
-        resp.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
-    }
-
-    /// `POST <base_url><path>` with a JSON body — deserialise JSON response into `T`.
-    pub async fn post<B: Serialize, T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .post(&url)
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            bail!("server returned {}: {}", status.as_u16(), body_text);
-        }
-        resp.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-// ── SynapseCliClient ──────────────────────────────────────────────────────────
-// Legacy client used by the transactions/settlements handlers; kept for
-// backward compatibility.
-
-// ── ApiClient (used by health.rs and stats.rs commands) ───────────────────────
+// Shared HTTP client used by most commands (health, stats, events, settlements,
+// transactions, webhooks, …). Sends X-API-Key on every request and surfaces
+// non-2xx responses as errors.
 
 pub struct ApiClient {
     client: Client,
@@ -116,6 +24,7 @@ impl ApiClient {
         }
     }
 
+    /// `GET <base_url><path>` — deserialise JSON body into `T`.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
@@ -135,15 +44,15 @@ impl ApiClient {
         resp.json::<T>().await.context("failed to parse response JSON")
     }
 
+    /// `GET <base_url><path>?key=value&…` — deserialise JSON body into `T`.
     pub async fn get_with_query<T: DeserializeOwned>(
         &self,
         path: &str,
-        params: &[(&str, &str)],
+        query_params: &[(&str, &str)],
     ) -> Result<T> {
-    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.client.get(&url).header("X-API-Key", &self.api_key);
-        for (k, v) in params {
+        for (k, v) in query_params {
             req = req.query(&[(k, v)]);
         }
         let resp = req.send().await.context("request failed")?;
@@ -156,9 +65,51 @@ impl ApiClient {
 
         resp.json::<T>().await.context("failed to parse response JSON")
     }
+
+    /// `POST <base_url><path>` with a JSON body — deserialise JSON response into `T`.
+    pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-API-Key", &self.api_key)
+            .json(body)
+            .send()
+            .await
+            .context("request failed")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            bail!("server returned {}: {}", status.as_u16(), body_text);
+        }
+
+        resp.json::<T>().await.context("failed to parse response JSON")
+    }
+
+    /// `GET <base_url><path>` returning the raw status code and body text,
+    /// without attempting to interpret non-2xx as an error. Used by callers
+    /// that need to distinguish specific status codes (e.g. 404) before
+    /// deciding how to report a failure.
+    pub async fn get_raw_status(&self, path: &str) -> Result<(u16, String)> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .context("request failed")?;
+
+        let status = resp.status().as_u16();
+        let body = resp.text().await.context("failed to read response body")?;
+        Ok((status, body))
+    }
 }
 
-// ── SynapseCliClient (used by settlements / transactions / export) ─────────────
+// ── SynapseCliClient ──────────────────────────────────────────────────────────
+// Thin client used by the transactions/settlements/graphql top-level handlers.
+// Unlike `ApiClient` it does not send an API key header.
 
 pub struct SynapseCliClient {
     client: Client,
@@ -173,29 +124,52 @@ impl SynapseCliClient {
         }
     }
 
+    /// `GET <base_url><path>` — deserialise JSON body into `T`.
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.client.get(&url).send().await?;
-        response.json().await.map_err(|e| anyhow::anyhow!(e))
-        self.send(self.client.get(self.url(path))).await
+        let response = self.client.get(&url).send().await.context("request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("server returned {}: {}", status.as_u16(), body);
+        }
+        response.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// `GET <base_url><path>?key=value&…` — deserialise JSON body into `T`.
     pub async fn get_with_query<T: DeserializeOwned>(
         &self,
         path: &str,
         query_params: &[(&str, &str)],
     ) -> Result<T> {
-        self.send(self.client.get(self.url(path)).query(query_params))
-            .await
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self.client.get(&url);
+        for (key, value) in query_params {
+            req = req.query(&[(key, value)]);
+        }
+        let response = req.send().await.context("request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("server returned {}: {}", status.as_u16(), body);
+        }
+        response.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// `GET <base_url><path>?…` returning the raw response bytes (used for
+    /// CSV/JSON export downloads).
     pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.client.get(&url);
         for (key, value) in query_params {
             req = req.query(&[(key, value)]);
         }
-        let response = req.send().await?;
+        let response = req.send().await.context("request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("server returned {}: {}", status.as_u16(), body);
+        }
         response
             .bytes()
             .await
@@ -203,20 +177,20 @@ impl SynapseCliClient {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
-        let url = format!("{}{}", self.base_url, path);
     /// POST a JSON body to `path` and deserialize the response as `T`.
     ///
     /// Returns an error for non-2xx HTTP status codes. On success the raw
     /// response body is deserialized — callers are responsible for inspecting
     /// the returned value for application-level GraphQL errors.
-    pub async fn post_json<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &Value,
-    ) -> Result<T> {
+    pub async fn post_json<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.client.post(&url).json(body).send().await?;
+        let response = self
+            .client
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .context("request failed")?;
 
         let status = response.status();
         if !status.is_success() {
@@ -225,171 +199,5 @@ impl SynapseCliClient {
         }
 
         response.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-/// Generic API client used by the health and stats command modules.
-/// Sends requests with an `X-API-Key` header and surfaces non-2xx responses
-/// as errors.
-pub struct ApiClient {
-    base_url: String,
-    api_key: String,
-    client: Client,
-}
-
-impl ApiClient {
-    pub fn new(base_url: &str, api_key: &str) -> Self {
-        Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: api_key.to_string(),
-            client: Client::new(),
-        }
-    }
-
-    pub async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .header("X-API-Key", &self.api_key)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("HTTP {}: {}", status.as_u16(), body);
-        }
-
-        resp.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
-    }
-
-    pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
-        let url = format!("{}{}", self.base_url, path);
-        let mut req = self.client.get(&url);
-        for (key, value) in query_params {
-            req = req.query(&[(key, value)]);
-        }
-        let response = req.send().await?;
-        response.bytes().await.map(|b| b.to_vec()).map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-// ── SynapseApiClient (transactions get) ───────────────────────────────────────
-        response
-            .bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-// ── SynapseApiClient ──────────────────────────────────────────────────────────
-// Thin client used by the transactions `get` handler.
-    pub async fn get_with_query<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        query_params: &[(&str, &str)],
-    ) -> anyhow::Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let mut req = self
-            .client
-            .get(&url)
-            .header("X-API-Key", &self.api_key);
-        let response = self
-            .client
-            .get(self.url(path))
-            .query(query_params)
-            .send()
-            .await
-            .context("request failed")?;
-        let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .context("failed to read response body")?;
-
-        if !status.is_success() {
-            bail!(
-                "server returned {status}: {}",
-                String::from_utf8_lossy(&bytes)
-            );
-        }
-
-        let resp = req.send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("HTTP {}: {}", status.as_u16(), body);
-        }
-
-        resp.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
-    }
-}
-
-/// Thin client used by older command modules that need per-request API-key
-/// injection and typed error variants.
-#[derive(Debug)]
-pub enum ClientError {
-    NotFound(String),
-    Http { status: u16, body: String },
-    Network(String),
-}
-
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClientError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            ClientError::Http { status, body } => write!(f, "HTTP {}: {}", status, body),
-            ClientError::Network(msg) => write!(f, "Network error: {}", msg),
-        }
-        Ok(bytes.to_vec())
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
-    }
-
-    pub async fn get_transaction(&self, id: &str) -> Result<serde_json::Value, ClientError> {
-    /// Fetch a transaction by ID. Returns `NotFound` for 404, `Http` for other errors.
-    /// Fetch a transaction by ID. Returns `NotFound` for 404, `Http` for other
-    /// non-success statuses.
-    pub async fn get_transaction(&self, id: &str) -> Result<Value, ClientError> {
-        let url = format!("{}/transactions/{}", self.base_url, id);
-        let client = Client::new();
-        let resp = client
-            .get(&url)
-            .header("X-API-Key", &self.api_key)
-            .send()
-    async fn send<T: serde::de::DeserializeOwned>(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> Result<T> {
-        let response = request.send().await.context("request failed")?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ClientError::Network(e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        if status == 404 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::NotFound(body));
-        }
-        if status >= 400 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Http { status, body });
-        }
-        resp.json::<serde_json::Value>()
-            .await
-            .map_err(|e| ClientError::Network(e.to_string()))
-            .context("failed to read response body")?;
-
-        if !status.is_success() {
-            bail!("server returned {status}: {body}");
-        }
-
-        serde_json::from_str(&body).context("failed to parse response JSON")
     }
 }

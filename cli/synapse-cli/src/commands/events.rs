@@ -432,15 +432,25 @@ mod tests {
         let row = resp.row();
         assert_eq!(row[1], "session_expired");
         assert_eq!(row[2], "-"); // no session_id
-use anyhow::Result;
+        assert_eq!(row[3], "0");
+        assert_eq!(row[4], "false");
+    }
+}
+
+// ── Top-level `synapse events watch` (WebSocket-based) ────────────────────────
+//
+// This is a separate command tree from the `EventsCommand`/`run()` pair above
+// (which backs `synapse admin events reconnect` / `reconnect-status`). The
+// top-level `events watch` subcommand streams live updates over a real
+// WebSocket connection.
+
 use chrono::{DateTime, Utc};
-use clap::{Args, Subcommand};
+use clap::Args;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
-use crate::formatter::{Formatter, OutputFormat};
+use crate::formatter::Formatter;
 
 /// A real-time transaction status update pushed by the server.
 #[derive(Debug, Clone, Deserialize, Serialize)]

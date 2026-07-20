@@ -48,7 +48,7 @@ fn events_watch_json_flag_appears_in_help() {
 ///   4. Waits for the client's Close frame (connection lifecycle check).
 ///
 /// Then verifies that `synapse events watch` prints the event and exits cleanly.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn events_watch_receives_event_and_exits_cleanly() {
     let port = free_port();
     let addr = format!("127.0.0.1:{}", port);
@@ -136,7 +136,6 @@ async fn serve_one_event(stream: &mut tokio::net::TcpStream) {
 
 /// Compute `Sec-WebSocket-Accept` per RFC 6455.
 fn ws_accept_key(key: &str) -> String {
-    use std::io::Write;
     const MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     let combined = format!("{}{}", key, MAGIC);
     // Use sha1 via a simple implementation to avoid pulling in a new dep.
@@ -210,7 +209,7 @@ fn base64_encode(data: &[u8]) -> String {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
         let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
-        out.push(ALPHABET[(b0 >> 2)] as char);
+        out.push(ALPHABET[b0 >> 2] as char);
         out.push(ALPHABET[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 {
             out.push(ALPHABET[((b1 & 0xf) << 2) | (b2 >> 6)] as char);

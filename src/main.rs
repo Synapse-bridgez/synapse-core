@@ -21,9 +21,11 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-mod cli;
-use cli::{BackupCommands, Cli, Commands, DbCommands, GraphqlCommands, StatsCommands, TxCommands};
-use cli::{BackupCommands, Cli, Commands, DbCommands, SettlementsCommands, TxCommands};
+use synapse_core::cli;
+use synapse_core::cli::{
+    BackupCommands, Cli, Commands, DbCommands, GraphqlCommands, SettlementsCommands,
+    StatsCommands, TxCommands,
+};
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -104,23 +106,7 @@ async fn main() -> anyhow::Result<()> {
                 from_date,
                 to_date,
                 format,
-            } => cli::handle_tx_list(cursor, limit, from_date, to_date, &format).await,
-            TxCommands::Search {
-                status,
-                asset_code,
-                min_amount,
-                max_amount,
-                from,
-                to,
-                stellar_account,
-                cursor,
-                limit,
-                format,
-            } => cli::handle_tx_search(
-                status, asset_code, min_amount, max_amount, from, to, stellar_account, cursor,
-                limit, &format,
-            )
-            .await,
+            } => cli::handle_tx_list(&config, cursor, limit, from_date, to_date, &format).await,
             TxCommands::Reconcile {
                 account,
                 start,

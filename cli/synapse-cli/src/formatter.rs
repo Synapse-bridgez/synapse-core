@@ -3,9 +3,6 @@ use serde_json::Value;
 
 // ── OutputFormat ──────────────────────────────────────────────────────────────
 
-// ── OutputFormat ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Table,
@@ -46,7 +43,10 @@ where
 {
     match fmt {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".into()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".into())
+            );
         }
         OutputFormat::Table => {
             if items.is_empty() {
@@ -67,7 +67,6 @@ where
                 })
                 .collect();
 
-            // Header row
             let header_line: Vec<String> = headers
                 .iter()
                 .zip(widths.iter())
@@ -75,11 +74,9 @@ where
                 .collect();
             println!("{}", header_line.join("  "));
 
-            // Separator
             let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
             println!("{}", sep.join("  "));
 
-            // Data rows
             for item in items {
                 let row = item.row();
                 let cells: Vec<String> = row
@@ -97,7 +94,10 @@ where
 pub fn print_one<T: Serialize>(item: &T, fmt: OutputFormat) {
     match fmt {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".into()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".into())
+            );
         }
         OutputFormat::Table => {
             let v = serde_json::to_value(item).unwrap_or(Value::Null);
@@ -106,93 +106,7 @@ pub fn print_one<T: Serialize>(item: &T, fmt: OutputFormat) {
     }
 }
 
-// ── Formatter struct (legacy / settlements / transactions usage) ──────────────
-// Commands implement this trait so that the shared `print` / `print_one`
-// functions can render either a table or pretty-printed JSON without any
-// command-specific logic in the formatter itself.
-
-pub trait TableDisplay: Serialize {
-    /// Column headers for the table view.
-    fn headers() -> Vec<&'static str>;
-    /// One table row, matching the order of `headers()`.
-    fn row(&self) -> Vec<String>;
-}
-
-// ── print / print_one ─────────────────────────────────────────────────────────
-
-/// Print a list of items as a table or JSON array.
-pub fn print<T: TableDisplay>(items: &[T], fmt: OutputFormat) {
-    match fmt {
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(items)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
-            println!("{}", json);
-        }
-        OutputFormat::Table => {
-            let headers = T::headers();
-            // Build column widths from headers and data.
-            let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-            let rows: Vec<Vec<String>> = items.iter().map(|item| item.row()).collect();
-            for row in &rows {
-                for (i, cell) in row.iter().enumerate() {
-                    if i < widths.len() {
-                        widths[i] = widths[i].max(cell.len());
-                    }
-                }
-            }
-
-            // Header row.
-            let header_line: Vec<String> = headers
-                .iter()
-                .enumerate()
-                .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
-                .collect();
-            println!("{}", header_line.join("  "));
-
-            // Separator.
-            let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-            println!("{}", sep.join("  "));
-
-            // Data rows.
-            for row in &rows {
-                let line: Vec<String> = row
-                    .iter()
-                    .enumerate()
-                    .map(|(i, cell)| {
-                        let w = widths.get(i).copied().unwrap_or(cell.len());
-                        format!("{:<width$}", cell, width = w)
-                    })
-                    .collect();
-                println!("{}", line.join("  "));
-            }
-
-            if items.is_empty() {
-                println!("(no results)");
-            }
-        }
-    }
-}
-
-/// Print a single item as a key-value table or JSON object.
-pub fn print_one<T: TableDisplay>(item: &T, fmt: OutputFormat) {
-    match fmt {
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(item)
-                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
-            println!("{}", json);
-        }
-        OutputFormat::Table => {
-            let headers = T::headers();
-            let row = item.row();
-            let key_width = headers.iter().map(|h| h.len()).max().unwrap_or(0);
-            for (header, value) in headers.iter().zip(row.iter()) {
-                println!("{:<width$}  {}", header, value, width = key_width);
-            }
-        }
-    }
-}
-
-// ── Formatter (legacy helpers used by transactions/settlements handlers) ──────
+// ── Formatter (legacy helpers used by settlements/transactions/admin handlers) ─
 
 pub struct Formatter;
 
@@ -204,8 +118,6 @@ impl Formatter {
         match output_format {
             OutputFormat::Json => Ok(serde_json::to_string_pretty(data)?),
             OutputFormat::Table => {
-                let json_value = serde_json::to_value(data)?;
-                Ok(format_value_as_table(&json_value))
                 let value = serde_json::to_value(data)?;
                 Ok(format_table_value(&value))
             }
@@ -215,67 +127,28 @@ impl Formatter {
     pub fn format_bytes_output(data: &[u8], output_format: OutputFormat) -> anyhow::Result<String> {
         match output_format {
             OutputFormat::Json => {
-                let text = String::from_utf8(data.to_vec())?;
+                let text = String::from_utf8_lossy(data).to_string();
                 let json_value = serde_json::json!({ "content": text, "size_bytes": data.len() });
                 Ok(serde_json::to_string_pretty(&json_value)?)
             }
-            OutputFormat::Table => {
-                String::from_utf8(data.to_vec()).map_err(|e| anyhow::anyhow!(e))
-                Ok(serde_json::to_string_pretty(&serde_json::json!({
-                    "content": text,
-                    "size_bytes": data.len()
-                }))?)
-            }
-            OutputFormat::Table => Ok(String::from_utf8(data.to_vec())?),
+            OutputFormat::Table => Ok(String::from_utf8_lossy(data).to_string()),
         }
     }
 }
 
-    /// Format a transaction `Value` for human-readable table display.
-    pub fn format_transaction_table(tx: &Value) -> String {
-        let id = tx.get("id").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let status = tx.get("status").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let amount = tx.get("amount").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let asset_code = tx
-            .get("asset_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("N/A");
-        format!(
-            "ID\t{}\nStatus\t{}\nAmount\t{}\nAsset\t{}\n",
-            id, status, amount, asset_code
-        )
-    }
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
-    /// Format a transaction `Value` as pretty-printed JSON.
-    pub fn format_transaction_json(tx: &Value) -> String {
-        serde_json::to_string_pretty(tx).unwrap_or_else(|_| "{}".to_string())
+fn format_value_as_kv(value: &Value) -> String {
+    match value {
+        Value::Object(obj) => obj
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, format_cell(v)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => format_cell(other),
     }
+}
 
-    /// Format a `Value` based on a format string (`"json"` or anything else → table).
-    pub fn format(format: &str, data: &Value) -> String {
-        match format {
-            "json" => Self::format_transaction_json(data),
-            _ => Self::format_transaction_table(data),
-        }
-    }
-
-    // For transactions get (table mode)
-    pub fn format_transaction_table(tx: &Value) -> String {
-        let id = tx.get("id").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let status = tx.get("status").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let amount = tx.get("amount").and_then(|v| v.as_str()).unwrap_or("N/A");
-        let asset_code = tx.get("asset_code").and_then(|v| v.as_str()).unwrap_or("N/A");
-        format!("ID\t{}\nStatus\t{}\nAmount\t{}\nAsset\t{}\n", id, status, amount, asset_code)
-    }
-
-    pub fn format_transaction_json(tx: &Value) -> String {
-        serde_json::to_string_pretty(tx).unwrap_or_else(|_| "{}".to_string())
-    fn format_as_table(value: &Value) -> String {
-        match value {
-            Value::Array(arr) => Self::format_array_as_table(arr),
-            Value::Object(obj) => Self::format_object_as_table(obj),
-            _ => value.to_string(),
-        }
 fn format_table_value(value: &Value) -> String {
     match value {
         Value::Array(values) => format_array(values),
@@ -288,83 +161,13 @@ fn format_table_value(value: &Value) -> String {
     }
 }
 
-    pub fn format(format: &str, data: &Value) -> String {
-        match format {
-            "json" => Self::format_transaction_json(data),
-            _ => Self::format_transaction_table(data),
-        }
-    }
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-fn format_value_as_table(value: &Value) -> String {
-    match value {
-        Value::Array(arr) => format_array_as_table(arr),
-        Value::Object(obj) => format_object_as_kv(obj),
-        _ => value.to_string(),
-    }
-}
-
-fn format_value_as_kv(value: &Value) -> String {
-    match value {
-        Value::Object(obj) => format_object_as_kv(obj),
-        _ => value.to_string(),
-    }
-}
-        if let Value::Object(first) = &arr[0] {
-            let headers: Vec<String> = first.keys().cloned().collect();
-            rows.push(headers.join(" | "));
-            rows.push("-".repeat(80));
-
-fn format_array_as_table(arr: &[Value]) -> String {
-    if arr.is_empty() {
-        return "(empty)".to_string();
-    }
-    let mut rows = Vec::new();
-    if let Value::Object(first) = &arr[0] {
-        let headers: Vec<String> = first.keys().cloned().collect();
-        rows.push(headers.join(" | "));
-        rows.push("-".repeat(80));
-        for item in arr {
-            if let Value::Object(obj) = item {
-                let values: Vec<String> = headers
-                    .iter()
-                    .map(|h| obj.get(h).map(display_scalar).unwrap_or_else(|| "-".into()))
-                    .collect();
-                rows.push(values.join(" | "));
-            }
-        }
-
-        rows.join("\n")
 fn format_array(values: &[Value]) -> String {
     if values.is_empty() {
         return "(empty)".to_string();
     }
-    rows.join("\n")
-}
 
-fn format_object_as_kv(obj: &serde_json::Map<String, Value>) -> String {
-    let map: BTreeMap<&String, &Value> = obj.iter().collect();
-    map.iter()
-        .map(|(k, v)| format!("{}: {}", k, display_scalar(v)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn display_scalar(value: &Value) -> String {
-    fn format_object_as_table(obj: &serde_json::Map<String, Value>) -> String {
-        let mut rows = Vec::new();
-        let map: BTreeMap<&String, &Value> = obj.iter().collect();
-
-        for (key, value) in map {
-            rows.push(format!("{}: {}", key, format_value(value)));
     let Some(first) = values.iter().find_map(Value::as_object) else {
-        return values
-            .iter()
-            .map(format_cell)
-            .collect::<Vec<_>>()
-            .join("\n");
+        return values.iter().map(format_cell).collect::<Vec<_>>().join("\n");
     };
 
     let headers = first.keys().cloned().collect::<Vec<_>>();
@@ -375,16 +178,11 @@ fn display_scalar(value: &Value) -> String {
             lines.push(
                 headers
                     .iter()
-                    .map(|header| {
-                        row.get(header)
-                            .map(format_cell)
-                            .unwrap_or_else(|| "-".into())
-                    })
+                    .map(|header| row.get(header).map(format_cell).unwrap_or_else(|| "-".into()))
                     .collect::<Vec<_>>()
                     .join(" | "),
             );
         }
-        rows.join("\n")
     }
 
     lines.join("\n")
@@ -404,52 +202,5 @@ fn format_cell(value: &Value) -> String {
         }
         Value::Array(arr) => format!("[{} items]", arr.len()),
         Value::Object(obj) => format!("{{{} fields}}", obj.len()),
-    }
-}
-
-/// Trait for types that can render themselves as a table row.
-pub trait TableDisplay: serde::Serialize {
-    fn headers() -> Vec<&'static str>;
-    fn row(&self) -> Vec<String>;
-}
-
-/// Print a slice of table-displayable items to stdout.
-pub fn print<T: TableDisplay>(items: &[T], fmt: OutputFormat) {
-    match fmt {
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string());
-            println!("{}", json);
-        }
-        OutputFormat::Table => {
-            if items.is_empty() {
-                println!("(empty)");
-                return;
-            }
-            let headers = T::headers();
-            println!("{}", headers.join(" | "));
-            println!("{}", "-".repeat(80));
-            for item in items {
-                println!("{}", item.row().join(" | "));
-            }
-        }
-    }
-}
-
-/// Print a single serializable item to stdout.
-pub fn print_one<T: serde::Serialize>(item: &T, fmt: OutputFormat) {
-    match fmt {
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".to_string());
-            println!("{}", json);
-        }
-        OutputFormat::Table => {
-            let v = serde_json::to_value(item).unwrap_or(Value::Null);
-            println!("{}", Formatter::format_as_table(&v));
-        }
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => value.clone(),
-        Value::Array(values) => format!("[{} items]", values.len()),
-        Value::Object(map) => format!("{{{} fields}}", map.len()),
     }
 }

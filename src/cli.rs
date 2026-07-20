@@ -1,6 +1,6 @@
+use crate::config::Config;
 use clap::{Parser, Subcommand};
 use sqlx::PgPool;
-use synapse_core::config::Config;
 use uuid::Uuid;
 
 // Re-export handler functions used in tests and from main dispatch.
@@ -99,57 +99,6 @@ Examples:
         /// Exclusive ISO 8601 date range end (e.g., 2024-02-01T00:00:00Z)
         #[arg(long)]
         to_date: Option<String>,
-
-        /// Output format (json or table; default: table)
-        #[arg(long, default_value = "table")]
-        format: String,
-    },
-
-    #[command(long_about = "Search transactions by filter, returning a single page of matches.
-
-All filters are optional — omit a field to leave that dimension unfiltered.
-A search with no matches returns total=0 and empty results, not an error.
-
-Examples:
-  synapse-core tx search --status completed --asset-code USD
-  synapse-core tx search --min-amount 10.00 --max-amount 500.00
-  synapse-core tx search --stellar-account GBRPYHIL2CI3WHZDTOOQFC6EB4KJJGUJIIAY3XDBKWV3UYSI7IFYWU4")]
-    Search {
-        /// Exact transaction status (e.g., pending, completed)
-        #[arg(long)]
-        status: Option<String>,
-
-        /// Exact asset code (e.g., USD)
-        #[arg(long)]
-        asset_code: Option<String>,
-
-        /// Inclusive minimum amount as decimal (e.g., 10.00)
-        #[arg(long)]
-        min_amount: Option<String>,
-
-        /// Inclusive maximum amount as decimal (e.g., 500.00)
-        #[arg(long)]
-        max_amount: Option<String>,
-
-        /// Inclusive RFC 3339 range start (e.g., 2024-01-01T00:00:00Z)
-        #[arg(long)]
-        from: Option<String>,
-
-        /// Exclusive RFC 3339 range end (e.g., 2024-02-01T00:00:00Z)
-        #[arg(long)]
-        to: Option<String>,
-
-        /// Exact Stellar account to filter by
-        #[arg(long)]
-        stellar_account: Option<String>,
-
-        /// Opaque pagination cursor (use next_cursor from previous response)
-        #[arg(long)]
-        cursor: Option<String>,
-
-        /// Maximum records per page (server default: 25, max: 100)
-        #[arg(long, short = 'l')]
-        limit: Option<i64>,
 
         /// Output format (json or table; default: table)
         #[arg(long, default_value = "table")]
@@ -746,6 +695,56 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
     }
 }
 
+pub async fn handle_tx_list(
+    config: &Config,
+    cursor: Option<String>,
+    limit: Option<i64>,
+    from_date: Option<String>,
+    to_date: Option<String>,
+    format: &str,
+) -> anyhow::Result<()> {
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+
+    let client = synapse_sdk::SynapseClient::new(base_url, api_key);
+    let params = synapse_sdk::ListParams {
+        cursor,
+        limit,
+        from_date,
+        to_date,
+    };
+
+    match client.transactions().list(params).await {
+        Ok(response) => {
+            match format {
+                "json" => {
+                    let json = serde_json::to_string_pretty(&response)?;
+                    println!("{}", json);
+                }
+                _ => {
+                    println!("{:<36} {:<12} {:<12} {:<15}", "ID", "Status", "Asset", "Amount");
+                    println!("{}", "-".repeat(75));
+                    for tx in &response.data {
+                        println!(
+                            "{:<36} {:<12} {:<12} {:<15}",
+                            tx.id, tx.status, tx.asset_code, tx.amount
+                        );
+                    }
+                    println!("\n✓ {} transactions", response.data.len());
+                    if let Some(cursor) = response.meta.next_cursor {
+                        println!("  Use --cursor {} for next page", cursor);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Failed to list transactions: {}", e);
+            anyhow::bail!("Failed to list transactions: {}", e)
+        }
+    }
+}
+
 pub async fn handle_db_migrate(config: &Config) -> anyhow::Result<()> {
     use sqlx::migrate::Migrator;
     use std::path::Path;
@@ -814,9 +813,9 @@ pub async fn handle_tx_reconcile(
     end: &str,
     format: &str,
 ) -> anyhow::Result<()> {
+    use crate::services::ReconciliationService;
+    use crate::stellar::HorizonClient;
     use chrono::DateTime;
-    use synapse_core::services::ReconciliationService;
-    use synapse_core::stellar::HorizonClient;
 
     let pool = crate::db::create_pool(config).await?;
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -1166,12 +1165,15 @@ mod tests {
         let result = handle_stats_cache(&server.url(), true).await;
         mock.assert_async().await;
         assert!(result.is_ok());
+    }
+}
+
 pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::Result<()> {
     let base_url = format!("http://localhost:{}", config.server_port);
     let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
-    let params = synapse_sdk::ListParams::default();
+    let params = synapse_sdk::SettlementParams::default();
 
     match client.settlements().list(params).await {
         Ok(response) => {

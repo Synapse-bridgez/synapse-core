@@ -1,18 +1,44 @@
-use crate::client::SynapseClient;
+use crate::client::AdminSynapseClient;
 use crate::error::SynapseError;
 use crate::models::BulkStatusResponse;
 use serde_json::json;
 
-/// Access admin endpoints (requires an admin API key sent via `X-API-Key`).
-pub struct Admin<'a> {
-    pub(crate) client: &'a SynapseClient,
+/// Admin operations for bulk transaction status updates.
+///
+/// # Example
+///
+/// ```no_run
+/// use synapse_sdk::AdminSynapseClient;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let admin = AdminSynapseClient::builder("https://api.example.com", "admin-key").build();
+///
+/// let ids = vec![
+///     "550e8400-e29b-41d4-a716-446655440000".to_string(),
+///     "550e8400-e29b-41d4-a716-446655440001".to_string(),
+/// ];
+///
+/// let resp = admin.bulk_status().update(ids, "completed").await.unwrap();
+/// println!("updated: {}, failed: {}", resp.updated, resp.failed);
+///
+/// for err in &resp.errors {
+///     eprintln!("id {} failed: {}", err.id, err.error);
+/// }
+/// # }
+/// ```
+pub struct AdminBulkStatus<'a> {
+    pub(crate) client: &'a AdminSynapseClient,
 }
 
-impl<'a> Admin<'a> {
+impl<'a> AdminBulkStatus<'a> {
+    pub fn new(client: &'a AdminSynapseClient) -> Self {
+        AdminBulkStatus { client }
+    }
+
     /// Bulk-update the status of up to 500 transactions
     /// (`POST /admin/transactions/bulk-status`).
     ///
-    /// The admin API key must be set on the client — not the public key.
     /// `ids` must be non-empty and contain at most 500 UUIDs.
     /// `new_status` must be one of `"pending"`, `"processing"`, `"completed"`,
     /// or `"failed"`; any other value returns [`SynapseError::Api`] (HTTP 422).
@@ -25,31 +51,7 @@ impl<'a> Admin<'a> {
     /// - [`SynapseError::Api`] – empty `ids`, over-limit, invalid status, or
     ///   other non-success HTTP response.
     /// - [`SynapseError::Network`] – transport/network failure.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use synapse_sdk::SynapseClient;
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// // Use the admin key, not the public key.
-    /// let client = SynapseClient::new("https://api.example.com", "admin-api-key");
-    ///
-    /// let ids = vec![
-    ///     "550e8400-e29b-41d4-a716-446655440000".to_string(),
-    ///     "550e8400-e29b-41d4-a716-446655440001".to_string(),
-    /// ];
-    ///
-    /// let resp = client.admin().bulk_update_status(ids, "completed").await.unwrap();
-    /// println!("updated: {}, failed: {}", resp.updated, resp.failed);
-    ///
-    /// for err in &resp.errors {
-    ///     eprintln!("id {} failed: {}", err.id, err.error);
-    /// }
-    /// # }
-    /// ```
-    pub async fn bulk_update_status(
+    pub async fn update(
         &self,
         ids: Vec<String>,
         new_status: &str,
@@ -58,7 +60,9 @@ impl<'a> Admin<'a> {
             "transaction_ids": ids,
             "status": new_status,
         });
-        self.client.post("/admin/transactions/bulk-status", body).await
+        self.client
+            .post("/admin/transactions/bulk-status", &body)
+            .await
     }
 }
 
@@ -69,11 +73,11 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn bulk_update_status_happy_path() {
+    async fn update_happy_path() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/admin/transactions/bulk-status"))
-            .and(header("X-API-Key", "admin-key"))
+            .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "updated": 2,
                 "failed": 0,
@@ -82,12 +86,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = SynapseClient::new(server.uri(), "admin-key");
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
         let ids = vec![
             "550e8400-e29b-41d4-a716-446655440000".to_string(),
             "550e8400-e29b-41d4-a716-446655440001".to_string(),
         ];
-        let result = client.admin().bulk_update_status(ids, "completed").await;
+        let result = AdminBulkStatus::new(&client).update(ids, "completed").await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let resp = result.unwrap();
@@ -97,22 +101,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_update_status_uses_admin_key_not_public_key() {
+    async fn update_uses_admin_key_not_public_key() {
         let server = MockServer::start().await;
-        // Strict match on the admin key header.
         Mock::given(method("POST"))
             .and(path("/admin/transactions/bulk-status"))
-            .and(header("X-API-Key", "admin-secret"))
+            .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "updated": 1, "failed": 0, "errors": []
             })))
             .mount(&server)
             .await;
 
-        let client = SynapseClient::new(server.uri(), "admin-secret");
-        let result = client
-            .admin()
-            .bulk_update_status(
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let result = AdminBulkStatus::new(&client)
+            .update(
                 vec!["550e8400-e29b-41d4-a716-446655440000".to_string()],
                 "failed",
             )
@@ -122,7 +124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_update_status_empty_ids_returns_api_error() {
+    async fn update_empty_ids_returns_api_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/admin/transactions/bulk-status"))
@@ -132,8 +134,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = SynapseClient::new(server.uri(), "admin-key");
-        let result = client.admin().bulk_update_status(vec![], "completed").await;
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let result = AdminBulkStatus::new(&client).update(vec![], "completed").await;
 
         assert!(
             matches!(result, Err(SynapseError::Api { status: 400, .. })),
@@ -143,7 +145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_update_status_invalid_status_returns_api_error() {
+    async fn update_invalid_status_returns_api_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/admin/transactions/bulk-status"))
@@ -151,10 +153,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = SynapseClient::new(server.uri(), "admin-key");
-        let result = client
-            .admin()
-            .bulk_update_status(
+        let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
+        let result = AdminBulkStatus::new(&client)
+            .update(
                 vec!["550e8400-e29b-41d4-a716-446655440000".to_string()],
                 "unknown",
             )
