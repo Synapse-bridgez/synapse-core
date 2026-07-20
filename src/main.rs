@@ -1,6 +1,11 @@
 use clap::Parser;
 use sqlx::migrate::Migrator;
 use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
+use synapse_core::cli;
+use synapse_core::cli::{
+    BackupCommands, Cli, Commands, DbCommands, GraphqlCommands, SettlementsCommands, StatsCommands,
+    TxCommands,
+};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
@@ -21,11 +26,6 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-use synapse_core::cli;
-use synapse_core::cli::{
-    BackupCommands, Cli, Commands, DbCommands, GraphqlCommands, SettlementsCommands,
-    StatsCommands, TxCommands,
-};
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -124,7 +124,22 @@ async fn main() -> anyhow::Result<()> {
                 cursor,
                 limit,
                 format,
-            } => cli::handle_tx_search(&config, status, asset_code, min_amount, max_amount, from, to, stellar_account, cursor, limit, &format).await,
+            } => {
+                cli::handle_tx_search(
+                    &config,
+                    status,
+                    asset_code,
+                    min_amount,
+                    max_amount,
+                    from,
+                    to,
+                    stellar_account,
+                    cursor,
+                    limit,
+                    &format,
+                )
+                .await
+            }
         },
         Some(Commands::Settlements(settlements_cmd)) => match settlements_cmd {
             SettlementsCommands::List { format } => {
@@ -152,18 +167,12 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
         Some(Commands::Stats(stats_cmd)) => match stats_cmd {
-            StatsCommands::Status { url, json } => {
-                cli::handle_stats_status(&url, json).await
-            }
+            StatsCommands::Status { url, json } => cli::handle_stats_status(&url, json).await,
             StatsCommands::Daily { url, days, json } => {
                 cli::handle_stats_daily(&url, days, json).await
             }
-            StatsCommands::Assets { url, json } => {
-                cli::handle_stats_assets(&url, json).await
-            }
-            StatsCommands::Cache { url, json } => {
-                cli::handle_stats_cache(&url, json).await
-            }
+            StatsCommands::Assets { url, json } => cli::handle_stats_assets(&url, json).await,
+            StatsCommands::Cache { url, json } => cli::handle_stats_cache(&url, json).await,
         },
         Some(Commands::Graphql(gql_cmd)) => match gql_cmd {
             GraphqlCommands::Query {

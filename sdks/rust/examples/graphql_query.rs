@@ -24,7 +24,10 @@ async fn main() {
 
     match client.graphql().query(query, None).await {
         Ok(resp) => {
-            println!("data: {}", serde_json::to_string_pretty(&resp.data).unwrap());
+            println!(
+                "data: {}",
+                serde_json::to_string_pretty(&resp.data).unwrap()
+            );
         }
         // GraphQL-level errors come back as HTTP 200 with an `errors` array.
         // They must be handled separately from transport/network failures.

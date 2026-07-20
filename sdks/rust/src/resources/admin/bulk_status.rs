@@ -128,14 +128,16 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/admin/transactions/bulk-status"))
-            .respond_with(ResponseTemplate::new(400).set_body_string(
-                "transaction_ids must not be empty",
-            ))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string("transaction_ids must not be empty"),
+            )
             .mount(&server)
             .await;
 
         let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
-        let result = AdminBulkStatus::new(&client).update(vec![], "completed").await;
+        let result = AdminBulkStatus::new(&client)
+            .update(vec![], "completed")
+            .await;
 
         assert!(
             matches!(result, Err(SynapseError::Api { status: 400, .. })),

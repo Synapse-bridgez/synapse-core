@@ -56,12 +56,10 @@ async fn events_watch_receives_event_and_exits_cleanly() {
     // Spawn mock WS server
     tokio::spawn(async move {
         let listener = AsyncTcpListener::bind(&addr).await.expect("bind");
-        if let Ok((mut stream, _)) = tokio::time::timeout(
-            Duration::from_secs(10),
-            listener.accept(),
-        )
-        .await
-        .expect("accept timeout")
+        if let Ok((mut stream, _)) =
+            tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                .await
+                .expect("accept timeout")
         {
             serve_one_event(&mut stream).await;
         }
@@ -207,8 +205,16 @@ fn base64_encode(data: &[u8]) -> String {
     let mut out = String::new();
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
         out.push(ALPHABET[b0 >> 2] as char);
         out.push(ALPHABET[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 {

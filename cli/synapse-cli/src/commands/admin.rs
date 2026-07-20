@@ -83,18 +83,34 @@ impl AdminClient {
             .context("request failed")?;
 
         let status = response.status();
-        let body = response.bytes().await.context("failed to read response body")?;
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read response body")?;
         if !status.is_success() {
-            bail!("server returned {status}: {}", String::from_utf8_lossy(&body));
+            bail!(
+                "server returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
         }
 
         Ok(body.to_vec())
     }
 
-    async fn send<T: for<'de> Deserialize<'de>>(&self, request: reqwest::RequestBuilder) -> Result<T> {
-        let response = self.with_auth(request).send().await.context("request failed")?;
+    async fn send<T: for<'de> Deserialize<'de>>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T> {
+        let response = self
+            .with_auth(request)
+            .send()
+            .await
+            .context("request failed")?;
         let status = response.status();
-        let body = response.text().await.context("failed to read response body")?;
+        let body = response
+            .text()
+            .await
+            .context("failed to read response body")?;
 
         if !status.is_success() {
             bail!("{}", server_error_message(&body));
@@ -115,7 +131,10 @@ fn server_error_message(body: &str) -> String {
         })
         .unwrap_or_else(|| body.to_string());
 
-    message.strip_prefix("Bad request: ").unwrap_or(&message).to_string()
+    message
+        .strip_prefix("Bad request: ")
+        .unwrap_or(&message)
+        .to_string()
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -161,11 +180,17 @@ pub enum AdminCommands {
 
 pub async fn run(cmd: AdminCommands, base_url: &str, api_key: &str) -> Result<()> {
     match cmd {
-        AdminCommands::Reconciliation(command) => handle_reconciliation(base_url, api_key, command).await,
-        AdminCommands::Settlements(command) => handle_admin_settlements(base_url, api_key, command).await,
+        AdminCommands::Reconciliation(command) => {
+            handle_reconciliation(base_url, api_key, command).await
+        }
+        AdminCommands::Settlements(command) => {
+            handle_admin_settlements(base_url, api_key, command).await
+        }
         AdminCommands::Locks(command) => handle_locks(base_url, api_key, command).await,
         AdminCommands::Quotas(command) => handle_quotas(base_url, api_key, command).await,
-        AdminCommands::Transactions(command) => handle_transactions(base_url, api_key, command).await,
+        AdminCommands::Transactions(command) => {
+            handle_transactions(base_url, api_key, command).await
+        }
         AdminCommands::Webhooks(command) => webhooks::run(command, base_url, api_key).await,
         AdminCommands::Events(command) => handle_events(base_url, api_key, command).await,
     }
@@ -274,11 +299,19 @@ struct RunRequest<'a> {
     period_hours: Option<u32>,
 }
 
-async fn handle_reconciliation(base_url: &str, api_key: &str, command: ReconciliationCommands) -> Result<()> {
+async fn handle_reconciliation(
+    base_url: &str,
+    api_key: &str,
+    command: ReconciliationCommands,
+) -> Result<()> {
     let client = AdminClient::new(base_url, api_key);
 
     match command {
-        ReconciliationCommands::Reports { limit, offset, json } => {
+        ReconciliationCommands::Reports {
+            limit,
+            offset,
+            json,
+        } => {
             let response: ListReportsResponse = client
                 .get(&format!(
                     "/admin/reconciliation/reports?limit={limit}&offset={offset}"
@@ -327,8 +360,12 @@ fn format_reports_table(response: &ListReportsResponse) -> String {
         return lines.join("\n");
     }
 
-    lines.push("ID | Generated | Period Start | Period End | DB | Chain | Discrepancies".to_string());
-    lines.push("-- | --------- | ------------ | ---------- | -- | ----- | -------------".to_string());
+    lines.push(
+        "ID | Generated | Period Start | Period End | DB | Chain | Discrepancies".to_string(),
+    );
+    lines.push(
+        "-- | --------- | ------------ | ---------- | -- | ----- | -------------".to_string(),
+    );
 
     for report in &response.reports {
         lines.push(format!(
@@ -353,12 +390,27 @@ fn format_report_table(report: &ReportDetailResponse) -> String {
         format!("Period: {} to {}", report.period_start, report.period_end),
         String::new(),
         "Summary:".to_string(),
-        format!("  Database transactions: {}", report.summary.total_db_transactions),
+        format!(
+            "  Database transactions: {}",
+            report.summary.total_db_transactions
+        ),
         format!("  Chain payments: {}", report.summary.total_chain_payments),
-        format!("  Missing on chain: {}", report.summary.missing_on_chain_count),
-        format!("  Orphaned payments: {}", report.summary.orphaned_payments_count),
-        format!("  Amount mismatches: {}", report.summary.amount_mismatches_count),
-        format!("  Has discrepancies: {}", yes_no(report.summary.has_discrepancies)),
+        format!(
+            "  Missing on chain: {}",
+            report.summary.missing_on_chain_count
+        ),
+        format!(
+            "  Orphaned payments: {}",
+            report.summary.orphaned_payments_count
+        ),
+        format!(
+            "  Amount mismatches: {}",
+            report.summary.amount_mismatches_count
+        ),
+        format!(
+            "  Has discrepancies: {}",
+            yes_no(report.summary.has_discrepancies)
+        ),
     ];
 
     if report.missing_on_chain.is_empty()
@@ -465,10 +517,16 @@ fn format_settlement_table(settlement: &SettlementResponse) -> String {
         format!("Status: {}", settlement.status),
         format!("Total amount: {}", settlement.total_amount),
         format!("Tx count: {}", settlement.tx_count),
-        format!("Period: {} to {}", settlement.period_start, settlement.period_end),
+        format!(
+            "Period: {} to {}",
+            settlement.period_start, settlement.period_end
+        ),
         format!(
             "Dispute reason: {}",
-            settlement.dispute_reason.as_deref().unwrap_or("not provided")
+            settlement
+                .dispute_reason
+                .as_deref()
+                .unwrap_or("not provided")
         ),
         format!(
             "Original total amount: {}",
@@ -491,7 +549,11 @@ fn format_settlement_table(settlement: &SettlementResponse) -> String {
     .join("\n")
 }
 
-async fn handle_admin_settlements(base_url: &str, api_key: &str, command: AdminSettlementCommands) -> Result<()> {
+async fn handle_admin_settlements(
+    base_url: &str,
+    api_key: &str,
+    command: AdminSettlementCommands,
+) -> Result<()> {
     let client = AdminClient::new(base_url, api_key);
 
     match command {
@@ -514,7 +576,10 @@ async fn handle_admin_settlements(base_url: &str, api_key: &str, command: AdminS
                     },
                 )
                 .await?;
-            println!("{}", output::render(&response, json, format_settlement_table)?);
+            println!(
+                "{}",
+                output::render(&response, json, format_settlement_table)?
+            );
         }
     }
 
@@ -656,7 +721,8 @@ async fn handle_quotas(base_url: &str, api_key: &str, command: QuotaCommands) ->
             );
         }
         QuotaCommands::Get { tenant_id, json } => {
-            let response: TenantQuotaView = client.get(&format!("/admin/quotas/{tenant_id}")).await?;
+            let response: TenantQuotaView =
+                client.get(&format!("/admin/quotas/{tenant_id}")).await?;
             println!(
                 "{}",
                 Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
@@ -688,7 +754,9 @@ async fn handle_quotas(base_url: &str, api_key: &str, command: QuotaCommands) ->
             );
         }
         QuotaCommands::Reset { tenant_id, json } => {
-            let response: serde_json::Value = client.delete(&format!("/admin/quotas/{tenant_id}/reset")).await?;
+            let response: serde_json::Value = client
+                .delete(&format!("/admin/quotas/{tenant_id}/reset"))
+                .await?;
             println!(
                 "{}",
                 Formatter::format_json_output(&response, OutputFormat::from_json_flag(json))?
@@ -733,11 +801,19 @@ struct BulkStatusError {
     error: String,
 }
 
-async fn handle_transactions(base_url: &str, api_key: &str, command: TransactionAdminCommands) -> Result<()> {
+async fn handle_transactions(
+    base_url: &str,
+    api_key: &str,
+    command: TransactionAdminCommands,
+) -> Result<()> {
     let client = AdminClient::new(base_url, api_key);
 
     match command {
-        TransactionAdminCommands::BulkStatus { ids, status, format } => {
+        TransactionAdminCommands::BulkStatus {
+            ids,
+            status,
+            format,
+        } => {
             let ids: Vec<String> = ids
                 .split(',')
                 .map(|id| id.trim().to_string())
@@ -745,8 +821,9 @@ async fn handle_transactions(base_url: &str, api_key: &str, command: Transaction
                 .collect();
 
             let body = serde_json::json!({ "transaction_ids": ids, "status": status });
-            let response: BulkStatusResponse =
-                client.post_json("/admin/transactions/bulk-status", &body).await?;
+            let response: BulkStatusResponse = client
+                .post_json("/admin/transactions/bulk-status", &body)
+                .await?;
 
             if format.eq_ignore_ascii_case("json") {
                 println!("{}", serde_json::to_string_pretty(&response)?);
@@ -851,7 +928,10 @@ async fn handle_events(base_url: &str, api_key: &str, command: AdminEventsComman
         AdminEventsCommands::Reconnect { cursor, json } => {
             let body = serde_json::json!({ "session_id": cursor });
             let response: ReconnectResponse = client.post_json("/reconnect", &body).await?;
-            println!("{}", output::render(&response, json, format_reconnect_table)?);
+            println!(
+                "{}",
+                output::render(&response, json, format_reconnect_table)?
+            );
         }
 
         AdminEventsCommands::ReconnectStatus { cursor, json } => {
@@ -863,7 +943,10 @@ async fn handle_events(base_url: &str, api_key: &str, command: AdminEventsComman
                 }
                 None => client.get(path).await?,
             };
-            println!("{}", output::render(&response, json, format_reconnect_table)?);
+            println!(
+                "{}",
+                output::render(&response, json, format_reconnect_table)?
+            );
         }
     }
 

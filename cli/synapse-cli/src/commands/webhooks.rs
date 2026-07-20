@@ -93,10 +93,7 @@ impl TableDisplay for EndpointHealth {
             self.enabled.to_string(),
             format!("{:.1}%", self.success_rate * 100.0),
             self.total_deliveries.to_string(),
-            self.last_success_at
-                .as_deref()
-                .unwrap_or("-")
-                .to_string(),
+            self.last_success_at.as_deref().unwrap_or("-").to_string(),
         ]
     }
 }
@@ -179,8 +176,7 @@ pub async fn run(cmd: WebhooksCommand, base_url: &str, api_key: &str) -> Result<
     match cmd {
         // ── synapse admin webhooks health ─────────────────────────────────
         WebhooksCommand::Health { json } => {
-            let endpoints: Vec<EndpointHealth> =
-                client.get("/admin/webhooks/health").await?;
+            let endpoints: Vec<EndpointHealth> = client.get("/admin/webhooks/health").await?;
             if json {
                 let views: Vec<EndpointHealthJson> =
                     endpoints.iter().map(EndpointHealthJson::from).collect();
@@ -288,8 +284,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> =
-            client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let endpoints = result.unwrap();
@@ -315,8 +310,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> =
-            client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
 
         assert!(
             result.is_ok(),
@@ -340,8 +334,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> =
-            client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
 
         assert!(result.is_err());
         assert!(
@@ -374,10 +367,7 @@ mod tests {
         assert_eq!(ep.url, "https://example.com/webhook");
         assert!(ep.enabled);
         assert_eq!(ep.total_deliveries, 250);
-        assert_eq!(
-            ep.last_success_at.as_deref(),
-            Some("2026-06-30T03:00:00Z")
-        );
+        assert_eq!(ep.last_success_at.as_deref(), Some("2026-06-30T03:00:00Z"));
     }
 
     /// Edge case: HTTP 404 must be distinguishable from a transport error.

@@ -78,7 +78,10 @@ pub struct CatalogResponse {
 /// Parse an API error body into (optional error code, message string).
 pub(crate) fn parse_api_error(body: &str) -> (Option<String>, String) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        let code = v.get("code").and_then(|c| c.as_str()).map(|s| s.to_string());
+        let code = v
+            .get("code")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string());
         let message = v
             .get("error")
             .or_else(|| v.get("detail"))

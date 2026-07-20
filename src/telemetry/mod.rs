@@ -19,7 +19,9 @@ pub use error_handling::{ErrorAction, ErrorHandler, TelemetryError, TelemetryRes
 pub use health_checks::{HealthCheckConfig, HealthCheckManager, HealthCheckResult};
 pub use input_validation::InputValidator;
 pub use metrics_optimization::{CardinalityLimiter, MetricsInstruments};
-pub use rate_limiting::{TelemetryRateLimitConfig, TelemetryRateLimiter, TelemetryRateLimitMetrics};
+pub use rate_limiting::{
+    TelemetryRateLimitConfig, TelemetryRateLimitMetrics, TelemetryRateLimiter,
+};
 pub use reconnection::ReconnectionManager;
 pub use webhook::{TelemetryWebhookHandler, WebhookPayload, WebhookResult};
 

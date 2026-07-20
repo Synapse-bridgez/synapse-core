@@ -142,7 +142,10 @@ fn route(request_line: &str, scenario: &str) -> String {
 
         ("GET", "/stats/daily") => {
             let params = parse_query(query);
-            let days = params.get("days").and_then(|v| v.parse::<u32>().ok()).unwrap_or(7);
+            let days = params
+                .get("days")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(7);
 
             let mut rows = Vec::new();
             for i in (0..days).rev() {
@@ -189,13 +192,25 @@ fn route(request_line: &str, scenario: &str) -> String {
             json_response(200, &body)
         }
 
-        ("GET", p) if p.starts_with("/admin/reconciliation/reports") && !p["/admin/reconciliation/reports".len()..].starts_with('/') => {
+        ("GET", p)
+            if p.starts_with("/admin/reconciliation/reports")
+                && !p["/admin/reconciliation/reports".len()..].starts_with('/') =>
+        {
             let params = parse_query(query);
-            let limit = params.get("limit").and_then(|v| v.parse::<i32>().ok()).unwrap_or(20);
-            let offset = params.get("offset").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(20);
+            let offset = params
+                .get("offset")
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0);
 
             if scenario == "edge" {
-                json_response(200, &format!(r#"{{"reports":[],"total":0,"limit":{limit},"offset":{offset}}}"#))
+                json_response(
+                    200,
+                    &format!(r#"{{"reports":[],"total":0,"limit":{limit},"offset":{offset}}}"#),
+                )
             } else {
                 json_response(
                     200,

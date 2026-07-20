@@ -1,6 +1,9 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
-use crate::models::{ListParams, SearchParams, Transaction, TransactionExportFilters, TransactionList, TransactionSearch};
+use crate::models::{
+    ListParams, SearchParams, Transaction, TransactionExportFilters, TransactionList,
+    TransactionSearch,
+};
 
 pub struct Transactions<'a> {
     pub(crate) client: &'a SynapseClient,
@@ -441,7 +444,8 @@ mod tests {
     #[tokio::test]
     async fn export_returns_raw_bytes_on_200() {
         let server = MockServer::start().await;
-        let csv_body = "id,stellar_account,amount,asset_code,status\nabc,GABC,100.00,USD,completed\n";
+        let csv_body =
+            "id,stellar_account,amount,asset_code,status\nabc,GABC,100.00,USD,completed\n";
 
         Mock::given(method("GET"))
             .and(path("/export"))
@@ -464,7 +468,11 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let bytes = result.unwrap();
-        assert_eq!(bytes, csv_body.as_bytes(), "raw bytes must be returned untouched");
+        assert_eq!(
+            bytes,
+            csv_body.as_bytes(),
+            "raw bytes must be returned untouched"
+        );
     }
 
     #[tokio::test]
@@ -483,7 +491,11 @@ mod tests {
             .export(TransactionExportFilters::default())
             .await;
 
-        assert!(result.is_ok(), "empty export must not be an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty export must not be an error: {:?}",
+            result
+        );
         assert!(result.unwrap().is_empty());
     }
 
@@ -500,7 +512,10 @@ mod tests {
             .await;
 
         let client = SynapseClient::new(server.uri(), "public-key");
-        let result = client.transactions().export(TransactionExportFilters::default()).await;
+        let result = client
+            .transactions()
+            .export(TransactionExportFilters::default())
+            .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     }
 }

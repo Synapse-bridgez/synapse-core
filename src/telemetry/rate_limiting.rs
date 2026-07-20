@@ -401,7 +401,11 @@ mod tests {
         });
 
         for i in 0..10 {
-            assert!(limiter.try_acquire_trace(), "Trace {} should succeed", i + 1);
+            assert!(
+                limiter.try_acquire_trace(),
+                "Trace {} should succeed",
+                i + 1
+            );
         }
         assert!(!limiter.try_acquire_trace(), "11th trace should fail");
     }
@@ -435,7 +439,10 @@ mod tests {
 
         assert!(limiter.try_acquire_metric());
         assert!(limiter.try_acquire_metric());
-        assert!(!limiter.try_acquire_metric(), "3rd metric should be rejected");
+        assert!(
+            !limiter.try_acquire_metric(),
+            "3rd metric should be rejected"
+        );
     }
 
     // -----------------------------------------------------------------------

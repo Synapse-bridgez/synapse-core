@@ -167,7 +167,11 @@ fn format_array(values: &[Value]) -> String {
     }
 
     let Some(first) = values.iter().find_map(Value::as_object) else {
-        return values.iter().map(format_cell).collect::<Vec<_>>().join("\n");
+        return values
+            .iter()
+            .map(format_cell)
+            .collect::<Vec<_>>()
+            .join("\n");
     };
 
     let headers = first.keys().cloned().collect::<Vec<_>>();
@@ -178,7 +182,11 @@ fn format_array(values: &[Value]) -> String {
             lines.push(
                 headers
                     .iter()
-                    .map(|header| row.get(header).map(format_cell).unwrap_or_else(|| "-".into()))
+                    .map(|header| {
+                        row.get(header)
+                            .map(format_cell)
+                            .unwrap_or_else(|| "-".into())
+                    })
                     .collect::<Vec<_>>()
                     .join(" | "),
             );

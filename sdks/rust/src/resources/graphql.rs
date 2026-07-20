@@ -44,7 +44,10 @@ impl<'a> GraphQL<'a> {
         query: impl Into<String>,
         variables: Option<serde_json::Value>,
     ) -> Result<GraphQLResponse, SynapseError> {
-        let body = GraphQLRequest { query: query.into(), variables };
+        let body = GraphQLRequest {
+            query: query.into(),
+            variables,
+        };
         let resp: GraphQLResponse = self.client.post("/graphql", body).await?;
         if !resp.errors.is_empty() {
             let messages: Vec<&str> = resp.errors.iter().map(|e| e.message.as_str()).collect();

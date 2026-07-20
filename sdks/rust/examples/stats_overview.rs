@@ -5,8 +5,8 @@
 //! Run with:
 //!   cargo run --example stats_overview
 
-use synapse_sdk::SynapseClient;
 use synapse_sdk::models::DailyParams;
+use synapse_sdk::SynapseClient;
 
 #[tokio::main]
 async fn main() {

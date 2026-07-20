@@ -351,7 +351,14 @@ pub struct CacheMetrics {
 
 impl Default for CacheMetrics {
     fn default() -> Self {
-        Self { hits: 0, misses: 0, hit_rate: 0.0, evictions: 0, size: 0, capacity: 0 }
+        Self {
+            hits: 0,
+            misses: 0,
+            hit_rate: 0.0,
+            evictions: 0,
+            size: 0,
+            capacity: 0,
+        }
     }
 }
 

@@ -40,7 +40,10 @@ async fn main() {
                 println!("no results on this page");
             } else {
                 for tx in &page.results {
-                    println!("  {}  {}  {} {}", tx.id, tx.status, tx.amount, tx.asset_code);
+                    println!(
+                        "  {}  {}  {} {}",
+                        tx.id, tx.status, tx.amount, tx.asset_code
+                    );
                 }
             }
 
@@ -60,7 +63,10 @@ async fn main() {
                     });
 
                 for tx in &page.results {
-                    println!("  {}  {}  {} {}", tx.id, tx.status, tx.amount, tx.asset_code);
+                    println!(
+                        "  {}  {}  {} {}",
+                        tx.id, tx.status, tx.amount, tx.asset_code
+                    );
                 }
                 cursor = page.next_cursor;
             }
@@ -82,7 +88,8 @@ async fn main() {
     match client.transactions().search(filters).await {
         Ok(page) => {
             // Zero matches is a successful response with total=0 and empty results.
-            println!("total: {}  results: {}  has_next: {}",
+            println!(
+                "total: {}  results: {}  has_next: {}",
                 page.total,
                 page.results.len(),
                 page.next_cursor.is_some(),

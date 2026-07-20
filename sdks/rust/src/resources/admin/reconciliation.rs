@@ -110,10 +110,7 @@ impl<'a> AdminReconciliation<'a> {
             query.push(("offset", offset_str));
         }
 
-        let query_refs: Vec<(&str, &str)> = query
-            .iter()
-            .map(|(k, v)| (*k, v.as_str()))
-            .collect();
+        let query_refs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
         self.client
             .get_query::<ListReconciliationReports>("/admin/reconciliation/reports", &query_refs)
@@ -162,10 +159,7 @@ impl<'a> AdminReconciliation<'a> {
     /// }
     /// # }
     /// ```
-    pub async fn get_report(
-        &self,
-        id: Uuid,
-    ) -> Result<ReconciliationReportDetail, SynapseError> {
+    pub async fn get_report(&self, id: Uuid) -> Result<ReconciliationReportDetail, SynapseError> {
         let path = format!("/admin/reconciliation/reports/{}", id);
         self.client.get::<ReconciliationReportDetail>(&path).await
     }
@@ -365,15 +359,15 @@ mod tests {
         let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
         let reconciliation = AdminReconciliation::new(&client);
         let result = reconciliation
-            .run("GABC1234567890123456789012345678901234567890123456789012", None)
+            .run(
+                "GABC1234567890123456789012345678901234567890123456789012",
+                None,
+            )
             .await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let response = result.unwrap();
-        assert_eq!(
-            response.message,
-            "Reconciliation completed successfully"
-        );
+        assert_eq!(response.message, "Reconciliation completed successfully");
         assert_eq!(response.report.id.to_string(), report_id);
     }
 
@@ -494,17 +488,13 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/admin/reconciliation/run"))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_string("invalid account format"),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string("invalid account format"))
             .mount(&server)
             .await;
 
         let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
         let reconciliation = AdminReconciliation::new(&client);
-        let result = reconciliation
-            .run("invalid-account", None)
-            .await;
+        let result = reconciliation.run("invalid-account", None).await;
 
         assert!(result.is_err());
         match result {
@@ -523,9 +513,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/admin/reconciliation/reports/{}", report_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(404).set_body_string("Report not found"),
-            )
+            .respond_with(ResponseTemplate::new(404).set_body_string("Report not found"))
             .mount(&server)
             .await;
 

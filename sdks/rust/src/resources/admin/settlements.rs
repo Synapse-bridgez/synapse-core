@@ -122,7 +122,8 @@ mod tests {
             .and(path(format!("/admin/settlements/{}/status", settlement_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(settlement_json(settlement_id, "pending_review")),
+                ResponseTemplate::new(200)
+                    .set_body_json(settlement_json(settlement_id, "pending_review")),
             )
             .mount(&server)
             .await;
@@ -152,17 +153,15 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/admin/settlements/{}/status", settlement_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": settlement_id,
-                    "status": "disputed",
-                    "total_amount": "1000.00",
-                    "reason": "Manual dispute flag",
-                    "actor": "reviewer",
-                    "created_at": "2024-01-15T10:00:00Z",
-                    "updated_at": "2024-01-15T11:00:00Z",
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": settlement_id,
+                "status": "disputed",
+                "total_amount": "1000.00",
+                "reason": "Manual dispute flag",
+                "actor": "reviewer",
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T11:00:00Z",
+            })))
             .mount(&server)
             .await;
 
@@ -192,11 +191,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/admin/settlements/{}/status", settlement_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_string(
-                    "invalid status transition: cannot transition from pending to completed",
-                ),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                "invalid status transition: cannot transition from pending to completed",
+            ))
             .mount(&server)
             .await;
 
@@ -229,17 +226,15 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/admin/settlements/{}/status", settlement_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": settlement_id,
-                    "status": "adjusted",
-                    "total_amount": "1500.75",
-                    "reason": "Adjustment based on review",
-                    "actor": "admin",
-                    "created_at": "2024-01-15T10:00:00Z",
-                    "updated_at": "2024-01-15T12:00:00Z",
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": settlement_id,
+                "status": "adjusted",
+                "total_amount": "1500.75",
+                "reason": "Adjustment based on review",
+                "actor": "admin",
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T12:00:00Z",
+            })))
             .mount(&server)
             .await;
 
@@ -269,9 +264,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path(format!("/admin/settlements/{}/status", settlement_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
-            .respond_with(
-                ResponseTemplate::new(404).set_body_string("Settlement not found"),
-            )
+            .respond_with(ResponseTemplate::new(404).set_body_string("Settlement not found"))
             .mount(&server)
             .await;
 
@@ -305,7 +298,8 @@ mod tests {
             .and(path(format!("/admin/settlements/{}/status", settlement_id)))
             .and(header("X-Admin-Key", "admin-test-key"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(settlement_json(settlement_id, "pending_review")),
+                ResponseTemplate::new(200)
+                    .set_body_json(settlement_json(settlement_id, "pending_review")),
             )
             .mount(&server)
             .await;
@@ -322,6 +316,10 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 }

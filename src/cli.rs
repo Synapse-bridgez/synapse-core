@@ -7,7 +7,6 @@ use uuid::Uuid;
 // `reqwest` and `serde_json` are regular [dependencies] so they are available
 // to every module in the binary crate without an explicit `extern crate`.
 
-
 #[derive(Parser)]
 #[command(name = "synapse-core")]
 #[command(about = "Synapse Core - Fiat Gateway Callback Processor", long_about = None)]
@@ -74,7 +73,8 @@ pub enum TxCommands {
         tx_id: Uuid,
     },
 
-    #[command(long_about = "List transactions with cursor-based pagination and optional date filters.
+    #[command(
+        long_about = "List transactions with cursor-based pagination and optional date filters.
 
 All flags are optional. Cursors are opaque — always use next_cursor from previous response.
 Invalid or expired cursors return an error and must not be retried as-is.
@@ -82,7 +82,8 @@ Invalid or expired cursors return an error and must not be retried as-is.
 Examples:
   synapse-core tx list --limit 50
   synapse-core tx list --from-date 2024-01-01T00:00:00Z --to-date 2024-02-01T00:00:00Z
-  synapse-core tx list --cursor <cursor> --format json")]
+  synapse-core tx list --cursor <cursor> --format json"
+    )]
     List {
         /// Opaque pagination cursor (use next_cursor from previous response)
         #[arg(long)]
@@ -616,9 +617,7 @@ pub async fn handle_graphql_query(
     let mut body = serde_json::json!({ "query": query });
     if let Some(vars_str) = variables {
         let vars: serde_json::Value = serde_json::from_str(vars_str).map_err(|e| {
-            anyhow::anyhow!(
-                "--variables must be a valid JSON object, got parse error: {e}"
-            )
+            anyhow::anyhow!("--variables must be a valid JSON object, got parse error: {e}")
         })?;
         if !vars.is_object() {
             anyhow::bail!("--variables must be a JSON object, e.g. '{{\"key\": \"value\"}}'");
@@ -722,7 +721,10 @@ pub async fn handle_tx_list(
                     println!("{}", json);
                 }
                 _ => {
-                    println!("{:<36} {:<12} {:<12} {:<15}", "ID", "Status", "Asset", "Amount");
+                    println!(
+                        "{:<36} {:<12} {:<12} {:<15}",
+                        "ID", "Status", "Asset", "Amount"
+                    );
                     println!("{}", "-".repeat(75));
                     for tx in &response.data {
                         println!(
@@ -918,8 +920,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_query_rejects_invalid_json_variables() {
-        let result =
-            handle_graphql_query("http://localhost:9999", "{ transactions { id } }", Some("not json")).await;
+        let result = handle_graphql_query(
+            "http://localhost:9999",
+            "{ transactions { id } }",
+            Some("not json"),
+        )
+        .await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("parse error"), "unexpected error: {msg}");
@@ -951,8 +957,7 @@ mod tests {
             .create_async()
             .await;
 
-        let result =
-            handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
+        let result = handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
         mock.assert_async().await;
         assert!(result.is_ok(), "expected success but got: {result:?}");
     }
@@ -969,8 +974,7 @@ mod tests {
             .await;
 
         // Empty errors array → should be treated as success
-        let result =
-            handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
+        let result = handle_graphql_query(&server.url(), "{ transactions { id } }", None).await;
         mock.assert_async().await;
         assert!(result.is_ok(), "empty errors should not fail: {result:?}");
     }
@@ -1062,9 +1066,7 @@ mod tests {
             .mock("GET", "/stats/daily?days=14")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"[{"date":"2026-06-29","total_amount":"5000.00","tx_count":10}]"#,
-            )
+            .with_body(r#"[{"date":"2026-06-29","total_amount":"5000.00","tx_count":10}]"#)
             .create_async()
             .await;
 
@@ -1183,16 +1185,25 @@ pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::R
                     println!("{}", json);
                 }
                 _ => {
-                    println!("{:<36} {:<12} {:<15} {:<10}", "ID", "Status", "Total Amount", "Tx Count");
+                    println!(
+                        "{:<36} {:<12} {:<15} {:<10}",
+                        "ID", "Status", "Total Amount", "Tx Count"
+                    );
                     println!("{}", "-".repeat(73));
                     for settlement in &response.settlements {
                         println!(
                             "{:<36} {:<12} {:<15} {:<10}",
-                            settlement.id, settlement.status, settlement.total_amount, settlement.tx_count
+                            settlement.id,
+                            settlement.status,
+                            settlement.total_amount,
+                            settlement.tx_count
                         );
                     }
                     if response.has_more {
-                        println!("\n✓ {} settlements (more available)", response.settlements.len());
+                        println!(
+                            "\n✓ {} settlements (more available)",
+                            response.settlements.len()
+                        );
                     } else {
                         println!("\n✓ {} settlements", response.settlements.len());
                     }
@@ -1291,7 +1302,10 @@ pub async fn handle_tx_search(
                     println!("{}", json);
                 }
                 _ => {
-                    println!("{:<36} {:<12} {:<12} {:<15}", "ID", "Status", "Asset", "Amount");
+                    println!(
+                        "{:<36} {:<12} {:<12} {:<15}",
+                        "ID", "Status", "Asset", "Amount"
+                    );
                     println!("{}", "-".repeat(75));
                     for tx in &response.results {
                         println!(
@@ -1299,9 +1313,16 @@ pub async fn handle_tx_search(
                             tx.id, tx.status, tx.asset_code, tx.amount
                         );
                     }
-                    println!("\n✓ {} results (total: {}", response.results.len(), response.total);
+                    println!(
+                        "\n✓ {} results (total: {}",
+                        response.results.len(),
+                        response.total
+                    );
                     if response.next_cursor.is_some() {
-                        println!("  Use --cursor {} for next page", response.next_cursor.as_ref().unwrap());
+                        println!(
+                            "  Use --cursor {} for next page",
+                            response.next_cursor.as_ref().unwrap()
+                        );
                     }
                     println!();
                 }

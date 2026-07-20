@@ -41,7 +41,9 @@ impl ApiClient {
             bail!("server returned {}: {}", status.as_u16(), body);
         }
 
-        resp.json::<T>().await.context("failed to parse response JSON")
+        resp.json::<T>()
+            .await
+            .context("failed to parse response JSON")
     }
 
     /// `GET <base_url><path>?key=value&…` — deserialise JSON body into `T`.
@@ -63,7 +65,9 @@ impl ApiClient {
             bail!("server returned {}: {}", status.as_u16(), body);
         }
 
-        resp.json::<T>().await.context("failed to parse response JSON")
+        resp.json::<T>()
+            .await
+            .context("failed to parse response JSON")
     }
 
     /// `POST <base_url><path>` with a JSON body — deserialise JSON response into `T`.
@@ -84,7 +88,9 @@ impl ApiClient {
             bail!("server returned {}: {}", status.as_u16(), body_text);
         }
 
-        resp.json::<T>().await.context("failed to parse response JSON")
+        resp.json::<T>()
+            .await
+            .context("failed to parse response JSON")
     }
 
     /// `GET <base_url><path>` returning the raw status code and body text,
@@ -127,7 +133,12 @@ impl SynapseCliClient {
     /// `GET <base_url><path>` — deserialise JSON body into `T`.
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.client.get(&url).send().await.context("request failed")?;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("request failed")?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();

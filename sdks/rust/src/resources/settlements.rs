@@ -240,9 +240,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/settlements"))
             .and(query_param("cursor", "bad-cursor"))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_string("invalid cursor: bad-cursor"),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string("invalid cursor: bad-cursor"))
             .mount(&server)
             .await;
 

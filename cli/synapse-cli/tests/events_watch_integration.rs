@@ -102,13 +102,19 @@ fn events_watch_happy_path_table() {
         stdout.contains("aaaaaaaa-0000-0000-0000-000000000001"),
         "expected first transaction_id in: {stdout}"
     );
-    assert!(stdout.contains("pending"), "expected status 'pending' in: {stdout}");
+    assert!(
+        stdout.contains("pending"),
+        "expected status 'pending' in: {stdout}"
+    );
     // Second event
     assert!(
         stdout.contains("aaaaaaaa-0000-0000-0000-000000000002"),
         "expected second transaction_id in: {stdout}"
     );
-    assert!(stdout.contains("completed"), "expected status 'completed' in: {stdout}");
+    assert!(
+        stdout.contains("completed"),
+        "expected status 'completed' in: {stdout}"
+    );
 }
 
 // ── Happy-path: JSON mode ─────────────────────────────────────────────────────
@@ -275,7 +281,14 @@ fn events_watch_empty_list_json_mode() {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let output = synapse_cmd()
-        .args(["--base-url", &base_url, "admin", "events", "watch", "--json"])
+        .args([
+            "--base-url",
+            &base_url,
+            "admin",
+            "events",
+            "watch",
+            "--json",
+        ])
         .output()
         .expect("command output");
 

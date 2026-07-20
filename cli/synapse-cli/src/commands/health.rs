@@ -115,22 +115,38 @@ pub async fn run(cmd: HealthCommand, base_url: &str, api_key: &str) -> Result<()
     match cmd {
         HealthCommand::Live { json } => {
             let resp: LivenessResponse = client.get("/live").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&resp, fmt);
         }
         HealthCommand::Ready { json } => {
             let resp: ReadinessResponse = client.get("/ready").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&resp, fmt);
         }
         HealthCommand::Check { json } => {
             let resp: HealthStatus = client.get("/health").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&resp, fmt);
         }
         HealthCommand::Errors { json } => {
             let resp: ErrorCatalogResponse = client.get("/errors").await?;
-            let fmt = if json { OutputFormat::Json } else { OutputFormat::Table };
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::Table
+            };
             print_one(&resp, fmt);
         }
     }

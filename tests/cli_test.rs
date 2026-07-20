@@ -186,7 +186,10 @@ async fn test_handle_stats_status_table_format() {
 
     let result = synapse_core::cli::handle_stats_status(&server.url(), false).await;
     mock.assert_async().await;
-    assert!(result.is_ok(), "handle_stats_status should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "handle_stats_status should succeed: {result:?}"
+    );
 }
 
 /// Verify JSON pass-through for `handle_stats_status`.
@@ -318,7 +321,10 @@ async fn test_handle_graphql_query_exits_on_graphql_errors() {
         synapse_core::cli::handle_graphql_query(&server.url(), "{ transactions { id } }", None)
             .await;
     mock.assert_async().await;
-    assert!(result.is_ok(), "empty errors array should not fail: {result:?}");
+    assert!(
+        result.is_ok(),
+        "empty errors array should not fail: {result:?}"
+    );
 }
 
 /// Verify --variables JSON validation rejects non-objects.
@@ -333,7 +339,10 @@ async fn test_handle_graphql_query_rejects_invalid_variables() {
     .await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("valid JSON"), "expected JSON parse error, got: {msg}");
+    assert!(
+        msg.contains("valid JSON"),
+        "expected JSON parse error, got: {msg}"
+    );
 }
 
 /// Verify that a non-array value passed as --variables is rejected.

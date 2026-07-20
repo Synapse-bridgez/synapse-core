@@ -29,15 +29,10 @@ async fn main() {
     };
 
     // Extract session_id if the server returned one.
-    let session_id = status
-        .status
-        .as_ref()
-        .and_then(|s| match s {
-            synapse_sdk::models::ReconnectStatus::Ready { session_id } => {
-                Some(session_id.clone())
-            }
-            _ => None,
-        });
+    let session_id = status.status.as_ref().and_then(|s| match s {
+        synapse_sdk::models::ReconnectStatus::Ready { session_id } => Some(session_id.clone()),
+        _ => None,
+    });
 
     if let Some(cursor) = session_id {
         println!("Got session_id: {cursor}");

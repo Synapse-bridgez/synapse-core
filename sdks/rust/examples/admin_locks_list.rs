@@ -10,8 +10,8 @@ use synapse_sdk::AdminSynapseClient;
 
 #[tokio::main]
 async fn main() {
-    let base_url = std::env::var("SYNAPSE_BASE_URL")
-        .unwrap_or_else(|_| "https://api.example.com".to_string());
+    let base_url =
+        std::env::var("SYNAPSE_BASE_URL").unwrap_or_else(|_| "https://api.example.com".to_string());
     let admin_key = std::env::var("SYNAPSE_ADMIN_KEY").expect("SYNAPSE_ADMIN_KEY required");
 
     let admin = AdminSynapseClient::builder(base_url, admin_key).build();

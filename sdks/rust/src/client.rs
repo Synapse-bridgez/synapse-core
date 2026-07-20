@@ -1,11 +1,14 @@
 use crate::error::{
     map_status_to_error, parse_api_error, CatalogEntry, CatalogResponse, SynapseError,
 };
+use crate::resources::admin::{
+    AdminBulkStatus, AdminDlq, AdminLocks, AdminReconciliation, AdminSettlements,
+    AdminWebhookReplay,
+};
 use crate::resources::health::Health;
 use crate::resources::settlements::Settlements;
 use crate::resources::transactions::Transactions;
 use crate::retry::{retry_with_backoff, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_ATTEMPTS};
-use crate::resources::admin::{AdminBulkStatus, AdminDlq, AdminLocks, AdminReconciliation, AdminSettlements, AdminWebhookReplay};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -157,7 +160,9 @@ impl SynapseClient {
                     let body = resp.text().await.unwrap_or_default();
                     return Err(SynapseError::Http { status, body });
                 }
-                resp.json::<T>().await.map_err(|e| SynapseError::Decode(e.to_string()))
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
             }
         })
         .await;
@@ -196,7 +201,9 @@ impl SynapseClient {
                     let body = resp.text().await.unwrap_or_default();
                     return Err(SynapseError::Http { status, body });
                 }
-                resp.json::<T>().await.map_err(|e| SynapseError::Decode(e.to_string()))
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
             }
         })
         .await;
@@ -231,7 +238,12 @@ impl SynapseClient {
             let key = key.clone();
             let http = http.clone();
             async move {
-                let resp = http.get(&url).header("X-API-Key", &key).send().await.map_err(SynapseError::Network)?;
+                let resp = http
+                    .get(&url)
+                    .header("X-API-Key", &key)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
                 let status = resp.status().as_u16();
                 let body = resp.json::<T>().await.map_err(SynapseError::Network)?;
                 Ok((status, body))
@@ -248,7 +260,10 @@ impl SynapseClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(SynapseError::Http { status, body });
         }
-        resp.bytes().await.map(|b| b.to_vec()).map_err(SynapseError::Network)
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(SynapseError::Network)
     }
 
     /// Issue an authenticated GET request with query parameters and return raw bytes.
@@ -265,13 +280,21 @@ impl SynapseClient {
             let key = key.clone();
             let http = http.clone();
             async move {
-                let resp = http.get(&url).header("X-API-Key", &key).send().await.map_err(SynapseError::Network)?;
+                let resp = http
+                    .get(&url)
+                    .header("X-API-Key", &key)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
                 let status = resp.status().as_u16();
                 if status >= 400 {
                     let body = resp.text().await.unwrap_or_default();
                     return Err(SynapseError::Http { status, body });
                 }
-                resp.bytes().await.map(|b| b.to_vec()).map_err(SynapseError::Network)
+                resp.bytes()
+                    .await
+                    .map(|b| b.to_vec())
+                    .map_err(SynapseError::Network)
             }
         })
         .await
@@ -476,7 +499,8 @@ impl AdminSynapseClient {
         let url = format!("{}{}", self.base_url, path);
         let key = self.admin_key.clone();
         let http = self.http.clone();
-        let body_json = serde_json::to_string(body).map_err(|e| SynapseError::Decode(e.to_string()))?;
+        let body_json =
+            serde_json::to_string(body).map_err(|e| SynapseError::Decode(e.to_string()))?;
         retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
             let url = url.clone();
             let key = key.clone();

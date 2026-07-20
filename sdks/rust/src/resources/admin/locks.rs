@@ -100,10 +100,17 @@ mod tests {
 
         let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
         let result = AdminLocks::new(&client).list().await;
-        assert!(result.is_ok(), "empty list must be Ok, not an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty list must be Ok, not an error: {:?}",
+            result
+        );
         let resp = result.unwrap();
         assert_eq!(resp.total, 0);
-        assert!(resp.active_locks.is_empty(), "active_locks must be an empty Vec, not null");
+        assert!(
+            resp.active_locks.is_empty(),
+            "active_locks must be an empty Vec, not null"
+        );
     }
 
     #[tokio::test]
@@ -123,6 +130,10 @@ mod tests {
 
         let client = AdminSynapseClient::builder(server.uri(), "admin-test-key").build();
         let result = AdminLocks::new(&client).list().await;
-        assert!(result.is_ok(), "expected Ok with admin key, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok with admin key, got: {:?}",
+            result
+        );
     }
 }
