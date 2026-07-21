@@ -160,9 +160,11 @@ async fn main() -> anyhow::Result<()> {
             BackupCommands::Restore { filename } => {
                 cli::handle_backup_restore(&config, &filename).await
             }
-            BackupCommands::RestorePitr { timestamp } => {
-                cli::handle_backup_restore_pitr(&config, &timestamp).await
-            }
+            BackupCommands::RestorePitr {
+                timestamp,
+                dry_run,
+                yes,
+            } => cli::handle_backup_restore_pitr(&config, &timestamp, dry_run, yes).await,
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),

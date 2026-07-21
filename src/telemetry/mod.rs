@@ -23,7 +23,7 @@ pub use rate_limiting::{
     TelemetryRateLimitConfig, TelemetryRateLimitMetrics, TelemetryRateLimiter,
 };
 pub use reconnection::ReconnectionManager;
-pub use webhook::{TelemetryWebhookHandler, WebhookPayload, WebhookResult};
+pub use webhook::{TelemetryWebhookHandler, WebhookEventPayload, WebhookResult};
 
 // ---------------------------------------------------------------------------
 // OpenTelemetry tracer initialisation.
