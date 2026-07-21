@@ -52,7 +52,7 @@ pub const SIGNATURE_HEADER: &str = "X-Webhook-Signature";
 
 /// An incoming webhook payload carrying a telemetry tracing event.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct WebhookPayload {
+pub struct WebhookEventPayload {
     /// Milliseconds since Unix epoch when the event was emitted.
     pub timestamp_ms: u64,
 
