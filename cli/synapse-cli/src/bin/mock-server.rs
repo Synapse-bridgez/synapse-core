@@ -729,7 +729,9 @@ mod tests {
     use super::*;
     use serde::de::DeserializeOwned;
     use serde::Deserialize;
-    use synapse_cli::commands::{admin, events, health, settlements, stats, transactions, webhooks};
+    use synapse_cli::commands::{
+        admin, events, health, settlements, stats, transactions, webhooks,
+    };
 
     // A UUID used only to fill `:param` slots when probing routes that accept
     // any well-formed ID. Deliberately distinct from every sentinel ID used
@@ -787,7 +789,10 @@ mod tests {
     }
 
     fn body_of(response: &str) -> &str {
-        response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b)
+            .unwrap_or("")
     }
 
     fn is_404(response: &str) -> bool {
@@ -967,11 +972,17 @@ mod tests {
         // 404 sentinels: still expected to return a minimal, parseable error body.
         assert_deserializes::<ErrorBody>(
             "GET /transactions/:id (not_found scenario)",
-            &route(&format!("GET /transactions/{zero_uuid} HTTP/1.1"), "not_found"),
+            &route(
+                &format!("GET /transactions/{zero_uuid} HTTP/1.1"),
+                "not_found",
+            ),
         );
         assert_deserializes::<ErrorBody>(
             "GET /settlements/:id (not_found scenario)",
-            &route(&format!("GET /settlements/{zero_uuid} HTTP/1.1"), "not_found"),
+            &route(
+                &format!("GET /settlements/{zero_uuid} HTTP/1.1"),
+                "not_found",
+            ),
         );
         assert_deserializes::<ErrorBody>(
             "GET /admin/webhooks/health/:id (unknown id)",
@@ -1126,7 +1137,13 @@ mod tests {
 
         template
             .split('/')
-            .map(|segment| if segment.starts_with(':') { sample } else { segment })
+            .map(|segment| {
+                if segment.starts_with(':') {
+                    sample
+                } else {
+                    segment
+                }
+            })
             .collect::<Vec<_>>()
             .join("/")
     }
@@ -1183,7 +1200,8 @@ mod tests {
             }
 
             let has_match = real.iter().any(|real_entry| {
-                real_entry.0.as_str() == method && path_matches_template(path, real_entry.1.as_str())
+                real_entry.0.as_str() == method
+                    && path_matches_template(path, real_entry.1.as_str())
             });
             if !has_match {
                 untracked.push(format!("{method} {path}"));
