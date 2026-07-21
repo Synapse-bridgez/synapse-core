@@ -148,7 +148,7 @@ impl TelemetryWebhookHandler {
         self.verify_signature(body, signature)?;
 
         // 3. Deserialize.
-        let payload: WebhookPayload = serde_json::from_slice(body).map_err(|e| {
+        let payload: WebhookEventPayload = serde_json::from_slice(body).map_err(|e| {
             TelemetryError::ValidationError(
                 crate::telemetry::input_validation::ValidationError::InvalidFormat(format!(
                     "invalid JSON: {}",
@@ -248,7 +248,7 @@ impl TelemetryWebhookHandler {
     }
 
     /// Validates all string fields in the payload.
-    fn validate_payload(&self, payload: &WebhookPayload) -> Result<(), TelemetryError> {
+    fn validate_payload(&self, payload: &WebhookEventPayload) -> Result<(), TelemetryError> {
         // source and event_type must be valid identifiers.
         InputValidator::validate_span_name(&payload.source)?;
         InputValidator::validate_span_name(&payload.event_type)?;

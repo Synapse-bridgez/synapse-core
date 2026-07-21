@@ -6,7 +6,11 @@ services:
       POSTGRES_USER: synapse
       POSTGRES_PASSWORD: synapse
       POSTGRES_DB: synapse
-      POSTGRES_INITDB_ARGS: "-c wal_level=replica -c max_wal_senders=3 -c max_replication_slots=3"
+      # wal_level/max_wal_senders/max_replication_slots make pg_basebackup
+      # streaming possible; archive_mode+archive_command actually populate
+      # postgres_wal so point-in-time recovery has WAL to replay beyond the
+      # latest base backup (see scripts/pitr_restore.sh).
+      POSTGRES_INITDB_ARGS: "-c wal_level=replica -c max_wal_senders=3 -c max_replication_slots=3 -c archive_mode=on -c archive_command='test ! -f /var/lib/postgresql/wal_archive/%f && cp %p /var/lib/postgresql/wal_archive/%f'"
     ports:
       - "5432:5432"
     volumes:
@@ -60,13 +64,25 @@ services:
       VAULT_ROLE_ID: ""
       VAULT_SECRET_ID: ""
       REDIS_URL: redis://redis:6379
+      # PITR restore (see scripts/pitr_restore.sh / src/services/pitr.rs).
+      # The script needs its own connection string because it runs as a
+      # separate process and streams a base backup over the replication
+      # protocol rather than reusing the app's pool.
+      PITR_DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      WAL_ARCHIVE_DIR: /var/lib/postgresql/wal_archive
+      PITR_WORKSPACE_DIR: /app/pitr_workspace
     ports:
       - "3000:3000"
     volumes:
       - ./migrations:/app/migrations # optional: for live migration updates
+      # Read-only: the app never writes here, it only reads archived WAL
+      # segments during a restore.
+      - postgres_wal:/var/lib/postgresql/wal_archive:ro
+      - pitr_workspace:/app/pitr_workspace
     command: ["/app/synapse-core"]
 
 volumes:
   postgres_data:
   postgres_wal:
   redis_data:
+  pitr_workspace:
