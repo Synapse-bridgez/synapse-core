@@ -222,7 +222,7 @@ pub enum ReconciliationCommands {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct ListReportsResponse {
+pub struct ListReportsResponse {
     reports: Vec<ReportSummary>,
     total: i64,
     limit: i32,
@@ -244,7 +244,7 @@ struct ReportSummary {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct ReportDetailResponse {
+pub struct ReportDetailResponse {
     id: Uuid,
     generated_at: String,
     period_start: String,
@@ -266,7 +266,7 @@ struct ReportDetailSummary {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct RunResponse {
+pub struct RunResponse {
     message: String,
     report: ReportSummary,
 }
@@ -470,7 +470,7 @@ struct UpdateSettlementStatusRequest<'a> {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct SettlementResponse {
+pub struct SettlementResponse {
     id: Uuid,
     asset_code: String,
     total_amount: String,
@@ -580,7 +580,7 @@ pub enum LockCommands {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct ListLocksResponse {
+pub struct ListLocksResponse {
     active_locks: Vec<ActiveLockView>,
     total: usize,
     overdue: usize,
@@ -680,7 +680,7 @@ pub enum QuotaCommands {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct TenantQuotaView {
+pub struct TenantQuotaView {
     tenant_id: Uuid,
     name: String,
     rate_limit_per_minute: i32,
@@ -767,7 +767,7 @@ pub enum TransactionAdminCommands {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct BulkStatusResponse {
+pub struct BulkStatusResponse {
     updated: usize,
     failed: usize,
     errors: Vec<BulkStatusError>,
@@ -799,8 +799,12 @@ async fn handle_transactions(
                 .collect();
 
             let body = serde_json::json!({ "transaction_ids": ids, "status": status });
+            // The server registers this route as PATCH (see `create_app()` in
+            // src/lib.rs) — it's a partial update of existing transactions, not a
+            // creation. Using POST here previously 405'd against a real server;
+            // the mock server matched the (wrong) POST, silently hiding the bug.
             let response: BulkStatusResponse = client
-                .post_json("/admin/transactions/bulk-status", &body)
+                .patch_json("/admin/transactions/bulk-status", &body)
                 .await?;
 
             if format.eq_ignore_ascii_case("json") {
@@ -849,7 +853,7 @@ pub enum AdminEventsCommands {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct Event {
+pub struct Event {
     transaction_id: Uuid,
     status: String,
     timestamp: String,
