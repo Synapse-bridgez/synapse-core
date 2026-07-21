@@ -99,7 +99,10 @@ sqlx = { version = "0.7", features = [
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
 reqwest = { version = "0.11", features = ["json"] }
-tokio-tungstenite = "0.21"
+# Pinned to match the tokio-tungstenite/tungstenite version axum 0.6's `ws`
+# feature vendors internally (axum's Cargo.toml hard-pins ^0.20) — keeping
+# this in lockstep avoids two majors of tungstenite resolving side by side.
+tokio-tungstenite = "0.20"
 assert_cmd = "2"
 assert_fs = "1"
 wiremock = "0.5"
