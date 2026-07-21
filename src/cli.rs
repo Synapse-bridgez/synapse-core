@@ -246,10 +246,33 @@ pub enum BackupCommands {
     },
 
     /// Restore to a specific point in time
+    ///
+    /// Submits a point-in-time-recovery (PITR) restore to the running
+    /// server's admin API and polls until it completes. This is a
+    /// destructive, data-loss-capable operation: the live database is
+    /// replaced with its state as of TIMESTAMP.
+    ///
+    /// Examples:
+    ///   # Check whether a timestamp is restorable without touching anything
+    ///   synapse-core backup restore-pitr --timestamp 2026-01-15T10:30:00Z --dry-run
+    ///
+    ///   # Actually perform the restore (requires explicit confirmation)
+    ///   synapse-core backup restore-pitr --timestamp 2026-01-15T10:30:00Z --yes
     RestorePitr {
         /// Target timestamp (ISO 8601 format, e.g., 2026-01-15T10:30:00Z)
         #[arg(long)]
         timestamp: String,
+
+        /// Validate the target timestamp and record the attempt without
+        /// performing the restore.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Confirm that you intend to run a live (non-dry-run) restore.
+        /// Required unless --dry-run is set; the command refuses to submit
+        /// a destructive restore without it.
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Apply retention policy to clean old backups
@@ -904,12 +927,164 @@ pub async fn handle_tx_reconcile(
     Ok(())
 }
 
-#[allow(dead_code)]
+/// Submit a point-in-time-recovery restore to the server's admin API and
+/// poll until it completes.
+///
+/// This is destructive and data-loss-capable, so a live (non-dry-run)
+/// restore is refused unless `yes` is set — mirroring the server-side
+/// requirement that every restore attempt (dry-run or not) be recorded in
+/// the audit log with who requested it and what timestamp was targeted.
 pub async fn handle_backup_restore_pitr(
-    _config: &Config,
-    _timestamp_str: &str,
+    config: &Config,
+    timestamp_str: &str,
+    dry_run: bool,
+    yes: bool,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("PITR restore service not yet implemented")
+    let target_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid --timestamp '{timestamp_str}'. Use ISO 8601 (e.g., 2026-01-15T10:30:00Z)"
+            )
+        })?
+        .with_timezone(&chrono::Utc);
+
+    if !dry_run && !yes {
+        anyhow::bail!(
+            "Refusing to run a live PITR restore without confirmation. \
+             Re-run with --yes to proceed, or --dry-run to validate the target timestamp first \
+             without touching anything."
+        );
+    }
+
+    let admin_key = std::env::var("ADMIN_API_KEY").map_err(|_| {
+        anyhow::anyhow!(
+            "ADMIN_API_KEY is not set. This command calls the server's admin API and needs the \
+             same admin key the server was started with."
+        )
+    })?;
+
+    let actor = std::env::var("SYNAPSE_ACTOR")
+        .or_else(|_| std::env::var("USER"))
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "admin-cli".to_string());
+
+    let base_url = format!("http://localhost:{}", config.server_port);
+    let client = reqwest::Client::new();
+
+    println!(
+        "Submitting PITR restore request: target={target_timestamp}, dry_run={dry_run}, requested_by={actor}"
+    );
+
+    let resp = client
+        .post(format!("{base_url}/admin/backup/restore-pitr"))
+        .header("Authorization", format!("Bearer {admin_key}"))
+        .json(&serde_json::json!({
+            "target_timestamp": target_timestamp.to_rfc3339(),
+            "dry_run": dry_run,
+            "requested_by": actor,
+        }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to reach server at {base_url}: {e}"))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to parse server response: {e}"))?;
+
+    if !status.is_success() {
+        let detail = body
+            .get("detail")
+            .or_else(|| body.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        anyhow::bail!("Server rejected the PITR restore request (HTTP {status}): {detail}");
+    }
+
+    let job_id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Server response missing job id: {body}"))?
+        .to_string();
+
+    println!("✓ Restore job submitted: {job_id}");
+    print_pitr_job_status(&body);
+
+    if dry_run {
+        // Dry-run jobs are resolved synchronously by the server.
+        return finish_pitr_job(&body);
+    }
+
+    // Poll until the job reaches a terminal state.
+    let poll_url = format!("{base_url}/admin/backup/restore-pitr/{job_id}");
+    let max_wait = std::time::Duration::from_secs(30 * 60);
+    let poll_interval = std::time::Duration::from_secs(3);
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() > max_wait {
+            anyhow::bail!(
+                "Timed out waiting for restore job {job_id} to complete after {}s. \
+                 The restore may still be running server-side — check its status later \
+                 with the same job id.",
+                max_wait.as_secs()
+            );
+        }
+
+        tokio::time::sleep(poll_interval).await;
+
+        let resp = client
+            .get(&poll_url)
+            .header("Authorization", format!("Bearer {admin_key}"))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to poll restore job status: {e}"))?;
+
+        let status = resp.status();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse job status response: {e}"))?;
+
+        if !status.is_success() {
+            anyhow::bail!("Server returned HTTP {status} while polling job {job_id}: {body}");
+        }
+
+        let job_status = body.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        println!("  status: {job_status}");
+
+        if job_status == "succeeded" || job_status == "failed" {
+            print_pitr_job_status(&body);
+            return finish_pitr_job(&body);
+        }
+    }
+}
+
+fn print_pitr_job_status(body: &serde_json::Value) {
+    if let Some(detail) = body.get("detail").and_then(|v| v.as_str()) {
+        println!("  detail: {detail}");
+    }
+    if let Some(err) = body.get("error_message").and_then(|v| v.as_str()) {
+        println!("  error: {err}");
+    }
+}
+
+fn finish_pitr_job(body: &serde_json::Value) -> anyhow::Result<()> {
+    match body.get("status").and_then(|v| v.as_str()) {
+        Some("succeeded") => {
+            println!("✓ PITR restore job completed successfully");
+            Ok(())
+        }
+        Some("failed") => {
+            let err = body
+                .get("error_message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("PITR restore job failed: {err}")
+        }
+        other => anyhow::bail!("PITR restore job ended in an unexpected state: {other:?}"),
+    }
 }
 
 #[cfg(test)]

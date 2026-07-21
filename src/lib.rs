@@ -273,6 +273,8 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
         )
+        // Admin: point-in-time-recovery backup restores
+        .nest("/admin/backup", handlers::admin::backup::backup_routes())
         .layer(axum_middleware::from_fn(
             crate::middleware::auth::admin_auth,
         ));
