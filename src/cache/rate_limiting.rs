@@ -53,15 +53,15 @@ pub enum RateLimitStrategy {
     SlidingWindow,
 }
 
-/// Cache-level metrics for rate limiting operations.
+/// Rate limiter metrics for tracking token acquisition and rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CacheMetrics {
+pub struct RateLimiterMetrics {
     acquired_requests: u64,
     rejected_requests: u64,
     refill_events: u64,
 }
 
-impl CacheMetrics {
+impl RateLimiterMetrics {
     /// Creates a new metrics collector.
     pub fn new() -> Self {
         Self::default()
@@ -225,8 +225,8 @@ impl RateLimiter {
     }
 
     /// Returns a snapshot of the rate-limiter metrics.
-    pub fn metrics(&self) -> CacheMetrics {
-        CacheMetrics {
+    pub fn metrics(&self) -> RateLimiterMetrics {
+        RateLimiterMetrics {
             acquired_requests: self.inner.acquired.load(Ordering::Relaxed),
             rejected_requests: self.inner.rejected.load(Ordering::Relaxed),
             refill_events: self.inner.refills.load(Ordering::Relaxed),
