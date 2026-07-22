@@ -195,18 +195,12 @@ pub async fn run(cmd: WebhooksCommand, base_url: &str, api_key: &str) -> Result<
         // rather than an opaque "server returned 404: …" transport error.
         WebhooksCommand::HealthGet { id, json } => {
             let path = format!("/admin/webhooks/health/{}", id);
-            // Use the raw_get helper so we can inspect the status code before
-            // committing to a decode path.
-            match client.get_raw_status(&path).await {
-                Ok((404, _body)) => {
+            match client.get::<EndpointHealth>(&path).await {
+                Err(synapse_sdk::SynapseError::NotFound(_)) => {
                     bail!("endpoint not found: {}", id);
                 }
-                Ok((status, body)) if status >= 400 => {
-                    bail!("server returned {}: {}", status, body);
-                }
-                Ok((_status, body)) => {
-                    let endpoint: EndpointHealth = serde_json::from_str(&body)
-                        .map_err(|e| anyhow::anyhow!("failed to decode response: {}", e))?;
+                Err(e) => return Err(e.into()),
+                Ok(endpoint) => {
                     if json {
                         let view = EndpointHealthJson::from(&endpoint);
                         println!(
@@ -225,7 +219,6 @@ pub async fn run(cmd: WebhooksCommand, base_url: &str, api_key: &str) -> Result<
                         );
                     }
                 }
-                Err(e) => return Err(e),
             }
         }
     }

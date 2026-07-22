@@ -175,7 +175,7 @@ pub async fn run(cmd: EventsCommand, base_url: &str, api_key: &str) -> Result<()
         // ── synapse events reconnect --cursor <CURSOR> ─────────────────────
         EventsCommand::Reconnect { cursor, json } => {
             let body = json!({ "session_id": cursor });
-            let response: ReconnectResponse = client.post("/reconnect", &body).await?;
+            let response: ReconnectResponse = client.post("/reconnect", body).await?;
             let fmt = if json {
                 OutputFormat::Json
             } else {
@@ -197,7 +197,7 @@ pub async fn run(cmd: EventsCommand, base_url: &str, api_key: &str) -> Result<()
             let response: ReconnectResponse = match cursor {
                 Some(ref token) => {
                     client
-                        .get_with_query("/reconnect/status", &[("token", token.as_str())])
+                        .get_query("/reconnect/status", &[("token", token.as_str())])
                         .await?
                 }
                 None => client.get("/reconnect/status").await?,
@@ -287,7 +287,7 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let result: Result<ReconnectResponse> = client
-            .get_with_query("/reconnect/status", &[("token", cursor)])
+            .get_query("/reconnect/status", &[("token", cursor)])
             .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let resp = result.unwrap();
@@ -337,7 +337,7 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": cursor });
-        let result: Result<ReconnectResponse> = client.post("/reconnect", &body).await;
+        let result: Result<ReconnectResponse> = client.post("/reconnect", body).await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let resp = result.unwrap();
         assert_eq!(resp.backoff_seconds, Some(1));
@@ -358,7 +358,7 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": "some-cursor" });
-        let result: Result<ReconnectResponse> = client.post("/reconnect", &body).await;
+        let result: Result<ReconnectResponse> = client.post("/reconnect", body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -383,7 +383,7 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": "bad-cursor" });
-        let result: Result<ReconnectResponse> = client.post("/reconnect", &body).await;
+        let result: Result<ReconnectResponse> = client.post("/reconnect", body).await;
         assert!(
             result.is_ok(),
             "HTTP 200 with error type must not fail: {:?}",
