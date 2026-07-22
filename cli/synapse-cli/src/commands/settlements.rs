@@ -1,8 +1,9 @@
+use synapse_sdk::models::{Settlement, SettlementList};
+
 use crate::client::ApiClient;
 use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -114,6 +115,7 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
             }
 
             let resp: SettlementList =
+                client.get_with_query("/settlements", &params).await?;
                 client.get_query("/settlements", &params).await?;
 
             let fmt = if json {
@@ -285,6 +287,7 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let resp: SettlementList = client
+            .get_with_query("/settlements", &[("limit", "5"), ("direction", "forward")])
             .get_query("/settlements", &[("limit", "5"), ("direction", "forward")])
             .await
             .unwrap();

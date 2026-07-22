@@ -1,8 +1,9 @@
+use synapse_sdk::models::Transaction;
+
 use crate::client::ApiClient;
 use crate::formatter::{print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ── Response types ────────────────────────────────────────────────────────────
