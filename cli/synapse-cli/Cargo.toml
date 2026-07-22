@@ -28,6 +28,8 @@ futures-util = "0.3"
 # Kept in lockstep with the root crate's tokio-tungstenite version — see the
 # comment there for why (axum 0.6's `ws` feature vendors tokio-tungstenite 0.20).
 tokio-tungstenite = "0.20"
+# Option A: use the canonical API response types directly from the core crate.
+synapse-core = { path = "../.." }
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -36,8 +38,4 @@ predicates = "3"
 regex = "1"
 tempfile = "3"
 wiremock = "0.5"
-# Real-server integration test (tests/events_watch_real_server_test.rs): boots
-# the actual synapse-core axum app in-process and drives the real `synapse`
-# CLI binary against its /ws endpoint.
-synapse-core = { path = "../.." }
 axum = "0.6"
