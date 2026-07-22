@@ -6,6 +6,10 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
+// ── Response types ────────────────────────────────────────────────────────────
+
+use synapse_sdk::Transaction;
+
 // ── TableDisplay impl ─────────────────────────────────────────────────────────
 
 impl TableDisplay for Transaction {
