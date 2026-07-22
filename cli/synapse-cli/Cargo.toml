@@ -16,6 +16,7 @@ name = "mock-server"
 path = "src/bin/mock-server.rs"
 
 [dependencies]
+synapse-sdk = { path = "../../sdks/rust" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }

@@ -1,36 +1,10 @@
+use synapse_sdk::models::Transaction;
+
 use crate::client::ApiClient;
 use crate::formatter::{print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-// ── Response types ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Transaction {
-    pub id: String,
-    pub stellar_account: String,
-    pub amount: String,
-    pub asset_code: String,
-    pub status: String,
-    pub created_at: String,
-    pub updated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_transaction_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub callback_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub callback_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub settlement_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memo: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memo_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-}
 
 // ── TableDisplay impl ─────────────────────────────────────────────────────────
 
@@ -58,10 +32,7 @@ impl TableDisplay for Transaction {
             } else {
                 self.stellar_account.clone()
             },
-            self.created_at
-                .get(..10)
-                .unwrap_or(&self.created_at)
-                .to_string(),
+            self.created_at.format("%Y-%m-%d").to_string(),
         ]
     }
 }
@@ -303,8 +274,8 @@ mod tests {
             amount: "100.00".to_string(),
             asset_code: "USD".to_string(),
             status: "pending".to_string(),
-            created_at: "2026-06-30T06:00:00Z".to_string(),
-            updated_at: "2026-06-30T06:00:00Z".to_string(),
+            created_at: "2026-06-30T06:00:00Z".parse().unwrap(),
+            updated_at: "2026-06-30T06:00:00Z".parse().unwrap(),
             anchor_transaction_id: None,
             callback_type: None,
             callback_status: None,

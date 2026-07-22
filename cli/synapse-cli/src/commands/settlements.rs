@@ -1,39 +1,10 @@
+use synapse_sdk::models::{Settlement, SettlementList};
+
 use crate::client::ApiClient;
 use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-// ── Response types ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Settlement {
-    pub id: String,
-    pub asset_code: String,
-    pub total_amount: String,
-    pub tx_count: i64,
-    pub status: String,
-    pub period_start: String,
-    pub period_end: String,
-    pub created_at: String,
-    pub updated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dispute_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub original_total_amount: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reviewed_by: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reviewed_at: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SettlementListResponse {
-    pub settlements: Vec<Settlement>,
-    pub next_cursor: Option<String>,
-    pub has_more: bool,
-}
 
 // ── TableDisplay impls ────────────────────────────────────────────────────────
 
@@ -57,10 +28,7 @@ impl TableDisplay for Settlement {
             self.total_amount.clone(),
             self.tx_count.to_string(),
             self.status.clone(),
-            self.period_start
-                .get(..10)
-                .unwrap_or(&self.period_start)
-                .to_string(),
+            self.period_start.format("%Y-%m-%d").to_string(),
         ]
     }
 }
@@ -142,7 +110,7 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
                 params.push(("cursor", &cursor_val));
             }
 
-            let resp: SettlementListResponse =
+            let resp: SettlementList =
                 client.get_with_query("/settlements", &params).await?;
 
             let fmt = if json {
@@ -237,7 +205,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let resp: SettlementListResponse = client.get("/settlements").await.unwrap();
+        let resp: SettlementList = client.get("/settlements").await.unwrap();
         assert_eq!(resp.settlements.len(), 1);
         assert_eq!(resp.settlements[0].asset_code, "USD");
         assert_eq!(resp.settlements[0].status, "pending");
@@ -257,7 +225,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let resp: SettlementListResponse = client.get("/settlements").await.unwrap();
+        let resp: SettlementList = client.get("/settlements").await.unwrap();
         assert!(resp.settlements.is_empty());
         assert!(!resp.has_more);
     }
@@ -282,7 +250,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let resp: SettlementListResponse = client.get("/settlements").await.unwrap();
+        let resp: SettlementList = client.get("/settlements").await.unwrap();
         let json = serde_json::to_string_pretty(&resp).unwrap();
         assert!(json.contains("\"settlements\""));
         assert!(json.contains(id));
@@ -313,7 +281,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let resp: SettlementListResponse = client
+        let resp: SettlementList = client
             .get_with_query("/settlements", &[("limit", "5"), ("direction", "forward")])
             .await
             .unwrap();
@@ -332,7 +300,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<SettlementListResponse> = client.get("/settlements").await;
+        let result: Result<SettlementList> = client.get("/settlements").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
     }
