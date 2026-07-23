@@ -6,24 +6,11 @@ services:
       POSTGRES_USER: synapse
       POSTGRES_PASSWORD: synapse
       POSTGRES_DB: synapse
-    # wal_level/max_wal_senders/max_replication_slots make pg_basebackup
-    # streaming possible; archive_mode+archive_command actually populate
-    # postgres_wal so point-in-time recovery has WAL to replay beyond the
-    # latest base backup (see scripts/pitr_restore.sh). These are PGC_POSTMASTER
-    # settings (server start, not `initdb`), so they're passed as `postgres -c`
-    # flags rather than POSTGRES_INITDB_ARGS — `initdb` doesn't accept `-c`.
-    command:
-      - postgres
-      - -c
-      - wal_level=replica
-      - -c
-      - max_wal_senders=3
-      - -c
-      - max_replication_slots=3
-      - -c
-      - archive_mode=on
-      - -c
-      - archive_command=test ! -f /var/lib/postgresql/wal_archive/%f && cp %p /var/lib/postgresql/wal_archive/%f
+      # wal_level/max_wal_senders/max_replication_slots make pg_basebackup
+      # streaming possible; archive_mode+archive_command actually populate
+      # postgres_wal so point-in-time recovery has WAL to replay beyond the
+      # latest base backup (see scripts/pitr_restore.sh).
+      POSTGRES_INITDB_ARGS: "-c wal_level=replica -c max_wal_senders=3 -c max_replication_slots=3 -c archive_mode=on -c archive_command='test ! -f /var/lib/postgresql/wal_archive/%f && cp %p /var/lib/postgresql/wal_archive/%f'"
     ports:
       - "5432:5432"
     volumes:
