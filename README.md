@@ -108,21 +108,6 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 
 NOTE: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
 
-#### Integration tests (`tests/`)
-
-Tests built on `tests/common::TestApp` (health checks, lifecycle, etc.) auto-detect test infra in this order: `TEST_DATABASE_URL`/`TEST_REDIS_URL` env vars pointing at infra you already have running, then a fresh `testcontainers` Postgres if Docker is reachable, then a clear failure message if neither is available.
-
-Reuse the docker-compose stack instead of paying the testcontainer startup cost on every run:
-
-```bash
-docker compose up -d postgres redis
-TEST_DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse \
-TEST_REDIS_URL=redis://localhost:6379 \
-cargo test
-```
-
-See [docs/setup.md](docs/setup.md#integration-tests-tests) for details and measured before/after timings.
-
 ## 📊 Database Partitioning
 
 The `transactions` table uses time-based partitioning for high-volume scaling:

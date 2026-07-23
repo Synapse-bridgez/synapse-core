@@ -170,34 +170,6 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 
 > **Note:** Some warnings about unused imports or dead code are expected — they correspond to features planned for future issues.
 
-### Integration Tests (`tests/`)
-
-Integration tests built on `tests/common::TestApp` (health checks, lifecycle, PITR restore, etc.)
-need their own Postgres/Redis. `TestApp::new()` looks for infra in this order:
-
-1. `TEST_DATABASE_URL` / `TEST_REDIS_URL`, if set — reuses whatever you already have running.
-2. A fresh `testcontainers` Postgres, if Docker is reachable (Redis is not auto-started this way —
-   see below).
-3. Otherwise it fails fast with a message naming exactly what's missing and how to fix it.
-
-For iterative local runs, start the stack once and point tests at it instead of paying the
-testcontainer startup cost (container create + Postgres boot) on every test binary:
-
-```bash
-docker compose up -d postgres redis
-
-TEST_DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse \
-TEST_REDIS_URL=redis://localhost:6379 \
-cargo test
-```
-
-This makes a real difference: each `#[tokio::test]` in `health_check_test.rs` calls
-`TestApp::new()` independently, so on a Docker-only fallback every test pays for its own Postgres
-container. Measured locally, `cargo test --test health_check_test` went from ~61s (fresh
-testcontainer per test) to ~9s (reusing `docker compose up -d postgres redis`). If you don't set
-`TEST_DATABASE_URL`/`TEST_REDIS_URL` and don't have Docker running, tests fail fast with a message
-naming exactly what's missing instead of a raw `testcontainers` or Docker-daemon error.
-
 ### Lint & Format
 
 ```bash
