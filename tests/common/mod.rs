@@ -37,6 +37,7 @@ use redis::Client as RedisClient;
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
 use std::time::Duration;
+use synapse_core::secrets::SecretsStore;
 use synapse_core::{create_app, AppState};
 use testcontainers::core::client::docker_client_instance;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
@@ -47,6 +48,13 @@ const TEST_REDIS_URL_VAR: &str = "TEST_REDIS_URL";
 const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
 const COMPOSE_UP_CMD: &str = "docker compose up -d postgres redis";
 const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Webhook secret backing the `SecretsStore` every `TestApp` is built with.
+/// Callers posting to `/callback` or `/webhook` must sign requests with this
+/// value (see `signature_verification` middleware) or they'll be rejected
+/// before reaching the handler.
+pub const TEST_WEBHOOK_SECRET: &str = "test-app-webhook-secret";
+pub const TEST_ADMIN_API_KEY: &str = "test-app-admin-key";
 
 /// Test application with automatic database and HTTP server setup.
 pub struct TestApp {
@@ -108,7 +116,10 @@ impl TestApp {
             )),
             pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
-            secrets_store: None,
+            secrets_store: Some(SecretsStore::new(
+                TEST_WEBHOOK_SECRET.to_string(),
+                TEST_ADMIN_API_KEY.to_string(),
+            )),
             metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
             ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
