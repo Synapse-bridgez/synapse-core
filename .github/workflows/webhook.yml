@@ -12,6 +12,10 @@
 name: Webhook Handlers
 
 on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
   repository_dispatch:
     types: [webhook_event]
   workflow_dispatch:
