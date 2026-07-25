@@ -41,7 +41,12 @@ pub async fn error_enrichment_middleware(
                 .status(parts.status)
                 .body(axum::body::boxed(axum::body::Full::from(new_body)))
                 .unwrap();
-            *resp.headers_mut() = parts.headers;
+            // Copy original headers, but drop Content-Length: the body is now
+            // longer (it gained a "request_id" field) so the original value
+            // would be stale and cause clients/proxies to truncate the body.
+            let mut headers = parts.headers;
+            headers.remove(axum::http::header::CONTENT_LENGTH);
+            *resp.headers_mut() = headers;
             return Ok(resp);
         }
 
@@ -49,7 +54,11 @@ pub async fn error_enrichment_middleware(
             .status(parts.status)
             .body(axum::body::boxed(axum::body::Full::from(bytes)))
             .unwrap();
-        *resp.headers_mut() = parts.headers;
+        // Same treatment for the non-JSON fallback path: drop Content-Length
+        // so the framing stays correct even if the body was re-buffered.
+        let mut headers = parts.headers;
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+        *resp.headers_mut() = headers;
         Ok(resp)
     } else {
         Ok(response)
