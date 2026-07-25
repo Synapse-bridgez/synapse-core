@@ -1,0 +1,27 @@
+[package]
+name = "synapse-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line interface for the Synapse API"
+license = "MIT"
+
+[[bin]]
+name = "synapse"
+path = "src/main.rs"
+
+[dependencies]
+# clap with derive + env features for the Cli struct, plus clap_complete
+# for generating real shell completion scripts from the live command tree.
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+url = "2.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

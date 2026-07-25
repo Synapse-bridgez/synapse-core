@@ -1,6 +1,87 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Cache metrics  (#899)
+//
+// The server exposes a single `/cache/metrics` endpoint that returns a
+// *combined* view of two separate cache subsystems:
+//
+//  1. `query_cache`     — the in-process LRU query result cache
+//                         (`CacheMetrics` from `services::query_cache`).
+//  2. Idempotency cache — Redis-backed idempotency key store counters.
+//
+// This is **not** the same shape as the placeholder
+// `sdks/rust/src/models::CacheMetrics { hits, misses, hit_rate, evictions,
+// size, capacity }` that was previously mentioned in issue #899.  That struct
+// targeted a hypothetical `/stats/cache` path which does not exist; the live
+// server endpoint is `/cache/metrics` and its JSON shape matches the structs
+// below.
+//
+// The SDK field names deliberately mirror the server's `CombinedCacheMetrics`
+// and nested `CacheMetrics` types (see `src/handlers/stats.rs` and
+// `src/services/query_cache.rs`) so that `serde` deserialization is zero-copy
+// and requires no field renaming.
+// ---------------------------------------------------------------------------
+
+/// Inner query-cache metrics returned inside [`CombinedCacheMetrics::query_cache`].
+///
+/// Corresponds to `services::query_cache::CacheMetrics` on the server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryCacheMetrics {
+    /// Number of cache hits since the last reset.
+    pub hits: u64,
+    /// Number of cache misses since the last reset.
+    pub misses: u64,
+    /// Hit rate as a ratio in `[0.0, 1.0]`.
+    pub hit_rate: f64,
+    /// Number of entries evicted from the LRU cache.
+    pub evictions: u64,
+    /// Current number of entries stored in the cache.
+    pub size: u64,
+    /// Maximum capacity of the LRU cache.
+    pub capacity: u64,
+}
+
+/// Combined cache metrics returned by `GET /cache/metrics`.
+///
+/// This is the canonical SDK model for the server's `/cache/metrics` endpoint.
+/// It aggregates metrics from the in-process query-result cache and the
+/// Redis-backed idempotency-key store into a single response.
+///
+/// # Endpoint
+/// `GET /cache/metrics`  (requires admin `Authorization: Bearer <key>`)
+///
+/// # Example
+/// ```no_run
+/// use synapse_sdk::SynapseClient;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let client = SynapseClient::new("https://api.example.com", "your-admin-key");
+/// let metrics = client.stats().cache_metrics().await.unwrap();
+/// println!("query cache hit rate: {:.2}%", metrics.query_cache.hit_rate * 100.0);
+/// println!("idempotency hits: {}", metrics.idempotency_cache_hits);
+/// # }
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CombinedCacheMetrics {
+    /// Metrics for the in-process LRU query-result cache.
+    pub query_cache: QueryCacheMetrics,
+    /// Total idempotency-cache hits recorded by the idempotency middleware.
+    pub idempotency_cache_hits: u64,
+    /// Total idempotency-cache misses.
+    pub idempotency_cache_misses: u64,
+    /// Number of times an idempotency lock was successfully acquired.
+    pub idempotency_lock_acquired: u64,
+    /// Number of times lock acquisition was contended (concurrent duplicate requests).
+    pub idempotency_lock_contention: u64,
+    /// Number of idempotency-processing errors.
+    pub idempotency_errors: u64,
+    /// Number of times the idempotency fallback path was taken.
+    pub idempotency_fallback_count: u64,
+}
+
 /// A single transaction returned by the API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Transaction {
