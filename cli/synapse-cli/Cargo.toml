@@ -16,6 +16,7 @@ name = "mock-server"
 path = "src/bin/mock-server.rs"
 
 [dependencies]
+synapse-sdk = { path = "../../sdks/rust" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -29,6 +30,8 @@ futures-util = "0.3"
 # comment there for why (axum 0.6's `ws` feature vendors tokio-tungstenite 0.20).
 synapse-sdk = { path = "../../sdks/rust" }
 tokio-tungstenite = "0.20"
+# Option A: use the canonical API response types directly from the core crate.
+synapse-core = { path = "../.." }
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -37,8 +40,4 @@ predicates = "3"
 regex = "1"
 tempfile = "3"
 wiremock = "0.5"
-# Real-server integration test (tests/events_watch_real_server_test.rs): boots
-# the actual synapse-core axum app in-process and drives the real `synapse`
-# CLI binary against its /ws endpoint.
-synapse-core = { path = "../.." }
 axum = "0.6"

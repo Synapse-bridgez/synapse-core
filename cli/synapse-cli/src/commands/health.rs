@@ -4,6 +4,10 @@ use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+// Option A: depend on synapse-core so the API handler remains the single source
+// of truth. `pub use` preserves the CLI module's existing public type path.
+pub use synapse_core::handlers::HealthStatus;
+
 // ── Response types (mirrors src/handlers/mod.rs) ──────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -15,25 +19,6 @@ pub struct LivenessResponse {
 pub struct ReadinessResponse {
     pub status: String,
     pub draining: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HealthStatus {
-    pub status: String,
-    pub version: String,
-    pub db: String,
-    pub db_pool: DbPoolStats,
-    pub pending_queue_depth: u64,
-    pub current_batch_size: u64,
-    pub ws_connection_count: usize,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DbPoolStats {
-    pub active_connections: u32,
-    pub idle_connections: u32,
-    pub max_connections: u32,
-    pub usage_percent: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

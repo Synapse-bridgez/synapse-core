@@ -939,7 +939,7 @@ mod tests {
             &route("GET /events HTTP/1.1", "happy"),
         );
 
-        assert_deserializes::<settlements::SettlementListResponse>(
+        assert_deserializes::<settlements::SettlementList>(
             "GET /settlements",
             &route("GET /settlements HTTP/1.1", "happy"),
         );

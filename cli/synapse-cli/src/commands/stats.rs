@@ -5,7 +5,9 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use synapse_sdk::models::{AssetStats, DailyTotal, StatusCount};
 
-// ── Response types (imported from synapse_sdk::models) ────────────────────────
+// ── Response types (mirrors src/db/queries and src/handlers/stats.rs) ─────────
+
+use synapse_sdk::{AssetStats, DailyTotal, StatusCount};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheMetrics {
@@ -166,7 +168,7 @@ pub async fn run(cmd: StatsCommand, base_url: &str, api_key: &str) -> Result<()>
         StatsCommand::Daily { days, json } => {
             let days_str = days.to_string();
             let items: Vec<DailyTotal> = client
-                .get_with_query("/stats/daily", &[("days", &days_str)])
+                .get_query("/stats/daily", &[("days", &days_str)])
                 .await?;
             let fmt = if json {
                 OutputFormat::Json
@@ -290,13 +292,13 @@ mod tests {
             .match_query(mockito::Matcher::UrlEncoded("days".into(), "7".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"date":"2026-06-27","total_amount":"1000.00","transaction_count":5}]"#)
+            .with_body(r#"[{"date":"2026-06-27","total_amount":"1000.00","count":5}]"#)
             .create_async()
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
         let items: Vec<DailyTotal> = client
-            .get_with_query("/stats/daily", &[("days", "7")])
+            .get_query("/stats/daily", &[("days", "7")])
             .await
             .unwrap();
         assert_eq!(items.len(), 1);
@@ -318,7 +320,7 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let items: Vec<DailyTotal> = client
-            .get_with_query("/stats/daily", &[("days", "7")])
+            .get_query("/stats/daily", &[("days", "7")])
             .await
             .unwrap();
         assert!(items.is_empty());
@@ -332,13 +334,13 @@ mod tests {
             .match_query(mockito::Matcher::UrlEncoded("days".into(), "30".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"date":"2026-06-01","total_amount":"500.00","transaction_count":3}]"#)
+            .with_body(r#"[{"date":"2026-06-01","total_amount":"500.00","count":3}]"#)
             .create_async()
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
         let items: Vec<DailyTotal> = client
-            .get_with_query("/stats/daily", &[("days", "30")])
+            .get_query("/stats/daily", &[("days", "30")])
             .await
             .unwrap();
         let json = serde_json::to_string_pretty(&items).unwrap();
@@ -355,7 +357,7 @@ mod tests {
             .mock("GET", "/stats/assets")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"asset_code":"USD","total_amount":"9999.00","transaction_count":20}]"#)
+            .with_body(r#"[{"asset_code":"USD","total_amount":"9999.00","count":20}]"#)
             .create_async()
             .await;
 
@@ -389,7 +391,7 @@ mod tests {
             .mock("GET", "/stats/assets")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[{"asset_code":"EUR","total_amount":"200.00","transaction_count":2}]"#)
+            .with_body(r#"[{"asset_code":"EUR","total_amount":"200.00","count":2}]"#)
             .create_async()
             .await;
 
