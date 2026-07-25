@@ -17,7 +17,9 @@ pub enum GraphqlSubcommand {
     ///
     /// Exit codes:
     ///   0 – success
-    ///   1 – GraphQL application error (HTTP 200 with `errors` array) or network/HTTP error
+    ///   1 – GraphQL application error (HTTP 200 with `errors` array) or other failure
+    ///   2 – authentication failure (HTTP 401/403)
+    ///   3 – not found (HTTP 404)
     ///
     /// Output formats:
     ///   table – human-readable key/value output (default)
@@ -27,7 +29,9 @@ pub enum GraphqlSubcommand {
         long_about = "Send a raw GraphQL query to POST /graphql and print the result.\n\n\
                       Exit codes:\n  \
                       0 - Success\n  \
-                      1 - GraphQL application error or network/HTTP failure\n\n\
+                      1 - GraphQL application error or other failure\n  \
+                      2 - Authentication failure (HTTP 401/403)\n  \
+                      3 - Not found (HTTP 404)\n\n\
                       Output formats:\n  \
                       table - Human-readable output (default)\n  \
                       json  - Pretty-printed JSON"
@@ -45,8 +49,8 @@ pub enum GraphqlSubcommand {
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
-pub async fn run(cmd: GraphqlSubcommand, base_url: &str) -> Result<()> {
-    let client = SynapseCliClient::new(base_url);
+pub async fn run(cmd: GraphqlSubcommand, base_url: &str, api_key: &str) -> Result<()> {
+    let client = SynapseCliClient::new(base_url, api_key);
 
     match cmd {
         GraphqlSubcommand::Query { query, format } => {

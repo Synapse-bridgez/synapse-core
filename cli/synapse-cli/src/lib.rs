@@ -6,8 +6,8 @@ pub mod output;
 
 pub use client::{ApiClient, SynapseCliClient};
 pub use error::{
-    handle_error, map_http_error, map_network_error, CliError, EXIT_AUTH_FAILURE, EXIT_NOT_FOUND,
-    EXIT_OTHER,
+    from_synapse_error, handle_error, map_http_error, map_network_error, CliError,
+    EXIT_AUTH_FAILURE, EXIT_NOT_FOUND, EXIT_OTHER,
 };
 pub use formatter::{print, print_one, Formatter, OutputFormat, TableDisplay};
 

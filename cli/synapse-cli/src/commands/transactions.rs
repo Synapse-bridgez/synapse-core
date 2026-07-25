@@ -135,7 +135,7 @@ pub async fn run(cmd: TransactionsSubcommand, base_url: &str, api_key: &str) -> 
             use crate::client::SynapseCliClient;
             use crate::formatter::Formatter;
 
-            let cli_client = SynapseCliClient::new(base_url);
+            let cli_client = SynapseCliClient::new(base_url, api_key);
             let mut params: Vec<(&str, String)> = vec![("format", format.clone())];
             if let Some(ref f) = from {
                 params.push(("from", f.clone()));
@@ -151,7 +151,7 @@ pub async fn run(cmd: TransactionsSubcommand, base_url: &str, api_key: &str) -> 
             }
 
             let query: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            let bytes = cli_client.get_bytes("/transactions/export", &query).await?;
+            let bytes = cli_client.get_bytes("/export", &query).await?;
             let fmt = OutputFormat::from_format_str(&format);
             let result = Formatter::format_bytes_output(&bytes, fmt)?;
 

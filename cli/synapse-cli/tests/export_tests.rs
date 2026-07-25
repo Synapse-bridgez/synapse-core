@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use mockito::Server;
 use predicates::prelude::*;
 use std::net::TcpListener;
 
@@ -106,6 +107,43 @@ fn test_export_unrecognized_format() {
         .arg("invalid");
 
     cmd.output().expect("Failed to execute");
+}
+
+/// Regression test: the CLI must call the real server route (`GET /export`,
+/// same as `synapse_sdk::Transactions::export`), not `/transactions/export`
+/// — and it must send `X-API-Key`, matching every other authenticated route.
+#[tokio::test]
+async fn test_export_hits_real_route_with_api_key() {
+    let mut server = Server::new_async().await;
+    let csv_body = "id,status\n1,pending\n";
+    let mock = server
+        .mock("GET", "/export")
+        .match_query(mockito::Matcher::UrlEncoded("format".into(), "csv".into()))
+        .match_header("x-api-key", "test-key")
+        .with_status(200)
+        .with_header("content-type", "text/csv")
+        .with_body(csv_body)
+        .create_async()
+        .await;
+
+    let mut cmd = Command::cargo_bin("synapse").expect("Failed to find binary");
+    cmd.arg("--url")
+        .arg(server.url())
+        .arg("--api-key")
+        .arg("test-key")
+        .arg("transactions")
+        .arg("export")
+        .arg("--format")
+        .arg("csv");
+
+    let output = cmd.output().expect("Failed to execute");
+    mock.assert_async().await;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), csv_body);
 }
 
 #[test]

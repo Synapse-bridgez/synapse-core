@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -9,18 +9,20 @@ pub use synapse_sdk::SynapseClient as ApiClient;
 
 // ── SynapseCliClient ──────────────────────────────────────────────────────────
 // Thin client used by the transactions/settlements/graphql top-level handlers.
-// Unlike `ApiClient` it does not send an API key header.
+// Sends the same `X-API-Key` header as `ApiClient` on every request.
 
 pub struct SynapseCliClient {
     client: Client,
     base_url: String,
+    api_key: String,
 }
 
 impl SynapseCliClient {
-    pub fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str, api_key: &str) -> Self {
         Self {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
         }
     }
 
@@ -30,13 +32,14 @@ impl SynapseCliClient {
         let response = self
             .client
             .get(&url)
+            .header("X-API-Key", &self.api_key)
             .send()
             .await
             .context("request failed")?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!("server returned {}: {}", status.as_u16(), body);
+            return Err(crate::error::map_http_error(status.as_u16(), body).into());
         }
         response.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
     }
@@ -48,7 +51,7 @@ impl SynapseCliClient {
         query_params: &[(&str, &str)],
     ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let mut req = self.client.get(&url);
+        let mut req = self.client.get(&url).header("X-API-Key", &self.api_key);
         for (key, value) in query_params {
             req = req.query(&[(key, value)]);
         }
@@ -56,7 +59,7 @@ impl SynapseCliClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!("server returned {}: {}", status.as_u16(), body);
+            return Err(crate::error::map_http_error(status.as_u16(), body).into());
         }
         response.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
     }
@@ -65,7 +68,7 @@ impl SynapseCliClient {
     /// CSV/JSON export downloads).
     pub async fn get_bytes(&self, path: &str, query_params: &[(&str, &str)]) -> Result<Vec<u8>> {
         let url = format!("{}{}", self.base_url, path);
-        let mut req = self.client.get(&url);
+        let mut req = self.client.get(&url).header("X-API-Key", &self.api_key);
         for (key, value) in query_params {
             req = req.query(&[(key, value)]);
         }
@@ -73,7 +76,7 @@ impl SynapseCliClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!("server returned {}: {}", status.as_u16(), body);
+            return Err(crate::error::map_http_error(status.as_u16(), body).into());
         }
         response
             .bytes()
@@ -92,6 +95,7 @@ impl SynapseCliClient {
         let response = self
             .client
             .post(&url)
+            .header("X-API-Key", &self.api_key)
             .json(body)
             .send()
             .await
@@ -100,7 +104,7 @@ impl SynapseCliClient {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("HTTP {}: {}", status.as_u16(), text);
+            return Err(crate::error::map_http_error(status.as_u16(), text).into());
         }
 
         response.json::<T>().await.map_err(|e| anyhow::anyhow!(e))
