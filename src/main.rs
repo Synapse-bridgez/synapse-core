@@ -387,6 +387,8 @@ async fn serve(
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        quota_manager: synapse_core::middleware::quota::QuotaManager::new(&config.redis_url)
+            .map_err(|e| anyhow::anyhow!("Failed to initialise QuotaManager: {e}"))?,
     };
 
     // Load tenant configs on startup
