@@ -106,6 +106,7 @@ tokio-tungstenite = "0.20"
 assert_cmd = "2"
 assert_fs = "1"
 wiremock = "0.5"
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 
 [[bench]]
 name = "critical_paths"
