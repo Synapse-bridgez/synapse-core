@@ -41,6 +41,8 @@ async fn setup_test_app() -> (
         .await
         .unwrap();
 
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -64,6 +66,7 @@ async fn setup_test_app() -> (
         secrets_store: None,
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        asset_cache,
     };
 
     let app = create_app(app_state);

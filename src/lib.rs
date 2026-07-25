@@ -1,8 +1,10 @@
+pub mod adapters;
 pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod domain;
 pub mod error;
 pub mod graphql;
 pub mod handlers;
@@ -10,6 +12,7 @@ pub mod health;
 pub mod metrics;
 pub mod middleware;
 pub mod payments;
+pub mod ports;
 pub mod readiness;
 pub mod schemas;
 pub mod secrets;
@@ -19,6 +22,7 @@ pub mod startup;
 pub mod stellar;
 pub mod telemetry;
 pub mod tenant;
+pub mod use_cases;
 pub mod utils;
 pub mod validation;
 pub mod ws;
@@ -68,6 +72,8 @@ pub struct AppState {
     pub metrics_handle: crate::metrics::MetricsHandle,
     /// Active WebSocket connection count
     pub ws_connection_count: Arc<AtomicUsize>,
+    /// Dynamic asset registry, refreshed from the `assets` table every 5 minutes.
+    pub asset_cache: Arc<AssetCache>,
 }
 
 impl AppState {
@@ -88,8 +94,7 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
-        let _asset_cache =
-            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)
@@ -109,6 +114,7 @@ impl AppState {
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
             ws_connection_count: Arc::new(AtomicUsize::new(0)),
+            asset_cache,
         }
     }
 }

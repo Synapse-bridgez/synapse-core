@@ -84,6 +84,9 @@ impl TestApp {
 
         // Build AppState
         let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let asset_cache =
+            synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+                .await;
         let app_state = AppState {
             db: pool.clone(),
             pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
@@ -111,6 +114,7 @@ impl TestApp {
             secrets_store: None,
             metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
             ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            asset_cache,
         };
 
         // Clone readiness before app_state is moved into create_app
