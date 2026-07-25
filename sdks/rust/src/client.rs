@@ -220,7 +220,10 @@ impl SynapseClient {
     ) -> Result<(u16, T), SynapseError> {
         let resp = self.get_response(path).await?;
         let status = resp.status().as_u16();
-        let body = resp.json::<T>().await.map_err(SynapseError::Network)?;
+        let body = resp
+            .json::<T>()
+            .await
+            .map_err(|e| SynapseError::Decode(e.to_string()))?;
         Ok((status, body))
     }
 
@@ -245,7 +248,10 @@ impl SynapseClient {
                     .await
                     .map_err(SynapseError::Network)?;
                 let status = resp.status().as_u16();
-                let body = resp.json::<T>().await.map_err(SynapseError::Network)?;
+                let body = resp
+                    .json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))?;
                 Ok((status, body))
             }
         })
@@ -445,7 +451,9 @@ impl AdminSynapseClient {
                         })
                     };
                 }
-                resp.json::<T>().await.map_err(SynapseError::Network)
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
             }
         })
         .await
@@ -484,7 +492,9 @@ impl AdminSynapseClient {
                         })
                     };
                 }
-                resp.json::<T>().await.map_err(SynapseError::Network)
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
             }
         })
         .await
@@ -527,7 +537,9 @@ impl AdminSynapseClient {
                         })
                     };
                 }
-                resp.json::<T>().await.map_err(SynapseError::Network)
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
             }
         })
         .await

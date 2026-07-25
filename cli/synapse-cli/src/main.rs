@@ -19,13 +19,22 @@ async fn main() -> Result<()> {
         Commands::Stats(cmd) => stats::run(cmd, base_url, api_key).await,
         Commands::Settlements(cmd) => settlements::run(cmd.command, base_url, api_key).await,
         Commands::Transactions(cmd) => transactions::run(cmd.command, base_url, api_key).await,
-        Commands::Graphql(cmd) => graphql::run(cmd.command, base_url).await,
+        Commands::Graphql(cmd) => graphql::run(cmd.command, base_url, api_key).await,
         Commands::Completions { shell } => print_completions(&shell),
     };
 
     if let Err(e) = result {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        let code = match e.downcast::<synapse_cli::CliError>() {
+            Ok(cli_err) => synapse_cli::handle_error(cli_err),
+            Err(e) => match e.downcast::<synapse_sdk::SynapseError>() {
+                Ok(sdk_err) => synapse_cli::handle_error(synapse_cli::from_synapse_error(&sdk_err)),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    synapse_cli::EXIT_OTHER
+                }
+            },
+        };
+        std::process::exit(code);
     }
 
     Ok(())
