@@ -3,6 +3,7 @@ use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
+use synapse_sdk::models::{AssetStats, DailyTotal, StatusCount};
 
 // ── Response types (mirrors src/db/queries and src/handlers/stats.rs) ─────────
 
