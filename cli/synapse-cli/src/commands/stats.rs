@@ -3,28 +3,9 @@ use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
+use synapse_sdk::models::{AssetStats, DailyTotal, StatusCount};
 
-// ── Response types (mirrors src/db/queries and src/handlers/stats.rs) ─────────
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StatusCount {
-    pub status: String,
-    pub count: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DailyTotal {
-    pub date: String,
-    pub total_amount: String,
-    pub transaction_count: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AssetStats {
-    pub asset_code: String,
-    pub total_amount: String,
-    pub transaction_count: i64,
-}
+// ── Response types (imported from synapse_sdk::models) ────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheMetrics {
@@ -55,7 +36,7 @@ impl TableDisplay for DailyTotal {
     fn row(&self) -> Vec<String> {
         vec![
             self.date.clone(),
-            self.transaction_count.to_string(),
+            self.count.to_string(),
             self.total_amount.clone(),
         ]
     }
@@ -68,7 +49,7 @@ impl TableDisplay for AssetStats {
     fn row(&self) -> Vec<String> {
         vec![
             self.asset_code.clone(),
-            self.transaction_count.to_string(),
+            self.count.to_string(),
             self.total_amount.clone(),
         ]
     }
@@ -319,7 +300,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].transaction_count, 5);
+        assert_eq!(items[0].count, 5);
     }
 
     /// Edge case: empty dataset must return a valid empty list.

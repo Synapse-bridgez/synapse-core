@@ -324,6 +324,7 @@ pub struct StatusCount {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DailyTotal {
     pub date: String,
+    #[serde(alias = "tx_count", alias = "transaction_count")]
     pub count: i64,
     pub total_amount: String,
 }
@@ -332,6 +333,7 @@ pub struct DailyTotal {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AssetStats {
     pub asset_code: String,
+    #[serde(alias = "tx_count", alias = "transaction_count")]
     pub count: i64,
     pub total_amount: String,
 }
