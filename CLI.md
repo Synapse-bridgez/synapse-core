@@ -100,15 +100,51 @@ synapse-core db migrate
 
 ### Backup Commands
 
-Backup and restore management (not yet implemented).
+The following commands are **not yet implemented** and will immediately error with
+`"Backup service not yet implemented"`:
 
 ```bash
 synapse-core backup run [--backup-type hourly|daily|monthly]
 synapse-core backup list
 synapse-core backup restore <FILENAME>
-synapse-core backup restore-pitr --timestamp <TIMESTAMP>
 synapse-core backup cleanup
 ```
+
+### `backup restore-pitr` — Point-in-time recovery *(implemented)*
+
+Triggers a point-in-time restore via the server's admin API.  This is a
+**destructive, data-loss-capable operation**; the live path requires explicit
+confirmation.
+
+**Prerequisites:** `ADMIN_API_KEY` environment variable must be set to the same
+key the server was started with.
+
+**Syntax:**
+
+```bash
+synapse-core backup restore-pitr --timestamp <TIMESTAMP> [--dry-run] [--yes]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--timestamp <TIMESTAMP>` | Target recovery point in ISO 8601 / RFC 3339 format (e.g. `2026-01-15T10:30:00Z`). Required. |
+| `--dry-run` | Validate the target timestamp and log the attempt without restoring data. Safe to run without `--yes`. |
+| `--yes` | Required for a live (non-dry-run) restore. Absent without `--dry-run`, the command refuses to proceed. |
+
+**Examples:**
+
+```bash
+# Validate a target timestamp without touching data
+ADMIN_API_KEY=secret synapse-core backup restore-pitr \
+  --timestamp 2026-01-15T10:30:00Z --dry-run
+
+# Perform a live restore (requires --yes)
+ADMIN_API_KEY=secret synapse-core backup restore-pitr \
+  --timestamp 2026-01-15T10:30:00Z --yes
+```
+
+The actor is taken from `SYNAPSE_ACTOR`, then `USER`/`LOGNAME`, and recorded in
+the server-side audit log alongside the target timestamp.
 
 ## Configuration
 
