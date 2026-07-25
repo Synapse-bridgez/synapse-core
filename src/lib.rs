@@ -35,6 +35,7 @@ use crate::services::feature_flags::FeatureFlagService;
 use crate::services::query_cache::QueryCache;
 use crate::stellar::HorizonClient;
 use crate::tenant::TenantConfig;
+use crate::middleware::idempotency::IdempotencyService;
 use axum::{
     middleware as axum_middleware,
     routing::{get, patch, post},
@@ -68,6 +69,8 @@ pub struct AppState {
     pub metrics_handle: crate::metrics::MetricsHandle,
     /// Active WebSocket connection count
     pub ws_connection_count: Arc<AtomicUsize>,
+    /// Redis-backed idempotency service for deduplicating webhook/callback deliveries (#910).
+    pub idempotency_service: Option<IdempotencyService>,
 }
 
 impl AppState {
@@ -109,6 +112,7 @@ impl AppState {
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
             ws_connection_count: Arc::new(AtomicUsize::new(0)),
+            idempotency_service: None,
         }
     }
 }
@@ -153,6 +157,14 @@ pub fn create_app(app_state: AppState) -> Router {
             crate::middleware::signature_verification::signature_verification,
         ));
 
+    // Mount idempotency middleware on callback routes when the service is available (#910).
+    if let Some(ref idempotency_service) = app_state.idempotency_service {
+        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency_service.clone(),
+            crate::middleware::idempotency::idempotency_middleware,
+        ));
+    }
+
     // Inject SecretsStore for signature verification
     if let Some(store) = &app_state.secrets_store {
         callback_routes = callback_routes.layer(axum::Extension(store.clone()));
@@ -174,6 +186,14 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn(
             crate::middleware::signature_verification::signature_verification,
         ));
+
+    // Mount idempotency middleware on webhook routes when the service is available (#910).
+    if let Some(ref idempotency_service) = app_state.idempotency_service {
+        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency_service.clone(),
+            crate::middleware::idempotency::idempotency_middleware,
+        ));
+    }
 
     // Inject SecretsStore for signature verification
     if let Some(store) = &app_state.secrets_store {

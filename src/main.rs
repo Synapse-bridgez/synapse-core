@@ -306,7 +306,7 @@ async fn serve(
     let idempotency_lock_contention = Arc::new(AtomicU64::new(0));
     let idempotency_errors = Arc::new(AtomicU64::new(0));
     let idempotency_fallback_count = Arc::new(AtomicU64::new(0));
-    let _idempotency_service = IdempotencyService::new(
+    let idempotency_service = IdempotencyService::new(
         &config.redis_url,
         pool.clone(),
         Arc::clone(&idempotency_cache_hits),
@@ -387,6 +387,7 @@ async fn serve(
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        idempotency_service: Some(idempotency_service),
     };
 
     // Load tenant configs on startup
