@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cli/synapse-cli"]
+members = [".", "sdks/rust", "cli/synapse-cli"]
 
 [package]
 name = "synapse-core"
@@ -18,6 +18,7 @@ name = "synapse_core"
 path = "src/lib.rs"
 
 [dependencies]
+synapse-sdk = { path = "sdks/rust" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.6", features = ["ws"] }
 vaultrs = "0.7"
@@ -47,7 +48,7 @@ home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json", "stream"] }
 bytes = "1"
 failsafe = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.4", features = ["cors", "limit"] }
 hyper = "0.14"
@@ -98,8 +99,13 @@ sqlx = { version = "0.7", features = [
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
 reqwest = { version = "0.11", features = ["json"] }
-tokio-tungstenite = "0.21"
+# Pinned to match the tokio-tungstenite/tungstenite version axum 0.6's `ws`
+# feature vendors internally (axum's Cargo.toml hard-pins ^0.20) — keeping
+# this in lockstep avoids two majors of tungstenite resolving side by side.
+tokio-tungstenite = "0.20"
 assert_cmd = "2"
+assert_fs = "1"
+wiremock = "0.5"
 
 [[bench]]
 name = "critical_paths"

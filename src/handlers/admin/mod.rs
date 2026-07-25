@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod bulk_status;
 pub mod locks;
 pub mod quota;

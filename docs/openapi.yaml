@@ -1,0 +1,2090 @@
+openapi: "3.0.3"
+info:
+  title: Synapse API
+  version: "1.0.0"
+  description: |
+    REST API for the Synapse payment bridge. Covers transactions, settlements,
+    export, stats, health, WebSocket events, and all admin endpoints wrapped by
+    the Rust SDK and CLI.
+
+    ## Authentication
+    - **Public endpoints** — send `X-API-Key: <key>` on every request.
+    - **Admin endpoints** — send `X-Admin-Key: <key>` on every request.
+    - WebSocket connection — send `token=<key>` as a query parameter.
+
+servers:
+  - url: https://api.example.com
+    description: Production
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security schemes
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    AdminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Reusable schemas
+  # ───────────────────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── Transaction ──────────────────────────────────────────────────────────
+    Transaction:
+      type: object
+      required:
+        - id
+        - stellar_account
+        - amount
+        - asset_code
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        stellar_account:
+          type: string
+          example: "GABC1234567890123456789012345678901234567890123456789012"
+        amount:
+          type: string
+          example: "100.00"
+        asset_code:
+          type: string
+          example: "USD"
+        status:
+          type: string
+          example: "pending"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:05:00Z"
+        anchor_transaction_id:
+          type: string
+          nullable: true
+          example: "anc-abc-123"
+        callback_type:
+          type: string
+          nullable: true
+          example: "customer_information_needed"
+        callback_status:
+          type: string
+          nullable: true
+          example: null
+        settlement_id:
+          type: string
+          format: uuid
+          nullable: true
+          example: null
+        memo:
+          type: string
+          nullable: true
+          example: "payment-ref-001"
+        memo_type:
+          type: string
+          nullable: true
+          example: "text"
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+          example: {"source": "mobile"}
+
+    ListMeta:
+      type: object
+      required:
+        - next_cursor
+        - has_more
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6IjU1MCJ9"
+        has_more:
+          type: boolean
+          example: true
+
+    TransactionList:
+      type: object
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Transaction"
+        meta:
+          $ref: "#/components/schemas/ListMeta"
+
+    TransactionSearch:
+      type: object
+      required:
+        - total
+        - results
+      properties:
+        total:
+          type: integer
+          format: int64
+          example: 42
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Transaction"
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6IjU1MCJ9"
+
+    # ── Settlement ───────────────────────────────────────────────────────────
+    Settlement:
+      type: object
+      required:
+        - id
+        - asset_code
+        - total_amount
+        - tx_count
+        - period_start
+        - period_end
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "660f9511-f3ac-52e5-b827-557766551111"
+        asset_code:
+          type: string
+          example: "USD"
+        total_amount:
+          type: string
+          example: "10000.00"
+        tx_count:
+          type: integer
+          example: 50
+        period_start:
+          type: string
+          format: date-time
+          example: "2024-01-01T00:00:00Z"
+        period_end:
+          type: string
+          format: date-time
+          example: "2024-01-31T23:59:59Z"
+        status:
+          type: string
+          example: "completed"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-02-01T08:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2024-02-01T08:00:00Z"
+        dispute_reason:
+          type: string
+          nullable: true
+          example: null
+        original_total_amount:
+          type: string
+          nullable: true
+          example: null
+        reviewed_by:
+          type: string
+          nullable: true
+          example: null
+        reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: null
+
+    SettlementList:
+      type: object
+      required:
+        - settlements
+        - has_more
+      properties:
+        settlements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Settlement"
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6IjY2MCJ9"
+        has_more:
+          type: boolean
+          example: false
+
+    # ── Stats ─────────────────────────────────────────────────────────────────
+    StatusCount:
+      type: object
+      required:
+        - status
+        - count
+      properties:
+        status:
+          type: string
+          example: "pending"
+        count:
+          type: integer
+          format: int64
+          example: 17
+
+    StatusCountsResponse:
+      type: object
+      required:
+        - counts
+      properties:
+        counts:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusCount"
+
+    DailyTotal:
+      type: object
+      required:
+        - date
+        - count
+        - total_amount
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2024-01-15"
+        count:
+          type: integer
+          format: int64
+          example: 120
+        total_amount:
+          type: string
+          example: "12000.00"
+
+    DailyTotalsResponse:
+      type: object
+      required:
+        - days
+      properties:
+        days:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyTotal"
+
+    AssetStats:
+      type: object
+      required:
+        - asset_code
+        - count
+        - total_amount
+      properties:
+        asset_code:
+          type: string
+          example: "USD"
+        count:
+          type: integer
+          format: int64
+          example: 500
+        total_amount:
+          type: string
+          example: "50000.00"
+
+    AssetStatsResponse:
+      type: object
+      required:
+        - assets
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetStats"
+
+    CacheMetrics:
+      type: object
+      required:
+        - hits
+        - misses
+        - hit_rate
+        - evictions
+        - size
+        - capacity
+      properties:
+        hits:
+          type: integer
+          format: int64
+          example: 9800
+        misses:
+          type: integer
+          format: int64
+          example: 200
+        hit_rate:
+          type: number
+          format: double
+          example: 0.98
+        evictions:
+          type: integer
+          format: int64
+          example: 5
+        size:
+          type: integer
+          format: int64
+          example: 800
+        capacity:
+          type: integer
+          format: int64
+          example: 1000
+
+    CacheMetricsResponse:
+      type: object
+      required:
+        - query_cache
+      properties:
+        query_cache:
+          $ref: "#/components/schemas/CacheMetrics"
+        idempotency_cache_hits:
+          type: integer
+          format: int64
+          example: 450
+        idempotency_cache_misses:
+          type: integer
+          format: int64
+          example: 50
+        idempotency_lock_acquired:
+          type: integer
+          format: int64
+          example: 500
+        idempotency_lock_contention:
+          type: integer
+          format: int64
+          example: 2
+        idempotency_errors:
+          type: integer
+          format: int64
+          example: 0
+        idempotency_fallback_count:
+          type: integer
+          format: int64
+          example: 0
+
+    # ── Health ────────────────────────────────────────────────────────────────
+    DbPoolStats:
+      type: object
+      required:
+        - active_connections
+        - idle_connections
+        - max_connections
+        - usage_percent
+      properties:
+        active_connections:
+          type: integer
+          example: 5
+        idle_connections:
+          type: integer
+          example: 15
+        max_connections:
+          type: integer
+          example: 20
+        usage_percent:
+          type: number
+          format: float
+          example: 25.0
+
+    HealthStatus:
+      type: object
+      required:
+        - status
+        - version
+        - db
+        - db_pool
+        - pending_queue_depth
+        - current_batch_size
+        - ws_connection_count
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+          example: "healthy"
+        version:
+          type: string
+          example: "0.1.0"
+        db:
+          type: string
+          enum: [connected, disconnected]
+          example: "connected"
+        db_pool:
+          $ref: "#/components/schemas/DbPoolStats"
+        pending_queue_depth:
+          type: integer
+          format: int64
+          example: 3
+        current_batch_size:
+          type: integer
+          format: int64
+          example: 100
+        ws_connection_count:
+          type: integer
+          example: 12
+
+    LivenessResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: "alive"
+
+    ReadinessResponse:
+      type: object
+      required:
+        - status
+        - draining
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+          example: "ready"
+        draining:
+          type: boolean
+          example: false
+
+    # ── GraphQL ───────────────────────────────────────────────────────────────
+    GraphQLRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          example: "{ transactions { id status amount } }"
+        variables:
+          type: object
+          nullable: true
+          additionalProperties: true
+          example: {"limit": 10}
+
+    GraphQLResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+          example: {"transactions": []}
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              message:
+                type: string
+          example: []
+
+    # ── WebSocket message envelope ────────────────────────────────────────────
+    WsTransactionStatusUpdate:
+      description: |
+        Message pushed to WebSocket subscribers on each transaction status change.
+        The `message` field is optional and provides a human-readable description.
+      type: object
+      required:
+        - transaction_id
+        - tenant_id
+        - status
+        - timestamp
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        tenant_id:
+          type: string
+          format: uuid
+          example: "aabbccdd-0000-1111-2222-334455667788"
+        status:
+          type: string
+          example: "completed"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:06:00Z"
+        message:
+          type: string
+          nullable: true
+          example: "Payment settled successfully"
+
+    # ── Error catalog ─────────────────────────────────────────────────────────
+    ErrorCatalogEntry:
+      type: object
+      required:
+        - code
+        - http_status
+        - description
+      properties:
+        code:
+          type: string
+          example: "ERR_AUTH_001"
+        http_status:
+          type: integer
+          example: 401
+        description:
+          type: string
+          example: "Invalid authentication credentials"
+
+    ErrorCatalogResponse:
+      type: object
+      required:
+        - errors
+        - version
+      properties:
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErrorCatalogEntry"
+        version:
+          type: string
+          example: "1.0.0"
+
+    # ── Admin: DLQ ────────────────────────────────────────────────────────────
+    DlqEntry:
+      type: object
+      required:
+        - id
+        - transaction_id
+        - stellar_account
+        - amount
+        - asset_code
+        - error_reason
+        - retry_count
+        - original_created_at
+        - moved_to_dlq_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "770a1122-b3cd-4ef5-9a00-665544332211"
+        transaction_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        stellar_account:
+          type: string
+          example: "GABC1234567890123456789012345678901234567890123456789012"
+        amount:
+          type: string
+          example: "100.00"
+        asset_code:
+          type: string
+          example: "USD"
+        anchor_transaction_id:
+          type: string
+          nullable: true
+          example: null
+        error_reason:
+          type: string
+          example: "Payment failed: network timeout after 3 retries"
+        stack_trace:
+          type: string
+          nullable: true
+          example: null
+        retry_count:
+          type: integer
+          example: 3
+        original_created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T09:55:00Z"
+        moved_to_dlq_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:00:00Z"
+        last_retry_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2024-01-15T09:59:00Z"
+
+    DlqListResponse:
+      type: object
+      required:
+        - dlq_entries
+        - count
+      properties:
+        dlq_entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DlqEntry"
+        count:
+          type: integer
+          example: 2
+
+    RequeueResponse:
+      type: object
+      required:
+        - message
+        - dlq_id
+      properties:
+        message:
+          type: string
+          example: "DLQ entry requeued successfully"
+        dlq_id:
+          type: string
+          format: uuid
+          example: "770a1122-b3cd-4ef5-9a00-665544332211"
+
+    # ── Admin: Webhook replay ─────────────────────────────────────────────────
+    FailedWebhookInfo:
+      type: object
+      required:
+        - transaction_id
+        - stellar_account
+        - amount
+        - asset_code
+        - status
+        - created_at
+        - retry_count
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        stellar_account:
+          type: string
+          example: "GABC1234567890123456789012345678901234567890123456789012"
+        amount:
+          type: string
+          example: "50.00"
+        asset_code:
+          type: string
+          example: "USD"
+        anchor_transaction_id:
+          type: string
+          nullable: true
+          example: null
+        status:
+          type: string
+          example: "failed"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:00:00Z"
+        last_error:
+          type: string
+          nullable: true
+          example: "connection timeout"
+        retry_count:
+          type: integer
+          example: 2
+
+    FailedWebhooksResponse:
+      type: object
+      required:
+        - total
+        - webhooks
+      properties:
+        total:
+          type: integer
+          format: int64
+          example: 3
+        webhooks:
+          type: array
+          items:
+            $ref: "#/components/schemas/FailedWebhookInfo"
+
+    WebhookReplayResult:
+      type: object
+      required:
+        - transaction_id
+        - success
+        - message
+        - dry_run
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Webhook replayed successfully"
+        dry_run:
+          type: boolean
+          example: false
+        replayed_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2024-01-15T10:10:00Z"
+
+    BatchWebhookReplayResponse:
+      description: |
+        Response from a batch webhook replay. The HTTP status is always 200.
+        **Inspect each `results` entry** — individual items may report
+        `success: false` even when the top-level response is 200.
+      type: object
+      required:
+        - total
+        - successful
+        - failed
+        - results
+      properties:
+        total:
+          type: integer
+          example: 3
+        successful:
+          type: integer
+          example: 2
+        failed:
+          type: integer
+          example: 1
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookReplayResult"
+
+    # ── Admin: Locks ──────────────────────────────────────────────────────────
+    LockEntry:
+      type: object
+      required:
+        - resource
+        - token
+        - acquired_at
+        - ttl_secs
+        - expected_duration_secs
+        - overdue
+      properties:
+        resource:
+          type: string
+          example: "settlement:42"
+        token:
+          type: string
+          example: "tok-abc-123"
+        acquired_at:
+          type: integer
+          format: int64
+          description: Unix timestamp when the lock was acquired
+          example: 1700000000
+        ttl_secs:
+          type: integer
+          format: int64
+          example: 30
+        expected_duration_secs:
+          type: integer
+          format: int64
+          example: 30
+        overdue:
+          type: boolean
+          example: false
+
+    LocksListResponse:
+      type: object
+      required:
+        - active_locks
+        - total
+        - overdue
+      properties:
+        active_locks:
+          type: array
+          items:
+            $ref: "#/components/schemas/LockEntry"
+        total:
+          type: integer
+          example: 1
+        overdue:
+          type: integer
+          example: 0
+
+    # ── Admin: Reconciliation ─────────────────────────────────────────────────
+    ReconciliationReportSummary:
+      type: object
+      required:
+        - id
+        - generated_at
+        - period_start
+        - period_end
+        - total_db_transactions
+        - total_chain_payments
+        - missing_on_chain_count
+        - orphaned_payments_count
+        - amount_mismatches_count
+        - has_discrepancies
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "880e8400-e29b-41d4-a716-446655440000"
+        generated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T12:00:00Z"
+        period_start:
+          type: string
+          format: date-time
+          example: "2024-01-14T12:00:00Z"
+        period_end:
+          type: string
+          format: date-time
+          example: "2024-01-15T12:00:00Z"
+        total_db_transactions:
+          type: integer
+          example: 100
+        total_chain_payments:
+          type: integer
+          example: 98
+        missing_on_chain_count:
+          type: integer
+          example: 2
+        orphaned_payments_count:
+          type: integer
+          example: 0
+        amount_mismatches_count:
+          type: integer
+          example: 0
+        has_discrepancies:
+          type: boolean
+          example: true
+
+    ListReconciliationReports:
+      type: object
+      required:
+        - reports
+        - total
+        - limit
+        - offset
+      properties:
+        reports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReconciliationReportSummary"
+        total:
+          type: integer
+          format: int64
+          example: 5
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+
+    ReconciliationReportDetail:
+      type: object
+      required:
+        - id
+        - generated_at
+        - period_start
+        - period_end
+        - summary
+        - missing_on_chain
+        - orphaned_payments
+        - amount_mismatches
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "880e8400-e29b-41d4-a716-446655440000"
+        generated_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T12:00:00Z"
+        period_start:
+          type: string
+          format: date-time
+          example: "2024-01-14T12:00:00Z"
+        period_end:
+          type: string
+          format: date-time
+          example: "2024-01-15T12:00:00Z"
+        summary:
+          type: object
+          properties:
+            total_db_transactions:
+              type: integer
+              example: 100
+            total_chain_payments:
+              type: integer
+              example: 98
+            missing_on_chain_count:
+              type: integer
+              example: 2
+            orphaned_payments_count:
+              type: integer
+              example: 0
+            amount_mismatches_count:
+              type: integer
+              example: 0
+            has_discrepancies:
+              type: boolean
+              example: true
+        missing_on_chain:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+                example: "aabbc123-0000-0000-0000-000000000001"
+              stellar_account:
+                type: string
+                example: "GABC1234567890123456789012345678901234567890123456789012"
+              amount:
+                type: string
+                example: "100.00"
+              asset_code:
+                type: string
+                example: "USD"
+              memo:
+                type: string
+                nullable: true
+                example: "payment-1"
+              created_at:
+                type: string
+                format: date-time
+                example: "2024-01-14T12:00:00Z"
+        orphaned_payments:
+          type: array
+          items:
+            type: object
+            properties:
+              payment_id:
+                type: string
+                example: "stellar-payment-xyz"
+              from:
+                type: string
+                example: "GABC…"
+              to:
+                type: string
+                example: "GDEF…"
+              amount:
+                type: string
+                example: "50.00"
+              asset_code:
+                type: string
+                example: "USD"
+              memo:
+                type: string
+                nullable: true
+                example: null
+        amount_mismatches:
+          type: array
+          items:
+            type: object
+            properties:
+              transaction_id:
+                type: string
+                format: uuid
+                example: "550e8400-0000-0000-0000-000000000001"
+              payment_id:
+                type: string
+                example: "stellar-payment-abc"
+              db_amount:
+                type: string
+                example: "100.00"
+              chain_amount:
+                type: string
+                example: "99.50"
+              memo:
+                type: string
+                nullable: true
+                example: null
+
+    RunReconciliationRequest:
+      type: object
+      required:
+        - account
+      properties:
+        account:
+          type: string
+          description: Stellar account address to reconcile
+          example: "GABC1234567890123456789012345678901234567890123456789012"
+        period_hours:
+          type: integer
+          nullable: true
+          description: Lookback window in hours (default 24)
+          example: 48
+
+    RunReconciliationResponse:
+      type: object
+      required:
+        - message
+        - report
+      properties:
+        message:
+          type: string
+          example: "Reconciliation completed successfully"
+        report:
+          $ref: "#/components/schemas/ReconciliationReportSummary"
+
+    # ── Admin: Bulk status ────────────────────────────────────────────────────
+    BulkStatusRequest:
+      type: object
+      required:
+        - transaction_ids
+        - status
+      properties:
+        transaction_ids:
+          type: array
+          items:
+            type: string
+          example: ["550e8400-e29b-41d4-a716-446655440000", "660f9511-f3ac-52e5-b827-557766551111"]
+        status:
+          type: string
+          example: "completed"
+
+    BulkUpdateError:
+      type: object
+      required:
+        - id
+        - error
+      properties:
+        id:
+          type: string
+          example: "660f9511-f3ac-52e5-b827-557766551111"
+        error:
+          type: string
+          example: "transaction not found"
+
+    BulkStatusResponse:
+      type: object
+      required:
+        - updated
+        - failed
+        - errors
+      properties:
+        updated:
+          type: integer
+          example: 1
+        failed:
+          type: integer
+          example: 1
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/BulkUpdateError"
+
+    # ── Admin: Settlement status update ──────────────────────────────────────
+    UpdateSettlementStatusRequest:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          description: |
+            Target status. Valid transitions:
+            - `completed` → `pending_review`, `disputed`
+            - `pending_review` → `adjusted`, `voided`, `disputed`
+            - `disputed` → `adjusted`, `voided`, `pending_review`
+          example: "disputed"
+        reason:
+          type: string
+          nullable: true
+          maxLength: 255
+          example: "Manual dispute flag"
+        new_total:
+          type: string
+          nullable: true
+          description: New total amount, only meaningful when transitioning to `adjusted`
+          example: "9500.00"
+        actor:
+          type: string
+          nullable: true
+          maxLength: 50
+          example: "reviewer"
+
+    # ── Error response ────────────────────────────────────────────────────────
+    ApiError:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: "resource not found"
+        code:
+          type: string
+          example: "ERR_NOT_FOUND_001"
+        status:
+          type: integer
+          example: 404
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Health ──────────────────────────────────────────────────────────────────
+  /live:
+    get:
+      summary: Liveness probe
+      description: Returns 200 if the process is running. No dependency checks.
+      operationId: getLiveness
+      tags: [Health]
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessResponse"
+              example:
+                status: "alive"
+
+  /ready:
+    get:
+      summary: Readiness probe
+      description: Returns 200 when ready to accept traffic, 503 when draining.
+      operationId: getReadiness
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+              example:
+                status: "ready"
+                draining: false
+        "503":
+          description: Service is not ready or is draining
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+              example:
+                status: "not_ready"
+                draining: true
+
+  /health:
+    get:
+      summary: Health check
+      description: Checks database connectivity and returns pool statistics.
+      operationId: getHealth
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+        "503":
+          description: Critical dependency (database) is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /errors:
+    get:
+      summary: Error catalog
+      description: Returns all named error codes and their descriptions.
+      operationId: getErrorCatalog
+      tags: [Health]
+      responses:
+        "200":
+          description: Error catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorCatalogResponse"
+
+  # ── Transactions ─────────────────────────────────────────────────────────────
+  /transactions:
+    get:
+      summary: List transactions
+      description: Returns a cursor-paginated list of transactions ordered by `created_at` descending.
+      operationId: listTransactions
+      tags: [Transactions]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a previous `meta.next_cursor`
+          schema:
+            type: string
+          example: "eyJpZCI6IjU1MCJ9"
+        - name: limit
+          in: query
+          description: Maximum records per page (server default 20, max 100)
+          schema:
+            type: integer
+          example: 20
+        - name: from_date
+          in: query
+          description: Inclusive start date filter (YYYY-MM-DD or RFC 3339)
+          schema:
+            type: string
+          example: "2024-01-01"
+        - name: to_date
+          in: query
+          description: Inclusive end date filter (YYYY-MM-DD or RFC 3339)
+          schema:
+            type: string
+          example: "2024-01-31"
+      responses:
+        "200":
+          description: Paginated transaction list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionList"
+        "401":
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/{id}:
+    get:
+      summary: Get transaction by ID
+      operationId: getTransaction
+      tags: [Transactions]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        "200":
+          description: Transaction details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/search:
+    get:
+      summary: Search transactions
+      description: |
+        Full-text and field-level search over transactions.
+        All parameters are optional; combine freely.
+      operationId: searchTransactions
+      tags: [Transactions]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+          example: "pending"
+        - name: asset_code
+          in: query
+          schema:
+            type: string
+          example: "USD"
+        - name: min_amount
+          in: query
+          schema:
+            type: string
+          example: "10.00"
+        - name: max_amount
+          in: query
+          schema:
+            type: string
+          example: "500.00"
+        - name: from
+          in: query
+          description: Inclusive start date (YYYY-MM-DD)
+          schema:
+            type: string
+          example: "2024-01-01"
+        - name: to
+          in: query
+          description: Inclusive end date (YYYY-MM-DD)
+          schema:
+            type: string
+          example: "2024-01-31"
+        - name: stellar_account
+          in: query
+          schema:
+            type: string
+          example: "GABC1234567890123456789012345678901234567890123456789012"
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+          example: 20
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionSearch"
+
+  # ── Export ────────────────────────────────────────────────────────────────────
+  /export:
+    get:
+      summary: Export transactions
+      description: |
+        Stream transactions as CSV (default) or JSON. The response body is the
+        raw file — the SDK returns it unchanged as bytes so callers can write
+        it directly to disk.
+      operationId: exportTransactions
+      tags: [Transactions]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: format
+          in: query
+          description: "`csv` (default) or `json`"
+          schema:
+            type: string
+            enum: [csv, json]
+          example: "csv"
+        - name: from
+          in: query
+          description: Inclusive start date (YYYY-MM-DD)
+          schema:
+            type: string
+          example: "2024-01-01"
+        - name: to
+          in: query
+          description: Inclusive end date (YYYY-MM-DD)
+          schema:
+            type: string
+          example: "2024-01-31"
+        - name: status
+          in: query
+          schema:
+            type: string
+          example: "completed"
+        - name: asset_code
+          in: query
+          schema:
+            type: string
+          example: "USD"
+      responses:
+        "200":
+          description: Export file (CSV or JSON stream)
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transaction"
+        "400":
+          description: Invalid filter parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Settlements ───────────────────────────────────────────────────────────────
+  /settlements:
+    get:
+      summary: List settlements
+      description: Returns a cursor-paginated list of settlements.
+      operationId: listSettlements
+      tags: [Settlements]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum records per page (server default 10, max 100)
+          schema:
+            type: integer
+          example: 10
+        - name: direction
+          in: query
+          description: "`forward` (default) or `backward`"
+          schema:
+            type: string
+            enum: [forward, backward]
+      responses:
+        "200":
+          description: Paginated settlement list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettlementList"
+
+  /settlements/{id}:
+    get:
+      summary: Get settlement by ID
+      operationId: getSettlement
+      tags: [Settlements]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "660f9511-f3ac-52e5-b827-557766551111"
+      responses:
+        "200":
+          description: Settlement details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settlement"
+        "404":
+          description: Settlement not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Stats ─────────────────────────────────────────────────────────────────────
+  /stats/status:
+    get:
+      summary: Transaction counts by status
+      operationId: getStatusCounts
+      tags: [Stats]
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: Per-status transaction counts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusCountsResponse"
+              example:
+                counts:
+                  - status: "pending"
+                    count: 17
+                  - status: "completed"
+                    count: 983
+
+  /stats/daily:
+    get:
+      summary: Daily transaction totals
+      operationId: getDailyTotals
+      tags: [Stats]
+      security:
+        - ApiKey: []
+      parameters:
+        - name: days
+          in: query
+          description: Number of days to include (1–365; server default 7)
+          schema:
+            type: integer
+          example: 7
+      responses:
+        "200":
+          description: Per-day transaction volume
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailyTotalsResponse"
+        "400":
+          description: Invalid days parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /stats/assets:
+    get:
+      summary: Per-asset transaction statistics
+      operationId: getAssetStats
+      tags: [Stats]
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: Per-asset totals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetStatsResponse"
+
+  /cache/metrics:
+    get:
+      summary: Cache metrics
+      description: Returns query cache and idempotency cache hit/miss statistics.
+      operationId: getCacheMetrics
+      tags: [Stats]
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: Cache metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheMetricsResponse"
+
+  # ── GraphQL ───────────────────────────────────────────────────────────────────
+  /graphql:
+    post:
+      summary: Execute a GraphQL query
+      description: |
+        Executes an arbitrary GraphQL query against the Synapse schema.
+        Application-level errors appear in the `errors` array of an HTTP 200
+        response — always check `errors` even on success.
+      operationId: graphql
+      tags: [GraphQL]
+      security:
+        - ApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GraphQLRequest"
+            example:
+              query: "{ transactions(limit: 5) { id status amount } }"
+              variables: null
+      responses:
+        "200":
+          description: GraphQL response (may contain application-level errors)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphQLResponse"
+
+  # ── WebSocket ─────────────────────────────────────────────────────────────────
+  /ws:
+    get:
+      summary: Open a WebSocket connection
+      description: |
+        Upgrades the connection to WebSocket. After connecting the server pushes
+        `TransactionStatusUpdate` messages whenever a transaction's status changes.
+
+        **Authentication:** pass `token=<api-key>` as a query parameter.
+
+        **Message envelope:** every push has the shape defined by
+        `WsTransactionStatusUpdate`.
+      operationId: websocket
+      tags: [WebSocket]
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: API key for authentication
+          schema:
+            type: string
+          example: "my-api-key"
+      responses:
+        "101":
+          description: Switching Protocols — WebSocket connection established
+        "401":
+          description: Invalid or missing token
+
+  # ── Admin: DLQ ────────────────────────────────────────────────────────────────
+  /dlq:
+    get:
+      summary: List dead-letter queue entries
+      description: |
+        Returns up to 100 failed transactions in the DLQ ordered by
+        `moved_to_dlq_at` descending. An empty list means the DLQ is clear.
+      operationId: listDlq
+      tags: [Admin / DLQ]
+      security:
+        - AdminKey: []
+      responses:
+        "200":
+          description: DLQ entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DlqListResponse"
+              example:
+                dlq_entries:
+                  - id: "770a1122-b3cd-4ef5-9a00-665544332211"
+                    transaction_id: "550e8400-e29b-41d4-a716-446655440000"
+                    stellar_account: "GABC1234567890123456789012345678901234567890123456789012"
+                    amount: "100.00"
+                    asset_code: "USD"
+                    anchor_transaction_id: null
+                    error_reason: "Payment failed: network timeout after 3 retries"
+                    stack_trace: null
+                    retry_count: 3
+                    original_created_at: "2024-01-15T09:55:00Z"
+                    moved_to_dlq_at: "2024-01-15T10:00:00Z"
+                    last_retry_at: "2024-01-15T09:59:00Z"
+                count: 1
+        "401":
+          description: Missing or invalid admin key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /dlq/{id}/requeue:
+    post:
+      summary: Requeue a DLQ entry
+      description: |
+        Re-submits the failed transaction to the processor.
+
+        Returns 404 if the entry no longer exists in the DLQ (already requeued
+        or manually removed). This is always surfaced as a clear not-found error
+        — never a silent success.
+      operationId: requeueDlq
+      tags: [Admin / DLQ]
+      security:
+        - AdminKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "770a1122-b3cd-4ef5-9a00-665544332211"
+      responses:
+        "200":
+          description: Entry requeued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequeueResponse"
+              example:
+                message: "DLQ entry requeued successfully"
+                dlq_id: "770a1122-b3cd-4ef5-9a00-665544332211"
+        "404":
+          description: DLQ entry not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Admin: Webhook replay ──────────────────────────────────────────────────────
+  /admin/webhooks/failed:
+    get:
+      summary: List failed webhook deliveries
+      description: |
+        Returns failed webhook deliveries from the audit log. Supports
+        pagination and filtering by asset code or date range.
+      operationId: listFailedWebhooks
+      tags: [Admin / Webhook Replay]
+      security:
+        - AdminKey: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum records to return (server default 50, max 100)
+          schema:
+            type: integer
+          example: 25
+        - name: offset
+          in: query
+          description: Records to skip
+          schema:
+            type: integer
+          example: 0
+        - name: asset_code
+          in: query
+          schema:
+            type: string
+          example: "USD"
+        - name: from_date
+          in: query
+          description: Inclusive start timestamp (RFC 3339)
+          schema:
+            type: string
+            format: date-time
+          example: "2024-01-01T00:00:00Z"
+        - name: to_date
+          in: query
+          description: Inclusive end timestamp (RFC 3339)
+          schema:
+            type: string
+            format: date-time
+          example: "2024-01-31T23:59:59Z"
+      responses:
+        "200":
+          description: Failed webhook deliveries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailedWebhooksResponse"
+
+  /admin/webhooks/replay/{id}:
+    post:
+      summary: Replay a single failed webhook
+      description: |
+        Re-processes the webhook for the given transaction ID. When `dry_run`
+        is `true` the server validates and logs the attempt without committing
+        any state changes.
+      operationId: replayWebhook
+      tags: [Admin / Webhook Replay]
+      security:
+        - AdminKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Transaction ID to replay
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - dry_run
+              properties:
+                dry_run:
+                  type: boolean
+                  default: false
+                  example: false
+      responses:
+        "200":
+          description: Replay result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookReplayResult"
+        "400":
+          description: Cannot replay (e.g. completed transaction without dry-run)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /admin/webhooks/replay/batch:
+    post:
+      summary: Replay multiple failed webhooks in batch
+      description: |
+        Re-processes webhooks for a list of transaction IDs in a single call.
+
+        **Important:** the HTTP response is always 200. Callers **must** inspect
+        each entry in `results` — individual items may report `success: false`
+        even when the overall call succeeds. Relying solely on the top-level HTTP
+        status is a bug.
+      operationId: batchReplayWebhooks
+      tags: [Admin / Webhook Replay]
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - transaction_ids
+              properties:
+                transaction_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  example:
+                    - "550e8400-e29b-41d4-a716-446655440000"
+                    - "660f9511-f3ac-52e5-b827-557766551111"
+                dry_run:
+                  type: boolean
+                  default: false
+                  example: false
+      responses:
+        "200":
+          description: |
+            Batch replay response. Always 200. Inspect each `results` entry
+            individually — `success` may be `false` for some items.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchWebhookReplayResponse"
+              example:
+                total: 2
+                successful: 1
+                failed: 1
+                results:
+                  - transaction_id: "550e8400-e29b-41d4-a716-446655440000"
+                    success: true
+                    message: "Webhook replayed successfully"
+                    dry_run: false
+                    replayed_at: "2024-01-15T10:10:00Z"
+                  - transaction_id: "660f9511-f3ac-52e5-b827-557766551111"
+                    success: false
+                    message: "Failed to replay webhook: transaction not found"
+                    dry_run: false
+                    replayed_at: null
+
+  # ── Admin: Locks ───────────────────────────────────────────────────────────────
+  /admin/locks:
+    get:
+      summary: List active distributed locks
+      description: |
+        Returns all currently held distributed locks. An empty `active_locks`
+        array (never null) means nothing is locked.
+      operationId: listAdminLocks
+      tags: [Admin / Locks]
+      security:
+        - AdminKey: []
+      responses:
+        "200":
+          description: Active lock list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocksListResponse"
+              example:
+                active_locks:
+                  - resource: "settlement:42"
+                    token: "tok-abc-123"
+                    acquired_at: 1700000000
+                    ttl_secs: 30
+                    expected_duration_secs: 30
+                    overdue: false
+                total: 1
+                overdue: 0
+
+  # ── Admin: Settlements ─────────────────────────────────────────────────────────
+  /admin/settlements/{id}/status:
+    patch:
+      summary: Update settlement status
+      description: |
+        Transitions a settlement to a new status. The server enforces valid
+        transitions:
+        - `completed` → `pending_review`, `disputed`
+        - `pending_review` → `adjusted`, `voided`, `disputed`
+        - `disputed` → `adjusted`, `voided`, `pending_review`
+
+        Attempting an invalid transition returns 400 with a specific message.
+      operationId: updateSettlementStatus
+      tags: [Admin / Settlements]
+      security:
+        - AdminKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "660f9511-f3ac-52e5-b827-557766551111"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSettlementStatusRequest"
+            example:
+              status: "disputed"
+              reason: "Discrepancy found in reconciliation report"
+      responses:
+        "200":
+          description: Updated settlement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settlement"
+        "400":
+          description: Invalid status transition or constraint violation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Settlement not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Admin: Reconciliation ──────────────────────────────────────────────────────
+  /admin/reconciliation/reports:
+    get:
+      summary: List reconciliation reports
+      operationId: listReconciliationReports
+      tags: [Admin / Reconciliation]
+      security:
+        - AdminKey: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum records per page (server default 20)
+          schema:
+            type: integer
+          example: 20
+        - name: offset
+          in: query
+          description: Records to skip
+          schema:
+            type: integer
+          example: 0
+      responses:
+        "200":
+          description: Paginated report list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListReconciliationReports"
+
+  /admin/reconciliation/reports/{id}:
+    get:
+      summary: Get reconciliation report detail
+      operationId: getReconciliationReport
+      tags: [Admin / Reconciliation]
+      security:
+        - AdminKey: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "880e8400-e29b-41d4-a716-446655440000"
+      responses:
+        "200":
+          description: Full reconciliation report with discrepancy details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReportDetail"
+        "404":
+          description: Report not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /admin/reconciliation/run:
+    post:
+      summary: Run a reconciliation
+      description: |
+        Runs reconciliation for the specified Stellar account synchronously.
+        Blocks until complete and returns the report summary.
+        For full discrepancy details call `GET /admin/reconciliation/reports/{id}`.
+      operationId: runReconciliation
+      tags: [Admin / Reconciliation]
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunReconciliationRequest"
+            example:
+              account: "GABC1234567890123456789012345678901234567890123456789012"
+              period_hours: 48
+      responses:
+        "200":
+          description: Reconciliation completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunReconciliationResponse"
+        "400":
+          description: Invalid account format or parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  # ── Admin: Bulk status ─────────────────────────────────────────────────────────
+  /admin/transactions/bulk-status:
+    patch:
+      summary: Bulk update transaction statuses
+      description: |
+        Updates the status of multiple transactions in a single request.
+        Partial failures are reported per-item in the `errors` array; the
+        overall HTTP response is 200 even when some items fail.
+      operationId: bulkUpdateStatus
+      tags: [Admin / Transactions]
+      security:
+        - AdminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkStatusRequest"
+            example:
+              transaction_ids:
+                - "550e8400-e29b-41d4-a716-446655440000"
+              status: "completed"
+      responses:
+        "200":
+          description: Bulk update result (inspect `errors` for partial failures)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkStatusResponse"
+              example:
+                updated: 1
+                failed: 0
+                errors: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tags (display order in docs)
+# ─────────────────────────────────────────────────────────────────────────────
+tags:
+  - name: Health
+    description: Liveness, readiness, and dependency health checks
+  - name: Transactions
+    description: Transaction CRUD, search, and export
+  - name: Settlements
+    description: Settlement listing and retrieval
+  - name: Stats
+    description: Aggregate statistics and cache metrics
+  - name: GraphQL
+    description: Schema-driven query interface
+  - name: WebSocket
+    description: Real-time transaction status push
+  - name: Admin / DLQ
+    description: Dead-letter queue inspection and replay
+  - name: Admin / Webhook Replay
+    description: Failed webhook delivery listing and replay
+  - name: Admin / Locks
+    description: Distributed lock inspection
+  - name: Admin / Settlements
+    description: Settlement dispute workflow
+  - name: Admin / Reconciliation
+    description: On-chain vs database reconciliation reports
+  - name: Admin / Transactions
+    description: Bulk transaction management

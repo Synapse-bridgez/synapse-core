@@ -1,13 +1,25 @@
-use crate::error::SynapseError;
+use crate::error::{
+    map_status_to_error, parse_api_error, CatalogEntry, CatalogResponse, SynapseError,
+};
+use crate::resources::admin::{
+    AdminBulkStatus, AdminDlq, AdminLocks, AdminReconciliation, AdminSettlements,
+    AdminWebhookReplay,
+};
+use crate::resources::health::Health;
+use crate::resources::settlements::Settlements;
+use crate::resources::transactions::Transactions;
 use crate::retry::{retry_with_backoff, DEFAULT_BASE_DELAY_MS, DEFAULT_MAX_ATTEMPTS};
 use serde::de::DeserializeOwned;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 /// HTTP client for the Synapse public API.
 ///
-/// Construct via [`SynapseClient::new`] for simple use cases or
-/// [`SynapseClient::builder`] for customised retry behaviour. All requests
-/// are issued with the configured API key and are retried automatically on
-/// transient failures.
+/// Construct via [`SynapseClient::new`] or [`SynapseClient::builder`]. All
+/// requests are issued with the configured API key and are retried automatically
+/// on transient failures.
 #[derive(Clone)]
 pub struct SynapseClient {
     pub(crate) http: reqwest::Client,
@@ -15,6 +27,7 @@ pub struct SynapseClient {
     pub(crate) api_key: String,
     pub(crate) max_attempts: u32,
     pub(crate) base_delay_ms: u64,
+    pub(crate) catalog: Arc<OnceCell<HashMap<String, CatalogEntry>>>,
 }
 
 /// Builder for [`SynapseClient`].
@@ -26,17 +39,11 @@ pub struct SynapseClientBuilder {
 }
 
 impl SynapseClient {
-    /// Construct a client with default retry settings.
+    /// Create a new [`SynapseClient`] with default retry settings.
     ///
-    /// Equivalent to `SynapseClient::builder(base_url, api_key).build()`.
+    /// This is a convenience method equivalent to `SynapseClient::builder(url, key).build()`.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        SynapseClient {
-            http: reqwest::Client::new(),
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            base_delay_ms: DEFAULT_BASE_DELAY_MS,
-        }
+        Self::builder(base_url, api_key).build()
     }
 
     /// Return a builder for constructing a [`SynapseClient`].
@@ -53,33 +60,50 @@ impl SynapseClient {
     }
 
     /// Access the transactions resource.
-    pub fn transactions(&self) -> crate::resources::transactions::Transactions<'_> {
-        crate::resources::transactions::Transactions { client: self }
+    pub fn transactions(&self) -> Transactions<'_> {
+        Transactions { client: self }
     }
 
-    /// Access the stats and cache-metrics resource.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use synapse_sdk::SynapseClient;
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// let client = SynapseClient::new("https://api.example.com", "admin-key");
-    /// let metrics = client.stats().cache_metrics().await.unwrap();
-    /// println!("hit rate: {:.1}%", metrics.query_cache.hit_rate * 100.0);
-    /// # }
-    /// ```
+    /// Access the settlements resource.
+    pub fn settlements(&self) -> Settlements<'_> {
+        Settlements { client: self }
+    }
+
+    /// Access the health resource.
+    pub fn health(&self) -> Health<'_> {
+        Health { client: self }
+    }
+
+    /// Access the graphql resource.
+    pub fn graphql(&self) -> crate::resources::graphql::GraphQL<'_> {
+        crate::resources::graphql::GraphQL { client: self }
+    }
+
+    /// Access the stats resource.
     pub fn stats(&self) -> crate::resources::stats::Stats<'_> {
         crate::resources::stats::Stats { client: self }
     }
 
-    /// Issue an authenticated GET request to `path` and deserialize the JSON response.
-    ///
-    /// The request is retried automatically according to the client's retry
-    /// configuration. 4xx responses are returned immediately without retrying.
-    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, SynapseError> {
-        let url = format!("{}{}", self.base_url, path);
+    /// Access the events resource.
+    pub fn events(&self) -> crate::resources::events::Events<'_> {
+        crate::resources::events::Events { client: self }
+    }
+
+    fn build_url(&self, path: &str, query: &[(&str, &str)]) -> String {
+        if query.is_empty() {
+            format!("{}{}", self.base_url, path)
+        } else {
+            let query = query
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("{}{}?{}", self.base_url, path, query)
+        }
+    }
+
+    async fn get_response(&self, path: &str) -> Result<reqwest::Response, SynapseError> {
+        let url = self.build_url(path, &[]);
         let key = self.api_key.clone();
         let http = self.http.clone();
         retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
@@ -87,29 +111,25 @@ impl SynapseClient {
             let key = key.clone();
             let http = http.clone();
             async move {
-                let resp = http
-                    .get(&url)
+                http.get(&url)
                     .header("X-API-Key", &key)
                     .send()
                     .await
-                    .map_err(SynapseError::Network)?;
-                let status = resp.status().as_u16();
-                if status >= 400 {
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Api {
-                        status,
-                        message: body,
-                    });
-                }
-                resp.json::<T>()
-                    .await
-                    .map_err(|e| SynapseError::Decode(e.to_string()))
+                    .map_err(SynapseError::Network)
             }
         })
         .await
     }
 
-    /// Issue an authenticated GET request with query-string parameters.
+    /// Issue an authenticated GET request to `path` and deserialize the JSON response.
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, SynapseError> {
+        self.get_query(path, &[]).await
+    }
+
+    /// Issue an authenticated GET request with query parameters and deserialize the JSON response.
+    ///
+    /// The request is retried automatically according to the client's retry
+    /// configuration. 4xx responses are returned immediately without retrying.
     pub async fn get_query<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -118,20 +138,151 @@ impl SynapseClient {
         let url = format!("{}{}", self.base_url, path);
         let key = self.api_key.clone();
         let http = self.http.clone();
-        let query_owned: Vec<(String, String)> = query
+        let query: Vec<(String, String)> = query
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let raw = retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+            let url = url.clone();
+            let key = key.clone();
+            let http = http.clone();
+            let query = query.clone();
+            async move {
+                let resp = http
+                    .get(&url)
+                    .query(&query)
+                    .header("X-API-Key", &key)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
+                let status = resp.status().as_u16();
+                if status >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SynapseError::Http { status, body });
+                }
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
+            }
+        })
+        .await;
+        match raw {
+            Err(SynapseError::Http { status, body }) => Err(self.map_api_error(status, body).await),
+            other => other,
+        }
+    }
+
+    /// Issue an authenticated POST request with a JSON body and deserialize the JSON response.
+    ///
+    /// 4xx responses are returned immediately without retrying.
+    pub async fn post<T: DeserializeOwned, B: Serialize + Clone + Send + 'static>(
+        &self,
+        path: &str,
+        body: B,
+    ) -> Result<T, SynapseError> {
+        let url = format!("{}{}", self.base_url, path);
+        let key = self.api_key.clone();
+        let http = self.http.clone();
+        let raw = retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+            let url = url.clone();
+            let key = key.clone();
+            let http = http.clone();
+            let body = body.clone();
+            async move {
+                let resp = http
+                    .post(&url)
+                    .header("X-API-Key", &key)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
+                let status = resp.status().as_u16();
+                if status >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SynapseError::Http { status, body });
+                }
+                resp.json::<T>()
+                    .await
+                    .map_err(|e| SynapseError::Decode(e.to_string()))
+            }
+        })
+        .await;
+        match raw {
+            Err(SynapseError::Http { status, body }) => Err(self.map_api_error(status, body).await),
+            other => other,
+        }
+    }
+
+    /// Issue an authenticated GET request and deserialize JSON even on non-2xx status.
+    pub async fn get_json_with_status<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<(u16, T), SynapseError> {
+        let resp = self.get_response(path).await?;
+        let status = resp.status().as_u16();
+        let body = resp.json::<T>().await.map_err(SynapseError::Network)?;
+        Ok((status, body))
+    }
+
+    /// Issue an authenticated GET request with query parameters and deserialize JSON even on non-2xx status.
+    pub async fn get_query_json_with_status<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<(u16, T), SynapseError> {
+        let url = self.build_url(path, query);
+        let key = self.api_key.clone();
+        let http = self.http.clone();
         retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
             let url = url.clone();
             let key = key.clone();
             let http = http.clone();
-            let query_owned = query_owned.clone();
             async move {
                 let resp = http
                     .get(&url)
                     .header("X-API-Key", &key)
-                    .query(&query_owned)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
+                let status = resp.status().as_u16();
+                let body = resp.json::<T>().await.map_err(SynapseError::Network)?;
+                Ok((status, body))
+            }
+        })
+        .await
+    }
+
+    /// Issue an authenticated GET request and return raw bytes.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>, SynapseError> {
+        let resp = self.get_response(path).await?;
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SynapseError::Http { status, body });
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(SynapseError::Network)
+    }
+
+    /// Issue an authenticated GET request with query parameters and return raw bytes.
+    pub async fn get_query_bytes(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Vec<u8>, SynapseError> {
+        let url = self.build_url(path, query);
+        let key = self.api_key.clone();
+        let http = self.http.clone();
+        retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+            let url = url.clone();
+            let key = key.clone();
+            let http = http.clone();
+            async move {
+                let resp = http
+                    .get(&url)
+                    .header("X-API-Key", &key)
                     .send()
                     .await
                     .map_err(SynapseError::Network)?;
@@ -143,27 +294,69 @@ impl SynapseClient {
                         message: body,
                     });
                 }
-                resp.json::<T>()
+                resp.bytes()
                     .await
-                    .map_err(|e| SynapseError::Decode(e.to_string()))
+                    .map(|b| b.to_vec())
+                    .map_err(SynapseError::Network)
             }
         })
         .await
     }
+
+    /// Fetch `/errors` on first call and return a reference to the cached catalog.
+    async fn ensure_catalog(&self) -> Option<&HashMap<String, CatalogEntry>> {
+        let http = self.http.clone();
+        let url = format!("{}/errors", self.base_url);
+        self.catalog
+            .get_or_try_init(|| async move {
+                let resp = http.get(&url).send().await?;
+                let body: CatalogResponse = resp.json().await?;
+                let map = body
+                    .errors
+                    .into_iter()
+                    .map(|e| (e.code.clone(), e))
+                    .collect();
+                Ok::<_, reqwest::Error>(map)
+            })
+            .await
+            .ok()
+    }
+
+    /// Translate a raw HTTP error into a typed [`SynapseError`] using the
+    /// lazily-fetched error catalog. Unknown codes fall back to [`SynapseError::Api`].
+    ///
+    /// Catalog descriptions are used only for named variants (401, 403, 404,
+    /// 429). For all other statuses the body message is preserved as-is so
+    /// that callers which inspect the message (e.g. cursor-error detection)
+    /// continue to work.
+    async fn map_api_error(&self, status: u16, body: String) -> SynapseError {
+        let (code, base_msg) = parse_api_error(&body);
+        let is_named = matches!(status, 401 | 403 | 404 | 429);
+        let description = if is_named {
+            match &code {
+                Some(c) => self
+                    .ensure_catalog()
+                    .await
+                    .and_then(|cat| cat.get(c))
+                    .map(|e| e.description.clone()),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let message = description.unwrap_or(base_msg);
+        map_status_to_error(status, message)
+    }
 }
 
 impl SynapseClientBuilder {
-    /// Set the maximum total number of attempts, including the first (default: 3).
-    ///
-    /// Values below 1 are treated as 1 (no retries).
+    /// Set the maximum total number of attempts (default: 3).
     pub fn max_attempts(mut self, n: u32) -> Self {
         self.max_attempts = n.max(1);
         self
     }
 
-    /// Disable retry behaviour. The first failure is returned immediately.
-    ///
-    /// Use this when the caller manages its own retry loop.
+    /// Disable retry behaviour.
     pub fn disable_retries(mut self) -> Self {
         self.max_attempts = 1;
         self
@@ -181,6 +374,224 @@ impl SynapseClientBuilder {
             http: reqwest::Client::new(),
             base_url: self.base_url,
             api_key: self.api_key,
+            max_attempts: self.max_attempts,
+            base_delay_ms: self.base_delay_ms,
+            catalog: Arc::new(OnceCell::new()),
+        }
+    }
+}
+
+// ============================================================================
+// Admin API Client
+// ============================================================================
+
+/// HTTP client for the Synapse admin API.
+///
+/// Construct via [`AdminSynapseClient::builder`]. All requests are issued with the
+/// configured admin API key and are retried automatically on transient failures.
+#[derive(Clone)]
+pub struct AdminSynapseClient {
+    pub(crate) http: reqwest::Client,
+    pub(crate) base_url: String,
+    pub(crate) admin_key: String,
+    pub(crate) max_attempts: u32,
+    pub(crate) base_delay_ms: u64,
+}
+
+/// Builder for [`AdminSynapseClient`].
+pub struct AdminSynapseClientBuilder {
+    base_url: String,
+    admin_key: String,
+    max_attempts: u32,
+    base_delay_ms: u64,
+}
+
+impl AdminSynapseClient {
+    /// Return a builder for constructing an [`AdminSynapseClient`].
+    pub fn builder(
+        base_url: impl Into<String>,
+        admin_key: impl Into<String>,
+    ) -> AdminSynapseClientBuilder {
+        AdminSynapseClientBuilder {
+            base_url: base_url.into(),
+            admin_key: admin_key.into(),
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            base_delay_ms: DEFAULT_BASE_DELAY_MS,
+        }
+    }
+
+    /// Issue an authenticated GET request to `path` and deserialize the JSON response.
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, SynapseError> {
+        let url = format!("{}{}", self.base_url, path);
+        let key = self.admin_key.clone();
+        let http = self.http.clone();
+        retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+            let url = url.clone();
+            let key = key.clone();
+            let http = http.clone();
+            async move {
+                let resp = http
+                    .get(&url)
+                    .header("X-Admin-Key", &key)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
+                let status = resp.status().as_u16();
+                if status >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    return if status >= 500 {
+                        Err(SynapseError::Http { status, body })
+                    } else {
+                        Err(SynapseError::Api {
+                            status,
+                            message: body,
+                        })
+                    };
+                }
+                resp.json::<T>().await.map_err(SynapseError::Network)
+            }
+        })
+        .await
+    }
+
+    /// Issue an authenticated GET request with query parameters.
+    pub async fn get_query<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T, SynapseError> {
+        let url = format!("{}{}", self.base_url, path);
+        let key = self.admin_key.clone();
+        let http = self.http.clone();
+        let query = query.to_vec();
+        retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+            let url = url.clone();
+            let key = key.clone();
+            let http = http.clone();
+            let query = query.clone();
+            async move {
+                let mut req = http.get(&url).header("X-Admin-Key", &key);
+                for (k, v) in query.iter() {
+                    req = req.query(&[(k, v)]);
+                }
+                let resp = req.send().await.map_err(SynapseError::Network)?;
+                let status = resp.status().as_u16();
+                if status >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    return if status >= 500 {
+                        Err(SynapseError::Http { status, body })
+                    } else {
+                        Err(SynapseError::Api {
+                            status,
+                            message: body,
+                        })
+                    };
+                }
+                resp.json::<T>().await.map_err(SynapseError::Network)
+            }
+        })
+        .await
+    }
+
+    /// Issue an authenticated POST request with JSON body and deserialize the JSON response.
+    pub async fn post<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, SynapseError> {
+        let url = format!("{}{}", self.base_url, path);
+        let key = self.admin_key.clone();
+        let http = self.http.clone();
+        let body_json =
+            serde_json::to_string(body).map_err(|e| SynapseError::Decode(e.to_string()))?;
+        retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+            let url = url.clone();
+            let key = key.clone();
+            let http = http.clone();
+            let body_json = body_json.clone();
+            async move {
+                let resp = http
+                    .post(&url)
+                    .header("X-Admin-Key", &key)
+                    .header("Content-Type", "application/json")
+                    .body(body_json)
+                    .send()
+                    .await
+                    .map_err(SynapseError::Network)?;
+                let status = resp.status().as_u16();
+                if status >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    return if status >= 500 {
+                        Err(SynapseError::Http { status, body })
+                    } else {
+                        Err(SynapseError::Api {
+                            status,
+                            message: body,
+                        })
+                    };
+                }
+                resp.json::<T>().await.map_err(SynapseError::Network)
+            }
+        })
+        .await
+    }
+
+    /// Access admin dead-letter queue operations.
+    pub fn dlq(&self) -> AdminDlq<'_> {
+        AdminDlq::new(self)
+    }
+
+    /// Access admin webhook replay operations.
+    pub fn webhook_replay(&self) -> AdminWebhookReplay<'_> {
+        AdminWebhookReplay::new(self)
+    }
+
+    /// Access admin reconciliation operations.
+    pub fn reconciliation(&self) -> AdminReconciliation<'_> {
+        AdminReconciliation::new(self)
+    }
+
+    /// Access admin settlement operations.
+    pub fn settlements(&self) -> AdminSettlements<'_> {
+        AdminSettlements::new(self)
+    }
+
+    /// Access admin distributed-lock operations.
+    pub fn locks(&self) -> AdminLocks<'_> {
+        AdminLocks::new(self)
+    }
+
+    /// Access admin bulk transaction status operations.
+    pub fn bulk_status(&self) -> AdminBulkStatus<'_> {
+        AdminBulkStatus::new(self)
+    }
+}
+
+impl AdminSynapseClientBuilder {
+    /// Set the maximum total number of attempts, including the first (default: 3).
+    pub fn max_attempts(mut self, n: u32) -> Self {
+        self.max_attempts = n.max(1);
+        self
+    }
+
+    /// Disable retry behaviour. The first failure is returned immediately.
+    pub fn disable_retries(mut self) -> Self {
+        self.max_attempts = 1;
+        self
+    }
+
+    /// Set the base delay in milliseconds for exponential backoff (default: 200).
+    pub fn base_delay_ms(mut self, ms: u64) -> Self {
+        self.base_delay_ms = ms;
+        self
+    }
+
+    /// Build the [`AdminSynapseClient`].
+    pub fn build(self) -> AdminSynapseClient {
+        AdminSynapseClient {
+            http: reqwest::Client::new(),
+            base_url: self.base_url,
+            admin_key: self.admin_key,
             max_attempts: self.max_attempts,
             base_delay_ms: self.base_delay_ms,
         }

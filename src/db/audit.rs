@@ -8,6 +8,7 @@ use uuid::Uuid;
 /// Entity type constants for audit logs
 pub const ENTITY_TRANSACTION: &str = "transaction";
 pub const ENTITY_SETTLEMENT: &str = "settlement";
+pub const ENTITY_BACKUP: &str = "backup";
 
 /// Represents an audit log entry
 #[derive(Debug, Clone)]

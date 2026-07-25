@@ -34,12 +34,15 @@ mod tests {
             );
         }
 
-        // These were all invalid in the original
+        // These were all invalid in the original.
+        // Note: same-state transitions (e.g. "pending_review" → "pending_review")
+        // are intentionally always valid (idempotent) — see
+        // `is_valid_transition`'s doc comment and `same_state_transitions_always_valid`
+        // below — so they don't belong in this list.
         let expected_invalid = vec![
             ("completed", "voided"),
             ("adjusted", "disputed"),
             ("voided", "completed"),
-            ("pending_review", "pending_review"),
             ("processing", "anything"), // non-existent state
         ];
 

@@ -4,6 +4,7 @@ pub mod circuit_breaker;
 pub mod compliance;
 pub mod feature_flags;
 pub mod lock_manager;
+pub mod pitr;
 pub mod processor;
 pub mod query_cache;
 pub mod reconciliation;

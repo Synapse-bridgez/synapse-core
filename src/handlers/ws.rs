@@ -229,6 +229,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_addr: String) 
         _ = (&mut recv_task) => send_task.abort(),
     }
 
+    // Send an explicit Close frame so the client sees a clean RFC 6455
+    // shutdown rather than an abrupt TCP teardown (relevant for heartbeat
+    // timeouts and broadcast-channel closure, where the client never sent
+    // a Close frame of its own to reply to).
+    {
+        let mut s = sender.lock().await;
+        let _ = s.send(Message::Close(None)).await;
+    }
+
     let remaining = state.ws_connection_count.fetch_sub(1, Ordering::Relaxed) - 1;
     let total_dropped = messages_dropped_total.load(Ordering::Relaxed);
     tracing::info!(
