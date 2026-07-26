@@ -90,15 +90,18 @@ impl SynapseClient {
     }
 
     fn build_url(&self, path: &str, query: &[(&str, &str)]) -> String {
+        let base = format!("{}{}", self.base_url, path);
         if query.is_empty() {
-            format!("{}{}", self.base_url, path)
+            base
         } else {
-            let query = query
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<_>>()
-                .join("&");
-            format!("{}{}?{}", self.base_url, path, query)
+            let mut url = url::Url::parse(&base).expect("base_url must be a valid URL");
+            {
+                let mut pairs = url.query_pairs_mut();
+                for (k, v) in query {
+                    pairs.append_pair(k, v);
+                }
+            }
+            url.into()
         }
     }
 

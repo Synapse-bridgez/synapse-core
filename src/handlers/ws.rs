@@ -38,6 +38,7 @@ pub struct TransactionStatusUpdate {
     pub tenant_id: Uuid,
     pub status: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub asset_code: Option<String>,
     pub message: Option<String>,
 }
 
@@ -418,6 +419,7 @@ mod tests {
             tenant_id: Uuid::new_v4(),
             status: "completed".to_string(),
             timestamp: chrono::Utc::now(),
+            asset_code: Some("USDC".to_string()),
             message: Some("Transaction processed".to_string()),
         };
         let json = serde_json::to_string(&update).unwrap();
