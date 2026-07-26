@@ -183,11 +183,19 @@ pub struct RetentionResult {
     pub deleted: u64,
 }
 
+/// Number of rows fetched/deleted per batch in [`run_retention`]. Keeps memory
+/// use bounded regardless of how large the backlog of expired rows grows.
+const RETENTION_BATCH_SIZE: i64 = 1000;
+
 /// Export audit logs older than `cutoff` (excluding protected entity IDs) to a
 /// gzip-compressed NDJSON file, then delete them from the database.
 ///
 /// Rows whose `entity_id` belongs to a transaction with status `'disputed'` are
 /// never deleted (they are still exported to the archive).
+///
+/// Rows are paged through in bounded batches (keyset pagination on
+/// `(timestamp, id)`) and streamed to the archive/delete per batch, so memory
+/// use stays bounded even when the backlog of expired rows is very large.
 ///
 /// Returns `Ok(None)` when there is nothing to do (no rows older than cutoff).
 pub async fn run_retention(
@@ -195,101 +203,142 @@ pub async fn run_retention(
     cutoff: DateTime<Utc>,
     archive_dir: &str,
 ) -> Result<Option<RetentionResult>, Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Fetch all rows older than the cutoff.
-    let rows = sqlx::query(
-        r#"
-        SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
-        FROM audit_logs
-        WHERE timestamp < $1
-        ORDER BY timestamp ASC
-        "#,
-    )
-    .bind(cutoff)
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
-        return Ok(None);
-    }
-
-    // 2. Identify entity_ids that belong to disputed transactions — these must
-    //    never be deleted.
-    let entity_ids: Vec<Uuid> = rows
-        .iter()
-        .map(|r| r.try_get::<Uuid, _>("entity_id"))
-        .collect::<Result<_, _>>()?;
-
-    let disputed: Vec<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT id FROM transactions
-        WHERE id = ANY($1)
-          AND status = 'disputed'
-        "#,
-    )
-    .bind(&entity_ids)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default(); // if transactions table has no disputed column yet, skip
-
-    let disputed_set: std::collections::HashSet<Uuid> = disputed.into_iter().collect();
-
-    // 3. Serialize all rows (including protected ones) to NDJSON and compress.
     let timestamp_str = Utc::now().format("%Y%m%dT%H%M%SZ");
     let archive_path = format!("{}/audit_logs_{}.ndjson.gz", archive_dir, timestamp_str);
 
-    let file = std::fs::File::create(&archive_path)?;
-    let mut gz = GzEncoder::new(file, Compression::default());
+    let mut gz: Option<GzEncoder<std::fs::File>> = None;
+    let mut exported: usize = 0;
+    let mut deleted: u64 = 0;
+    let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
 
-    for row in &rows {
-        let id: Uuid = row.try_get("id")?;
-        let entity_id: Uuid = row.try_get("entity_id")?;
-        let entity_type: String = row.try_get("entity_type")?;
-        let action: String = row.try_get("action")?;
-        let old_val: Option<JsonValue> = row.try_get("old_val")?;
-        let new_val: Option<JsonValue> = row.try_get("new_val")?;
-        let actor: String = row.try_get("actor")?;
-        let timestamp: DateTime<Utc> = row.try_get("timestamp")?;
+    loop {
+        let rows = match cursor {
+            None => {
+                sqlx::query(
+                    r#"
+                    SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+                    FROM audit_logs
+                    WHERE timestamp < $1
+                    ORDER BY timestamp ASC, id ASC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(cutoff)
+                .bind(RETENTION_BATCH_SIZE)
+                .fetch_all(pool)
+                .await?
+            }
+            Some((last_ts, last_id)) => {
+                sqlx::query(
+                    r#"
+                    SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
+                    FROM audit_logs
+                    WHERE timestamp < $1
+                      AND (timestamp, id) > ($2, $3)
+                    ORDER BY timestamp ASC, id ASC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(cutoff)
+                .bind(last_ts)
+                .bind(last_id)
+                .bind(RETENTION_BATCH_SIZE)
+                .fetch_all(pool)
+                .await?
+            }
+        };
 
-        let record = json!({
-            "id": id,
-            "entity_id": entity_id,
-            "entity_type": entity_type,
-            "action": action,
-            "old_val": old_val,
-            "new_val": new_val,
-            "actor": actor,
-            "timestamp": timestamp.to_rfc3339(),
-        });
+        if rows.is_empty() {
+            break;
+        }
+        let batch_len = rows.len();
 
-        writeln!(gz, "{}", record)?;
+        // Identify entity_ids in this batch that belong to disputed
+        // transactions — these must never be deleted.
+        let entity_ids: Vec<Uuid> = rows
+            .iter()
+            .map(|r| r.try_get::<Uuid, _>("entity_id"))
+            .collect::<Result<_, _>>()?;
+
+        let disputed: Vec<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT id FROM transactions
+            WHERE id = ANY($1)
+              AND status = 'disputed'
+            "#,
+        )
+        .bind(&entity_ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default(); // if transactions table has no disputed column yet, skip
+
+        let disputed_set: std::collections::HashSet<Uuid> = disputed.into_iter().collect();
+
+        let gz_writer = match gz.as_mut() {
+            Some(w) => w,
+            None => {
+                let file = std::fs::File::create(&archive_path)?;
+                gz.insert(GzEncoder::new(file, Compression::default()))
+            }
+        };
+
+        let mut deletable_ids: Vec<Uuid> = Vec::with_capacity(batch_len);
+        let mut last_key: Option<(DateTime<Utc>, Uuid)> = None;
+
+        for row in &rows {
+            let id: Uuid = row.try_get("id")?;
+            let entity_id: Uuid = row.try_get("entity_id")?;
+            let entity_type: String = row.try_get("entity_type")?;
+            let action: String = row.try_get("action")?;
+            let old_val: Option<JsonValue> = row.try_get("old_val")?;
+            let new_val: Option<JsonValue> = row.try_get("new_val")?;
+            let actor: String = row.try_get("actor")?;
+            let timestamp: DateTime<Utc> = row.try_get("timestamp")?;
+
+            let record = json!({
+                "id": id,
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "action": action,
+                "old_val": old_val,
+                "new_val": new_val,
+                "actor": actor,
+                "timestamp": timestamp.to_rfc3339(),
+            });
+
+            writeln!(gz_writer, "{}", record)?;
+
+            if !disputed_set.contains(&entity_id) {
+                deletable_ids.push(id);
+            }
+            last_key = Some((timestamp, id));
+        }
+
+        exported += batch_len;
+
+        if !deletable_ids.is_empty() {
+            let result = sqlx::query("DELETE FROM audit_logs WHERE id = ANY($1)")
+                .bind(&deletable_ids)
+                .execute(pool)
+                .await?;
+            deleted += result.rows_affected();
+        }
+
+        cursor = last_key;
+
+        if batch_len < RETENTION_BATCH_SIZE as usize {
+            break;
+        }
     }
 
-    gz.finish()?;
-    let exported = rows.len();
+    if exported == 0 {
+        return Ok(None);
+    }
 
-    // 4. Delete only the non-protected rows.
-    let deletable_ids: Vec<Uuid> = rows
-        .iter()
-        .filter_map(|r| {
-            let id: Uuid = r.try_get("id").ok()?;
-            let entity_id: Uuid = r.try_get("entity_id").ok()?;
-            if disputed_set.contains(&entity_id) {
-                None
-            } else {
-                Some(id)
-            }
-        })
-        .collect();
-
-    let deleted = if deletable_ids.is_empty() {
-        0
-    } else {
-        let result = sqlx::query("DELETE FROM audit_logs WHERE id = ANY($1)")
-            .bind(&deletable_ids)
-            .execute(pool)
-            .await?;
-        result.rows_affected()
-    };
+    if let Some(mut gz_writer) = gz {
+        gz_writer.flush()?;
+        gz_writer.finish()?;
+    }
 
     Ok(Some(RetentionResult {
         exported,

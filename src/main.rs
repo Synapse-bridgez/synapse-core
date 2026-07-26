@@ -202,6 +202,7 @@ async fn serve(
 
     if pool_manager.replica().is_some() {
         tracing::info!("Database replica configured - read queries will be routed to replica");
+        pool_manager.start_health_checks();
     } else {
         tracing::info!("No replica configured - all queries will use primary database");
     }
