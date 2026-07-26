@@ -387,6 +387,7 @@ async fn serve(
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        idempotency_service: Some(idempotency_service),
         asset_cache,
         idempotency_service,
     };
