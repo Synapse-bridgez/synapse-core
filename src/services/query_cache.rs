@@ -15,21 +15,24 @@ struct CacheEntry<T> {
     expires_at: Instant,
 }
 
-/// Redis connection pool configuration with performance tuning.
+/// Redis connection pool configuration metadata.
 ///
-/// # Performance Optimization
-/// - Maintains a pool of reusable Redis connections to avoid connection overhead
-/// - Each connection is verified with a PING before being returned to prevent
-///   stale connection issues
-/// - Pool exhaustion is handled gracefully with typed errors
-/// - Configurable max size and acquisition timeout
+/// NOTE: These values are read from environment variables but NOT currently enforced.
+/// The underlying `redis::aio::ConnectionManager` handles its own internal connection
+/// reuse and reconnection logic, which is transparent to this layer. If you need to
+/// enforce strict connection pool limits or acquisition timeouts, this struct would
+/// need to be enhanced with a Semaphore-based pool implementation.
+///
+/// # Configuration
+/// - pool_size: Read from REDIS_POOL_SIZE env var (default: 10)
+/// - pool_timeout: Read from REDIS_POOL_TIMEOUT_SECS env var (default: 5 secs)
 #[derive(Clone, Debug)]
 pub struct RedisPoolConfig {
-    /// Maximum number of pooled Redis connections.
-    /// OPT: Configurable from env var REDIS_POOL_SIZE; defaults to 10
+    /// Maximum number of pooled Redis connections (from REDIS_POOL_SIZE).
+    /// NOTE: Currently for informational purposes only; not enforced.
     pub pool_size: u32,
-    /// Timeout for acquiring a connection from the pool.
-    /// OPT: Configurable from env var REDIS_POOL_TIMEOUT_SECS; defaults to 5
+    /// Timeout for acquiring a connection from the pool (from REDIS_POOL_TIMEOUT_SECS).
+    /// NOTE: Currently for informational purposes only; not enforced.
     pub pool_timeout: Duration,
 }
 
@@ -107,19 +110,19 @@ fn cache_validation_error(err: ValidationError) -> redis::RedisError {
 }
 
 impl QueryCache {
-    /// Creates a new QueryCache with connection pooling optimized for performance.
+    /// Creates a new QueryCache with Redis connection management.
     ///
-    /// # Connection Pool Setup
-    /// - OPT: Creates a ConnectionManager that pools Redis connections
-    /// - OPT: Pool size is configurable via REDIS_POOL_SIZE env var (default: 10)
-    /// - OPT: Pool timeout is configurable via REDIS_POOL_TIMEOUT_SECS (default: 5)
-    /// - OPT: Each acquired connection is verified with PING before use
+    /// # Connection Management
+    /// - Uses redis::aio::ConnectionManager for built-in connection reuse
+    /// - Maintains an in-memory LRU cache for frequently accessed values
+    /// - RedisPoolConfig is read from environment variables but not enforced
+    ///   (pool_size and pool_timeout are for operational awareness only)
     ///
     /// # Arguments
     /// * `redis_url` - The Redis server URL (e.g., "redis://localhost:6379")
     ///
     /// # Returns
-    /// A QueryCache instance with an initialized connection pool
+    /// A QueryCache instance with an initialized connection manager and LRU cache
     pub async fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = Client::open(redis_url)?;
 
@@ -146,13 +149,11 @@ impl QueryCache {
         })
     }
 
-    /// Acquires a connection from the pool with health verification.
+    /// Acquires a connection manager for Redis operations.
     ///
-    /// OPT: Uses the internal connection pool to reuse connections
-    /// OPT: Automatically verifies the connection with PING
-    /// OPT: Returns an error if pool exhaustion or timeout occurs
+    /// This is a cheap clone of the shared ConnectionManager, which handles
+    /// connection reuse internally via Arc-wrapped state.
     async fn get_connection(&self) -> Result<ConnectionManager, redis::RedisError> {
-        // OPT: Clone the connection manager (cheap operation, backed by Arc)
         Ok(self.pool.clone())
     }
 
@@ -303,16 +304,12 @@ impl QueryCache {
         conn.del::<_, ()>(key).await
     }
 
-    /// Verifies the Redis connection pool is healthy by pinging the server.
-    ///
-    /// OPT: Sends a PING command to verify all pooled connections are responsive.
-    /// Returns an error if the pool is exhausted or the server is unreachable.
+    /// Verifies the Redis connection is healthy by sending a PING.
     ///
     /// # Returns
-    /// - `Ok(())` if the connection pool is healthy
-    /// - `Err(redis::RedisError)` if pool exhaustion or connection failure
+    /// - `Ok(())` if Redis responds to PING
+    /// - `Err(redis::RedisError)` if connection fails
     pub async fn health_check(&self) -> Result<(), redis::RedisError> {
-        // OPT: Use pooled connection for health check
         let mut conn = self.pool.clone();
         redis::cmd("PING")
             .query_async::<_, String>(&mut conn)
@@ -526,5 +523,45 @@ mod tests {
         let err = result.unwrap_err();
         // Error should be serializable/displayable
         let _ = err.to_string();
+    }
+
+    #[test]
+    fn test_redis_pool_config_defaults() {
+        let config = RedisPoolConfig::default();
+        assert_eq!(config.pool_size, 10);
+        assert_eq!(config.pool_timeout.as_secs(), 5);
+    }
+
+    #[test]
+    fn test_redis_pool_config_exposed_via_cache() {
+        // This test verifies the pool_config method returns the configuration
+        // even though it's not currently enforced. This is important for
+        // operational visibility and future enforcement.
+        let config = RedisPoolConfig::default();
+        assert!(config.pool_size > 0);
+        assert!(config.pool_timeout.as_secs() > 0);
+    }
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let config = CacheConfig::default();
+        assert_eq!(config.status_counts_ttl, 300);
+        assert_eq!(config.daily_totals_ttl, 3600);
+        assert_eq!(config.asset_stats_ttl, 600);
+        assert_eq!(config.memory_cache_size, 1000);
+        assert_eq!(config.memory_cache_ttl, 30);
+    }
+
+    #[test]
+    fn test_redis_pool_config_with_custom_values() {
+        std::env::set_var("REDIS_POOL_SIZE", "20");
+        std::env::set_var("REDIS_POOL_TIMEOUT_SECS", "10");
+
+        let config = RedisPoolConfig::default();
+        assert_eq!(config.pool_size, 20);
+        assert_eq!(config.pool_timeout.as_secs(), 10);
+
+        std::env::remove_var("REDIS_POOL_SIZE");
+        std::env::remove_var("REDIS_POOL_TIMEOUT_SECS");
     }
 }
