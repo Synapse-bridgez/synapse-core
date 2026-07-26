@@ -77,16 +77,47 @@ impl ComponentStatus {
     }
 }
 
+/// Trait for types that can report the live status of a single service component.
+///
+/// Implement this trait and pass the boxed checker to
+/// [`HealthCheckManager::with_component_checker`] so that `perform_health_check`
+/// interrogates real component state instead of returning a hard-coded "healthy".
+pub trait ComponentChecker: Send + Sync {
+    /// Return the current [`ComponentStatus`] for this component.
+    ///
+    /// Implementations should be fast and non-blocking where possible; the
+    /// health-check cache will shield the system from pathological call rates.
+    fn check(&self) -> ComponentStatus;
+}
+
+/// Bundled component checkers, one per [`HealthComponents`] field.
+struct ComponentCheckers {
+    database: Box<dyn ComponentChecker>,
+    telemetry_export: Box<dyn ComponentChecker>,
+    message_queue: Box<dyn ComponentChecker>,
+}
+
 /// Manager for secure health checks with caching and rate limiting.
 pub struct HealthCheckManager {
     config: HealthCheckConfig,
     cached_result: Arc<RwLock<Option<CachedHealth>>>,
     check_count: Arc<RwLock<u32>>,
     check_interval_start: Arc<RwLock<Instant>>,
+    /// Optional real component checkers injected by the caller.
+    ///
+    /// When `None`, `perform_health_check` reports every component as "healthy"
+    /// (baseline/placeholder behaviour).  Supply real checkers via
+    /// [`HealthCheckManager::with_component_checker`] so that the manager
+    /// reflects actual component state.
+    component_checkers: Option<Arc<ComponentCheckers>>,
 }
 
 impl HealthCheckManager {
     /// Create a new health check manager with default configuration.
+    ///
+    /// No component checkers are injected; [`check`](Self::check) will return a
+    /// hard-coded "healthy" baseline until real checkers are supplied via
+    /// [`with_component_checker`](Self::with_component_checker).
     pub fn new() -> Self {
         Self::with_config(HealthCheckConfig::default())
     }
@@ -98,7 +129,30 @@ impl HealthCheckManager {
             cached_result: Arc::new(RwLock::new(None)),
             check_count: Arc::new(RwLock::new(0)),
             check_interval_start: Arc::new(RwLock::new(Instant::now())),
+            component_checkers: None,
         }
+    }
+
+    /// Attach real component checkers so that `perform_health_check` reflects
+    /// actual component state rather than always returning "healthy".
+    ///
+    /// # Arguments
+    ///
+    /// - `database` — checks the database / connection-pool liveness.
+    /// - `telemetry_export` — checks the OTLP export pipeline.
+    /// - `message_queue` — checks the message queue / broker connectivity.
+    pub fn with_component_checker(
+        mut self,
+        database: Box<dyn ComponentChecker>,
+        telemetry_export: Box<dyn ComponentChecker>,
+        message_queue: Box<dyn ComponentChecker>,
+    ) -> Self {
+        self.component_checkers = Some(Arc::new(ComponentCheckers {
+            database,
+            telemetry_export,
+            message_queue,
+        }));
+        self
     }
 
     /// Validate health check request (ensure parameters are non-empty and well-formed).
@@ -170,21 +224,54 @@ impl HealthCheckManager {
         Ok(result)
     }
 
-    /// Internal implementation of health check logic (should be implemented by callers).
+    /// Run the real component checks (or fall back to the baseline if no
+    /// checkers have been injected).
+    ///
+    /// When [`with_component_checker`](Self::with_component_checker) has been
+    /// called the component statuses reflect live state; otherwise every
+    /// component is reported as "healthy" (placeholder baseline — suitable only
+    /// until real checkers are wired in).
+    ///
+    /// The top-level `status` field is "healthy" when all components are
+    /// healthy and "degraded" when at least one reports unhealthy.
     async fn perform_health_check(&self) -> Result<HealthCheckResult, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "Failed to get current timestamp".to_string())?
             .as_millis() as u64;
 
-        Ok(HealthCheckResult {
-            status: "healthy".to_string(),
-            timestamp: now,
-            components: HealthComponents {
+        let components = if let Some(checkers) = &self.component_checkers {
+            HealthComponents {
+                database: checkers.database.check(),
+                telemetry_export: checkers.telemetry_export.check(),
+                message_queue: checkers.message_queue.check(),
+            }
+        } else {
+            // No real checkers injected — return a static baseline.
+            // Wire real checkers via `with_component_checker` to reflect actual state.
+            HealthComponents {
                 database: ComponentStatus::healthy(),
                 telemetry_export: ComponentStatus::healthy(),
                 message_queue: ComponentStatus::healthy(),
+            }
+        };
+
+        let all_healthy = [
+            &components.database,
+            &components.telemetry_export,
+            &components.message_queue,
+        ]
+        .iter()
+        .all(|c| c.status == "healthy");
+
+        Ok(HealthCheckResult {
+            status: if all_healthy {
+                "healthy".to_string()
+            } else {
+                "degraded".to_string()
             },
+            timestamp: now,
+            components,
         })
     }
 }
