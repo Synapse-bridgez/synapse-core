@@ -1,8 +1,10 @@
+pub mod adapters;
 pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod domain;
 pub mod error;
 pub mod graphql;
 pub mod handlers;
@@ -10,6 +12,7 @@ pub mod health;
 pub mod metrics;
 pub mod middleware;
 pub mod payments;
+pub mod ports;
 pub mod readiness;
 pub mod schemas;
 pub mod secrets;
@@ -19,6 +22,7 @@ pub mod startup;
 pub mod stellar;
 pub mod telemetry;
 pub mod tenant;
+pub mod use_cases;
 pub mod utils;
 pub mod validation;
 pub mod ws;
@@ -69,8 +73,10 @@ pub struct AppState {
     pub metrics_handle: crate::metrics::MetricsHandle,
     /// Active WebSocket connection count
     pub ws_connection_count: Arc<AtomicUsize>,
-    /// Redis-backed idempotency service for deduplicating webhook/callback deliveries (#910).
-    pub idempotency_service: Option<IdempotencyService>,
+    /// Dynamic asset registry, refreshed from the `assets` table every 5 minutes.
+    pub asset_cache: Arc<AssetCache>,
+    /// Redis idempotency service for webhook deduplication
+    pub idempotency_service: Option<crate::middleware::idempotency::IdempotencyService>,
 }
 
 impl AppState {
@@ -91,8 +97,7 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
-        let _asset_cache =
-            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)
@@ -112,6 +117,7 @@ impl AppState {
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
             ws_connection_count: Arc::new(AtomicUsize::new(0)),
+            asset_cache,
             idempotency_service: None,
         }
     }
@@ -161,6 +167,9 @@ pub fn create_app(app_state: AppState) -> Router {
     if let Some(ref idempotency_service) = app_state.idempotency_service {
         callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
             idempotency_service.clone(),
+    if let Some(idempotency) = &app_state.idempotency_service {
+        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency.clone(),
             crate::middleware::idempotency::idempotency_middleware,
         ));
     }
@@ -191,6 +200,9 @@ pub fn create_app(app_state: AppState) -> Router {
     if let Some(ref idempotency_service) = app_state.idempotency_service {
         webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
             idempotency_service.clone(),
+    if let Some(idempotency) = &app_state.idempotency_service {
+        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency.clone(),
             crate::middleware::idempotency::idempotency_middleware,
         ));
     }

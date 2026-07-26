@@ -315,7 +315,7 @@ async fn serve(
         Arc::clone(&idempotency_lock_contention),
         Arc::clone(&idempotency_errors),
         Arc::clone(&idempotency_fallback_count),
-    )?;
+    ).ok();
     tracing::info!("Redis idempotency service initialized");
 
     // Initialize query cache
@@ -365,7 +365,7 @@ async fn serve(
         config.processor_min_batch as u64,
     ));
     // Initialize asset registry cache (refreshes every 5 minutes)
-    let _asset_cache =
+    let asset_cache =
         synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
@@ -388,6 +388,8 @@ async fn serve(
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         idempotency_service: Some(idempotency_service),
+        asset_cache,
+        idempotency_service,
     };
 
     // Load tenant configs on startup
