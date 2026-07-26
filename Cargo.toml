@@ -87,6 +87,7 @@ parking_lot = "0.12"
 lazy_static = "1"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio", "metrics", "trace", "testing"] }
 mockito = "1"
 proptest = "1"
 tempfile = "3"
@@ -106,6 +107,7 @@ tokio-tungstenite = "0.20"
 assert_cmd = "2"
 assert_fs = "1"
 wiremock = "0.5"
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 
 [[bench]]
 name = "critical_paths"

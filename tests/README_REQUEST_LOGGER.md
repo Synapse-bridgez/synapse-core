@@ -45,15 +45,21 @@ Tests request body logging when enabled:
 
 ### 7. `test_request_logging_sanitization`
 Tests sanitization of sensitive data in logs:
-- Tests with sensitive fields (stellar_account, password, token)
-- Verifies request is processed (actual sanitization tested in utils)
-- Ensures sensitive data doesn't break request processing
+- Enables body logging (`LOG_REQUEST_BODY=true`)
+- Sends a payload containing `stellar_account`, `password`, and `token` fields
+- Captures the actual log output via `#[traced_test]`
+- Asserts that the `****` masking marker appears in the logged body
+- Asserts that plain-text sensitive values (`super_secret_password`, `secret_token_12345`, full account string) are absent from logs
+- Asserts that non-sensitive fields (e.g. `amount`) are still logged in plain text
 
 ### 8. `test_request_logging_nested_sensitive_data`
-Tests sanitization of nested sensitive data:
-- Tests deeply nested JSON structures
-- Verifies nested sensitive fields are handled
-- Confirms complex payloads are processed correctly
+Tests sanitization of nested sensitive data in logs:
+- Enables body logging (`LOG_REQUEST_BODY=true`)
+- Sends a deeply nested payload with `stellar_account` and `api_key` buried inside sub-objects
+- Captures the actual log output via `#[traced_test]`
+- Asserts that the `****` masking marker appears in the logged body
+- Asserts that plain-text sensitive values (`secret_api_key_12345`, full account string) are absent from logs
+- Asserts that non-sensitive fields at any nesting depth (e.g. `amount`, `name`) are still logged in plain text
 
 ### 9. `test_request_logging_large_body`
 Tests handling of oversized request bodies:
@@ -114,6 +120,7 @@ The tests use:
 - `tower`: Service trait and testing helpers
 - `serde_json`: JSON serialization for test payloads
 - `tokio`: Async runtime
+- `tracing-test` (`no-env-filter` feature): Captures tracing log output in integration tests and injects `logs_contain`/`logs_assert` helpers for asserting on logged content
 
 ## Environment Variables
 
@@ -217,12 +224,11 @@ INFO Outgoing response request_id=abc-123 method=POST uri=/test status=200 laten
 ## Future Enhancements
 
 Potential improvements:
-1. Add structured log capture for testing actual log output
-2. Test correlation with distributed tracing systems
-3. Add performance benchmarks
-4. Test with streaming request bodies
-5. Add tests for custom header propagation
-6. Test integration with observability platforms
+1. Test correlation with distributed tracing systems
+2. Add performance benchmarks
+3. Test with streaming request bodies
+4. Add tests for custom header propagation
+5. Test integration with observability platforms
 
 ## Troubleshooting
 
@@ -256,4 +262,4 @@ Potential improvements:
 
 ---
 
-**Test Coverage**: 13 comprehensive test cases covering all logging scenarios, error handling, and security features.
+**Test Coverage**: 13 comprehensive test cases covering all logging scenarios, error handling, and security features. Tests #7 and #8 capture actual log output (via `tracing-test`) and assert that sensitive fields are masked and never appear in plain text, providing real regression coverage for the sanitization behavior described in the Security Considerations section.

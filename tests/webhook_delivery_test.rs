@@ -36,23 +36,30 @@ impl TestDispatcher {
         }
     }
 
-    fn signature_for(&self, body: &[u8]) -> String {
-        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes()).unwrap();
-        mac.update(body);
-        hex::encode(mac.finalize().into_bytes())
+    fn signature_for(&self, body: &[u8], timestamp: &str) -> String {
+        let body_str = std::str::from_utf8(body).unwrap_or("");
+        synapse_core::services::webhook_dispatcher::sign_payload_with_version(
+            &self.secret,
+            timestamp,
+            body_str,
+        )
     }
 
     async fn send(&self, url: &str, body: &str) -> Result<DeliveryResult, reqwest::Error> {
         let mut attempts = 0usize;
         let body_bytes = body.as_bytes();
-        let sig = self.signature_for(body_bytes);
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let sig = self.signature_for(body_bytes, &timestamp);
 
         loop {
             attempts += 1;
             let req = self
                 .client
                 .post(url)
-                .header("X-Stellar-Signature", sig.clone())
+                .header("Content-Type", "application/json")
+                .header("X-Webhook-Signature", sig.clone())
+                .header("X-Webhook-Timestamp", timestamp.clone())
+                .header("X-Webhook-Event", "test.event")
                 .body(body.to_string());
 
             let resp = req.send().await;
@@ -123,12 +130,14 @@ async fn test_webhook_retry_on_failure() {
 async fn test_webhook_signature_generation() {
     let d = TestDispatcher::new("my-secret", Duration::from_secs(2), 0);
     let body = b"payload";
-    let sig = d.signature_for(body);
+    let timestamp = "2025-01-15T10:30:00Z";
+    let sig = d.signature_for(body, timestamp);
 
-    // Compute expected via HMAC crate directly
-    let mut mac = HmacSha256::new_from_slice(b"my-secret").unwrap();
-    mac.update(body);
-    let expected = hex::encode(mac.finalize().into_bytes());
+    let expected = synapse_core::services::webhook_dispatcher::sign_payload_with_version(
+        "my-secret",
+        timestamp,
+        "payload",
+    );
 
     assert_eq!(sig, expected);
 }

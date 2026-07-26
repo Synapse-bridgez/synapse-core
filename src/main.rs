@@ -306,7 +306,7 @@ async fn serve(
     let idempotency_lock_contention = Arc::new(AtomicU64::new(0));
     let idempotency_errors = Arc::new(AtomicU64::new(0));
     let idempotency_fallback_count = Arc::new(AtomicU64::new(0));
-    let _idempotency_service = IdempotencyService::new(
+    let idempotency_service = IdempotencyService::new(
         &config.redis_url,
         pool.clone(),
         Arc::clone(&idempotency_cache_hits),
@@ -315,7 +315,7 @@ async fn serve(
         Arc::clone(&idempotency_lock_contention),
         Arc::clone(&idempotency_errors),
         Arc::clone(&idempotency_fallback_count),
-    )?;
+    ).ok();
     tracing::info!("Redis idempotency service initialized");
 
     // Initialize query cache
@@ -388,6 +388,7 @@ async fn serve(
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         asset_cache,
+        idempotency_service,
     };
 
     // Load tenant configs on startup
