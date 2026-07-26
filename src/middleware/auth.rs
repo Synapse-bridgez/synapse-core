@@ -100,7 +100,7 @@ pub async fn admin_auth(req: Request<Body>, next: Next<Body>) -> Result<Response
 }
 
 /// Constant-time byte slice equality check to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     if a.len() != b.len() {
         return false;
