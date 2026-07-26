@@ -35,6 +35,8 @@ async fn test_api_versioning_headers() {
         .unwrap();
 
     // Start App
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     let app_state = AppState {
         db: pool.clone(),
         pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
@@ -62,6 +64,7 @@ async fn test_api_versioning_headers() {
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         quota_manager: synapse_core::middleware::quota::QuotaManager::new("redis://localhost:6379")
             .expect("quota manager init failed"),
+        asset_cache,
     };
     let app = create_app(app_state);
 

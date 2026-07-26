@@ -160,7 +160,7 @@ Commands:
   serve       Start the HTTP server (default)
   tx          Transaction management
   db          Database management
-  backup      Backup management
+  backup      Backup management (restore-pitr implemented; run/list/restore/cleanup are stubs)
   config      Validate configuration
   stats       Query live transaction statistics
   graphql     Execute a GraphQL query or mutation

@@ -306,7 +306,7 @@ async fn serve(
     let idempotency_lock_contention = Arc::new(AtomicU64::new(0));
     let idempotency_errors = Arc::new(AtomicU64::new(0));
     let idempotency_fallback_count = Arc::new(AtomicU64::new(0));
-    let _idempotency_service = IdempotencyService::new(
+    let idempotency_service = IdempotencyService::new(
         &config.redis_url,
         pool.clone(),
         Arc::clone(&idempotency_cache_hits),
@@ -315,7 +315,7 @@ async fn serve(
         Arc::clone(&idempotency_lock_contention),
         Arc::clone(&idempotency_errors),
         Arc::clone(&idempotency_fallback_count),
-    )?;
+    ).ok();
     tracing::info!("Redis idempotency service initialized");
 
     // Initialize query cache
@@ -365,7 +365,7 @@ async fn serve(
         config.processor_min_batch as u64,
     ));
     // Initialize asset registry cache (refreshes every 5 minutes)
-    let _asset_cache =
+    let asset_cache =
         synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
@@ -389,6 +389,9 @@ async fn serve(
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         quota_manager: synapse_core::middleware::quota::QuotaManager::new(&config.redis_url)
             .map_err(|e| anyhow::anyhow!("Failed to initialise QuotaManager: {e}"))?,
+        idempotency_service: Some(idempotency_service),
+        asset_cache,
+        idempotency_service,
     };
 
     // Load tenant configs on startup

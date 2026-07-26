@@ -1084,7 +1084,7 @@ const SIGNATURE_VERSION: &str = "v1";
 /// # Signed Content
 /// The signed content is formatted as: `timestamp.body`
 /// where timestamp is included in the X-Webhook-Timestamp header.
-fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> String {
+pub fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> String {
     let signed_content = format!("{timestamp}.{body}");
     let signature_hex = sign_payload_v1(secret, &signed_content);
     format!("{SIGNATURE_VERSION}={signature_hex}")

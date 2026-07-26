@@ -289,7 +289,10 @@ impl SynapseClient {
                 let status = resp.status().as_u16();
                 if status >= 400 {
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Http { status, body });
+                    return Err(SynapseError::Api {
+                        status,
+                        message: body,
+                    });
                 }
                 resp.bytes()
                     .await

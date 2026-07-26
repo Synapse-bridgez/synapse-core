@@ -1,8 +1,10 @@
+pub mod adapters;
 pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod domain;
 pub mod error;
 pub mod graphql;
 pub mod handlers;
@@ -10,6 +12,7 @@ pub mod health;
 pub mod metrics;
 pub mod middleware;
 pub mod payments;
+pub mod ports;
 pub mod readiness;
 pub mod schemas;
 pub mod secrets;
@@ -19,6 +22,7 @@ pub mod startup;
 pub mod stellar;
 pub mod telemetry;
 pub mod tenant;
+pub mod use_cases;
 pub mod utils;
 pub mod validation;
 pub mod ws;
@@ -35,6 +39,7 @@ use crate::services::feature_flags::FeatureFlagService;
 use crate::services::query_cache::QueryCache;
 use crate::stellar::HorizonClient;
 use crate::tenant::TenantConfig;
+use crate::middleware::idempotency::IdempotencyService;
 use axum::{
     middleware as axum_middleware,
     routing::{get, patch, post},
@@ -72,6 +77,10 @@ pub struct AppState {
     /// breaker can accumulate failure history across requests and actually trip
     /// open when Redis is down.
     pub quota_manager: crate::middleware::quota::QuotaManager,
+    /// Dynamic asset registry, refreshed from the `assets` table every 5 minutes.
+    pub asset_cache: Arc<AssetCache>,
+    /// Redis idempotency service for webhook deduplication
+    pub idempotency_service: Option<crate::middleware::idempotency::IdempotencyService>,
 }
 
 impl AppState {
@@ -95,6 +104,7 @@ impl AppState {
         let _asset_cache =
             AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         let redis_url = "redis://localhost:6379".to_string();
+        let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)
@@ -116,6 +126,8 @@ impl AppState {
             ws_connection_count: Arc::new(AtomicUsize::new(0)),
             quota_manager: crate::middleware::quota::QuotaManager::new(&redis_url)
                 .expect("quota manager init failed in test_new"),
+            asset_cache,
+            idempotency_service: None,
         }
     }
 }
@@ -163,6 +175,17 @@ pub fn create_app(app_state: AppState) -> Router {
             crate::middleware::quota::rate_limit_middleware,
         ));
 
+    // Mount idempotency middleware on callback routes when the service is available (#910).
+    if let Some(ref idempotency_service) = app_state.idempotency_service {
+        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency_service.clone(),
+    if let Some(idempotency) = &app_state.idempotency_service {
+        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency.clone(),
+            crate::middleware::idempotency::idempotency_middleware,
+        ));
+    }
+
     // Inject SecretsStore for signature verification
     if let Some(store) = &app_state.secrets_store {
         callback_routes = callback_routes.layer(axum::Extension(store.clone()));
@@ -185,6 +208,17 @@ pub fn create_app(app_state: AppState) -> Router {
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
         ));
+
+    // Mount idempotency middleware on webhook routes when the service is available (#910).
+    if let Some(ref idempotency_service) = app_state.idempotency_service {
+        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency_service.clone(),
+    if let Some(idempotency) = &app_state.idempotency_service {
+        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
+            idempotency.clone(),
+            crate::middleware::idempotency::idempotency_middleware,
+        ));
+    }
 
     // Inject SecretsStore for signature verification
     if let Some(store) = &app_state.secrets_store {
