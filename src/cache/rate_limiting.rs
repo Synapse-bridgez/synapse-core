@@ -1,7 +1,6 @@
-//! Rate limiting implementation using Redis.
+//! Rate limiting implementation using a token-bucket algorithm.
 //!
-//! Provides token bucket and sliding window rate limiting strategies
-//! with configurable limits and time windows.
+//! Provides token-bucket rate limiting with configurable limits and time windows.
 //!
 //! # Performance optimisations (#454)
 //! - Token refill is computed in a single integer division instead of floating-point
@@ -20,18 +19,16 @@ use std::time::Duration;
 ///
 /// * `max_requests` - Maximum number of requests allowed within the time window
 /// * `window` - Duration of the time window
-/// * `strategy` - Algorithm to use for rate limiting
 ///
 /// # Example
 ///
 /// ```
-/// use synapse_core::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy};
+/// use synapse_core::cache::rate_limiting::RateLimitConfig;
 /// use std::time::Duration;
 ///
 /// let config = RateLimitConfig {
 ///     max_requests: 100,
 ///     window: Duration::from_secs(60),
-///     strategy: RateLimitStrategy::TokenBucket,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -40,17 +37,6 @@ pub struct RateLimitConfig {
     pub max_requests: u32,
     /// Time window for the rate limit
     pub window: Duration,
-    /// Strategy to use for rate limiting
-    pub strategy: RateLimitStrategy,
-}
-
-/// Rate limiting strategies
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitStrategy {
-    /// Token bucket algorithm
-    TokenBucket,
-    /// Sliding window algorithm
-    SlidingWindow,
 }
 
 /// Rate limiter metrics for tracking token acquisition and rejection.
@@ -103,7 +89,6 @@ impl Default for RateLimitConfig {
         Self {
             max_requests: 100,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         }
     }
 }
@@ -306,7 +291,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -321,7 +305,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -335,7 +318,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -349,7 +331,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -366,7 +347,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -384,7 +364,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -402,7 +381,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(1),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -419,7 +397,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -434,7 +411,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 4,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
         let clone = limiter.clone();
@@ -450,7 +426,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -465,7 +440,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_millis(50),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -488,7 +462,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(1),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -503,7 +476,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -519,7 +491,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 2,
             window: Duration::from_millis(50),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -543,7 +514,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 2,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
 
         let client_a = RateLimiter::with_config(config.clone());
@@ -567,7 +537,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limited_endpoint = RateLimiter::with_config(config);
 
