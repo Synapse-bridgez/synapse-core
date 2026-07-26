@@ -98,10 +98,27 @@ synapse-core db migrate
 
 ## Backup
 
-### Backup Commands
+### `backup restore-pitr` — Point-in-time recovery (implemented)
 
-The following commands are **not yet implemented** and will immediately error with
-`"Backup service not yet implemented"`:
+Restores the database to the state at a given timestamp. This is a **destructive, irreversible operation** — a confirmation gate is enforced for live runs.
+
+```bash
+# Dry-run: validate the target timestamp without touching anything
+synapse-core backup restore-pitr --timestamp <TIMESTAMP> --dry-run
+
+# Live restore: requires explicit --yes confirmation
+synapse-core backup restore-pitr --timestamp <TIMESTAMP> --yes
+```
+
+- `--timestamp` — ISO 8601 / RFC 3339 timestamp (e.g. `2026-01-15T10:30:00Z`). Required.
+- `--dry-run` — Validates the request without executing the restore.
+- `--yes` — Required for a live (non-dry-run) restore. The command refuses to proceed without it.
+
+Requires the `ADMIN_API_KEY` environment variable (same key the server was started with). POSTs to `POST /admin/backup/restore-pitr`. The actor is read from `SYNAPSE_ACTOR`, then `USER`, then `LOGNAME`, falling back to `admin-cli`.
+
+### Stub subcommands (not yet implemented)
+
+The following subcommands exist in the CLI but immediately return an error. They are placeholders for a future backup service integration:
 
 ```bash
 synapse-core backup run [--backup-type hourly|daily|monthly]
