@@ -9,7 +9,14 @@ pub struct Transition {
 }
 
 /// Transaction status state machine.
-/// Valid transitions for transaction lifecycle (pending → processing → completed/failed, dlq → pending, …).
+/// Valid transitions for transaction lifecycle (pending → processing → completed/failed, …).
+///
+/// `"dlq"` is *not* a `transactions.status` value and intentionally has no
+/// transitions here: dead-lettering is tracked out-of-band in the
+/// `transaction_dlq` side table (see `TransactionProcessor::move_to_dlq`),
+/// which never touches `transactions.status`. `requeue_dlq` transitions the
+/// transaction's existing status back to `"pending"`, which the same-state
+/// and `failed -> pending` rules below already cover.
 pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
     // From pending
     Transition {
@@ -36,11 +43,6 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
     // From failed (reprocess)
     Transition {
         from: "failed",
-        to: "pending",
-    },
-    // From dlq (requeue)
-    Transition {
-        from: "dlq",
         to: "pending",
     },
 ];
@@ -110,10 +112,10 @@ mod tests {
             from: "failed",
             to: "pending"
         }));
-        assert!(transitions.contains(&Transition {
-            from: "dlq",
-            to: "pending"
-        }));
+        // "dlq" is deliberately absent: see the doc comment on
+        // `TRANSACTION_TRANSITIONS` — DLQ state lives in the `transaction_dlq`
+        // table, never in `transactions.status`.
+        assert!(!transitions.iter().any(|t| t.from == "dlq" || t.to == "dlq"));
     }
 
     #[test]
