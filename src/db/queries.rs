@@ -34,8 +34,10 @@ use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,9 +141,21 @@ where
     F: std::future::Future<Output = Result<T>>,
 {
     let dur = tier.duration();
+    let start = std::time::Instant::now();
     match timeout(dur, fut).await {
-        Ok(result) => result,
+        Ok(result) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            crate::db::slow_query::log_query_timing(
+                tier.label(),
+                sql_label,
+                duration_ms,
+                0,
+                slow_query_threshold_ms(),
+            );
+            result
+        }
         Err(_elapsed) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
             DB_QUERY_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 tier = tier.label(),
@@ -150,20 +164,64 @@ where
                 db_query_timeout_total = DB_QUERY_TIMEOUT_TOTAL.load(Ordering::Relaxed),
                 "Database query timed out; connection will be dropped"
             );
+            crate::db::slow_query::log_query_timing(
+                tier.label(),
+                sql_label,
+                duration_ms,
+                0,
+                slow_query_threshold_ms(),
+            );
             Err(sqlx::Error::PoolTimedOut)
         }
     }
 }
 
+/// Slow-query threshold in milliseconds, overridable via `SLOW_QUERY_THRESHOLD_MS`
+/// (see [`crate::config::Config::slow_query_threshold_ms`] for the app-wide default).
+fn slow_query_threshold_ms() -> u64 {
+    std::env::var("SLOW_QUERY_THRESHOLD_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500)
+}
+
 // --- Tenant Queries --------------------------------------------------------
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Server-side secret used to (a) key the HMAC-SHA256 hash of tenant API keys
+/// and (b) as the pgcrypto passphrase for `webhook_secret` encryption at
+/// rest. Never stored in the database, so a stolen `tenants` table alone
+/// cannot be used to forge API keys or recover webhook secrets.
+fn tenant_secret_key() -> String {
+    std::env::var("TENANT_SECRET_KEY").unwrap_or_else(|_| {
+        tracing::error!(
+            "TENANT_SECRET_KEY is not set; falling back to an insecure default. \
+             This must be set to a strong random value in any environment that \
+             handles real tenant credentials."
+        );
+        "insecure-dev-only-tenant-secret".to_string()
+    })
+}
+
+/// Hash a tenant API key for storage/lookup. HMAC-SHA256 keyed by
+/// [`tenant_secret_key`], so equality comparisons never touch the raw key.
+pub fn hash_api_key(api_key: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(tenant_secret_key().as_bytes())
+        .expect("HMAC-SHA256 accepts a key of any length");
+    mac.update(api_key.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
 
 /// Look up whether an API key exists and belongs to an active tenant.
 /// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
 pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
-    let row = sqlx::query("SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT 1 FROM tenants WHERE api_key_hash = $1 AND is_active = true LIMIT 1",
+    )
+    .bind(hash_api_key(api_key))
+    .fetch_optional(pool)
+    .await?;
     Ok(row.is_some())
 }
 
@@ -172,8 +230,9 @@ pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
 /// callers must not log or persist them in audit records.
 pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
     let configs = sqlx::query_as::<_, TenantConfig>(
-        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+        "SELECT tenant_id, name, pgp_sym_decrypt(webhook_secret, $1) AS webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
     )
+    .bind(tenant_secret_key())
     .fetch_all(pool)
     .await?;
     Ok(configs)
@@ -1907,12 +1966,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT")
         .bind(420)
         .bind(true)
@@ -1934,12 +1994,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant 2")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret2")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT2")
         .bind(50)
         .bind(true)
@@ -2015,12 +2076,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("rl-test-tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT3")
         .bind(60)
         .bind(true)
