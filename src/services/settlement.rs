@@ -202,6 +202,14 @@ impl SettlementService {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        // Settlement is a system job spanning every tenant's transactions for
+        // this asset, so it must bypass RLS rather than run with no session
+        // context (which would silently hide tenant-owned rows).
+        sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
         let end_time = Utc::now();
 
         let unsettled = queries::get_unsettled_transactions(&mut tx, asset_code, end_time)
@@ -382,6 +390,7 @@ mod tests {
             memo_type: None,
             metadata: None,
             trace_id: None,
+            tenant_id: None,
         }
     }
 

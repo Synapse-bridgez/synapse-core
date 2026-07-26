@@ -135,6 +135,7 @@ impl TransactionFixture {
             memo_type: self.memo_type,
             metadata: self.metadata,
             trace_id: None,
+            tenant_id: None,
         }
     }
 
