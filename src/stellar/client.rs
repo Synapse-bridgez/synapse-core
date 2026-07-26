@@ -68,6 +68,11 @@ pub struct StreamPayment {
     pub created_at: String,
 }
 
+/// Maximum size the SSE receive buffer may grow to before we treat the
+/// connection as misbehaving and reset it. Guards against unbounded memory
+/// growth if the stream never emits a complete `\n\n`-delimited event.
+const MAX_SSE_BUFFER_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub struct StreamMetrics {
     pub reconnections: u64,
@@ -299,6 +304,13 @@ impl HorizonClient {
         while let Some(chunk) = stream.next().await {
             let chunk: bytes::Bytes = chunk?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
+
+            if buf.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(HorizonError::InvalidResponse(format!(
+                    "SSE receive buffer exceeded {} bytes without a complete event; resetting connection",
+                    MAX_SSE_BUFFER_BYTES
+                )));
+            }
 
             // Split on the SSE event delimiter. Only process complete events.
             while let Some(pos) = buf.find("\n\n") {

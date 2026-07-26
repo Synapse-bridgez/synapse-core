@@ -61,6 +61,9 @@ pub struct Transaction {
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub trace_id: Option<String>,
+    /// Owning tenant, used by the `tenant_isolation` RLS policy on this table.
+    /// `None` means the row is only visible to admin-context sessions (legacy/system rows).
+    pub tenant_id: Option<Uuid>,
 }
 
 #[async_graphql::Object]
@@ -135,11 +138,17 @@ impl Transaction {
             memo_type,
             metadata,
             trace_id: None,
+            tenant_id: None,
         }
     }
 
     pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
         self.trace_id = trace_id;
+        self
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: Option<Uuid>) -> Self {
+        self.tenant_id = tenant_id;
         self
     }
 }

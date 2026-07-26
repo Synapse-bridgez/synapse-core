@@ -511,6 +511,32 @@ async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
 ) -> Result<(Transaction, bool)> {
+    // Set the RLS session GUCs to match `tx.tenant_id` *before* any
+    // read/write against `transactions` in this DB transaction, so the
+    // `tenant_isolation`/`tenant_isolation_insert` policies fire correctly
+    // instead of running with no context (which the policy fails closed on).
+    // Callers that don't yet resolve a tenant (nothing does today - see
+    // `Transaction::with_tenant_id`) fall back to the admin bypass, which
+    // preserves today's behavior of every row being visible/insertable.
+    let resolved_tenant_id = tx.tenant_id;
+
+    match resolved_tenant_id {
+        Some(tid) => {
+            sqlx::query("SELECT set_config('app.tenant_id', $1, true), set_config('app.is_admin', 'false', true)")
+                .bind(tid.to_string())
+                .execute(&mut **db_tx)
+                .await?;
+        }
+        None => {
+            // No owning tenant could be resolved (legacy/system-originated
+            // transaction): use the admin bypass rather than an unset
+            // context, which the policy would otherwise deny.
+            sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+                .execute(&mut **db_tx)
+                .await?;
+        }
+    }
+
     // === Anchor-ID dedup guard (cross-partition uniqueness)
     if let Some(ref anchor_id) = tx.anchor_transaction_id {
         let claimed = sqlx::query(
@@ -558,8 +584,8 @@ async fn persist_transaction(
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
-            settlement_id, memo, memo_type, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            settlement_id, memo, memo_type, metadata, tenant_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         -- Partitioned by created_at; only (id, created_at) is a valid conflict target.
         ON CONFLICT (id, created_at) DO NOTHING
         RETURNING *
@@ -579,6 +605,7 @@ async fn persist_transaction(
     .bind(&tx.memo)
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
+    .bind(resolved_tenant_id)
     .fetch_optional(&mut **db_tx)
     .await?;
 
@@ -1058,11 +1085,21 @@ pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
         QueryTier::Read,
         "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL",
         async {
+            // Settlement scans across every tenant's completed transactions,
+            // so this must bypass RLS rather than run with no session
+            // context (which would silently hide tenant-owned rows).
+            let mut tx = pool.begin().await?;
+            sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+                .execute(&mut *tx)
+                .await?;
+
             let rows = sqlx::query(
                 "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL"
             )
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?;
+
+            tx.commit().await?;
 
             Ok(rows
                 .into_iter()
