@@ -122,14 +122,15 @@ fn extract_timestamp(req: &Request<Body>) -> Result<u64, StatusCode> {
 }
 
 /// Validate that timestamp is within acceptable window to prevent replay attacks.
+/// Both stale timestamps (too far in the past) and future timestamps (too far
+/// ahead) are rejected — enforcing a symmetric ±MAX_TIMESTAMP_AGE_SECS window.
 fn validate_timestamp(timestamp: u64) -> Result<(), StatusCode> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .as_secs();
 
-    let age = now.saturating_sub(timestamp);
-    if age > MAX_TIMESTAMP_AGE_SECS {
+    if now.abs_diff(timestamp) > MAX_TIMESTAMP_AGE_SECS {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

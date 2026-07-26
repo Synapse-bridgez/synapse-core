@@ -125,6 +125,8 @@ impl TestApp {
             )),
             metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
             ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            quota_manager: synapse_core::middleware::quota::QuotaManager::new(&redis_url)
+                .expect("quota manager init failed in test harness"),
             asset_cache,
         };
 

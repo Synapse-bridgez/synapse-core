@@ -458,22 +458,25 @@ pub async fn rate_limit_middleware(
     // identifiers from growing memory without bound; new identifiers fail
     // closed once the cap is full. In a multi-instance deployment the outage
     // limit is per instance until Redis recovers.
-    let redis_result = match QuotaManager::new(&state.redis_url) {
-        Ok(manager) => manager
-            .consume_quota_with_window(&per_minute_key, limit_per_minute, 60)
-            .await
-            .map(|allowed| (manager, allowed)),
-        Err(error) => Err(error),
-    };
+    //
+    // The QuotaManager (and its RedisCircuitBreaker) is reused from AppState so
+    // the circuit breaker can accumulate failures across requests and actually
+    // trip open when Redis is down, instead of resetting on every request.
+    let redis_result = state
+        .quota_manager
+        .consume_quota_with_window(&per_minute_key, limit_per_minute, 60)
+        .await
+        .map(|allowed| allowed);
 
     let (allowed, status) = match redis_result {
-        Ok((manager, allowed)) => {
+        Ok(allowed) => {
             let fallback_used = if allowed {
                 1
             } else {
                 limit_per_minute.saturating_add(1)
             };
-            let status = manager
+            let status = state
+                .quota_manager
                 .check_quota_with_limit(&per_minute_key, limit_per_minute)
                 .await
                 .unwrap_or(QuotaStatus {

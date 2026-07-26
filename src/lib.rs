@@ -73,6 +73,10 @@ pub struct AppState {
     pub metrics_handle: crate::metrics::MetricsHandle,
     /// Active WebSocket connection count
     pub ws_connection_count: Arc<AtomicUsize>,
+    /// Shared QuotaManager — constructed once at startup so the Redis circuit
+    /// breaker can accumulate failure history across requests and actually trip
+    /// open when Redis is down.
+    pub quota_manager: crate::middleware::quota::QuotaManager,
     /// Dynamic asset registry, refreshed from the `assets` table every 5 minutes.
     pub asset_cache: Arc<AssetCache>,
     /// Redis idempotency service for webhook deduplication
@@ -97,6 +101,9 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
+        let _asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        let redis_url = "redis://localhost:6379".to_string();
         let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
@@ -105,7 +112,7 @@ impl AppState {
                 .unwrap(),
             horizon_client: HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
             feature_flags: FeatureFlagService::new(pool),
-            redis_url: "redis://localhost:6379".to_string(),
+            redis_url: redis_url.clone(),
             start_time: std::time::Instant::now(),
             readiness: ReadinessState::new(),
             tx_broadcast: tx,
@@ -117,6 +124,8 @@ impl AppState {
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
             ws_connection_count: Arc::new(AtomicUsize::new(0)),
+            quota_manager: crate::middleware::quota::QuotaManager::new(&redis_url)
+                .expect("quota manager init failed in test_new"),
             asset_cache,
             idempotency_service: None,
         }
@@ -142,17 +151,16 @@ pub fn create_app(app_state: AppState) -> Router {
         graphql_schema,
     };
 
-    // Callback routes: signature verification + api_key_auth + validation + quota
+    // Callback routes: rate limiting outermost (runs first) so unauthenticated
+    // floods are throttled before the expensive signature/API-key checks run.
+    // Layer execution order is the reverse of declaration order in axum/tower,
+    // so the last .layer() call becomes the outermost wrapper.
     let mut callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route(
             "/callback/transaction",
             post(handlers::webhook::transaction_callback),
         )
-        .layer(axum_middleware::from_fn_with_state(
-            app_state.clone(),
-            crate::middleware::quota::rate_limit_middleware,
-        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
         ))
@@ -161,6 +169,10 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::signature_verification::signature_verification,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
         ));
 
     // Mount idempotency middleware on callback routes when the service is available (#910).
@@ -179,13 +191,10 @@ pub fn create_app(app_state: AppState) -> Router {
         callback_routes = callback_routes.layer(axum::Extension(store.clone()));
     }
 
-    // Webhook route: signature verification + validation + quota
+    // Webhook route: rate limiting outermost (runs first) — same reasoning as
+    // callback_routes above.
     let mut webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
-        .layer(axum_middleware::from_fn_with_state(
-            app_state.clone(),
-            crate::middleware::quota::rate_limit_middleware,
-        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
         ))
@@ -194,6 +203,10 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::signature_verification::signature_verification,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
         ));
 
     // Mount idempotency middleware on webhook routes when the service is available (#910).
@@ -341,5 +354,8 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
+        ))
+        .layer(axum_middleware::from_fn(
+            middleware::error_enrichment::error_enrichment_middleware,
         ))
 }
