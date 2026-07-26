@@ -293,9 +293,6 @@ pub fn create_app(app_state: AppState) -> Router {
         // Versioned route groups
         .nest("/api/v1", v1_routes)
         .nest("/api/v2", v2_routes)
-        .layer(axum_middleware::from_fn(
-            middleware::panic_recovery::panic_recovery_middleware,
-        ))
         .with_state(api_state)
         .merge(
             Router::new()
@@ -307,6 +304,13 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/reconnect", post(handlers::reconnection::reconnect))
                 .with_state(app_state),
         )
+        // panic_recovery_middleware is applied after the final .merge() so it
+        // covers every route including /ws, /reconnect/status, and /reconnect
+        // (fix for #918: previously applied before the ws/reconnect merge and
+        // therefore did not protect those routes from ungraceful panics).
+        .layer(axum_middleware::from_fn(
+            middleware::panic_recovery::panic_recovery_middleware,
+        ))
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))
