@@ -83,6 +83,8 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any, String) {
         .await
         .unwrap();
 
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     // Seed a tenant so `X-API-Key` auth (api_key_auth middleware) succeeds.
     let tenant_id = Uuid::new_v4();
     let api_key = format!("integration-test-key-{}", tenant_id);
@@ -126,6 +128,7 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any, String) {
         secrets_store: Some(secrets_store),
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        asset_cache,
     };
     let app = create_app(app_state);
 
