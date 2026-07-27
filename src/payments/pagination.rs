@@ -51,6 +51,13 @@ impl PaginationParams {
                 page_size, config.max_page_size
             ));
         }
+        let max_page = u32::MAX / page_size;
+        if page > max_page {
+            return Err(format!(
+                "page {} exceeds maximum {} for page_size {}",
+                page, max_page, page_size
+            ));
+        }
         Ok(PaginationParams { page, page_size })
     }
 
@@ -191,6 +198,13 @@ mod tests {
     fn test_pagination_params_page_size_exceeds_max() {
         let config = PaginationConfig::default();
         let result = PaginationParams::new(1, 200, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pagination_params_page_overflow() {
+        let config = PaginationConfig::default();
+        let result = PaginationParams::new(50_000_000, 100, &config);
         assert!(result.is_err());
     }
 
