@@ -254,7 +254,12 @@ impl SecurityConnectionPool {
 
     /// Number of idle connections currently available in the pool.
     pub fn idle_count(&self) -> usize {
-        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(e) => e.into_inner(),
+        };
+        self.evict_stale_locked(&mut state);
+        state.available.len()
     }
 
     /// Total connections managed by the pool (idle + currently in use).
@@ -441,5 +446,19 @@ mod tests {
     fn pool_error_converts_to_security_error() {
         let pool_err = SecurityPoolError::Exhausted(5);
         let _: SecurityError = pool_err.into();
+    }
+
+    #[test]
+    fn stale_idle_connections_evicted_by_idle_count() {
+        let config = SecurityPoolConfig {
+            max_idle: Duration::from_nanos(1),
+            ..Default::default()
+        };
+        let pool = SecurityConnectionPool::with_config(config).unwrap();
+        let conn = pool.acquire().unwrap();
+        pool.release(conn);
+        assert_eq!(pool.idle_count(), 1);
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(pool.idle_count(), 0);
     }
 }
