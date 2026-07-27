@@ -229,16 +229,13 @@ impl Config {
             db_timeouts: DbTimeoutConfig {
                 read_query_secs: env::var("DB_TIMEOUT_READ_SECS")
                     .unwrap_or_else(|_| "5".to_string())
-                    .parse()
-                    .unwrap_or(5),
+                    .parse()?,
                 write_query_secs: env::var("DB_TIMEOUT_WRITE_SECS")
                     .unwrap_or_else(|_| "10".to_string())
-                    .parse()
-                    .unwrap_or(10),
+                    .parse()?,
                 admin_query_secs: env::var("DB_TIMEOUT_ADMIN_SECS")
                     .unwrap_or_else(|_| "60".to_string())
-                    .parse()
-                    .unwrap_or(60),
+                    .parse()?,
             },
             otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
