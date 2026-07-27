@@ -245,13 +245,19 @@ impl PaymentsConnectionPool {
     }
 
     /// Number of idle connections currently available in the pool.
+    ///
+    /// Recovers gracefully from poisoned mutexes, consistent with acquire/release.
     pub fn idle_count(&self) -> usize {
-        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.available.len()
     }
 
     /// Total connections managed by the pool (idle + currently in use).
+    ///
+    /// Recovers gracefully from poisoned mutexes, consistent with acquire/release.
     pub fn total_count(&self) -> usize {
-        self.state.lock().map(|s| s.total).unwrap_or(0)
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.total
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {
