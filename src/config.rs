@@ -34,13 +34,13 @@ impl AppEnv {
 }
 
 /// Load the profile-specific .env file (.env.development, .env.staging, .env.production)
-/// then fall back to the base .env. Profile file is loaded first so base .env can override.
+/// with precedence over the base .env. Profile-specific values override base .env values.
 fn load_env_profile(app_env: &AppEnv) {
     // Load base .env first (lowest priority)
     dotenv().ok();
-    // Load profile-specific file (higher priority — values set here override base .env)
+    // Load profile-specific file (higher priority — use _override to ensure it takes precedence)
     let profile_file = format!(".env.{}", app_env.as_str());
-    dotenvy::from_filename(&profile_file).ok();
+    dotenvy::from_filename_override(&profile_file).ok();
 }
 
 /// Apply profile defaults for any env vars not already set
