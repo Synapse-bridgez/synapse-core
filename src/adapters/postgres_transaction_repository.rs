@@ -67,7 +67,7 @@ impl TransactionRepository for PostgresTransactionRepository {
 
     async fn list(&self, limit: i64, offset: i64) -> RepositoryResult<Vec<Transaction>> {
         let rows = sqlx::query_as::<_, TransactionRow>(
-            "SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            "SELECT * FROM transactions ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)
