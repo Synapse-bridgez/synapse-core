@@ -176,9 +176,6 @@ pub fn create_app(app_state: AppState) -> Router {
         ));
 
     // Mount idempotency middleware on callback routes when the service is available (#910).
-    if let Some(ref idempotency_service) = app_state.idempotency_service {
-        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
-            idempotency_service.clone(),
     if let Some(idempotency) = &app_state.idempotency_service {
         callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
             idempotency.clone(),
@@ -210,9 +207,6 @@ pub fn create_app(app_state: AppState) -> Router {
         ));
 
     // Mount idempotency middleware on webhook routes when the service is available (#910).
-    if let Some(ref idempotency_service) = app_state.idempotency_service {
-        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
-            idempotency_service.clone(),
     if let Some(idempotency) = &app_state.idempotency_service {
         webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
             idempotency.clone(),
