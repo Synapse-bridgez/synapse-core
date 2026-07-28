@@ -1490,7 +1490,7 @@ pub async fn handle_tx_search(
                         );
                     }
                     println!(
-                        "\n✓ {} results (total: {}",
+                        "\n✓ {} results (total: {})",
                         response.results.len(),
                         response.total
                     );
