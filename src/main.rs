@@ -462,6 +462,34 @@ async fn serve(
     } else {
         tracing::info!("RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled");
     }
+
+    // Register transaction processor job
+    let tx_processor_job = synapse_core::services::TransactionProcessorJob::new(
+        pool.clone(),
+        horizon_client.clone(),
+    );
+    if let Err(e) = scheduler.register_job(Box::new(tx_processor_job)).await {
+        tracing::warn!("Failed to register transaction processor job: {}", e);
+    }
+
+    // Register audit log retention job
+    let audit_log_job = synapse_core::services::AuditLogRetentionJob::new(pool.clone());
+    if let Err(e) = scheduler.register_job(Box::new(audit_log_job)).await {
+        tracing::warn!("Failed to register audit log retention job: {}", e);
+    }
+
+    // Register backup verification job
+    let backup_service = std::sync::Arc::new(synapse_core::services::BackupService::new(
+        std::env::var("DATABASE_URL").unwrap_or_default(),
+        std::path::PathBuf::from(&config.backup_dir),
+        config.backup_encryption_key.clone(),
+    ));
+    let backup_verification_job =
+        synapse_core::services::BackupVerificationJob::new(backup_service);
+    if let Err(e) = scheduler.register_job(Box::new(backup_verification_job)).await {
+        tracing::warn!("Failed to register backup verification job: {}", e);
+    }
+
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
