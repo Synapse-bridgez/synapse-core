@@ -203,7 +203,16 @@ fn format_cell(value: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
             if s.len() > 60 {
-                format!("{}...", &s[..57])
+                // #896: s.len() is byte length; &s[..57] would panic if byte
+                // offset 57 falls inside a multi-byte UTF-8 character.
+                // Use char_indices to find the byte offset of the 57th char
+                // boundary instead, which is always a valid slice point.
+                let byte_end = s
+                    .char_indices()
+                    .nth(57)
+                    .map(|(i, _)| i)
+                    .unwrap_or(s.len());
+                format!("{}...", &s[..byte_end])
             } else {
                 s.clone()
             }
