@@ -26,11 +26,11 @@ impl TransactionRepository for PostgresTransactionRepository {
             r#"
             INSERT INTO transactions (
                 id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                created_at, updated_at, tenant_id, anchor_transaction_id, callback_type, callback_status,
                 memo, memo_type, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING id, stellar_account, amount, asset_code, status,
-                created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
+                created_at, updated_at, tenant_id, anchor_transaction_id, callback_type, callback_status,
                 memo, memo_type, metadata
             "#,
         )
@@ -41,6 +41,7 @@ impl TransactionRepository for PostgresTransactionRepository {
         .bind(&tx.status)
         .bind(tx.created_at)
         .bind(tx.updated_at)
+        .bind(tx.tenant_id)
         .bind(&tx.anchor_transaction_id)
         .bind(&tx.callback_type)
         .bind(&tx.callback_status)
@@ -67,7 +68,7 @@ impl TransactionRepository for PostgresTransactionRepository {
 
     async fn list(&self, limit: i64, offset: i64) -> RepositoryResult<Vec<Transaction>> {
         let rows = sqlx::query_as::<_, TransactionRow>(
-            "SELECT * FROM transactions ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            "SELECT * FROM transactions ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)
@@ -89,6 +90,7 @@ struct TransactionRow {
     status: String,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
+    tenant_id: Option<Uuid>,
     anchor_transaction_id: Option<String>,
     callback_type: Option<String>,
     callback_status: Option<String>,
@@ -107,6 +109,7 @@ impl TransactionRow {
             status: self.status,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            tenant_id: self.tenant_id,
             anchor_transaction_id: self.anchor_transaction_id,
             callback_type: self.callback_type,
             callback_status: self.callback_status,
