@@ -280,14 +280,39 @@ impl QueryCache {
             lru.clear();
         }
 
-        // OPT: Use pooled connection for Redis operations
-        let mut conn = self.get_connection().await?;
-        let keys: Vec<String> = conn.keys(pattern).await?;
+        let pool = self.pool.clone();
+        let pattern = pattern.to_string();
 
-        if !keys.is_empty() {
-            conn.del::<_, ()>(keys).await?;
-        }
-        Ok(())
+        self.cb
+            .call(|| async move {
+                let mut conn = pool.clone();
+                let mut cursor: u64 = 0;
+                loop {
+                    let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&pattern)
+                        .arg("COUNT")
+                        .arg(100u32)
+                        .query_async(&mut conn)
+                        .await?;
+                    if !batch.is_empty() {
+                        conn.del::<_, ()>(batch).await?;
+                    }
+                    cursor = next_cursor;
+                    if cursor == 0 {
+                        break;
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| match e {
+                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
+                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
+                ),
+                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            })
     }
 
     pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
@@ -299,9 +324,21 @@ impl QueryCache {
             lru.pop(key);
         }
 
-        // OPT: Use pooled connection for Redis operations
-        let mut conn = self.get_connection().await?;
-        conn.del::<_, ()>(key).await
+        let pool = self.pool.clone();
+        let key = key.to_string();
+
+        self.cb
+            .call(|| async move {
+                let mut conn = pool.clone();
+                conn.del::<_, ()>(&key).await
+            })
+            .await
+            .map_err(|e| match e {
+                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
+                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
+                ),
+                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            })
     }
 
     /// Verifies the Redis connection is healthy by sending a PING.

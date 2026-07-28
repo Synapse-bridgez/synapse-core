@@ -68,17 +68,6 @@ async fn resolve_tenant_id(
         return resolve_tenant_by_api_key(&state.db, &api_key).await;
     }
 
-    if let Some(tenant_id_str) = headers.get("X-Tenant-ID") {
-        if let Ok(tenant_id) = tenant_id_str
-            .to_str()
-            .ok()
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .ok_or(AppError::InvalidApiKey)
-        {
-            return Ok(tenant_id);
-        }
-    }
-
     Err(AppError::InvalidApiKey)
 }
 
