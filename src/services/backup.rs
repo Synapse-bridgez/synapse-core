@@ -224,8 +224,30 @@ impl BackupService {
     }
 
     async fn run_pg_dump(&self, output_path: &Path) -> Result<()> {
-        let output = Command::new("pg_dump")
-            .arg(&self.database_url)
+        let url = std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("PITR_DATABASE_URL"))
+            .unwrap_or_else(|_| self.database_url.clone());
+
+        let mut cmd = Command::new("pg_dump");
+
+        if let Ok(url_parsed) = url::Url::parse(&url) {
+            if let Some(password) = url_parsed.password() {
+                cmd.env("PGPASSWORD", password);
+            }
+            let db_url_no_creds = format!(
+                "{}://{}@{}:{}/{}",
+                url_parsed.scheme(),
+                url_parsed.username(),
+                url_parsed.host_str().unwrap_or("localhost"),
+                url_parsed.port().unwrap_or(5432),
+                url_parsed.path().trim_start_matches('/')
+            );
+            cmd.arg(&db_url_no_creds);
+        } else {
+            cmd.arg(&url);
+        }
+
+        let output = cmd
             .arg("--format=plain")
             .arg("--no-owner")
             .arg("--no-acl")
@@ -242,8 +264,30 @@ impl BackupService {
     }
 
     async fn run_pg_restore(&self, sql_path: &Path) -> Result<()> {
-        let output = Command::new("psql")
-            .arg(&self.database_url)
+        let url = std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("PITR_DATABASE_URL"))
+            .unwrap_or_else(|_| self.database_url.clone());
+
+        let mut cmd = Command::new("psql");
+
+        if let Ok(url_parsed) = url::Url::parse(&url) {
+            if let Some(password) = url_parsed.password() {
+                cmd.env("PGPASSWORD", password);
+            }
+            let db_url_no_creds = format!(
+                "{}://{}@{}:{}/{}",
+                url_parsed.scheme(),
+                url_parsed.username(),
+                url_parsed.host_str().unwrap_or("localhost"),
+                url_parsed.port().unwrap_or(5432),
+                url_parsed.path().trim_start_matches('/')
+            );
+            cmd.arg(&db_url_no_creds);
+        } else {
+            cmd.arg(&url);
+        }
+
+        let output = cmd
             .arg("--file")
             .arg(sql_path)
             .output()
@@ -320,8 +364,8 @@ impl BackupService {
 
         let output_path = input_path.with_extension("sql.gz.enc");
 
-        let output = Command::new("openssl")
-            .arg("enc")
+        let mut cmd = Command::new("openssl");
+        cmd.arg("enc")
             .arg("-aes-256-cbc")
             .arg("-salt")
             .arg("-pbkdf2")
@@ -330,9 +374,11 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{key}"))
-            .output()
-            .context("Failed to execute openssl")?;
+            .arg("env:OPENSSL_PASS");
+
+        cmd.env("OPENSSL_PASS", key);
+
+        let output = cmd.output().context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -355,8 +401,8 @@ impl BackupService {
 
         let output_path = temp_dir.join("decrypted.sql.gz");
 
-        let output = Command::new("openssl")
-            .arg("enc")
+        let mut cmd = Command::new("openssl");
+        cmd.arg("enc")
             .arg("-aes-256-cbc")
             .arg("-d")
             .arg("-pbkdf2")
@@ -365,9 +411,11 @@ impl BackupService {
             .arg("-out")
             .arg(&output_path)
             .arg("-pass")
-            .arg(format!("pass:{key}"))
-            .output()
-            .context("Failed to execute openssl")?;
+            .arg("env:OPENSSL_PASS");
+
+        cmd.env("OPENSSL_PASS", key);
+
+        let output = cmd.output().context("Failed to execute openssl")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -454,5 +502,94 @@ impl BackupService {
             serde_json::from_str(&json).context("Failed to parse metadata")?;
 
         Ok(metadata)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backup_service_creation() {
+        let service = BackupService::new(
+            "postgres://user:password@localhost/testdb".to_string(),
+            PathBuf::from("/tmp/backups"),
+            Some("encryption_key".to_string()),
+        );
+
+        assert_eq!(service.database_url, "postgres://user:password@localhost/testdb");
+        assert_eq!(service.encryption_key, Some("encryption_key".to_string()));
+    }
+
+    #[test]
+    fn test_backup_metadata_creation() {
+        let now = Utc::now();
+        let metadata = BackupMetadata {
+            filename: "backup_2024_01_01.sql.gz.enc".to_string(),
+            backup_type: BackupType::Daily,
+            timestamp: now,
+            size_bytes: 1024,
+            compressed: true,
+            encrypted: true,
+            checksum: "abc123".to_string(),
+        };
+
+        assert_eq!(metadata.backup_type, BackupType::Daily);
+        assert!(metadata.encrypted);
+        assert!(metadata.compressed);
+    }
+
+    #[test]
+    fn test_backup_type_variants() {
+        assert_eq!(BackupType::Hourly, BackupType::Hourly);
+        assert_eq!(BackupType::Daily, BackupType::Daily);
+        assert_eq!(BackupType::Monthly, BackupType::Monthly);
+        assert_ne!(BackupType::Hourly, BackupType::Daily);
+    }
+
+    #[test]
+    fn test_database_url_parsing() {
+        let url_str = "postgres://user:password@localhost:5432/mydb";
+        let parsed = url::Url::parse(url_str).expect("Failed to parse URL");
+
+        assert_eq!(parsed.scheme(), "postgres");
+        assert_eq!(parsed.username(), "user");
+        assert_eq!(parsed.password(), Some("password"));
+        assert_eq!(parsed.host_str(), Some("localhost"));
+        assert_eq!(parsed.port(), Some(5432));
+
+        let path = parsed.path().trim_start_matches('/');
+        assert_eq!(path, "mydb");
+    }
+
+    #[test]
+    fn test_database_url_without_password() {
+        let url_str = "postgres://localhost/mydb";
+        let parsed = url::Url::parse(url_str).expect("Failed to parse URL");
+
+        assert_eq!(parsed.scheme(), "postgres");
+        assert_eq!(parsed.password(), None);
+    }
+
+    #[test]
+    fn test_backup_metadata_serialization() {
+        let now = Utc::now();
+        let metadata = BackupMetadata {
+            filename: "test_backup.sql.gz".to_string(),
+            backup_type: BackupType::Hourly,
+            timestamp: now,
+            size_bytes: 5000,
+            compressed: true,
+            encrypted: false,
+            checksum: "def456".to_string(),
+        };
+
+        let json = serde_json::to_string(&metadata).expect("Serialization failed");
+        let deserialized: BackupMetadata =
+            serde_json::from_str(&json).expect("Deserialization failed");
+
+        assert_eq!(deserialized.filename, metadata.filename);
+        assert_eq!(deserialized.backup_type, metadata.backup_type);
+        assert_eq!(deserialized.size_bytes, metadata.size_bytes);
     }
 }

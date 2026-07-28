@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use vaultrs::auth::approle;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
 use vaultrs::kv2;
+use vaultrs::token;
 
 use crate::auth::AuthRateLimiter;
 
@@ -183,13 +184,46 @@ impl SecretsManager {
 
     /// Spawn a background task that refreshes secrets from Vault every 5 minutes.
     /// Rotated secrets remain valid for a grace period so in-flight requests are not rejected.
-    pub fn start_refresh_task(self, store: SecretsStore) {
+    pub fn start_refresh_task(mut self, store: SecretsStore) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
             interval.tick().await; // skip the immediate first tick
             loop {
                 interval.tick().await;
                 tracing::info!("secrets_rotation: refreshing secrets from Vault");
+
+                // Renew token before each refresh to prevent expiration
+                if let Err(e) = token::renew_self(&self.client, None).await {
+                    tracing::warn!("secrets_rotation: failed to renew Vault token: {e}");
+                    // Attempt to re-authenticate if token renewal fails
+                    let role_id = match env::var("VAULT_ROLE_ID") {
+                        Ok(id) => id,
+                        Err(_) => {
+                            tracing::error!("secrets_rotation: VAULT_ROLE_ID not set, cannot re-authenticate");
+                            continue;
+                        }
+                    };
+                    let secret_id = match env::var("VAULT_SECRET_ID") {
+                        Ok(id) => id,
+                        Err(_) => {
+                            tracing::error!("secrets_rotation: VAULT_SECRET_ID not set, cannot re-authenticate");
+                            continue;
+                        }
+                    };
+                    let auth_mount = env::var("VAULT_AUTH_MOUNT")
+                        .unwrap_or_else(|_| "auth/approle".to_string());
+
+                    match approle::login(&self.client, &auth_mount, &role_id, &secret_id).await {
+                        Ok(auth) => {
+                            self.client.set_token(&auth.client_token);
+                            tracing::info!("secrets_rotation: successfully re-authenticated to Vault");
+                        }
+                        Err(e) => {
+                            tracing::error!("secrets_rotation: failed to re-authenticate to Vault: {e}");
+                            continue;
+                        }
+                    }
+                }
 
                 match self.get_anchor_secret().await {
                     Ok(new_secret) => {

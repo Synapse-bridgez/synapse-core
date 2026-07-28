@@ -176,9 +176,6 @@ pub fn create_app(app_state: AppState) -> Router {
         ));
 
     // Mount idempotency middleware on callback routes when the service is available (#910).
-    if let Some(ref idempotency_service) = app_state.idempotency_service {
-        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
-            idempotency_service.clone(),
     if let Some(idempotency) = &app_state.idempotency_service {
         callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
             idempotency.clone(),
@@ -210,9 +207,6 @@ pub fn create_app(app_state: AppState) -> Router {
         ));
 
     // Mount idempotency middleware on webhook routes when the service is available (#910).
-    if let Some(ref idempotency_service) = app_state.idempotency_service {
-        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
-            idempotency_service.clone(),
     if let Some(idempotency) = &app_state.idempotency_service {
         webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
             idempotency.clone(),
@@ -224,6 +218,17 @@ pub fn create_app(app_state: AppState) -> Router {
     if let Some(store) = &app_state.secrets_store {
         webhook_routes = webhook_routes.layer(axum::Extension(store.clone()));
     }
+
+    // Telemetry webhook route (#976): wire TelemetryWebhookHandler to an actual
+    // HTTP endpoint.  The handler itself performs HMAC-SHA256 signature
+    // verification, payload-size cap, timestamp replay protection, and field
+    // validation — so no additional middleware auth layer is needed here.
+    let telemetry_webhook_routes = Router::new()
+        .route(
+            "/telemetry/webhook",
+            post(handlers::telemetry_webhook::handle_telemetry_webhook),
+        )
+        .with_state(api_state.clone());
 
     // Core API routes (shared between versioned and unversioned)
     let core_routes = Router::new()
@@ -338,6 +343,8 @@ pub fn create_app(app_state: AppState) -> Router {
         // Versioned route groups
         .nest("/api/v1", v1_routes)
         .nest("/api/v2", v2_routes)
+        // Telemetry webhook ingestion — HMAC-authenticated by the handler (#976)
+        .merge(telemetry_webhook_routes)
         .with_state(api_state)
         .merge(
             Router::new()

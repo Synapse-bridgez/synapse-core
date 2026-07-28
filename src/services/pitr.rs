@@ -171,11 +171,13 @@ impl ShellPitrExecutor {
 #[async_trait]
 impl PitrExecutor for ShellPitrExecutor {
     async fn restore(&self, target_timestamp: DateTime<Utc>) -> Result<String, String> {
-        let output = tokio::process::Command::new(&self.script)
-            .arg(target_timestamp.to_rfc3339())
-            .arg(&self.database_url)
+        let mut cmd = tokio::process::Command::new(&self.script);
+        cmd.arg(target_timestamp.to_rfc3339())
             .arg(&self.workspace_dir)
             .arg(&self.wal_archive_dir)
+            .env("PITR_DATABASE_URL", &self.database_url);
+
+        let output = cmd
             .output()
             .await
             .map_err(|e| {
@@ -451,5 +453,61 @@ mod tests {
         };
         assert!(validate_target_timestamp(coverage.earliest, now, Some(&coverage)).is_ok());
         assert!(validate_target_timestamp(coverage.latest, now, Some(&coverage)).is_ok());
+    }
+
+    #[test]
+    fn test_restore_job_creation() {
+        let id = uuid::Uuid::new_v4();
+        let target = ts(2026, 5, 15);
+        let now = Utc::now();
+
+        let job = RestoreJob {
+            id,
+            target_timestamp: target,
+            status: STATUS_PENDING.to_string(),
+            dry_run: false,
+            requested_by: "test_user".to_string(),
+            detail: None,
+            error_message: None,
+            created_at: now,
+            started_at: None,
+            completed_at: None,
+        };
+
+        assert_eq!(job.status, STATUS_PENDING);
+        assert!(!job.dry_run);
+        assert_eq!(job.requested_by, "test_user");
+    }
+
+    #[test]
+    fn test_restore_job_dry_run() {
+        let id = uuid::Uuid::new_v4();
+        let target = ts(2026, 5, 15);
+        let now = Utc::now();
+
+        let job = RestoreJob {
+            id,
+            target_timestamp: target,
+            status: STATUS_PENDING.to_string(),
+            dry_run: true,
+            requested_by: "test_user".to_string(),
+            detail: None,
+            error_message: None,
+            created_at: now,
+            started_at: None,
+            completed_at: None,
+        };
+
+        assert!(job.dry_run);
+    }
+
+    #[test]
+    fn test_pitr_coverage_validation() {
+        let coverage = PitrCoverage {
+            earliest: ts(2026, 5, 1),
+            latest: ts(2026, 5, 20),
+        };
+
+        assert!(coverage.earliest < coverage.latest);
     }
 }

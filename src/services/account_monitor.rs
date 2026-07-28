@@ -1,6 +1,7 @@
 use crate::stellar::client::HorizonClient;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -87,14 +88,23 @@ impl AccountMonitor {
 
         info!("Found {} new payments for {}", payments.len(), account);
 
-        let mut last_successful_id: Option<String> = None;
+        // Track the id of every payment we observe, regardless of outcome.
+        // The Horizon cursor is exclusive-after-cursor, so we must advance past
+        // ALL seen payments — not just successful ones — to avoid permanently
+        // skipping payments whose process_payment call failed transiently.
+        let mut last_seen_id: Option<String> = None;
 
         for payment in payments {
+            // Record this payment's id before processing so a panic/early-return
+            // below cannot prevent the cursor from advancing past it.
+            last_seen_id = Some(payment.id.clone());
+
             match self.process_payment(&payment).await {
-                Ok(_) => last_successful_id = Some(payment.id.clone()),
+                Ok(_) => {}
                 Err(e) => {
                     warn!("Failed to process payment {}: {}", payment.id, e);
-                    // Route to DLQ if match found but verification failed
+                    // Route to DLQ so the failure is recorded even though we
+                    // will advance the cursor past this payment.
                     if let Err(dlq_err) = self.route_to_dlq(&payment, &e).await {
                         error!("Failed to route payment {} to DLQ: {}", payment.id, dlq_err);
                     }
@@ -102,7 +112,7 @@ impl AccountMonitor {
             }
         }
 
-        if let Some(id) = last_successful_id {
+        if let Some(id) = last_seen_id {
             self.save_cursor(account, &id).await?;
         }
 
@@ -170,47 +180,49 @@ impl AccountMonitor {
         }
 
         let memo = payment.memo.as_ref().unwrap();
-        let payment_amount = payment.amount.parse::<f64>()?;
 
-        let tx = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::BigDecimal)>(
-            "SELECT id, stellar_account, asset_code, amount FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
+        // #922: parse payment amount as BigDecimal to preserve decimal precision
+        // and avoid f64 rounding errors in financial comparisons.
+        let payment_amount =
+            sqlx::types::BigDecimal::from_str(&payment.amount).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse payment amount '{}' as decimal: {}",
+                    payment.amount,
+                    e
+                )
+            })?;
+
+        // #924: Scope the lookup by both memo AND stellar_account (payment.to)
+        // so that memo collisions across different accounts cannot match the
+        // wrong transaction.  Fetch all matching pending rows (not LIMIT 1) and
+        // also filter by asset_code so we only iterate plausible candidates.
+        // ORDER BY created_at ASC to give deterministic, oldest-first matching.
+        let candidates = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::BigDecimal)>(
+            "SELECT id, stellar_account, asset_code, amount \
+             FROM transactions \
+             WHERE memo = $1 \
+               AND stellar_account = $2 \
+               AND asset_code = $3 \
+               AND status = 'pending' \
+             ORDER BY created_at ASC",
         )
         .bind(memo)
-        .fetch_optional(&self.pool)
+        .bind(&payment.to)
+        .bind(&payment.asset_code)
+        .fetch_all(&self.pool)
         .await?;
 
-        if let Some((tx_id, expected_account, expected_asset, expected_amount)) = tx {
-            // Verify destination account matches
-            if payment.to != expected_account {
-                return Err(anyhow::anyhow!(
-                    "Payment destination {} does not match transaction account {}",
-                    payment.to,
-                    expected_account
-                ));
-            }
+        // Walk all matching candidates and take the first one whose amount is
+        // satisfied by this payment (allow overpayment).
+        let matched = candidates.into_iter().find(|(_, _, _, expected_amount)| {
+            // #922: compare BigDecimal values directly — no f64 round-trip.
+            &payment_amount >= expected_amount
+        });
 
-            // Verify asset code matches
-            if payment.asset_code != expected_asset {
-                return Err(anyhow::anyhow!(
-                    "Payment asset {} does not match transaction asset {}",
-                    payment.asset_code,
-                    expected_asset
-                ));
-            }
-
-            // Verify amount is at least equal to expected (allow overpayment)
-            let expected_amount_f64 = expected_amount.to_string().parse::<f64>()?;
-            if payment_amount < expected_amount_f64 {
-                return Err(anyhow::anyhow!(
-                    "Payment amount {} is less than expected amount {}",
-                    payment_amount,
-                    expected_amount_f64
-                ));
-            }
-
+        if let Some((tx_id, _expected_account, _expected_asset, expected_amount)) = matched {
             info!(
-                "Verified payment {} matches transaction {}",
-                payment.id, tx_id
+                "Verified payment {} matches transaction {} (amount {} >= expected {})",
+                payment.id, tx_id, payment_amount, expected_amount
             );
 
             // Validate status transition: pending → completed
@@ -229,8 +241,11 @@ impl AccountMonitor {
             info!("Completed transaction {} via payment monitoring", tx_id);
         } else {
             return Err(anyhow::anyhow!(
-                "No pending transaction found with memo {}",
-                memo
+                "No pending transaction found for memo {}, account {}, asset {}, amount {}",
+                memo,
+                payment.to,
+                payment.asset_code,
+                payment_amount
             ));
         }
 
@@ -264,13 +279,25 @@ impl AccountMonitor {
     }
 
     async fn route_to_dlq(&self, payment: &Payment, error: &anyhow::Error) -> anyhow::Result<()> {
-        // Try to extract transaction ID and details if a matching transaction exists
+        // Try to extract transaction ID and details if a matching transaction exists.
+        // #924: scope by stellar_account (payment.to) and asset_code so we don't
+        // accidentally DLQ a transaction belonging to a different account that
+        // happens to share the same memo.
         if let Some(memo) = &payment.memo {
             if let Ok(Some((tx_id, stellar_account, amount, asset_code, anchor_tx_id))) =
                 sqlx::query_as::<_, (Uuid, String, sqlx::types::BigDecimal, String, Option<String>)>(
-                    "SELECT id, stellar_account, amount, asset_code, anchor_transaction_id FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
+                    "SELECT id, stellar_account, amount, asset_code, anchor_transaction_id \
+                     FROM transactions \
+                     WHERE memo = $1 \
+                       AND stellar_account = $2 \
+                       AND asset_code = $3 \
+                       AND status = 'pending' \
+                     ORDER BY created_at ASC \
+                     LIMIT 1",
                 )
                 .bind(memo)
+                .bind(&payment.to)
+                .bind(&payment.asset_code)
                 .fetch_optional(&self.pool)
                 .await
             {

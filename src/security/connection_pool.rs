@@ -7,9 +7,10 @@
 //!
 //! # Security guarantees
 //!
-//! - The backend URL is validated against an allow-list of safe schemes
-//!   (`https` only for security backends) and a maximum length at construction
-//!   time, preventing SSRF and injection vectors.
+//! - The backend URL is validated at construction time: only the `https://`
+//!   scheme is accepted; the URL length is capped at [`MAX_ENDPOINT_LEN`];
+//!   embedded credentials are rejected; and loopback, link-local, and
+//!   RFC-1918/ULA private hosts are blocked to prevent SSRF.
 //! - Pool size is hard-capped at [`SecurityPoolConfig::max_size`]; acquisition
 //!   attempts beyond this limit return [`SecurityPoolError::Exhausted`] rather
 //!   than blocking or allocating unboundedly.
@@ -24,12 +25,14 @@
 //! use synapse_core::security::connection_pool::{SecurityConnectionPool, SecurityPoolConfig};
 //!
 //! let pool = SecurityConnectionPool::new()?;
-//! let conn = pool.acquire()?;
-//! // … use conn …
-//! pool.release(conn);
+//! let guard = pool.acquire()?;
+//! // … use *guard …
+//! pool.release(guard); // or just drop the guard — it returns automatically
 //! ```
 
 use std::collections::VecDeque;
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,7 +75,7 @@ impl Default for SecurityPoolConfig {
         Self {
             max_size: 5,
             max_idle: Duration::from_secs(120),
-            endpoint: "https://localhost:8200".to_string(),
+            endpoint: "https://vault.internal:8200".to_string(),
         }
     }
 }
@@ -165,6 +168,75 @@ impl PoolState {
 }
 
 // ---------------------------------------------------------------------------
+// RAII connection guard
+// ---------------------------------------------------------------------------
+
+/// RAII guard that returns a [`SecurityConnection`] to its pool when dropped.
+///
+/// Obtain a guard via [`SecurityConnectionPool::acquire`].  The guard dereferences
+/// to the inner [`SecurityConnection`] for read access.  If the guard is dropped
+/// without an explicit [`SecurityConnectionPool::release`] call (e.g. due to an
+/// early `?` return or a panic on the calling thread), `Drop` automatically
+/// decrements the pool's `total` counter so the capacity is never permanently lost.
+pub struct ConnectionGuard {
+    /// The checked-out connection; wrapped in `Option` so `Drop` can take it.
+    conn: Option<SecurityConnection>,
+    state: Arc<Mutex<PoolState>>,
+    max_idle: Duration,
+}
+
+impl ConnectionGuard {
+    fn new(conn: SecurityConnection, state: Arc<Mutex<PoolState>>, max_idle: Duration) -> Self {
+        Self {
+            conn: Some(conn),
+            state,
+            max_idle,
+        }
+    }
+
+    /// Consumes the guard and returns the inner connection so the caller can
+    /// pass it to [`SecurityConnectionPool::release`] explicitly.
+    pub fn into_inner(mut self) -> SecurityConnection {
+        self.conn.take().expect("ConnectionGuard conn already taken")
+    }
+}
+
+impl std::ops::Deref for ConnectionGuard {
+    type Target = SecurityConnection;
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("ConnectionGuard conn already taken")
+    }
+}
+
+impl std::ops::DerefMut for ConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.conn.as_mut().expect("ConnectionGuard conn already taken")
+    }
+}
+
+impl Drop for ConnectionGuard {
+    /// Returns or discards the connection automatically.
+    ///
+    /// If the connection is still fresh it is pushed back onto the idle queue;
+    /// if it is stale (or `into_inner` was already called) the `total` counter
+    /// is decremented so the pool capacity is reclaimed.
+    fn drop(&mut self) {
+        let Some(mut conn) = self.conn.take() else {
+            // `into_inner` was called; the caller is responsible for releasing.
+            return;
+        };
+
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if conn.is_stale(self.max_idle) {
+            state.total = state.total.saturating_sub(1);
+        } else {
+            conn.touch();
+            state.available.push_back(conn);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pool
 // ---------------------------------------------------------------------------
 
@@ -210,37 +282,51 @@ impl SecurityConnectionPool {
         })
     }
 
-    /// Acquires a connection from the pool.
+    /// Acquires a connection from the pool, returning a [`ConnectionGuard`].
+    ///
+    /// The guard automatically returns (or discards) the connection when dropped,
+    /// so the pool's capacity is always reclaimed even on early-return error paths.
     ///
     /// Stale idle connections are evicted before the availability check.
-    /// Returns a fresh connection if the pool has capacity and no idle
+    /// A fresh connection is created if the pool has capacity and no idle
     /// connections are available.
     ///
     /// # Errors
     /// [`SecurityPoolError::Exhausted`] when all `max_size` connections are in use.
-    pub fn acquire(&self) -> Result<SecurityConnection, SecurityPoolError> {
+    pub fn acquire(&self) -> Result<ConnectionGuard, SecurityPoolError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.evict_stale_locked(&mut state);
 
-        if let Some(conn) = state.available.pop_front() {
-            return Ok(conn);
-        }
+        let conn = if let Some(conn) = state.available.pop_front() {
+            conn
+        } else {
+            if state.total >= self.config.max_size {
+                return Err(SecurityPoolError::Exhausted(self.config.max_size));
+            }
+            let id = state.next_id();
+            state.total += 1;
+            SecurityConnection::new(id, self.config.endpoint.clone())
+        };
 
-        if state.total >= self.config.max_size {
-            return Err(SecurityPoolError::Exhausted(self.config.max_size));
-        }
-
-        let id = state.next_id();
-        state.total += 1;
-        Ok(SecurityConnection::new(id, self.config.endpoint.clone()))
+        Ok(ConnectionGuard::new(
+            conn,
+            Arc::clone(&self.state),
+            self.config.max_idle,
+        ))
     }
 
     /// Returns a connection to the pool after use.
     ///
-    /// Stale connections are discarded and the pool size is decremented.
-    /// Non-stale connections are re-queued for future acquisition.
+    /// Accepts a [`ConnectionGuard`] produced by [`acquire`](Self::acquire).
+    /// Stale connections are discarded and the pool size is decremented;
+    /// non-stale connections are re-queued for future acquisition.
     /// Recovers gracefully from poisoned mutexes.
-    pub fn release(&self, mut conn: SecurityConnection) {
+    ///
+    /// Calling this is optional — dropping the guard achieves the same result.
+    pub fn release(&self, guard: ConnectionGuard) {
+        // Taking `into_inner` disarms the guard's own Drop, then we handle
+        // return/eviction here with a single lock acquisition.
+        let mut conn = guard.into_inner();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         if conn.is_stale(self.config.max_idle) {
@@ -260,11 +346,16 @@ impl SecurityConnectionPool {
         };
         self.evict_stale_locked(&mut state);
         state.available.len()
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .available
+            .len()
     }
 
     /// Total connections managed by the pool (idle + currently in use).
     pub fn total_count(&self) -> usize {
-        self.state.lock().map(|s| s.total).unwrap_or(0)
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).total
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {
@@ -282,8 +373,12 @@ impl SecurityConnectionPool {
 
 /// Validates a backend endpoint URL for use in the security pool.
 ///
-/// Only `https://` scheme is accepted to prevent credential leakage over
-/// plain HTTP.  The URL must not exceed [`MAX_ENDPOINT_LEN`] characters.
+/// Checks that the URL:
+/// - is non-empty and does not exceed [`MAX_ENDPOINT_LEN`] characters,
+/// - uses the `https://` scheme (plain HTTP is rejected to prevent credential leakage),
+/// - does not contain embedded credentials (`user:pass@`),
+/// - targets a routable host — loopback (`127.x`, `::1`), link-local (`169.254.x`,
+///   `fe80::`), and RFC-1918/ULA private ranges are rejected to prevent SSRF.
 fn validate_endpoint(endpoint: &str) -> Result<(), SecurityPoolError> {
     if endpoint.is_empty() {
         return Err(SecurityPoolError::InvalidConfig(
@@ -305,7 +400,72 @@ fn validate_endpoint(endpoint: &str) -> Result<(), SecurityPoolError> {
         ));
     }
 
+    // Strip scheme prefix to get authority + path.
+    let after_scheme = &endpoint["https://".len()..];
+
+    // Reject embedded credentials (user:pass@host).
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    if authority.contains('@') {
+        return Err(SecurityPoolError::InvalidConfig(
+            "endpoint must not contain embedded credentials".into(),
+        ));
+    }
+
+    // Extract host (strip port if present, handle IPv6 brackets).
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        // IPv6 literal: [::1]:8200 — take up to the closing ']'
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        // hostname or IPv4: strip port
+        authority.split(':').next().unwrap_or("")
+    };
+
+    // Reject loopback hostnames.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(SecurityPoolError::InvalidConfig(
+            "endpoint host must not be a loopback or private address (SSRF prevention)".into(),
+        ));
+    }
+
+    // If the host looks like an IP address, reject private/loopback/link-local ranges.
+    if let Ok(ip) = IpAddr::from_str(host) {
+        if is_ssrf_unsafe_ip(ip) {
+            return Err(SecurityPoolError::InvalidConfig(
+                "endpoint host must not be a loopback, link-local, or private IP address (SSRF prevention)".into(),
+            ));
+        }
+    }
+
     Ok(())
+}
+
+/// Returns `true` if the IP address should be blocked as an SSRF risk.
+///
+/// Covers loopback, link-local (169.254.x/fe80::), and RFC-1918/ULA private ranges.
+fn is_ssrf_unsafe_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()                          // 127.0.0.0/8
+                || v4.is_link_local()                 // 169.254.0.0/16
+                || o[0] == 10                         // 10.0.0.0/8
+                || (o[0] == 172 && o[1] >= 16 && o[1] <= 31) // 172.16.0.0/12
+                || (o[0] == 192 && o[1] == 168)       // 192.168.0.0/16
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()                          // ::1
+                || is_ipv6_link_local(v6.segments())  // fe80::/10
+                || is_ipv6_ula(v6.segments())         // fc00::/7
+        }
+    }
+}
+
+fn is_ipv6_link_local(segs: [u16; 8]) -> bool {
+    (segs[0] & 0xffc0) == 0xfe80
+}
+
+fn is_ipv6_ula(segs: [u16; 8]) -> bool {
+    (segs[0] & 0xfe00) == 0xfc00
 }
 
 // ---------------------------------------------------------------------------
