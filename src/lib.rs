@@ -144,6 +144,24 @@ impl std::fmt::Debug for ApiState {
     }
 }
 
+/// Build the complete API router with all routes and middleware.
+///
+/// Includes:
+/// - Core API routes (transactions, settlements, callbacks, webhooks)
+/// - Admin routes (quota, locks, webhooks, DLQ, reconciliation, backup)
+/// - Health check endpoints (live, ready, health, errors)
+/// - WebSocket and reconnection endpoints
+///
+/// # Admin Routes Mounted
+/// - `/admin/dlq` - Dead-letter queue listing and requeue operations
+/// - `/admin/webhooks/failed` - List failed webhook deliveries
+/// - `/admin/webhooks/replay/:id` - Replay a single failed webhook
+/// - `/admin/webhooks/replay/batch` - Batch replay failed webhooks
+/// - `/admin/webhooks/endpoints/:id/rate-limit` - Update webhook rate limits
+/// - `/admin/reconciliation/*` - Reconciliation reports
+/// - `/admin/backup/*` - Point-in-time recovery backup restores
+///
+/// All admin routes are protected by admin_auth middleware.
 pub fn create_app(app_state: AppState) -> Router {
     let graphql_schema = crate::graphql::schema::build_schema(app_state.clone());
     let api_state = ApiState {
@@ -325,6 +343,10 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         // Admin: point-in-time-recovery backup restores
         .nest("/admin/backup", handlers::admin::backup::backup_routes())
+        // Admin: dead-letter queue and transaction requeue operations
+        .nest("/admin", handlers::dlq::dlq_routes())
+        // Admin: webhook replay and batch operations
+        .nest("/admin", handlers::admin::webhook_replay_routes())
         .layer(axum_middleware::from_fn(
             crate::middleware::auth::admin_auth,
         ));
