@@ -1,8 +1,7 @@
 use axum::{
     async_trait,
-    extract::{FromRequestParts, Path},
+    extract::FromRequestParts,
     http::{request::Parts, HeaderMap},
-    RequestPartsExt,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -58,10 +57,10 @@ async fn resolve_tenant_id(
     parts: &mut Parts,
     state: &AppState,
 ) -> std::result::Result<Uuid, AppError> {
-    if let Ok(Path(tenant_id)) = parts.extract::<Path<Uuid>>().await {
-        return Ok(tenant_id);
-    }
-
+    // Tenant identity is established exclusively from authenticated credentials
+    // (API key or Bearer token). Path parameters are never trusted as a tenant
+    // identity source — doing so would allow any caller to impersonate an
+    // arbitrary tenant by placing that tenant's UUID in the URL (issue #971).
     let headers = &parts.headers;
 
     if let Some(api_key) = extract_api_key(headers) {

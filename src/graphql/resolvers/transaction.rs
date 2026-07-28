@@ -1,4 +1,5 @@
 use crate::db::{models::Transaction, queries};
+use crate::graphql::error::database_error;
 use crate::graphql::input_validation::{
     validate_asset_code, validate_limit, validate_status, validate_stellar_account,
 };
@@ -44,7 +45,7 @@ impl TransactionQuery {
         let state = ctx.data::<AppState>()?;
         queries::get_transaction(&state.db, id)
             .await
-            .map_err(|e| e.into())
+            .map_err(|e| database_error(&e))
     }
 
     /// List transactions with optional filtering.
@@ -188,7 +189,8 @@ impl TransactionMutation {
             sqlx::query_as("SELECT status, asset_code FROM transactions WHERE id = $1")
                 .bind(id)
                 .fetch_one(&state.db)
-                .await?;
+                .await
+                .map_err(|e| database_error(&e))?;
 
         // Validate transition through the canonical state machine.
         crate::validation::state_machine::validate_status_transition(&current_status, "completed")
@@ -201,7 +203,8 @@ impl TransactionMutation {
         .bind(id)
         .bind(&current_status)
         .fetch_one(&state.db)
-        .await?;
+        .await
+        .map_err(|e| database_error(&e))?;
 
         crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
 
