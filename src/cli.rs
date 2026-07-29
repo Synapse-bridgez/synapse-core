@@ -444,8 +444,12 @@ pub enum GraphqlCommands {
 // ─── Stats handlers ───────────────────────────────────────────────────────────
 
 pub async fn handle_stats_status(base_url: &str, json: bool) -> anyhow::Result<()> {
+    let admin_key = require_admin_api_key()?;
     let url = format!("{base_url}/stats/status");
-    let resp = reqwest::get(&url)
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {admin_key}"))
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("Request failed: {e}"))?;
 
@@ -478,8 +482,12 @@ pub async fn handle_stats_status(base_url: &str, json: bool) -> anyhow::Result<(
 }
 
 pub async fn handle_stats_daily(base_url: &str, days: i32, json: bool) -> anyhow::Result<()> {
+    let admin_key = require_admin_api_key()?;
     let url = format!("{base_url}/stats/daily?days={days}");
-    let resp = reqwest::get(&url)
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {admin_key}"))
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("Request failed: {e}"))?;
 
@@ -515,8 +523,12 @@ pub async fn handle_stats_daily(base_url: &str, days: i32, json: bool) -> anyhow
 }
 
 pub async fn handle_stats_assets(base_url: &str, json: bool) -> anyhow::Result<()> {
+    let admin_key = require_admin_api_key()?;
     let url = format!("{base_url}/stats/assets");
-    let resp = reqwest::get(&url)
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {admin_key}"))
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("Request failed: {e}"))?;
 
@@ -562,8 +574,12 @@ pub async fn handle_stats_assets(base_url: &str, json: bool) -> anyhow::Result<(
 }
 
 pub async fn handle_stats_cache(base_url: &str, json: bool) -> anyhow::Result<()> {
+    let admin_key = require_admin_api_key()?;
     let url = format!("{base_url}/cache/metrics");
-    let resp = reqwest::get(&url)
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {admin_key}"))
+        .send()
         .await
         .map_err(|e| anyhow::anyhow!("Request failed: {e}"))?;
 
@@ -648,10 +664,12 @@ pub async fn handle_graphql_query(
         body["variables"] = vars;
     }
 
+    let admin_key = require_admin_api_key()?;
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {admin_key}"))
         .json(&body)
         .send()
         .await
@@ -684,37 +702,80 @@ pub async fn handle_graphql_query(
     Ok(())
 }
 
+/// Force complete a transaction by ID.
+///
+/// Attributes the action to an operator (`SYNAPSE_ACTOR`/`USER`/`LOGNAME`,
+/// mirroring [`handle_backup_restore_pitr`]) and validates the transition
+/// through the canonical state machine so an already-completed or failed
+/// transaction can't be silently overwritten.
 pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Result<()> {
-    // Get asset_code before update for cache invalidation
-    let asset_code: Option<String> =
-        sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+    let actor = std::env::var("SYNAPSE_ACTOR")
+        .or_else(|_| std::env::var("USER"))
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "admin-cli".to_string());
+
+    let mut db_tx = pool.begin().await?;
+
+    let current: Option<(String, String)> =
+        sqlx::query_as("SELECT status, asset_code FROM transactions WHERE id = $1 FOR UPDATE")
             .bind(tx_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *db_tx)
             .await?;
 
-    let result = sqlx::query(
-        "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING id"
+    let (current_status, asset_code) = match current {
+        Some(row) => row,
+        None => {
+            db_tx.rollback().await?;
+            tracing::warn!("Transaction {} not found", tx_id);
+            anyhow::bail!("Transaction {tx_id} not found");
+        }
+    };
+
+    if let Err(e) = crate::validation::state_machine::validate_status_transition(
+        &current_status,
+        "completed",
+    ) {
+        db_tx.rollback().await?;
+        tracing::warn!(
+            actor = %actor,
+            current_status = %current_status,
+            "Refusing to force-complete transaction {}: {}",
+            tx_id,
+            e
+        );
+        anyhow::bail!("Cannot force-complete transaction {tx_id}: {e}");
+    }
+
+    sqlx::query(
+        "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 AND status = $2",
     )
     .bind(tx_id)
-    .fetch_optional(pool)
+    .bind(&current_status)
+    .execute(&mut *db_tx)
     .await?;
 
-    match result {
-        Some(_) => {
-            // Invalidate cache after update
-            if let Some(asset) = asset_code {
-                crate::db::queries::invalidate_caches_for_asset(&asset).await;
-            }
+    crate::db::audit::AuditLog::log_status_change(
+        &mut db_tx,
+        tx_id,
+        crate::db::audit::ENTITY_TRANSACTION,
+        &current_status,
+        "completed",
+        &actor,
+    )
+    .await?;
 
-            tracing::info!("Transaction {} marked as completed", tx_id);
-            println!("✓ Transaction {tx_id} marked as completed");
-            Ok(())
-        }
-        None => {
-            tracing::warn!("Transaction {} not found", tx_id);
-            anyhow::bail!("Transaction {tx_id} not found")
-        }
-    }
+    db_tx.commit().await?;
+
+    crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+
+    tracing::info!(
+        actor = %actor,
+        previous_status = %current_status,
+        "Transaction {} marked as completed",
+        tx_id
+    );
+    println!("✓ Transaction {tx_id} marked as completed (by {actor})");
+    Ok(())
 }
 
 pub async fn handle_tx_list(
@@ -726,7 +787,7 @@ pub async fn handle_tx_list(
     format: &str,
 ) -> anyhow::Result<()> {
     let base_url = format!("http://localhost:{}", config.server_port);
-    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+    let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
     let params = synapse_sdk::ListParams {
@@ -786,7 +847,7 @@ pub async fn handle_db_migrate(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn handle_config_validate(config: &Config) -> anyhow::Result<()> {
+pub async fn handle_config_validate(config: &Config) -> anyhow::Result<()> {
     tracing::info!("Validating configuration...");
 
     println!("Configuration:");
@@ -794,10 +855,42 @@ pub fn handle_config_validate(config: &Config) -> anyhow::Result<()> {
     println!("  Database URL: {}", mask_password(&config.database_url));
     println!("  Stellar Horizon URL: {}", config.stellar_horizon_url);
 
-    tracing::info!("Configuration is valid");
-    println!("✓ Configuration is valid");
+    let pool = crate::db::create_pool(config).await.map_err(|e| {
+        anyhow::anyhow!("Failed to connect to the database while validating configuration: {e}")
+    })?;
 
+    let report = crate::startup::validate_environment(config, &pool).await?;
+    report.print();
+
+    if !report.is_valid() {
+        anyhow::bail!("Configuration validation failed");
+    }
+
+    tracing::info!("Configuration is valid");
     Ok(())
+}
+
+/// Read `SYNAPSE_API_KEY` from the environment, failing closed instead of
+/// silently substituting a "dev-key" placeholder credential when it's unset.
+fn require_api_key() -> anyhow::Result<String> {
+    std::env::var("SYNAPSE_API_KEY").map_err(|_| {
+        anyhow::anyhow!(
+            "SYNAPSE_API_KEY is not set. This command calls the Synapse Core API and needs a \
+             valid API key."
+        )
+    })
+}
+
+/// Read `ADMIN_API_KEY` from the environment. The `/stats/*`, `/cache/metrics`,
+/// and `/graphql` routes are mounted on `admin_router` and protected by
+/// `admin_auth`, so every request against them must carry this bearer token.
+fn require_admin_api_key() -> anyhow::Result<String> {
+    std::env::var("ADMIN_API_KEY").map_err(|_| {
+        anyhow::anyhow!(
+            "ADMIN_API_KEY is not set. This command calls an admin-authenticated endpoint and \
+             needs the same admin key the server was started with."
+        )
+    })
 }
 
 fn mask_password(url: &str) -> String {
@@ -1090,6 +1183,39 @@ fn finish_pitr_job(body: &serde_json::Value) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `ADMIN_API_KEY` is process-wide state; without this lock, tests that set
+    // or rely on it race against each other under parallel test execution.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that sets `ADMIN_API_KEY` for the duration of a test and
+    /// restores the previous value on drop, while holding `ENV_LOCK` so no
+    /// other test observes a half-set env var.
+    struct AdminKeyGuard<'a> {
+        _lock: std::sync::MutexGuard<'a, ()>,
+        previous: Option<String>,
+    }
+
+    impl<'a> AdminKeyGuard<'a> {
+        fn set(lock: std::sync::MutexGuard<'a, ()>) -> Self {
+            let previous = std::env::var("ADMIN_API_KEY").ok();
+            std::env::set_var("ADMIN_API_KEY", "test-admin-key");
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for AdminKeyGuard<'_> {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => std::env::set_var("ADMIN_API_KEY", v),
+                None => std::env::remove_var("ADMIN_API_KEY"),
+            }
+        }
+    }
 
     // ─── handle_graphql_query variable validation (no network) ───────────────
 
@@ -1123,6 +1249,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_query_success_response() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/graphql")
@@ -1139,6 +1266,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_query_empty_errors_array_ok() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/graphql")
@@ -1156,6 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graphql_query_passes_variables() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         // We just verify the POST reaches the server – body matching is
         // handled by integration tests.
@@ -1181,6 +1310,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_status_table_output() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/stats/status")
@@ -1202,6 +1332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_status_json_output() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/stats/status")
@@ -1218,6 +1349,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_status_server_error() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/stats/status")
@@ -1236,6 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_daily_sends_correct_days_param() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/stats/daily?days=14")
@@ -1252,6 +1385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_daily_json_output() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/stats/daily?days=7")
@@ -1270,6 +1404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_assets_table_output() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/stats/assets")
@@ -1290,6 +1425,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_cache_table_output() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let body = serde_json::json!({
             "query_cache": {
@@ -1320,6 +1456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_cache_json_output() {
+        let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
         let mut server = mockito::Server::new_async().await;
         let body = serde_json::json!({
             "query_cache": {"hits": 0, "misses": 0, "total": 0, "hit_rate": 0.0,
@@ -1347,7 +1484,7 @@ mod tests {
 
 pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::Result<()> {
     let base_url = format!("http://localhost:{}", config.server_port);
-    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+    let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
     let params = synapse_sdk::SettlementParams::default();
@@ -1395,7 +1532,7 @@ pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::R
 
 pub async fn handle_settlements_get(config: &Config, id: &str, format: &str) -> anyhow::Result<()> {
     let base_url = format!("http://localhost:{}", config.server_port);
-    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+    let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
 
@@ -1455,7 +1592,7 @@ pub async fn handle_tx_search(
     format: &str,
 ) -> anyhow::Result<()> {
     let base_url = format!("http://localhost:{}", config.server_port);
-    let api_key = std::env::var("SYNAPSE_API_KEY").unwrap_or_else(|_| "dev-key".to_string());
+    let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
     let params = synapse_sdk::SearchParams {

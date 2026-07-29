@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
             } => cli::handle_backup_restore_pitr(&config, &timestamp, dry_run, yes).await,
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
-        Some(Commands::Config) => cli::handle_config_validate(&config),
+        Some(Commands::Config) => cli::handle_config_validate(&config).await,
         Some(Commands::Stats(stats_cmd)) => match stats_cmd {
             StatsCommands::Status { url, json } => cli::handle_stats_status(&url, json).await,
             StatsCommands::Daily { url, days, json } => {
