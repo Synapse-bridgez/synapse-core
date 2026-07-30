@@ -37,7 +37,7 @@ impl Session {
     pub fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
         now > self.expires_at
     }

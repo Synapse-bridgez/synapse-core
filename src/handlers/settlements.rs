@@ -284,7 +284,10 @@ mod tests {
             actor: None,
         };
         // Both should validate identically - actor field should not affect validation
-        assert_eq!(req_with_actor.validate().is_ok(), req_without_actor.validate().is_ok());
+        assert_eq!(
+            req_with_actor.validate().is_ok(),
+            req_without_actor.validate().is_ok()
+        );
     }
 
     #[test]

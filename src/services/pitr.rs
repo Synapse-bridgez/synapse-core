@@ -33,6 +33,8 @@ pub const STATUS_FAILED: &str = "failed";
 pub enum PitrError {
     #[error("{0}")]
     InvalidTarget(String),
+    #[error("internal PITR error: {0}")]
+    Internal(String),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -177,15 +179,12 @@ impl PitrExecutor for ShellPitrExecutor {
             .arg(&self.wal_archive_dir)
             .env("PITR_DATABASE_URL", &self.database_url);
 
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| {
-                format!(
-                    "failed to launch PITR restore script {}: {e}",
-                    self.script.display()
-                )
-            })?;
+        let output = cmd.output().await.map_err(|e| {
+            format!(
+                "failed to launch PITR restore script {}: {e}",
+                self.script.display()
+            )
+        })?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -276,7 +275,9 @@ impl PitrService {
         }
 
         if dry_run {
-            let coverage = coverage.expect("validated target implies coverage exists");
+            let coverage = coverage.ok_or_else(|| {
+                PitrError::Internal("validated target had no recovery coverage".to_string())
+            })?;
             let detail = format!(
                 "dry run: target timestamp {target} is within available recovery coverage \
                  [{}, {}]; no restore was performed",
@@ -291,10 +292,9 @@ impl PitrService {
                 requested_by,
             )
             .await?;
-            return Ok(self
-                .get_job(job.id)
-                .await?
-                .expect("job was just inserted and finished"));
+            return self.get_job(job.id).await?.ok_or_else(|| {
+                PitrError::Internal("restore job disappeared after dry-run completion".to_string())
+            });
         }
 
         let pool = self.pool.clone();

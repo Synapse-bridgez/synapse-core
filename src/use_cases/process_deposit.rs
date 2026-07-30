@@ -51,6 +51,7 @@ impl ProcessDeposit {
             input.stellar_account,
             input.amount,
             input.asset_code,
+            None,
             input.anchor_transaction_id,
             input.callback_type,
             input.callback_status,

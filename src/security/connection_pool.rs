@@ -197,20 +197,26 @@ impl ConnectionGuard {
     /// Consumes the guard and returns the inner connection so the caller can
     /// pass it to [`SecurityConnectionPool::release`] explicitly.
     pub fn into_inner(mut self) -> SecurityConnection {
-        self.conn.take().expect("ConnectionGuard conn already taken")
+        self.conn
+            .take()
+            .expect("ConnectionGuard conn already taken")
     }
 }
 
 impl std::ops::Deref for ConnectionGuard {
     type Target = SecurityConnection;
     fn deref(&self) -> &Self::Target {
-        self.conn.as_ref().expect("ConnectionGuard conn already taken")
+        self.conn
+            .as_ref()
+            .expect("ConnectionGuard conn already taken")
     }
 }
 
 impl std::ops::DerefMut for ConnectionGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.conn.as_mut().expect("ConnectionGuard conn already taken")
+        self.conn
+            .as_mut()
+            .expect("ConnectionGuard conn already taken")
     }
 }
 
@@ -346,11 +352,6 @@ impl SecurityConnectionPool {
         };
         self.evict_stale_locked(&mut state);
         state.available.len()
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .available
-            .len()
     }
 
     /// Total connections managed by the pool (idle + currently in use).
@@ -450,12 +451,12 @@ fn is_ssrf_unsafe_ip(ip: IpAddr) -> bool {
                 || v4.is_link_local()                 // 169.254.0.0/16
                 || o[0] == 10                         // 10.0.0.0/8
                 || (o[0] == 172 && o[1] >= 16 && o[1] <= 31) // 172.16.0.0/12
-                || (o[0] == 192 && o[1] == 168)       // 192.168.0.0/16
+                || (o[0] == 192 && o[1] == 168) // 192.168.0.0/16
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()                          // ::1
                 || is_ipv6_link_local(v6.segments())  // fe80::/10
-                || is_ipv6_ula(v6.segments())         // fc00::/7
+                || is_ipv6_ula(v6.segments()) // fc00::/7
         }
     }
 }

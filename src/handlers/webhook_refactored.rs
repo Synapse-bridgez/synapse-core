@@ -1,11 +1,10 @@
 /// Refactored webhook handlers for payments module
-/// 
+///
 /// This module provides improved code structure for webhook handling with:
 /// - Clear separation of concerns
 /// - Reusable validation functions
 /// - Better error handling
 /// - Comprehensive test coverage
-
 use crate::db::models::Transaction;
 use crate::db::queries;
 use crate::error::AppError;
@@ -15,15 +14,9 @@ use crate::validation::{
     CALLBACK_STATUS_MAX_LEN, CALLBACK_TYPE_MAX_LEN,
 };
 use crate::AppState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
-use std::str::FromStr;
 use tracing::instrument;
 use utoipa::ToSchema;
 
@@ -46,7 +39,7 @@ pub struct WebhookTransactionResponse {
 }
 
 /// Validated webhook transaction (internal representation)
-struct ValidatedWebhookTransaction {
+pub struct ValidatedWebhookTransaction {
     stellar_address: String,
     amount: BigDecimal,
     asset_code: String,
@@ -64,14 +57,12 @@ fn sanitize_optional(value: Option<String>) -> Option<String> {
 
 /// Validate stellar address field
 fn validate_stellar_address_field(address: &str) -> Result<(), AppError> {
-    validate_stellar_address(address)
-        .map_err(|err| AppError::Validation(err.to_string()))
+    validate_stellar_address(address).map_err(|err| AppError::Validation(err.to_string()))
 }
 
 /// Validate asset code field
 fn validate_asset_code_field(code: &str) -> Result<(), AppError> {
-    validate_asset_code(code)
-        .map_err(|err| AppError::Validation(err.to_string()))
+    validate_asset_code(code).map_err(|err| AppError::Validation(err.to_string()))
 }
 
 /// Validate amount field
@@ -83,8 +74,7 @@ fn validate_amount_field(amount_str: &str) -> Result<BigDecimal, AppError> {
         .parse::<BigDecimal>()
         .map_err(|_| AppError::Validation("amount: must be a valid decimal".to_string()))?;
 
-    validate_positive_amount(&amount)
-        .map_err(|err| AppError::Validation(err.to_string()))?;
+    validate_positive_amount(&amount).map_err(|err| AppError::Validation(err.to_string()))?;
 
     Ok(amount)
 }

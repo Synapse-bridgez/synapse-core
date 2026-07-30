@@ -153,7 +153,7 @@ fn _lock_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:lock:{tenant_id}:{key}")
 }
 
-fn _lock_value(token: &str) -> String {
+fn _lock_value(token: &str) -> Result<String, serde_json::Error> {
     let instance_id =
         std::env::var("INSTANCE_ID").unwrap_or_else(|_| std::process::id().to_string());
     let locked_at = std::time::SystemTime::now()
@@ -165,7 +165,6 @@ fn _lock_value(token: &str) -> String {
         locked_at,
         token: token.to_string(),
     })
-    .expect("serializing an idempotency lock value cannot fail")
 }
 
 impl IdempotencyService {
@@ -228,7 +227,7 @@ impl IdempotencyService {
                 let lock_token = uuid::Uuid::new_v4().to_string();
                 let acquired: bool = redis::cmd("SET")
                     .arg(&lock_key)
-                    .arg(_lock_value(&lock_token))
+                    .arg(_lock_value(&lock_token)?)
                     .arg("NX")
                     .arg("EX")
                     .arg(300) // 5 minute lock
@@ -336,10 +335,14 @@ impl IdempotencyService {
                 // Store and release as one ownership-checked transaction. A
                 // worker whose lock expired or was recovered cannot overwrite
                 // the new owner's response or release its lock.
+                let Some(lock_token) = lock_token else {
+                    return self.store_response_db(key, &response).await;
+                };
+
                 redis::Script::new(STORE_RESPONSE_AND_RELEASE_SCRIPT)
                     .key(&lock_key)
                     .key(&cache_key)
-                    .arg(lock_token.expect("checked above"))
+                    .arg(lock_token)
                     .arg(86400)
                     .arg(&data)
                     .invoke_async::<_, u32>(&mut conn)
@@ -678,7 +681,10 @@ pub async fn idempotency_middleware(
                 }
                 client_response_builder
                     .body(axum::body::boxed(Body::from(body_bytes)))
-                    .unwrap()
+                    .unwrap_or_else(|error| {
+                        tracing::error!(%error, "Failed to rebuild idempotency response");
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    })
             } else {
                 if let Err(e) = service
                     .release_lock(&tenant_id, &idempotency_key, lock_token.as_deref())
@@ -724,7 +730,10 @@ pub async fn idempotency_middleware(
                         .body(axum::body::boxed(Body::from(
                             r#"{"error":"Failed to reconstruct cached response"}"#,
                         )))
-                        .unwrap()
+                        .unwrap_or_else(|error| {
+                            tracing::error!(%error, "Failed to build idempotency fallback response");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        })
                 })
         }
         Err(e) => {

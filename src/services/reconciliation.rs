@@ -300,7 +300,9 @@ impl ReconciliationService {
             if past_window || next_url.is_none() {
                 break;
             }
-            url = next_url.unwrap();
+            if let Some(next_url) = next_url {
+                url = next_url;
+            }
         }
 
         Ok(all_payments)
@@ -403,15 +405,23 @@ fn match_memo_group(
 
     // Phase 1: exact match (amount + asset_code).
     for (di, &db_idx) in db_indices.iter().enumerate() {
-        let tx = &db_txs[db_idx];
+        let Some(tx) = db_txs.get(db_idx) else {
+            continue;
+        };
         for (ci, &chain_idx) in chain_indices.iter().enumerate() {
-            if !avail_chain[ci] {
+            if avail_chain.get(ci).copied() != Some(true) {
                 continue;
             }
-            let p = &chain_payments[chain_idx];
+            let Some(p) = chain_payments.get(chain_idx) else {
+                continue;
+            };
             if tx.asset_code == p.asset_code && tx.amount == p.amount {
-                avail_db[di] = false;
-                avail_chain[ci] = false;
+                if let Some(available) = avail_db.get_mut(di) {
+                    *available = false;
+                }
+                if let Some(available) = avail_chain.get_mut(ci) {
+                    *available = false;
+                }
                 acc.matched_count += 1;
                 break;
             }
@@ -420,18 +430,26 @@ fn match_memo_group(
 
     // Phase 2: asset-only match → amount mismatch pair.
     for (di, &db_idx) in db_indices.iter().enumerate() {
-        if !avail_db[di] {
+        if avail_db.get(di).copied() != Some(true) {
             continue;
         }
-        let tx = &db_txs[db_idx];
+        let Some(tx) = db_txs.get(db_idx) else {
+            continue;
+        };
         for (ci, &chain_idx) in chain_indices.iter().enumerate() {
-            if !avail_chain[ci] {
+            if avail_chain.get(ci).copied() != Some(true) {
                 continue;
             }
-            let p = &chain_payments[chain_idx];
+            let Some(p) = chain_payments.get(chain_idx) else {
+                continue;
+            };
             if tx.asset_code == p.asset_code {
-                avail_db[di] = false;
-                avail_chain[ci] = false;
+                if let Some(available) = avail_db.get_mut(di) {
+                    *available = false;
+                }
+                if let Some(available) = avail_chain.get_mut(ci) {
+                    *available = false;
+                }
                 acc.matched_count += 1;
                 acc.amount_mismatches.push(AmountMismatch {
                     transaction_id: tx.id,
@@ -449,13 +467,13 @@ fn match_memo_group(
     let rem_db: Vec<usize> = db_indices
         .iter()
         .enumerate()
-        .filter(|(di, _)| avail_db[*di])
+        .filter(|(di, _)| avail_db.get(*di).copied().unwrap_or(false))
         .map(|(_, &idx)| idx)
         .collect();
     let rem_chain: Vec<usize> = chain_indices
         .iter()
         .enumerate()
-        .filter(|(ci, _)| avail_chain[*ci])
+        .filter(|(ci, _)| avail_chain.get(*ci).copied().unwrap_or(false))
         .map(|(_, &idx)| idx)
         .collect();
 
@@ -468,7 +486,9 @@ fn match_memo_group(
             rem_chain.len()
         );
         for &idx in &rem_db {
-            let tx = &db_txs[idx];
+            let Some(tx) = db_txs.get(idx) else {
+                continue;
+            };
             acc.ambiguous_db.push(AmbiguousTransaction {
                 id: tx.id,
                 stellar_account: tx.stellar_account.clone(),
@@ -480,7 +500,9 @@ fn match_memo_group(
             });
         }
         for &idx in &rem_chain {
-            let p = &chain_payments[idx];
+            let Some(p) = chain_payments.get(idx) else {
+                continue;
+            };
             acc.ambiguous_chain.push(AmbiguousPayment {
                 payment_id: p.id.clone(),
                 from: p.from.clone(),
@@ -493,7 +515,9 @@ fn match_memo_group(
         }
     } else {
         for &idx in &rem_db {
-            let tx = &db_txs[idx];
+            let Some(tx) = db_txs.get(idx) else {
+                continue;
+            };
             acc.missing_on_chain.push(MissingTransaction {
                 id: tx.id,
                 stellar_account: tx.stellar_account.clone(),
@@ -504,7 +528,9 @@ fn match_memo_group(
             });
         }
         for &idx in &rem_chain {
-            let p = &chain_payments[idx];
+            let Some(p) = chain_payments.get(idx) else {
+                continue;
+            };
             acc.orphaned_payments.push(OrphanedPayment {
                 payment_id: p.id.clone(),
                 from: p.from.clone(),
@@ -528,16 +554,22 @@ fn match_no_memo_records(
     let mut avail_chain = vec![true; chain_indices.len()];
 
     for &db_idx in db_indices {
-        let tx = &db_txs[db_idx];
+        let Some(tx) = db_txs.get(db_idx) else {
+            continue;
+        };
         let mut matched = false;
         for (ci, &chain_idx) in chain_indices.iter().enumerate() {
-            if !avail_chain[ci] {
+            if avail_chain.get(ci).copied() != Some(true) {
                 continue;
             }
-            let p = &chain_payments[chain_idx];
+            let Some(p) = chain_payments.get(chain_idx) else {
+                continue;
+            };
             if p.to == tx.stellar_account && p.amount == tx.amount && p.asset_code == tx.asset_code
             {
-                avail_chain[ci] = false;
+                if let Some(available) = avail_chain.get_mut(ci) {
+                    *available = false;
+                }
                 acc.matched_count += 1;
                 matched = true;
                 break;
@@ -556,8 +588,10 @@ fn match_no_memo_records(
     }
 
     for (ci, &chain_idx) in chain_indices.iter().enumerate() {
-        if avail_chain[ci] {
-            let p = &chain_payments[chain_idx];
+        if avail_chain.get(ci).copied() == Some(true) {
+            let Some(p) = chain_payments.get(chain_idx) else {
+                continue;
+            };
             acc.unmatched_no_memo_chain.push(OrphanedPayment {
                 payment_id: p.id.clone(),
                 from: p.from.clone(),

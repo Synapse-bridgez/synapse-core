@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 use utoipa::ToSchema;
 
 /// Configuration for pagination caching.

@@ -555,7 +555,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(1),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -574,7 +573,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_millis(100),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -602,7 +600,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 100,
             window: Duration::from_secs(1),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -642,7 +639,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(10),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 

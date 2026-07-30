@@ -90,7 +90,13 @@ impl WebhookDispatcher {
             http: HttpClient::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
-                .expect("failed to build reqwest client"),
+                .map_err(|e| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::IoError,
+                        "failed to build webhook HTTP client",
+                        e.to_string(),
+                    ))
+                })?,
             redis: Client::open(redis_url)?,
             concurrency,
         })
@@ -702,9 +708,10 @@ impl WebhookDispatcher {
         match data {
             Some(json) => {
                 let state: serde_json::Value = serde_json::from_str(&json)?;
-                if state["state"] == "open" {
-                    let opened_at = state["opened_at"]
-                        .as_str()
+                if state.get("state").and_then(|value| value.as_str()) == Some("open") {
+                    let opened_at = state
+                        .get("opened_at")
+                        .and_then(|value| value.as_str())
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or(Utc::now());
@@ -1092,6 +1099,9 @@ pub fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> S
 
 /// Compute HMAC-SHA256 hex signature (v1).
 fn sign_payload_v1(secret: &str, signed_content: &str) -> String {
+    // HMAC constructors accept keys of any length; the `hmac` crate only returns
+    // an error for fixed-size MACs, which these HMAC-SHA variants are not.
+    #[allow(clippy::expect_used, reason = "HMAC-SHA256 accepts any key length")]
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(signed_content.as_bytes());
@@ -1102,6 +1112,9 @@ fn sign_payload_v1(secret: &str, signed_content: &str) -> String {
 /// Currently returns the same as v1 for compatibility.
 #[allow(dead_code)]
 fn sign_payload_v2(secret: &str, signed_content: &str) -> String {
+    // HMAC constructors accept keys of any length; the `hmac` crate only returns
+    // an error for fixed-size MACs, which these HMAC-SHA variants are not.
+    #[allow(clippy::expect_used, reason = "HMAC-SHA512 accepts any key length")]
     let mut mac =
         Hmac::<Sha512>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(signed_content.as_bytes());
@@ -1112,6 +1125,9 @@ fn sign_payload_v2(secret: &str, signed_content: &str) -> String {
 /// This is deprecated in favor of sign_payload_with_version.
 #[allow(dead_code)]
 fn sign_payload(secret: &str, body: &str) -> String {
+    // HMAC constructors accept keys of any length; the `hmac` crate only returns
+    // an error for fixed-size MACs, which these HMAC-SHA variants are not.
+    #[allow(clippy::expect_used, reason = "HMAC-SHA256 accepts any key length")]
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());

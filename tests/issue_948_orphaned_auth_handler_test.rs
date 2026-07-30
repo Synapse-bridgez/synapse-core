@@ -18,8 +18,7 @@ mod tests {
             "src/handlers/mod.rs should exist"
         );
 
-        let content = fs::read_to_string(mod_rs_path)
-            .expect("Failed to read src/handlers/mod.rs");
+        let content = fs::read_to_string(mod_rs_path).expect("Failed to read src/handlers/mod.rs");
 
         // Verify that auth module is NOT declared
         assert!(
@@ -38,8 +37,8 @@ mod tests {
 
         // If the file exists, it should not be included in the module tree
         if Path::new(auth_rs_path).exists() {
-            let content = fs::read_to_string(mod_rs_path)
-                .expect("Failed to read src/handlers/mod.rs");
+            let content =
+                fs::read_to_string(mod_rs_path).expect("Failed to read src/handlers/mod.rs");
             assert!(
                 !content.contains("pub mod auth"),
                 "If src/handlers/auth.rs exists, it should not be included in mod.rs"

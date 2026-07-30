@@ -69,6 +69,7 @@ async fn setup_test_app() -> (
         quota_manager: synapse_core::middleware::quota::QuotaManager::new("redis://localhost:6379")
             .expect("quota manager init failed"),
         asset_cache,
+        idempotency_service: None,
     };
 
     let app = create_app(app_state);

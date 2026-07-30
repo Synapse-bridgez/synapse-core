@@ -1,3 +1,10 @@
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "request middleware must not panic on bad input or runtime state"
+)]
+
 pub mod auth;
 pub mod error_enrichment;
 pub mod idempotency;

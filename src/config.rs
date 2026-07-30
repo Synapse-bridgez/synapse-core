@@ -1,5 +1,5 @@
 use crate::secrets::SecretsManager;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use dotenvy::dotenv;
 use ipnet::IpNet;
 use std::env;
@@ -194,7 +194,7 @@ impl Config {
             let db_template = env::var("DATABASE_URL_TEMPLATE").ok();
             let db_url = db_template
                 .map(|template| template.replace("{password}", &db_password))
-                .or_else(|_| env::var("DATABASE_URL"))
+                .or_else(|| env::var("DATABASE_URL").ok())
                 .context("DATABASE_URL must be set (or DATABASE_URL_TEMPLATE when using Vault)")?;
 
             (db_url, anchor_secret)

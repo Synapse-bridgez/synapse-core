@@ -1,14 +1,9 @@
-use synapse_sdk::models::{Settlement, SettlementList};
-
 use crate::client::ApiClient;
 use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use synapse_sdk::models::{Settlement, SettlementList};
 use uuid::Uuid;
-
-// ── Response types ────────────────────────────────────────────────────────────
-
-use synapse_sdk::{Settlement, SettlementList};
 
 // ── TableDisplay impls ────────────────────────────────────────────────────────
 
@@ -114,9 +109,7 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
                 params.push(("cursor", &cursor_val));
             }
 
-            let resp: SettlementList =
-                client.get_with_query("/settlements", &params).await?;
-                client.get_query("/settlements", &params).await?;
+            let resp: SettlementList = client.get_query("/settlements", &params).await?;
 
             let fmt = if json {
                 OutputFormat::Json

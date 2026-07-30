@@ -316,7 +316,8 @@ async fn serve(
         Arc::clone(&idempotency_lock_contention),
         Arc::clone(&idempotency_errors),
         Arc::clone(&idempotency_fallback_count),
-    ).ok();
+    )
+    .ok();
     tracing::info!("Redis idempotency service initialized");
 
     // Initialize query cache
@@ -390,7 +391,6 @@ async fn serve(
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         quota_manager: synapse_core::middleware::quota::QuotaManager::new(&config.redis_url)
             .map_err(|e| anyhow::anyhow!("Failed to initialise QuotaManager: {e}"))?,
-        idempotency_service: Some(idempotency_service),
         asset_cache,
         idempotency_service,
     };
@@ -464,10 +464,8 @@ async fn serve(
     }
 
     // Register transaction processor job
-    let tx_processor_job = synapse_core::services::TransactionProcessorJob::new(
-        pool.clone(),
-        horizon_client.clone(),
-    );
+    let tx_processor_job =
+        synapse_core::services::TransactionProcessorJob::new(pool.clone(), horizon_client.clone());
     if let Err(e) = scheduler.register_job(Box::new(tx_processor_job)).await {
         tracing::warn!("Failed to register transaction processor job: {}", e);
     }
@@ -486,7 +484,10 @@ async fn serve(
     ));
     let backup_verification_job =
         synapse_core::services::BackupVerificationJob::new(backup_service);
-    if let Err(e) = scheduler.register_job(Box::new(backup_verification_job)).await {
+    if let Err(e) = scheduler
+        .register_job(Box::new(backup_verification_job))
+        .await
+    {
         tracing::warn!("Failed to register backup verification job: {}", e);
     }
 

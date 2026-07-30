@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::Value;
 
 // ── ApiClient ─────────────────────────────────────────────────────────────────

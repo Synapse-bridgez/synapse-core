@@ -24,11 +24,7 @@ mod tests {
         //   WHERE transactions.tenant_id = $N
 
         let requirement = "list_transactions must filter by tenant_id";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #945: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #945: {}", requirement);
     }
 
     /// Verify that get_transaction function exists and can be called
@@ -47,11 +43,7 @@ mod tests {
         //   WHERE id = $1 AND tenant_id = $2
 
         let requirement = "get_transaction must filter by tenant_id";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #945: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #945: {}", requirement);
     }
 
     /// Verify that WebSocket resync handler applies tenant filtering
@@ -71,11 +63,7 @@ mod tests {
         // Where tenant_id comes from the authenticated connection context.
 
         let requirement = "WebSocket resync must extract tenant_id from auth context";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #945: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #945: {}", requirement);
     }
 
     /// Verify that GraphQL query handler applies tenant filtering
@@ -94,11 +82,7 @@ mod tests {
         //   3. Rely on the database layer to enforce the filter
 
         let requirement = "GraphQL handler must extract tenant_id from auth context";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #945: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #945: {}", requirement);
     }
 
     /// Verify that tenant isolation is enforced at SQL layer, not application layer
@@ -118,11 +102,7 @@ mod tests {
         // in all transaction query functions, not rely on application code.
 
         let requirement = "Tenant filtering must be enforced in SQL WHERE clauses";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #945: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #945: {}", requirement);
     }
 
     /// Verify multi-tenant system architecture
@@ -139,10 +119,6 @@ mod tests {
         // all query functions that touch shared data.
 
         let requirement = "Transactions must be scoped to tenant_id in queries";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #945: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #945: {}", requirement);
     }
 }

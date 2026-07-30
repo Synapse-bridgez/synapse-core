@@ -109,6 +109,14 @@ fn cache_validation_error(err: ValidationError) -> redis::RedisError {
     ))
 }
 
+fn cache_internal_error(message: &str) -> redis::RedisError {
+    redis::RedisError::from((
+        redis::ErrorKind::IoError,
+        "query cache internal error",
+        message.to_string(),
+    ))
+}
+
 impl QueryCache {
     /// Creates a new QueryCache with Redis connection management.
     ///
@@ -134,6 +142,8 @@ impl QueryCache {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000);
+        let cache_size = NonZeroUsize::new(cache_size)
+            .ok_or_else(|| cache_internal_error("MEMORY_CACHE_SIZE must be greater than zero"))?;
 
         Ok(Self {
             pool,
@@ -143,9 +153,7 @@ impl QueryCache {
             misses: Arc::new(AtomicU64::new(0)),
             memory_hits: Arc::new(AtomicU64::new(0)),
             memory_misses: Arc::new(AtomicU64::new(0)),
-            lru: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(cache_size).unwrap(),
-            ))),
+            lru: Arc::new(Mutex::new(LruCache::new(cache_size))),
         })
     }
 
@@ -153,6 +161,7 @@ impl QueryCache {
     ///
     /// This is a cheap clone of the shared ConnectionManager, which handles
     /// connection reuse internally via Arc-wrapped state.
+    #[allow(dead_code)]
     async fn get_connection(&self) -> Result<ConnectionManager, redis::RedisError> {
         Ok(self.pool.clone())
     }
@@ -165,7 +174,10 @@ impl QueryCache {
 
         // Try in-memory cache first
         {
-            let mut lru = self.lru.lock().unwrap();
+            let mut lru = self
+                .lru
+                .lock()
+                .map_err(|_| cache_internal_error("in-memory cache lock is poisoned"))?;
             if let Some(cached) = lru.get(key) {
                 self.memory_hits.fetch_add(1, Ordering::Relaxed);
                 if let Ok(value) = serde_json::from_str::<T>(cached) {
@@ -194,7 +206,13 @@ impl QueryCache {
                         hits.fetch_add(1, Ordering::Relaxed);
                         // Populate in-memory cache
                         {
-                            let mut lru_cache = lru.lock().unwrap();
+                            let mut lru_cache = lru.lock().map_err(|_| {
+                                redis::RedisError::from((
+                                    redis::ErrorKind::IoError,
+                                    "query cache internal error",
+                                    "in-memory cache lock is poisoned".to_string(),
+                                ))
+                            })?;
                             lru_cache.put(key.clone(), v.clone());
                         }
                         serde_json::from_str(&v).map(Some).map_err(|e| {
@@ -248,7 +266,10 @@ impl QueryCache {
 
         // Store in in-memory cache
         {
-            let mut lru = self.lru.lock().unwrap();
+            let mut lru = self
+                .lru
+                .lock()
+                .map_err(|_| cache_internal_error("in-memory cache lock is poisoned"))?;
             lru.put(key.to_string(), serialized.clone());
         }
 
@@ -276,7 +297,10 @@ impl QueryCache {
 
         // Clear in-memory cache
         {
-            let mut lru = self.lru.lock().unwrap();
+            let mut lru = self
+                .lru
+                .lock()
+                .map_err(|_| cache_internal_error("in-memory cache lock is poisoned"))?;
             lru.clear();
         }
 
@@ -320,7 +344,10 @@ impl QueryCache {
 
         // Clear from in-memory cache
         {
-            let mut lru = self.lru.lock().unwrap();
+            let mut lru = self
+                .lru
+                .lock()
+                .map_err(|_| cache_internal_error("in-memory cache lock is poisoned"))?;
             lru.pop(key);
         }
 

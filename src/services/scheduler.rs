@@ -394,7 +394,11 @@ mod tests {
         );
 
         let parts: Vec<&str> = schedule.split_whitespace().collect();
-        assert_eq!(parts.len(), 7, "Should have 7 fields (sec min hour dom mon dow year)");
+        assert_eq!(
+            parts.len(),
+            7,
+            "Should have 7 fields (sec min hour dom mon dow year)"
+        );
     }
 
     #[test]
