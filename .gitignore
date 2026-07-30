@@ -1,8 +1,14 @@
 /target
 sdks/rust/target
+cli/synapse-cli/target
 node_modules
 .env
 .env.example
 *.snap
+*.snap.new
+*.log
+.DS_Store
+.vscode/
+.idea/
 
 ISSUES.md
