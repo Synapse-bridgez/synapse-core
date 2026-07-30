@@ -7,8 +7,6 @@ use synapse_sdk::models::{AssetStats, DailyTotal, StatusCount};
 
 // ── Response types (mirrors src/db/queries and src/handlers/stats.rs) ─────────
 
-use synapse_sdk::{AssetStats, DailyTotal, StatusCount};
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheMetrics {
     pub query_cache: serde_json::Value,

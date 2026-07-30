@@ -66,6 +66,7 @@ pub async fn submit_restore_pitr(
         Err(crate::services::pitr::PitrError::Database(e)) => {
             Err(AppError::DatabaseError(e.to_string()))
         }
+        Err(crate::services::pitr::PitrError::Internal(msg)) => Err(AppError::Internal(msg)),
     }
 }
 

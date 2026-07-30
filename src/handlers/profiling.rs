@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::AppState;
 
@@ -90,6 +90,11 @@ impl ProfilingManager {
         self.current_session.lock().await.clone()
     }
 
+    #[cfg(test)]
+    pub async fn set_current_session_for_test(&self, session: ProfilingSession) {
+        *self.current_session.lock().await = Some(session);
+    }
+
     /// Start a CPU profiling session
     pub async fn start_cpu_profiling(
         &self,
@@ -102,15 +107,13 @@ impl ProfilingManager {
 
         let session_id = format!(
             "profile-cpu-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
+            unix_timestamp()
+                .map_err(|e| format!("System clock is before UNIX_EPOCH: {e}"))?
                 .as_millis()
         );
 
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        let start_time = unix_timestamp()
+            .map_err(|e| format!("System clock is before UNIX_EPOCH: {e}"))?
             .as_secs();
 
         let session = ProfilingSession {
@@ -137,18 +140,13 @@ impl ProfilingManager {
                 Ok(flamegraph_path) => {
                     if let Some(session) = current_session.lock().await.as_mut() {
                         session.status = "completed".to_string();
-                        session.end_time = Some(
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
-                        );
+                        session.end_time = unix_timestamp().ok().map(|ts| ts.as_secs());
                         session.flamegraph_path = Some(flamegraph_path);
 
-                        if let Ok(metadata) =
-                            fs::metadata(session.flamegraph_path.as_ref().unwrap())
-                        {
-                            session.data_size_bytes = Some(metadata.len());
+                        if let Some(path) = session.flamegraph_path.as_ref() {
+                            if let Ok(metadata) = fs::metadata(path) {
+                                session.data_size_bytes = Some(metadata.len());
+                            }
                         }
                     }
                 }
@@ -156,12 +154,7 @@ impl ProfilingManager {
                     tracing::error!("CPU profiling failed: {}", e);
                     if let Some(session) = current_session.lock().await.as_mut() {
                         session.status = format!("failed: {e}");
-                        session.end_time = Some(
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
-                        );
+                        session.end_time = unix_timestamp().ok().map(|ts| ts.as_secs());
                     }
                 }
             }
@@ -182,15 +175,13 @@ impl ProfilingManager {
 
         let session_id = format!(
             "profile-memory-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
+            unix_timestamp()
+                .map_err(|e| format!("System clock is before UNIX_EPOCH: {e}"))?
                 .as_millis()
         );
 
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+        let start_time = unix_timestamp()
+            .map_err(|e| format!("System clock is before UNIX_EPOCH: {e}"))?
             .as_secs();
 
         let session = ProfilingSession {
@@ -217,18 +208,13 @@ impl ProfilingManager {
                 Ok(flamegraph_path) => {
                     if let Some(session) = current_session.lock().await.as_mut() {
                         session.status = "completed".to_string();
-                        session.end_time = Some(
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
-                        );
+                        session.end_time = unix_timestamp().ok().map(|ts| ts.as_secs());
                         session.flamegraph_path = Some(flamegraph_path);
 
-                        if let Ok(metadata) =
-                            fs::metadata(session.flamegraph_path.as_ref().unwrap())
-                        {
-                            session.data_size_bytes = Some(metadata.len());
+                        if let Some(path) = session.flamegraph_path.as_ref() {
+                            if let Ok(metadata) = fs::metadata(path) {
+                                session.data_size_bytes = Some(metadata.len());
+                            }
                         }
                     }
                 }
@@ -236,12 +222,7 @@ impl ProfilingManager {
                     tracing::error!("Memory profiling failed: {}", e);
                     if let Some(session) = current_session.lock().await.as_mut() {
                         session.status = format!("failed: {e}");
-                        session.end_time = Some(
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
-                        );
+                        session.end_time = unix_timestamp().ok().map(|ts| ts.as_secs());
                     }
                 }
             }
@@ -260,6 +241,25 @@ impl ProfilingManager {
         self.is_profiling.store(false, Ordering::Relaxed);
         Ok(())
     }
+}
+
+fn unix_timestamp() -> Result<Duration, std::time::SystemTimeError> {
+    SystemTime::now().duration_since(UNIX_EPOCH)
+}
+
+fn ensure_flamegraph_path_available(
+    session: Option<ProfilingSession>,
+    session_id: &str,
+) -> Result<(), AppError> {
+    if let Some(session) = session {
+        if session.session_id == session_id && session.flamegraph_path.is_none() {
+            return Err(AppError::Profiling(format!(
+                "Profiling session '{session_id}' has no flamegraph path"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 impl Default for ProfilingManager {
@@ -359,7 +359,7 @@ pub async fn start_profiling(
         Ok(session) => Ok((StatusCode::OK, Json(session))),
         Err(e) => {
             tracing::error!("Failed to start profiling: {}", e);
-            Err(AppError::Internal(e))
+            Err(AppError::Profiling(e))
         }
     }
 }
@@ -398,9 +398,14 @@ pub async fn stop_profiling(State(state): State<AppState>) -> Result<impl IntoRe
 
 /// HTTP handler to serve a flamegraph SVG
 pub async fn get_flamegraph(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_flamegraph_path_available(
+        state.profiling_manager.get_current_session().await,
+        &session_id,
+    )?;
+
     let profile_dir = PathBuf::from("./profiling_data");
     let flamegraph_path = profile_dir.join(format!("{session_id}.svg"));
 
@@ -446,5 +451,24 @@ mod tests {
         let manager = ProfilingManager::new();
         assert!(!manager.is_profiling());
         assert!(manager.get_current_session().await.is_none());
+    }
+
+    #[test]
+    fn test_flamegraph_missing_session_path_returns_profiling_error() {
+        let session = ProfilingSession {
+            session_id: "profile-cpu-missing-path".to_string(),
+            start_time: 1,
+            end_time: None,
+            duration_secs: 30,
+            profile_type: "cpu".to_string(),
+            status: "completed".to_string(),
+            flamegraph_path: None,
+            data_size_bytes: None,
+        };
+
+        let err = ensure_flamegraph_path_available(Some(session), "profile-cpu-missing-path")
+            .expect_err("missing flamegraph path should be reported as an error");
+
+        assert!(matches!(err, AppError::Profiling(_)));
     }
 }

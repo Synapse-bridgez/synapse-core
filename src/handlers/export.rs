@@ -9,7 +9,8 @@ use csv::Writer;
 use futures::stream::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
-use sqlx::{PgPool, Row};
+use sqlx::{postgres::PgRow, PgPool, Row};
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -137,10 +138,10 @@ impl From<&Transaction> for TransactionJsonRow {
 const BATCH_SIZE: i64 = 1000;
 
 /// Type alias for the stream of CSV rows
-type CsvStream = Pin<Box<dyn Stream<Item = Result<String, sqlx::Error>> + Send>>;
+type CsvStream = Pin<Box<dyn Stream<Item = Result<String, AppError>> + Send>>;
 
 /// Type alias for the stream of JSON rows
-type JsonStream = Pin<Box<dyn Stream<Item = Result<String, sqlx::Error>> + Send>>;
+type JsonStream = Pin<Box<dyn Stream<Item = Result<String, AppError>> + Send>>;
 
 /// Parse date string to DateTime<Utc>
 fn parse_date(date_str: &str) -> Result<DateTime<Utc>, String> {
@@ -211,6 +212,58 @@ enum FilterValue {
     DateTime(DateTime<Utc>),
 }
 
+fn transaction_from_row(row: &PgRow) -> Result<Transaction, AppError> {
+    Ok(Transaction {
+        id: row.try_get("id").map_err(export_db_error)?,
+        stellar_account: row.try_get("stellar_account").map_err(export_db_error)?,
+        amount: row.try_get("amount").map_err(export_db_error)?,
+        asset_code: row.try_get("asset_code").map_err(export_db_error)?,
+        status: row.try_get("status").map_err(export_db_error)?,
+        created_at: row.try_get("created_at").map_err(export_db_error)?,
+        updated_at: row.try_get("updated_at").map_err(export_db_error)?,
+        anchor_transaction_id: row
+            .try_get("anchor_transaction_id")
+            .map_err(export_db_error)?,
+        callback_type: row.try_get("callback_type").map_err(export_db_error)?,
+        callback_status: row.try_get("callback_status").map_err(export_db_error)?,
+        settlement_id: row.try_get("settlement_id").map_err(export_db_error)?,
+        memo: row.try_get("memo").map_err(export_db_error)?,
+        memo_type: row.try_get("memo_type").map_err(export_db_error)?,
+        metadata: row.try_get("metadata").map_err(export_db_error)?,
+        trace_id: None,
+        tenant_id: None,
+    })
+}
+
+fn export_db_error(error: sqlx::Error) -> AppError {
+    AppError::Export(format!("Failed to read transaction export row: {error}"))
+}
+
+fn csv_row_to_line(csv_row: TransactionCsvRow) -> Result<String, AppError> {
+    let bytes = serialize_csv_row_to_writer(csv_row, Vec::new())?;
+    String::from_utf8(bytes).map_err(|e| {
+        AppError::Export(format!(
+            "CSV serializer produced invalid UTF-8 while exporting transactions: {e}"
+        ))
+    })
+}
+
+fn serialize_csv_row_to_writer<W: Write>(
+    csv_row: TransactionCsvRow,
+    writer: W,
+) -> Result<W, AppError> {
+    let mut wtr = Writer::from_writer(writer);
+    wtr.serialize(csv_row)
+        .map_err(|e| AppError::Export(format!("Failed to serialize transaction CSV row: {e}")))?;
+    wtr.into_inner()
+        .map_err(|e| AppError::Export(format!("Failed to finalize transaction CSV row: {e}")))
+}
+
+fn json_row_to_line(json_row: TransactionJsonRow) -> Result<String, AppError> {
+    serde_json::to_string(&json_row)
+        .map_err(|e| AppError::Export(format!("Failed to serialize transaction JSON row: {e}")))
+}
+
 /// Create a CSV stream from database rows - truly streaming without buffering
 fn create_csv_stream(
     pool: Arc<PgPool>,
@@ -273,35 +326,21 @@ fn create_csv_stream(
                 match row {
                     Ok(row) => {
                         batch_has_rows = true;
-                        let tx = Transaction {
-                            id: row.get("id"),
-                            stellar_account: row.get("stellar_account"),
-                            amount: row.get("amount"),
-                            asset_code: row.get("asset_code"),
-                            status: row.get("status"),
-                            created_at: row.get("created_at"),
-                            updated_at: row.get("updated_at"),
-                            anchor_transaction_id: row.get("anchor_transaction_id"),
-                            callback_type: row.get("callback_type"),
-                            callback_status: row.get("callback_status"),
-                            settlement_id: row.get("settlement_id"),
-                            memo: row.get("memo"),
-                            memo_type: row.get("memo_type"),
-                            metadata: row.get("metadata"),
-                            trace_id: None,
-                            tenant_id: None,
+                        let tx = match transaction_from_row(&row) {
+                            Ok(tx) => tx,
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
                         };
 
                         last_id = Some(tx.id);
 
                         let csv_row = TransactionCsvRow::from(&tx);
-                        let mut wtr = Writer::from_writer(vec![]);
-                        wtr.serialize(csv_row).unwrap();
-                        let csv_line = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
-                        yield Ok(csv_line);
+                        yield csv_row_to_line(csv_row);
                     }
                     Err(e) => {
-                        yield Err(e);
+                        yield Err(AppError::Database(e));
                         return;
                     }
                 }
@@ -371,33 +410,21 @@ fn create_json_stream(
                 match row {
                     Ok(row) => {
                         batch_has_rows = true;
-                        let tx = Transaction {
-                            id: row.get("id"),
-                            stellar_account: row.get("stellar_account"),
-                            amount: row.get("amount"),
-                            asset_code: row.get("asset_code"),
-                            status: row.get("status"),
-                            created_at: row.get("created_at"),
-                            updated_at: row.get("updated_at"),
-                            anchor_transaction_id: row.get("anchor_transaction_id"),
-                            callback_type: row.get("callback_type"),
-                            callback_status: row.get("callback_status"),
-                            settlement_id: row.get("settlement_id"),
-                            memo: row.get("memo"),
-                            memo_type: row.get("memo_type"),
-                            metadata: row.get("metadata"),
-                            trace_id: None,
-                            tenant_id: None,
+                        let tx = match transaction_from_row(&row) {
+                            Ok(tx) => tx,
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
                         };
 
                         last_id = Some(tx.id);
 
                         let json_row = TransactionJsonRow::from(&tx);
-                        let json_line = serde_json::to_string(&json_row).unwrap();
-                        yield Ok(json_line);
+                        yield json_row_to_line(json_row);
                     }
                     Err(e) => {
-                        yield Err(e);
+                        yield Err(AppError::Database(e));
                         return;
                     }
                 }
@@ -420,7 +447,7 @@ async fn stream_to_response<S>(
     filename: &str,
 ) -> Result<impl IntoResponse, AppError>
 where
-    S: Stream<Item = Result<String, sqlx::Error>> + Send + 'static,
+    S: Stream<Item = Result<String, AppError>> + Send + 'static,
 {
     use futures::stream::StreamExt;
 
@@ -431,18 +458,20 @@ where
     while let Some(result) = pinned_stream.next().await {
         match result {
             Ok(s) => all_data.push_str(&s),
-            Err(_) => break,
+            Err(error) => return Err(error),
         }
     }
 
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(content_type).unwrap(),
+        HeaderValue::from_str(content_type)
+            .map_err(|e| AppError::Export(format!("Invalid export content type: {e}")))?,
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|e| AppError::Export(format!("Invalid export filename header: {e}")))?,
     );
 
     Ok((StatusCode::OK, headers, all_data))
@@ -761,6 +790,50 @@ mod tests {
 
         let row = TransactionCsvRow::from(&tx);
         assert_eq!(row.amount, "123.456");
+    }
+
+    #[test]
+    fn test_csv_serialization_failure_returns_export_error() {
+        use bigdecimal::BigDecimal;
+        use std::io;
+        use uuid::Uuid;
+
+        #[derive(Debug)]
+        struct FailingWriter;
+
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer failed"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let tx = Transaction {
+            id: Uuid::new_v4(),
+            stellar_account: "GABC".to_string(),
+            amount: BigDecimal::from(1),
+            asset_code: "USD".to_string(),
+            status: "completed".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            anchor_transaction_id: None,
+            callback_type: None,
+            callback_status: None,
+            settlement_id: None,
+            memo: None,
+            memo_type: None,
+            metadata: None,
+            trace_id: None,
+            tenant_id: None,
+        };
+
+        let err = serialize_csv_row_to_writer(TransactionCsvRow::from(&tx), FailingWriter)
+            .expect_err("writer failure should become an export error");
+
+        assert!(matches!(err, AppError::Export(_)));
     }
 
     #[test]

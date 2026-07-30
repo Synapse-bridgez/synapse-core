@@ -24,7 +24,9 @@ impl ConnectionState {
     }
 }
 
-async fn cleanup_stale_sessions(store: Arc<Mutex<std::collections::HashMap<Uuid, ConnectionState>>>) {
+async fn cleanup_stale_sessions(
+    store: Arc<Mutex<std::collections::HashMap<Uuid, ConnectionState>>>,
+) {
     let mut store = store.lock().await;
     let now = std::time::Instant::now();
 
@@ -38,14 +40,17 @@ async fn test_cleanup_stale_sessions_removes_old_sessions() {
     ));
 
     let mut session = ConnectionState::new();
-    session.created_at =
-        std::time::Instant::now() - Duration::from_secs(3700);
+    session.created_at = std::time::Instant::now() - Duration::from_secs(3700);
 
     let session_id = session.session_id;
 
     store.lock().await.insert(session_id, session);
 
-    assert_eq!(store.lock().await.len(), 1, "Session should exist before cleanup");
+    assert_eq!(
+        store.lock().await.len(),
+        1,
+        "Session should exist before cleanup"
+    );
 
     cleanup_stale_sessions(store.clone()).await;
 
@@ -129,8 +134,7 @@ async fn test_cleanup_stale_sessions_boundary_case() {
     ));
 
     let mut boundary_session = ConnectionState::new();
-    boundary_session.created_at =
-        std::time::Instant::now() - Duration::from_secs(3599);
+    boundary_session.created_at = std::time::Instant::now() - Duration::from_secs(3599);
     let boundary_id = boundary_session.session_id;
 
     store.lock().await.insert(boundary_id, boundary_session);

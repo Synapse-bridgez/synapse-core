@@ -210,7 +210,13 @@ fn period_bounds(
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), AppError> {
     match period {
         "daily" => {
-            let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let start = now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| {
+                    AppError::Internal("Failed to build daily period start".to_string())
+                })?
+                .and_utc();
             Ok((start, start + Duration::days(1)))
         }
         "weekly" => {
@@ -218,7 +224,9 @@ fn period_bounds(
             let start = (now - Duration::days(days_from_monday))
                 .date_naive()
                 .and_hms_opt(0, 0, 0)
-                .unwrap()
+                .ok_or_else(|| {
+                    AppError::Internal("Failed to build weekly period start".to_string())
+                })?
                 .and_utc();
             Ok((start, start + Duration::weeks(1)))
         }
@@ -226,18 +234,28 @@ fn period_bounds(
             let start = now
                 .date_naive()
                 .with_day(1)
-                .unwrap()
+                .ok_or_else(|| {
+                    AppError::Internal("Failed to build monthly period start".to_string())
+                })?
                 .and_hms_opt(0, 0, 0)
-                .unwrap()
+                .ok_or_else(|| {
+                    AppError::Internal("Failed to build monthly period start time".to_string())
+                })?
                 .and_utc();
             let next = if start.month() == 12 {
                 start
                     .with_year(start.year() + 1)
-                    .unwrap()
+                    .ok_or_else(|| {
+                        AppError::Internal("Failed to build next yearly period".to_string())
+                    })?
                     .with_month(1)
-                    .unwrap()
+                    .ok_or_else(|| {
+                        AppError::Internal("Failed to build January period".to_string())
+                    })?
             } else {
-                start.with_month(start.month() + 1).unwrap()
+                start.with_month(start.month() + 1).ok_or_else(|| {
+                    AppError::Internal("Failed to build next monthly period".to_string())
+                })?
             };
             Ok((start, next))
         }

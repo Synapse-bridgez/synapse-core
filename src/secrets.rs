@@ -199,27 +199,35 @@ impl SecretsManager {
                     let role_id = match env::var("VAULT_ROLE_ID") {
                         Ok(id) => id,
                         Err(_) => {
-                            tracing::error!("secrets_rotation: VAULT_ROLE_ID not set, cannot re-authenticate");
+                            tracing::error!(
+                                "secrets_rotation: VAULT_ROLE_ID not set, cannot re-authenticate"
+                            );
                             continue;
                         }
                     };
                     let secret_id = match env::var("VAULT_SECRET_ID") {
                         Ok(id) => id,
                         Err(_) => {
-                            tracing::error!("secrets_rotation: VAULT_SECRET_ID not set, cannot re-authenticate");
+                            tracing::error!(
+                                "secrets_rotation: VAULT_SECRET_ID not set, cannot re-authenticate"
+                            );
                             continue;
                         }
                     };
-                    let auth_mount = env::var("VAULT_AUTH_MOUNT")
-                        .unwrap_or_else(|_| "auth/approle".to_string());
+                    let auth_mount =
+                        env::var("VAULT_AUTH_MOUNT").unwrap_or_else(|_| "auth/approle".to_string());
 
                     match approle::login(&self.client, &auth_mount, &role_id, &secret_id).await {
                         Ok(auth) => {
                             self.client.set_token(&auth.client_token);
-                            tracing::info!("secrets_rotation: successfully re-authenticated to Vault");
+                            tracing::info!(
+                                "secrets_rotation: successfully re-authenticated to Vault"
+                            );
                         }
                         Err(e) => {
-                            tracing::error!("secrets_rotation: failed to re-authenticate to Vault: {e}");
+                            tracing::error!(
+                                "secrets_rotation: failed to re-authenticate to Vault: {e}"
+                            );
                             continue;
                         }
                     }

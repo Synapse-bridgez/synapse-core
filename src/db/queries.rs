@@ -216,12 +216,11 @@ pub fn hash_api_key(api_key: &str) -> String {
 /// Look up whether an API key exists and belongs to an active tenant.
 /// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
 pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
-    let row = sqlx::query(
-        "SELECT 1 FROM tenants WHERE api_key_hash = $1 AND is_active = true LIMIT 1",
-    )
-    .bind(hash_api_key(api_key))
-    .fetch_optional(pool)
-    .await?;
+    let row =
+        sqlx::query("SELECT 1 FROM tenants WHERE api_key_hash = $1 AND is_active = true LIMIT 1")
+            .bind(hash_api_key(api_key))
+            .fetch_optional(pool)
+            .await?;
     Ok(row.is_some())
 }
 
@@ -1603,10 +1602,11 @@ pub async fn bulk_update_transaction_status(
             // Lock the target rows for the lifetime of the transaction so a concurrent
             // update can't change their status between validation and the UPDATE below —
             // same locked-row pattern as update_settlement_status.
-            let rows = sqlx::query("SELECT id, status FROM transactions WHERE id = ANY($1) FOR UPDATE")
-                .bind(transaction_ids)
-                .fetch_all(&mut *db_tx)
-                .await?;
+            let rows =
+                sqlx::query("SELECT id, status FROM transactions WHERE id = ANY($1) FOR UPDATE")
+                    .bind(transaction_ids)
+                    .fetch_all(&mut *db_tx)
+                    .await?;
 
             let current: std::collections::HashMap<Uuid, String> = rows
                 .into_iter()
@@ -1646,11 +1646,13 @@ pub async fn bulk_update_transaction_status(
                 });
             }
 
-            sqlx::query("UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)")
-                .bind(new_status)
-                .bind(&valid_ids)
-                .execute(&mut *db_tx)
-                .await?;
+            sqlx::query(
+                "UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)",
+            )
+            .bind(new_status)
+            .bind(&valid_ids)
+            .execute(&mut *db_tx)
+            .await?;
 
             for &id in &valid_ids {
                 let old_status = old_statuses
@@ -1775,7 +1777,11 @@ pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal
                 tracing::debug!("get_daily_totals EXPLAIN ANALYZE:\n{}", explain_plan);
             }
 
-            let rows = sqlx::query(sql).bind(start).bind(end).fetch_all(pool).await?;
+            let rows = sqlx::query(sql)
+                .bind(start)
+                .bind(end)
+                .fetch_all(pool)
+                .await?;
 
             Ok(rows
                 .into_iter()

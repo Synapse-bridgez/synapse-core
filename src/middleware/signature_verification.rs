@@ -160,7 +160,7 @@ fn verify_signature(provided_hex: &str, signed_payload: &str, secret: &str) -> b
             if provided_bytes.len() != expected.len() {
                 return false;
             }
-            provided_bytes.ct_eq(&expected[..]).into()
+            provided_bytes.ct_eq(&expected).into()
         }
         Err(_) => false,
     }

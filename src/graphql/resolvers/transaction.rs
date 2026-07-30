@@ -174,14 +174,18 @@ impl TransactionMutation {
                 } else {
                     std::env::var("ADMIN_API_KEY")
                         .ok()
-                        .map(|ak| crate::middleware::auth::constant_time_eq(ak.as_bytes(), key.as_bytes()))
+                        .map(|ak| {
+                            crate::middleware::auth::constant_time_eq(ak.as_bytes(), key.as_bytes())
+                        })
                         .unwrap_or(false)
                 }
             }
         };
 
         if !authorized {
-            return Err(async_graphql::Error::new("Unauthorized: admin privileges required"));
+            return Err(async_graphql::Error::new(
+                "Unauthorized: admin privileges required",
+            ));
         }
 
         // Fetch current status for state-machine validation.

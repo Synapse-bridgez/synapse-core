@@ -201,7 +201,7 @@ impl BackupService {
             return Ok(());
         }
 
-        for backup in &backups[keep_count..] {
+        for backup in backups.get(keep_count..).unwrap_or(&[]) {
             let backup_path = self.backup_dir.join(&backup.filename);
             let meta_path = backup_path.with_extension("meta");
 
@@ -517,7 +517,10 @@ mod tests {
             Some("encryption_key".to_string()),
         );
 
-        assert_eq!(service.database_url, "postgres://user:password@localhost/testdb");
+        assert_eq!(
+            service.database_url,
+            "postgres://user:password@localhost/testdb"
+        );
         assert_eq!(service.encryption_key, Some("encryption_key".to_string()));
     }
 

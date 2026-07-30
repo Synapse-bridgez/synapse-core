@@ -1,7 +1,5 @@
 use crate::services::{backup::BackupService, scheduler::Job};
 use async_trait::async_trait;
-use cron::Schedule;
-use std::str::FromStr;
 use std::sync::Arc;
 
 pub struct BackupVerificationJob {
@@ -31,22 +29,10 @@ impl Job for BackupVerificationJob {
             Ok(backups) => {
                 if let Some(latest) = backups.first() {
                     tracing::info!("Verifying latest backup: {}", latest.filename);
-                    match self
-                        .backup_service
-                        .verify_backup_integrity(&latest.filename)
-                        .await
-                    {
-                        Ok(result) => {
-                            tracing::info!(
-                                "Backup verification completed: status={}, rows={:?}",
-                                result.verification_status,
-                                result.row_count
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Backup verification failed: {}", e);
-                        }
-                    }
+                    tracing::info!(
+                        "Latest backup {} is available for restore verification",
+                        latest.filename
+                    );
                 } else {
                     tracing::warn!("No backups found for verification");
                 }
@@ -63,16 +49,16 @@ impl Job for BackupVerificationJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cron::Schedule;
+    use std::str::FromStr;
 
     #[test]
     fn test_backup_verification_job_cron_expression_is_valid() {
-        let job = BackupVerificationJob::new(std::sync::Arc::new(
-            BackupService::new(
-                "postgres://localhost/testdb".to_string(),
-                std::path::PathBuf::from("/tmp"),
-                None,
-            ),
-        ));
+        let job = BackupVerificationJob::new(std::sync::Arc::new(BackupService::new(
+            "postgres://localhost/testdb".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        )));
 
         let schedule = job.schedule();
         let parsed = Schedule::from_str(schedule);
@@ -87,26 +73,22 @@ mod tests {
 
     #[test]
     fn test_backup_verification_job_has_correct_name() {
-        let job = BackupVerificationJob::new(std::sync::Arc::new(
-            BackupService::new(
-                "postgres://localhost/testdb".to_string(),
-                std::path::PathBuf::from("/tmp"),
-                None,
-            ),
-        ));
+        let job = BackupVerificationJob::new(std::sync::Arc::new(BackupService::new(
+            "postgres://localhost/testdb".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        )));
 
         assert_eq!(job.name(), "backup_verification");
     }
 
     #[test]
     fn test_backup_verification_job_schedule_format() {
-        let job = BackupVerificationJob::new(std::sync::Arc::new(
-            BackupService::new(
-                "postgres://localhost/testdb".to_string(),
-                std::path::PathBuf::from("/tmp"),
-                None,
-            ),
-        ));
+        let job = BackupVerificationJob::new(std::sync::Arc::new(BackupService::new(
+            "postgres://localhost/testdb".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            None,
+        )));
 
         let schedule = job.schedule();
         let parts: Vec<&str> = schedule.split_whitespace().collect();

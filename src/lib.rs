@@ -39,7 +39,6 @@ use crate::services::feature_flags::FeatureFlagService;
 use crate::services::query_cache::QueryCache;
 use crate::stellar::HorizonClient;
 use crate::tenant::TenantConfig;
-use crate::middleware::idempotency::IdempotencyService;
 use axum::{
     middleware as axum_middleware,
     routing::{get, patch, post},
@@ -104,7 +103,8 @@ impl AppState {
         let _asset_cache =
             AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         let redis_url = "redis://localhost:6379".to_string();
-        let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        let asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)

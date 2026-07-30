@@ -127,16 +127,8 @@ async fn test_transactions_offset_parameter_is_used() {
     .await
     .unwrap();
 
-    assert_eq!(
-        page1.len(),
-        2,
-        "first page should return 2 transactions"
-    );
-    assert_eq!(
-        page2.len(),
-        2,
-        "second page should return 2 transactions"
-    );
+    assert_eq!(page1.len(), 2, "first page should return 2 transactions");
+    assert_eq!(page2.len(), 2, "second page should return 2 transactions");
 
     let page1_ids: Vec<_> = page1.iter().map(|r| r.0).collect();
     let page2_ids: Vec<_> = page2.iter().map(|r| r.0).collect();
