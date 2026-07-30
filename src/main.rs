@@ -167,21 +167,39 @@ async fn main() -> anyhow::Result<()> {
             } => cli::handle_backup_restore_pitr(&config, &timestamp, dry_run, yes).await,
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
+        Some(Commands::Config) => cli::handle_config_validate(&config),
+        Some(Commands::Stats(stats_cmd)) => {
+            let default_url = format!("http://localhost:{}", config.server_port);
+            match stats_cmd {
+                StatsCommands::Status { url, json } => {
+                    cli::handle_stats_status(&url.unwrap_or(default_url), json).await
+                }
+                StatsCommands::Daily { url, days, json } => {
+                    cli::handle_stats_daily(&url.unwrap_or(default_url), days, json).await
+                }
+                StatsCommands::Assets { url, json } => {
+                    cli::handle_stats_assets(&url.unwrap_or(default_url), json).await
+                }
+                StatsCommands::Cache { url, json } => {
+                    cli::handle_stats_cache(&url.unwrap_or(default_url), json).await
+                }
         Some(Commands::Config) => cli::handle_config_validate(&config).await,
         Some(Commands::Stats(stats_cmd)) => match stats_cmd {
             StatsCommands::Status { url, json } => cli::handle_stats_status(&url, json).await,
             StatsCommands::Daily { url, days, json } => {
                 cli::handle_stats_daily(&url, days, json).await
             }
-            StatsCommands::Assets { url, json } => cli::handle_stats_assets(&url, json).await,
-            StatsCommands::Cache { url, json } => cli::handle_stats_cache(&url, json).await,
-        },
+        }
         Some(Commands::Graphql(gql_cmd)) => match gql_cmd {
             GraphqlCommands::Query {
                 query,
                 variables,
                 url,
-            } => cli::handle_graphql_query(&url, &query, variables.as_deref()).await,
+            } => {
+                let base_url =
+                    url.unwrap_or_else(|| format!("http://localhost:{}", config.server_port));
+                cli::handle_graphql_query(&base_url, &query, variables.as_deref()).await
+            }
         },
     }
 }

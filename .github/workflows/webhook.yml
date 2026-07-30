@@ -67,7 +67,7 @@ jobs:
             exit 1
           fi
           # Match cache::webhook::validate_event_id charset and length limits.
-          if ! printf '%s' "$EVENT" | grep -Eq '^[A-Za-z0-9_:-]{1,64}$'; then
+          if ! printf '%s' "$EVENT" | grep -Eq '^[A-Za-z0-9_:-]{1,128}$'; then
             echo "::error::Invalid webhook event type format"
             exit 1
           fi

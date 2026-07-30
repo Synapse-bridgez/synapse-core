@@ -5,6 +5,10 @@ WORKDIR /app
 # Copy manifests and lockfile
 COPY Cargo.toml Cargo.lock ./
 
+# Copy workspace members required to resolve the workspace manifest
+COPY sdks ./sdks
+COPY cli ./cli
+
 # Copy source and migrations
 COPY src ./src
 COPY migrations ./migrations
