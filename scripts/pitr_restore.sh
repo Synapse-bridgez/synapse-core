@@ -62,7 +62,7 @@ touch "$DATA_DIR/standby.signal"
 {
   echo "restore_command = 'cp \"$WAL_ARCHIVE_DIR/%f\" \"%p\"'"
   echo "recovery_target_time = '$TARGET_TIMESTAMP'"
-  echo "recovery_target_action = 'promote'"
+  echo "recovery_target_action = 'pause'"
   echo "recovery_target_inclusive = true"
 } >> "$DATA_DIR/postgresql.auto.conf"
 
@@ -70,8 +70,9 @@ log "starting recovered instance on port $RESTORE_PORT"
 pg_ctl start -D "$DATA_DIR" -o "-p $RESTORE_PORT -c listen_addresses=127.0.0.1" -l "$DATA_DIR/recovery.log" \
   || fail "failed to start recovered instance; see $DATA_DIR/recovery.log"
 
-# Wait for recovery to finish: pg_isready succeeds once the server is
-# accepting connections, whether still in recovery or already promoted.
+# Wait for the paused recovery to accept connections: pg_isready succeeds
+# once the server is up, which for recovery_target_action='pause' means it
+# is paused in read-only recovery at the target, awaiting manual promotion.
 ATTEMPTS=0
 MAX_ATTEMPTS="${PITR_RESTORE_WAIT_ATTEMPTS:-120}"
 until pg_isready -h 127.0.0.1 -p "$RESTORE_PORT" >/dev/null 2>&1; do
@@ -86,4 +87,4 @@ done
 # Confirm recovery actually reached the target rather than just starting up.
 IN_RECOVERY=$(psql -h 127.0.0.1 -p "$RESTORE_PORT" -U "$(whoami)" -d postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null || echo "unknown")
 
-echo "recovered instance ready at 127.0.0.1:$RESTORE_PORT (data dir: $DATA_DIR, target: $TARGET_TIMESTAMP, in_recovery: $IN_RECOVERY) — verify the data, then promote/cut over manually; it is left running for inspection"
+echo "recovered instance paused at 127.0.0.1:$RESTORE_PORT (data dir: $DATA_DIR, target: $TARGET_TIMESTAMP, in_recovery: $IN_RECOVERY) — verify the data, then run SELECT pg_promote(); (or pg_ctl promote -D \"$DATA_DIR\") to cut over manually; it is left running read-only for inspection"
