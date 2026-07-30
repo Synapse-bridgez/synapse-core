@@ -340,10 +340,10 @@ mod tests {
 
         // Build a SecretsStore with both current and a grace-period previous secret.
         let store = {
-            use synapse_core::secrets::RotatingSecret;
             use std::sync::Arc;
-            use tokio::sync::RwLock;
             use std::time::Instant;
+            use synapse_core::secrets::RotatingSecret;
+            use tokio::sync::RwLock;
 
             let mut rotating = RotatingSecret::new(current_secret.to_string());
             // Inject a "previous" entry that is brand-new (so still in grace period).

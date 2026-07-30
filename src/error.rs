@@ -221,6 +221,12 @@ pub enum AppError {
     #[error("Internal server error: {0}")]
     Internal(String),
 
+    #[error("Export error: {0}")]
+    Export(String),
+
+    #[error("Profiling error: {0}")]
+    Profiling(String),
+
     #[error("Bad request: {0}")]
     BadRequest(String),
 
@@ -288,6 +294,8 @@ impl AppError {
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Export(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Profiling(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::TenantNotFound => StatusCode::NOT_FOUND,
@@ -319,6 +327,8 @@ impl AppError {
             AppError::Validation(_) => codes::VALIDATION_001.0,
             AppError::NotFound(_) => codes::NOT_FOUND_001.0,
             AppError::Internal(_) => codes::INTERNAL_001.0,
+            AppError::Export(_) => codes::INTERNAL_001.0,
+            AppError::Profiling(_) => codes::INTERNAL_001.0,
             AppError::BadRequest(_) => codes::BAD_REQUEST_001.0,
             AppError::Unauthorized(_) => codes::UNAUTHORIZED_001.0,
             AppError::TenantNotFound => codes::NOT_FOUND_001.0,

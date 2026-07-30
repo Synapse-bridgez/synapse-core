@@ -83,7 +83,10 @@ async fn test_counter_increment() {
 
     assert!(!sum.data_points.is_empty(), "no data points recorded");
     let total: u64 = sum.data_points.iter().map(|dp| dp.value).sum();
-    assert_eq!(total, 5, "expected cumulative sum of 5 (1 + 4), got {total}");
+    assert_eq!(
+        total, 5,
+        "expected cumulative sum of 5 (1 + 4), got {total}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -160,8 +163,7 @@ async fn test_gauge_updates() {
         "no gauge data points recorded"
     );
     assert_eq!(
-        gauge_data.data_points[0].value,
-        42,
+        gauge_data.data_points[0].value, 42,
         "expected gauge value 42, got {}",
         gauge_data.data_points[0].value
     );

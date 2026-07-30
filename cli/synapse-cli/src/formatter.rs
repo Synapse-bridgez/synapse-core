@@ -207,11 +207,7 @@ fn format_cell(value: &Value) -> String {
                 // offset 57 falls inside a multi-byte UTF-8 character.
                 // Use char_indices to find the byte offset of the 57th char
                 // boundary instead, which is always a valid slice point.
-                let byte_end = s
-                    .char_indices()
-                    .nth(57)
-                    .map(|(i, _)| i)
-                    .unwrap_or(s.len());
+                let byte_end = s.char_indices().nth(57).map(|(i, _)| i).unwrap_or(s.len());
                 format!("{}...", &s[..byte_end])
             } else {
                 s.clone()

@@ -79,10 +79,6 @@ mod tests {
         // rate limiting) are enforced for every query.
 
         let requirement = "graphql_handler must execute state.graphql_schema";
-        assert!(
-            !requirement.is_empty(),
-            "For issue #946: {}",
-            requirement
-        );
+        assert!(!requirement.is_empty(), "For issue #946: {}", requirement);
     }
 }

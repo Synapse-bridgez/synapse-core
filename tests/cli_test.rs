@@ -1,5 +1,38 @@
 use assert_cmd::Command;
 use mockito::Server;
+use std::sync::Mutex;
+
+// `ADMIN_API_KEY` is process-wide state; without this lock, tests in this file
+// that rely on it race against each other under parallel test execution.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// RAII guard that sets `ADMIN_API_KEY` for the duration of a test and
+/// restores the previous value on drop, while holding `ENV_LOCK` so no other
+/// test observes a half-set env var.
+struct AdminKeyGuard<'a> {
+    _lock: std::sync::MutexGuard<'a, ()>,
+    previous: Option<String>,
+}
+
+impl<'a> AdminKeyGuard<'a> {
+    fn set(lock: std::sync::MutexGuard<'a, ()>) -> Self {
+        let previous = std::env::var("ADMIN_API_KEY").ok();
+        std::env::set_var("ADMIN_API_KEY", "test-admin-key");
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for AdminKeyGuard<'_> {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(v) => std::env::set_var("ADMIN_API_KEY", v),
+            None => std::env::remove_var("ADMIN_API_KEY"),
+        }
+    }
+}
 
 fn synapse_cmd() -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("synapse-core");
@@ -169,6 +202,7 @@ fn test_cli_stats_daily_out_of_range() {
 /// response from the server. Uses `mockito` to avoid a real network dependency.
 #[tokio::test]
 async fn test_handle_stats_status_table_format() {
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let mock = server
         .mock("GET", "/stats/status")
@@ -195,6 +229,7 @@ async fn test_handle_stats_status_table_format() {
 /// Verify JSON pass-through for `handle_stats_status`.
 #[tokio::test]
 async fn test_handle_stats_status_json_format() {
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let mock = server
         .mock("GET", "/stats/status")
@@ -212,6 +247,7 @@ async fn test_handle_stats_status_json_format() {
 /// Verify that `handle_stats_daily` sends the correct query parameter.
 #[tokio::test]
 async fn test_handle_stats_daily_sends_days_param() {
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let mock = server
         .mock("GET", "/stats/daily?days=14")
@@ -229,6 +265,7 @@ async fn test_handle_stats_daily_sends_days_param() {
 /// Verify `handle_stats_assets` parses asset rows.
 #[tokio::test]
 async fn test_handle_stats_assets_table_format() {
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let mock = server
         .mock("GET", "/stats/assets")
@@ -248,6 +285,7 @@ async fn test_handle_stats_assets_table_format() {
 /// Verify `handle_stats_cache` formats combined cache metrics.
 #[tokio::test]
 async fn test_handle_stats_cache_table_format() {
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let body = serde_json::json!({
         "query_cache": {
@@ -280,6 +318,7 @@ async fn test_handle_stats_cache_table_format() {
 /// normal data response (no errors array).
 #[tokio::test]
 async fn test_handle_graphql_query_success() {
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let mock = server
         .mock("POST", "/graphql")
@@ -307,6 +346,7 @@ async fn test_handle_graphql_query_exits_on_graphql_errors() {
     // exercised at the integration / CLI level.
     //
     // Instead verify the happy-path absence of error when errors array is empty.
+    let _guard = AdminKeyGuard::set(ENV_LOCK.lock().unwrap());
     let mut server = Server::new_async().await;
     let mock = server
         .mock("POST", "/graphql")

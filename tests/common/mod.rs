@@ -128,6 +128,7 @@ impl TestApp {
             quota_manager: synapse_core::middleware::quota::QuotaManager::new(&redis_url)
                 .expect("quota manager init failed in test harness"),
             asset_cache,
+            idempotency_service: None,
         };
 
         // Clone readiness before app_state is moved into create_app

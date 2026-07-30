@@ -274,9 +274,7 @@ async fn test_transactions_combined_status_and_asset_filter() {
 
     // All results should match both criteria
     assert!(
-        results
-            .iter()
-            .all(|r| r.0 == "completed" && r.1 == "EUR"),
+        results.iter().all(|r| r.0 == "completed" && r.1 == "EUR"),
         "all filtered results should match both status and asset criteria"
     );
 }

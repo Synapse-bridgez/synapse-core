@@ -1,6 +1,7 @@
 use crate::db::models::Transaction;
 use crate::db::queries;
 use crate::error::AppError;
+use crate::ApiState;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -111,9 +112,10 @@ async fn get_webhook_payload_from_audit(
 
 /// List failed webhook attempts from audit logs
 pub async fn list_failed_webhooks(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Query(params): Query<ListFailedWebhooksQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    let pool = &state.app_state.db;
     let limit = params.limit.min(100);
 
     // Build query to find transactions with failed status or in DLQ
@@ -148,7 +150,7 @@ pub async fn list_failed_webhooks(
     query_builder.push_bind(params.offset);
 
     let query = query_builder.build();
-    let rows = query.fetch_all(&pool).await?;
+    let rows = query.fetch_all(pool).await?;
 
     let webhooks: Vec<FailedWebhookInfo> = rows
         .iter()
@@ -172,17 +174,18 @@ pub async fn list_failed_webhooks(
          WHERE (t.status = 'failed' OR d.id IS NOT NULL)",
     );
 
-    let total = count_query.fetch_one(&pool).await.unwrap_or(0);
+    let total = count_query.fetch_one(pool).await.unwrap_or(0);
 
     Ok(Json(FailedWebhooksResponse { total, webhooks }))
 }
 
 /// Replay a single webhook by transaction ID
 pub async fn replay_webhook(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Path(transaction_id): Path<Uuid>,
     Json(request): Json<ReplayWebhookRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let pool = &state.app_state.db;
     tracing::info!(
         "Replaying webhook for transaction {} (dry_run: {})",
         transaction_id,
@@ -190,7 +193,7 @@ pub async fn replay_webhook(
     );
 
     // Retrieve the original payload from audit logs
-    let transaction = get_webhook_payload_from_audit(&pool, transaction_id).await?;
+    let transaction = get_webhook_payload_from_audit(pool, transaction_id).await?;
 
     // Validate that we can replay this transaction
     if transaction.status == "completed" && !request.dry_run {
@@ -201,7 +204,7 @@ pub async fn replay_webhook(
 
     let result = if request.dry_run {
         // Dry-run mode: validate payload without committing
-        let _ = track_replay_attempt(&pool, transaction_id, true, true, None).await;
+        let _ = track_replay_attempt(pool, transaction_id, true, true, None).await;
 
         ReplayResult {
             transaction_id,
@@ -215,7 +218,7 @@ pub async fn replay_webhook(
         }
     } else {
         // Actual replay: reprocess the webhook
-        match reprocess_webhook(&pool, &transaction).await {
+        match reprocess_webhook(pool, &transaction).await {
             Ok(_) => {
                 // Log the replay attempt in audit logs
                 let mut db_tx = pool.begin().await.map_err(|e| {
@@ -243,7 +246,7 @@ pub async fn replay_webhook(
                 })?;
 
                 // Track replay in history table
-                let _ = track_replay_attempt(&pool, transaction_id, false, true, None).await;
+                let _ = track_replay_attempt(pool, transaction_id, false, true, None).await;
 
                 ReplayResult {
                     transaction_id,
@@ -256,7 +259,7 @@ pub async fn replay_webhook(
             Err(e) => {
                 let error_msg = format!("Failed to replay webhook: {e}");
                 let _ = track_replay_attempt(
-                    &pool,
+                    pool,
                     transaction_id,
                     false,
                     false,
@@ -280,9 +283,10 @@ pub async fn replay_webhook(
 
 /// Replay multiple webhooks in batch
 pub async fn batch_replay_webhooks(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Json(request): Json<BatchReplayRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let pool = &state.app_state.db;
     tracing::info!(
         "Batch replaying {} webhooks (dry_run: {})",
         request.transaction_ids.len(),
@@ -295,7 +299,7 @@ pub async fn batch_replay_webhooks(
 
     for transaction_id in request.transaction_ids {
         // Retrieve the original payload
-        let transaction = match get_webhook_payload_from_audit(&pool, transaction_id).await {
+        let transaction = match get_webhook_payload_from_audit(pool, transaction_id).await {
             Ok(tx) => tx,
             Err(e) => {
                 failed += 1;
@@ -324,7 +328,7 @@ pub async fn batch_replay_webhooks(
         }
 
         let result = if request.dry_run {
-            let _ = track_replay_attempt(&pool, transaction_id, true, true, None).await;
+            let _ = track_replay_attempt(pool, transaction_id, true, true, None).await;
             successful += 1;
             ReplayResult {
                 transaction_id,
@@ -337,7 +341,7 @@ pub async fn batch_replay_webhooks(
                 replayed_at: None,
             }
         } else {
-            match reprocess_webhook(&pool, &transaction).await {
+            match reprocess_webhook(pool, &transaction).await {
                 Ok(_) => {
                     // Log the replay attempt
                     if let Ok(mut db_tx) = pool.begin().await {
@@ -359,7 +363,7 @@ pub async fn batch_replay_webhooks(
                         let _ = db_tx.commit().await;
                     }
 
-                    let _ = track_replay_attempt(&pool, transaction_id, false, true, None).await;
+                    let _ = track_replay_attempt(pool, transaction_id, false, true, None).await;
                     successful += 1;
                     ReplayResult {
                         transaction_id,
@@ -372,7 +376,7 @@ pub async fn batch_replay_webhooks(
                 Err(e) => {
                     let error_msg = format!("Failed to replay webhook: {e}");
                     let _ = track_replay_attempt(
-                        &pool,
+                        pool,
                         transaction_id,
                         false,
                         false,

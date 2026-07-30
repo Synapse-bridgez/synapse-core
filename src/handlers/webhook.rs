@@ -142,7 +142,11 @@ pub async fn transaction_callback(
 ) -> Result<impl IntoResponse, AppError> {
     let payload = validate_webhook_payload(payload)?;
 
-    if !state.app_state.asset_cache.is_registered(&payload.asset_code) {
+    if !state
+        .app_state
+        .asset_cache
+        .is_registered(&payload.asset_code)
+    {
         return Err(AppError::Validation(format!(
             "asset_code: '{}' is not a registered/enabled asset",
             payload.asset_code

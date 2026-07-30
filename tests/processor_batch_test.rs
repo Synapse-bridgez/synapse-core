@@ -21,13 +21,11 @@ async fn test_process_batch_calls_horizon_verification() {
 
     assert_eq!(processed, 1, "Should process exactly one transaction");
 
-    let tx_in_db: (String,) = sqlx::query_as(
-        "SELECT status FROM transactions WHERE id = $1"
-    )
-    .bind(transaction_id)
-    .fetch_one(&pool)
-    .await
-    .expect("Failed to fetch transaction");
+    let tx_in_db: (String,) = sqlx::query_as("SELECT status FROM transactions WHERE id = $1")
+        .bind(transaction_id)
+        .fetch_one(&pool)
+        .await
+        .expect("Failed to fetch transaction");
 
     assert_ne!(
         tx_in_db.0, "pending",
@@ -51,7 +49,7 @@ async fn test_process_batch_updates_transaction_status() {
         .expect("process_batch failed");
 
     let updated_at: (i64,) = sqlx::query_as(
-        "SELECT EXTRACT(EPOCH FROM updated_at)::bigint FROM transactions WHERE id = $1"
+        "SELECT EXTRACT(EPOCH FROM updated_at)::bigint FROM transactions WHERE id = $1",
     )
     .bind(transaction_id)
     .fetch_one(&pool)
@@ -98,14 +96,16 @@ async fn test_process_batch_respects_batch_size() {
         .await
         .expect("process_batch failed");
 
-    assert_eq!(processed, 10, "Should process up to batch_size transactions");
+    assert_eq!(
+        processed, 10,
+        "Should process up to batch_size transactions"
+    );
 
-    let remaining: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions WHERE status = 'pending'"
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("Failed to count pending");
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE status = 'pending'")
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to count pending");
 
     assert!(remaining > 0, "Some transactions should remain pending");
 }

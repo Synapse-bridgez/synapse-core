@@ -1,15 +1,15 @@
-use synapse_core::services::CircuitBreaker;
-use std::time::Duration;
 use chrono::Duration as ChronoDuration;
+use std::time::Duration;
+use synapse_core::services::CircuitBreaker;
 
 #[tokio::test]
 #[ignore = "requires redis"]
 async fn test_circuit_breaker_can_be_instantiated() {
-    let redis_url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_client = redis::Client::open(redis_url)
-        .expect("Failed to create Redis client for testing");
+    let redis_client =
+        redis::Client::open(redis_url).expect("Failed to create Redis client for testing");
 
     let breaker = CircuitBreaker::new(
         "test_service".to_string(),
@@ -25,11 +25,11 @@ async fn test_circuit_breaker_can_be_instantiated() {
 #[tokio::test]
 #[ignore = "requires redis"]
 async fn test_circuit_breaker_with_config() {
-    let redis_url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_client = redis::Client::open(redis_url)
-        .expect("Failed to create Redis client for testing");
+    let redis_client =
+        redis::Client::open(redis_url).expect("Failed to create Redis client for testing");
 
     let breaker = CircuitBreaker::with_config(
         "test_service".to_string(),
@@ -48,11 +48,11 @@ async fn test_circuit_breaker_with_config() {
 #[tokio::test]
 #[ignore = "requires redis"]
 async fn test_circuit_breaker_is_initially_closed() {
-    let redis_url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_client = redis::Client::open(redis_url)
-        .expect("Failed to create Redis client for testing");
+    let redis_client =
+        redis::Client::open(redis_url).expect("Failed to create Redis client for testing");
 
     let breaker = CircuitBreaker::new(
         "test".to_string(),
@@ -68,11 +68,11 @@ async fn test_circuit_breaker_is_initially_closed() {
 #[tokio::test]
 #[ignore = "requires redis"]
 async fn test_circuit_breaker_can_record_failures() {
-    let redis_url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_client = redis::Client::open(redis_url)
-        .expect("Failed to create Redis client for testing");
+    let redis_client =
+        redis::Client::open(redis_url).expect("Failed to create Redis client for testing");
 
     let breaker = CircuitBreaker::new(
         "test".to_string(),

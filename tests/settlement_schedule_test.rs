@@ -16,9 +16,7 @@ impl SettlementSchedule {
                 let last_settlement = now - chrono::Duration::hours(23);
                 now.date_naive() != last_settlement.date_naive()
             }
-            SettlementSchedule::Weekly => {
-                now.weekday() == Weekday::Mon
-            }
+            SettlementSchedule::Weekly => now.weekday() == Weekday::Mon,
         }
     }
 
@@ -27,8 +25,8 @@ impl SettlementSchedule {
             SettlementSchedule::Hourly => true,
             SettlementSchedule::Daily => {
                 if let Some(last_time) = last_settlement_time {
-                    let last_settlement = chrono::DateTime::<Utc>::from_timestamp(last_time, 0)
-                        .unwrap_or(Utc::now());
+                    let last_settlement =
+                        chrono::DateTime::<Utc>::from_timestamp(last_time, 0).unwrap_or(Utc::now());
                     let now = Utc::now();
                     now.date_naive() != last_settlement.date_naive()
                 } else {
@@ -37,10 +35,11 @@ impl SettlementSchedule {
             }
             SettlementSchedule::Weekly => {
                 if let Some(last_time) = last_settlement_time {
-                    let last_settlement = chrono::DateTime::<Utc>::from_timestamp(last_time, 0)
-                        .unwrap_or(Utc::now());
+                    let last_settlement =
+                        chrono::DateTime::<Utc>::from_timestamp(last_time, 0).unwrap_or(Utc::now());
                     let now = Utc::now();
-                    now.weekday() == Weekday::Mon && now.date_naive() != last_settlement.date_naive()
+                    now.weekday() == Weekday::Mon
+                        && now.date_naive() != last_settlement.date_naive()
                 } else {
                     Utc::now().weekday() == Weekday::Mon
                 }
@@ -56,7 +55,10 @@ mod tests {
     #[test]
     fn test_hourly_schedule_always_eligible() {
         let schedule = SettlementSchedule::Hourly;
-        assert!(schedule.should_settle(None), "Hourly should always settle without last_settlement_time");
+        assert!(
+            schedule.should_settle(None),
+            "Hourly should always settle without last_settlement_time"
+        );
         assert!(
             schedule.should_settle(Some(Utc::now().timestamp() - 60)),
             "Hourly should settle even if settled 1 minute ago"

@@ -1,3 +1,10 @@
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "services used by live requests must not panic on bad input or runtime state"
+)]
+
 pub mod account_monitor;
 pub mod backup;
 pub mod backup_verification_job;

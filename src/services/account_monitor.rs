@@ -179,18 +179,19 @@ impl AccountMonitor {
             return Err(anyhow::anyhow!("Payment {} has no memo", payment.id));
         }
 
-        let memo = payment.memo.as_ref().unwrap();
+        let Some(memo) = payment.memo.as_ref() else {
+            return Err(anyhow::anyhow!("Payment {} has no memo", payment.id));
+        };
 
         // #922: parse payment amount as BigDecimal to preserve decimal precision
         // and avoid f64 rounding errors in financial comparisons.
-        let payment_amount =
-            sqlx::types::BigDecimal::from_str(&payment.amount).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to parse payment amount '{}' as decimal: {}",
-                    payment.amount,
-                    e
-                )
-            })?;
+        let payment_amount = sqlx::types::BigDecimal::from_str(&payment.amount).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse payment amount '{}' as decimal: {}",
+                payment.amount,
+                e
+            )
+        })?;
 
         // #924: Scope the lookup by both memo AND stellar_account (payment.to)
         // so that memo collisions across different accounts cannot match the
@@ -285,7 +286,16 @@ impl AccountMonitor {
         // happens to share the same memo.
         if let Some(memo) = &payment.memo {
             if let Ok(Some((tx_id, stellar_account, amount, asset_code, anchor_tx_id))) =
-                sqlx::query_as::<_, (Uuid, String, sqlx::types::BigDecimal, String, Option<String>)>(
+                sqlx::query_as::<
+                    _,
+                    (
+                        Uuid,
+                        String,
+                        sqlx::types::BigDecimal,
+                        String,
+                        Option<String>,
+                    ),
+                >(
                     "SELECT id, stellar_account, amount, asset_code, anchor_transaction_id \
                      FROM transactions \
                      WHERE memo = $1 \

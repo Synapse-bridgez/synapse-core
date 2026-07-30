@@ -95,8 +95,15 @@ pub async fn handle_telemetry_webhook(
     {
         Some(sig) => sig.to_owned(),
         None => {
-            tracing::warn!("telemetry webhook: missing {} header", crate::telemetry::webhook::SIGNATURE_HEADER);
-            return (StatusCode::UNAUTHORIZED, "Missing X-Webhook-Signature header").into_response();
+            tracing::warn!(
+                "telemetry webhook: missing {} header",
+                crate::telemetry::webhook::SIGNATURE_HEADER
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Missing X-Webhook-Signature header",
+            )
+                .into_response();
         }
     };
 
@@ -120,12 +127,14 @@ pub async fn handle_telemetry_webhook(
         Err(e) => {
             use crate::telemetry::error_handling::TelemetryError;
             let (status, msg) = match &e {
-                TelemetryError::PayloadTooLarge(_) => {
-                    (StatusCode::PAYLOAD_TOO_LARGE, "Payload exceeds the maximum allowed size")
-                }
-                TelemetryError::ValidationError(_) => {
-                    (StatusCode::UNAUTHORIZED, "Webhook signature or payload validation failed")
-                }
+                TelemetryError::PayloadTooLarge(_) => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Payload exceeds the maximum allowed size",
+                ),
+                TelemetryError::ValidationError(_) => (
+                    StatusCode::UNAUTHORIZED,
+                    "Webhook signature or payload validation failed",
+                ),
                 _ => (StatusCode::BAD_REQUEST, "Invalid telemetry webhook payload"),
             };
             tracing::warn!("telemetry webhook rejected: {e:?}");

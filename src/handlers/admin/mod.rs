@@ -9,7 +9,7 @@ pub mod webhook_replay;
 
 use crate::error::AppError;
 use crate::validation::{validate_max_len, validate_required};
-use crate::AppState;
+use crate::{ApiState, AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -70,12 +70,12 @@ pub struct SetAssetEnabledRequest {
 }
 
 /// Create admin routes for queue management
-pub fn admin_routes() -> Router<sqlx::PgPool> {
+pub fn admin_routes() -> Router<ApiState> {
     Router::new().route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
 }
 
 /// Create webhook replay admin routes
-pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
+pub fn webhook_replay_routes() -> Router<ApiState> {
     Router::new()
         .route(
             "/webhooks/failed",
@@ -135,7 +135,7 @@ pub async fn update_flag(
 }
 
 pub async fn update_webhook_rate_limit(
-    State(pool): State<sqlx::PgPool>,
+    State(state): State<ApiState>,
     Path(endpoint_id): Path<uuid::Uuid>,
     Json(payload): Json<UpdateWebhookRateLimitRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -154,7 +154,7 @@ pub async fn update_webhook_rate_limit(
     )
     .bind(payload.max_delivery_rate)
     .bind(endpoint_id)
-    .execute(&pool)
+    .execute(&state.app_state.db)
     .await?;
 
     if result.rows_affected() == 0 {

@@ -1,3 +1,10 @@
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "request handlers must not panic on bad input or runtime state"
+)]
+
 pub mod admin;
 pub mod dlq;
 pub mod export;

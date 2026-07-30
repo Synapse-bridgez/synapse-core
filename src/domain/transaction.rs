@@ -25,6 +25,7 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stellar_account: String,
         amount: BigDecimal,

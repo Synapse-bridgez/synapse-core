@@ -287,10 +287,11 @@ pub async fn queue_depth_task(pool: PgPool, pending_queue_depth: Arc<AtomicU64>)
             sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
                 .execute(&mut *tx)
                 .await?;
-            let count =
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM transactions WHERE status = 'pending'")
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM transactions WHERE status = 'pending'",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
             tx.commit().await?;
             Ok(count)
         }

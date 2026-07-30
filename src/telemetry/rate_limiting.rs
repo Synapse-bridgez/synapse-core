@@ -26,7 +26,7 @@
 
 use std::time::Duration;
 
-use crate::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy, RateLimiter};
+use crate::cache::rate_limiting::{RateLimitConfig, RateLimiter};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -144,17 +144,14 @@ impl TelemetryRateLimiter {
         let trace = RateLimiter::with_config(RateLimitConfig {
             max_requests: config.trace_limit,
             window: config.window,
-            strategy: RateLimitStrategy::TokenBucket,
         });
         let metric = RateLimiter::with_config(RateLimitConfig {
             max_requests: config.metric_limit,
             window: config.window,
-            strategy: RateLimitStrategy::TokenBucket,
         });
         let event = RateLimiter::with_config(RateLimitConfig {
             max_requests: config.event_limit,
             window: config.window,
-            strategy: RateLimitStrategy::TokenBucket,
         });
 
         Self {

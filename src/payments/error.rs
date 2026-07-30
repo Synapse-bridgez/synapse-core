@@ -326,7 +326,8 @@ mod tests {
     #[test]
     fn error_messages_do_not_leak_sensitive_details() {
         // Error messages should be user-facing, not expose internal details
-        let raw_db_error = "connection refused: password=admin123 user=root table=payments_transactions";
+        let raw_db_error =
+            "connection refused: password=admin123 user=root table=payments_transactions";
         let db_err = PaymentError::Database(raw_db_error.into());
         let msg = db_err.to_string();
 

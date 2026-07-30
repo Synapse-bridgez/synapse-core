@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use crate::auth::error::AuthError;
 use crate::auth::metrics::AuthMetrics;
-use crate::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy, RateLimiter};
+use crate::cache::rate_limiting::{RateLimitConfig, RateLimiter};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -153,7 +153,6 @@ impl AuthRateLimiter {
         let vault_bucket = RateLimiter::with_config(RateLimitConfig {
             max_requests: config.vault_probe_limit,
             window: config.window,
-            strategy: RateLimitStrategy::TokenBucket,
         });
         Self {
             config,
@@ -272,7 +271,6 @@ impl AuthRateLimiter {
             return RateLimiter::with_config(RateLimitConfig {
                 max_requests: 0,
                 window: self.config.window,
-                strategy: RateLimitStrategy::TokenBucket,
             });
         }
 
@@ -281,7 +279,6 @@ impl AuthRateLimiter {
                 RateLimiter::with_config(RateLimitConfig {
                     max_requests: self.config.auth_limit,
                     window: self.config.window,
-                    strategy: RateLimitStrategy::TokenBucket,
                 })
             })
             .clone()

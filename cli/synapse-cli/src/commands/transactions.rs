@@ -1,14 +1,9 @@
-use synapse_sdk::models::Transaction;
-
 use crate::client::ApiClient;
 use crate::formatter::{print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use synapse_sdk::models::Transaction;
 use uuid::Uuid;
-
-// ── Response types ────────────────────────────────────────────────────────────
-
-use synapse_sdk::Transaction;
 
 // ── TableDisplay impl ─────────────────────────────────────────────────────────
 
