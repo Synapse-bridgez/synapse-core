@@ -302,9 +302,9 @@ pub enum StatsCommands {
         /// Base URL of the running Synapse Core server
         ///
         /// The command appends /stats/status to this value.
-        /// Defaults to http://localhost:3000.
-        #[arg(long, default_value = "http://localhost:3000", env = "SYNAPSE_URL")]
-        url: String,
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
 
         /// Emit raw JSON instead of a formatted table
         #[arg(long)]
@@ -328,8 +328,9 @@ pub enum StatsCommands {
         /// Base URL of the running Synapse Core server
         ///
         /// The command appends /stats/daily?days=<N> to this value.
-        #[arg(long, default_value = "http://localhost:3000", env = "SYNAPSE_URL")]
-        url: String,
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
 
         /// Number of days to include in the rolling window (1–365)
         ///
@@ -353,8 +354,10 @@ pub enum StatsCommands {
     ///   synapse-core stats assets --json
     Assets {
         /// Base URL of the running Synapse Core server
-        #[arg(long, default_value = "http://localhost:3000", env = "SYNAPSE_URL")]
-        url: String,
+        ///
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
 
         /// Emit raw JSON instead of a formatted table
         #[arg(long)]
@@ -372,8 +375,10 @@ pub enum StatsCommands {
     ///   synapse-core stats cache --json
     Cache {
         /// Base URL of the running Synapse Core server
-        #[arg(long, default_value = "http://localhost:3000", env = "SYNAPSE_URL")]
-        url: String,
+        ///
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
 
         /// Emit raw JSON instead of a formatted table
         #[arg(long)]
@@ -435,9 +440,9 @@ pub enum GraphqlCommands {
         /// Base URL of the running Synapse Core server
         ///
         /// The command posts to <url>/graphql.
-        /// Defaults to http://localhost:3000.
-        #[arg(long, default_value = "http://localhost:3000", env = "SYNAPSE_URL")]
-        url: String,
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
     },
 }
 

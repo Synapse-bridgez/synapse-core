@@ -68,6 +68,8 @@ services:
     volumes:
       - ./src:/app/src
       - ./migrations:/app/migrations
+      - ./sdks:/app/sdks
+      - ./cli:/app/cli
       - ./Cargo.toml:/app/Cargo.toml
       - ./Cargo.lock:/app/Cargo.lock
       - cargo_registry:/usr/local/cargo/registry

@@ -1,8 +1,23 @@
 /target
 sdks/rust/target
+cli/synapse-cli/target
 node_modules
 .env
 .env.example
+
+# Test snapshots / test artifacts
 *.snap
+*.snap.new
+tests/snapshots/
+test-results/
+coverage/
+
+# Logs
+*.log
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
 
 ISSUES.md
