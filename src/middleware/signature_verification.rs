@@ -36,12 +36,20 @@ pub async fn signature_verification(
         .map(|ci| ci.0.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let secrets_store = match req.extensions().get::<SecretsStore>() {
-        Some(store) => store.clone(),
-        None => {
-            tracing::error!("signature_verification: SecretsStore extension not found");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+    // Resolve the webhook secret(s) from the SecretsStore when Vault rotation
+    // is enabled, or fall back to the ANCHOR_WEBHOOK_SECRET environment
+    // variable (the supported non-Vault deployment mode — see config.rs).
+    let valid_secrets: Vec<String> = match req.extensions().get::<SecretsStore>() {
+        Some(store) => store.clone().valid_webhook_secrets().await,
+        None => match std::env::var("ANCHOR_WEBHOOK_SECRET") {
+            Ok(s) if !s.is_empty() => vec![s],
+            _ => {
+                tracing::error!(
+                    "signature_verification: no SecretsStore extension and ANCHOR_WEBHOOK_SECRET not set"
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        },
     };
 
     let timestamp = match extract_timestamp(&req) {
@@ -89,7 +97,6 @@ pub async fn signature_verification(
     let body_hex = hex::encode(&body_bytes);
     let signed_payload = format!("{}.{}", timestamp, body_hex);
 
-    let valid_secrets = secrets_store.valid_webhook_secrets().await;
     let signature_valid = valid_secrets
         .iter()
         .any(|secret| verify_signature(&provided_signature, &signed_payload, secret));

@@ -63,7 +63,9 @@ async fn test_graphql_queries() {
         .unwrap();
 
     let asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .expect("failed to start asset cache in test");
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,

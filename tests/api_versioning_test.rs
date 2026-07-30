@@ -36,7 +36,9 @@ async fn test_api_versioning_headers() {
 
     // Start App
     let asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .expect("failed to start asset cache in test");
     let app_state = AppState {
         db: pool.clone(),
         pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)

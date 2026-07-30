@@ -100,11 +100,10 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
-        let _asset_cache =
-            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         let redis_url = "redis://localhost:6379".to_string();
-        let asset_cache =
-            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .expect("failed to start asset cache in test_new");
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)

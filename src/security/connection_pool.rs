@@ -104,10 +104,16 @@ pub enum SecurityPoolError {
 
 impl From<SecurityPoolError> for SecurityError {
     fn from(e: SecurityPoolError) -> Self {
-        // Pool errors are surfaced as rate-limit exceeded (429) because they
-        // indicate the security backend is under load, not a client mistake.
         tracing::error!(error = %e, "Security connection pool error");
-        SecurityError::RateLimitExceeded
+        match e {
+            // Exhaustion indicates the security backend is under load, not a
+            // client mistake or a static defect — surfaced as 429 so callers
+            // back off and retry.
+            SecurityPoolError::Exhausted(_) => SecurityError::RateLimitExceeded,
+            // A bad max_size/endpoint is a static configuration defect that
+            // will never resolve itself through retries — surfaced as 500.
+            SecurityPoolError::InvalidConfig(_) => SecurityError::Misconfigured,
+        }
     }
 }
 

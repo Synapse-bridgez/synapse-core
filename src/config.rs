@@ -199,9 +199,14 @@ impl Config {
 
             (db_url, anchor_secret)
         } else {
+            let env_secrets = crate::secrets::env_secrets::EnvSecretsManager::new();
             (
-                env::var("DATABASE_URL")?,
-                env::var("ANCHOR_WEBHOOK_SECRET")?,
+                env_secrets
+                    .get_secret("DATABASE_URL")
+                    .map_err(|e| anyhow::anyhow!(e))?,
+                env_secrets
+                    .get_secret("ANCHOR_WEBHOOK_SECRET")
+                    .map_err(|e| anyhow::anyhow!(e))?,
             )
         };
 
