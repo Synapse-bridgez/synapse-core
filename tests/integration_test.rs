@@ -84,7 +84,9 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any, String) {
         .unwrap();
 
     let asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .expect("failed to start asset cache in test");
     // Seed a tenant so `X-API-Key` auth (api_key_auth middleware) succeeds.
     let tenant_id = Uuid::new_v4();
     let api_key = format!("integration-test-key-{}", tenant_id);

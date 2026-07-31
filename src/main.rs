@@ -359,7 +359,11 @@ async fn serve(
     tracing::info!("Feature flags service initialized");
 
     // Initialize secrets store and start rotation task (if Vault is configured).
-    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok() {
+    // Mirrors the use_vault check in Config::load() (config.rs) so both agree
+    // on whether Vault is enabled.
+    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok()
+        && std::env::var("VAULT_SECRET_ID").is_ok()
+    {
         match synapse_core::secrets::SecretsManager::new().await {
             Ok(manager) => {
                 let anchor_secret = manager.get_anchor_secret().await?;
@@ -386,7 +390,9 @@ async fn serve(
     ));
     // Initialize asset registry cache (refreshes every 5 minutes)
     let asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to initialize asset registry cache: {e}"))?;
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
