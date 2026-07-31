@@ -145,9 +145,10 @@ jobs:
       with:
         tool: sqlx-cli@0.7.4
 
-    # Validates that no migration breaks existing pagination indexes.
-    # The script checks for destructive operations (DROP INDEX, ALTER TABLE)
-    # on columns used by cursor queries (created_at, id).
+    # Flags potentially unsafe operations in up migrations: DROP TABLE,
+    # DROP COLUMN, DROP INDEX, TRUNCATE, and ALTER COLUMN TYPE/SET NOT NULL.
+    # These checks are not scoped to specific tables or columns — any match
+    # in a non-.down.sql migration is flagged for manual review.
     - name: Check migration safety
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
