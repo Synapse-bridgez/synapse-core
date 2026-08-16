@@ -13,7 +13,46 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
+/// Seed a `tenants` row whose `api_key_hash` matches `api_key`, so that
+/// `authenticate_ws_token` (src/handlers/ws.rs) — which validates the `?token=`
+/// query param against a real tenant row via `queries::lookup_api_key`, not
+/// just its shape — accepts connections using this token.
+async fn seed_tenant_api_key(pool: &PgPool, api_key: &str) {
+    sqlx::query(
+        r#"
+        INSERT INTO tenants
+            (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active)
+        VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), '', 60, true)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("ws-test-tenant-{api_key}"))
+    .bind(synapse_core::db::queries::hash_api_key(api_key))
+    .bind("test-webhook-secret")
+    .bind(synapse_core::db::queries::tenant_secret_key())
+    .execute(pool)
+    .await
+    .expect("Failed to seed tenant for WS auth");
+}
+
+/// Set up the test app without seeding any tenant/API key. Used by tests
+/// that intentionally connect with no token or an invalid one and expect
+/// the connection to be rejected.
 async fn setup_test_app() -> (
+    String,
+    PgPool,
+    broadcast::Sender<TransactionStatusUpdate>,
+    impl std::any::Any,
+) {
+    setup_test_app_with_tokens(&[]).await
+}
+
+/// Set up the test app and seed a `tenants` row for each token in `tokens`,
+/// so WebSocket connections using `?token=<one of tokens>` authenticate
+/// successfully (see `seed_tenant_api_key`).
+async fn setup_test_app_with_tokens(
+    tokens: &[&str],
+) -> (
     String,
     PgPool,
     broadcast::Sender<TransactionStatusUpdate>,
@@ -34,6 +73,10 @@ async fn setup_test_app() -> (
     .await
     .unwrap();
     migrator.run(&pool).await.unwrap();
+
+    for token in tokens {
+        seed_tenant_api_key(&pool, token).await;
+    }
 
     let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
     let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
@@ -95,7 +138,7 @@ async fn setup_test_app() -> (
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_connection_with_valid_token() {
-    let (base_url, _pool, _tx, _container) = setup_test_app().await;
+    let (base_url, _pool, _tx, _container) = setup_test_app_with_tokens(&["valid-token-123"]).await;
 
     // Connect with valid token
     let ws_url = format!("{}/ws?token=valid-token-123", base_url);
@@ -142,7 +185,8 @@ async fn test_ws_connection_rejected_invalid_token() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_receives_transaction_updates() {
-    let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
+    let (base_url, _pool, tx_broadcast, _container) =
+        setup_test_app_with_tokens(&["test-token"]).await;
 
     // Connect WebSocket client
     let ws_url = format!("{}/ws?token=test-token", base_url);
@@ -158,6 +202,7 @@ async fn test_ws_receives_transaction_updates() {
         tenant_id: Uuid::default(),
         status: "completed".to_string(),
         timestamp: Utc::now(),
+        asset_code: Some("USDC".to_string()),
         message: Some("Transaction processed successfully".to_string()),
     };
 
@@ -197,7 +242,8 @@ async fn test_ws_receives_transaction_updates() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_multiple_clients_receive_broadcast() {
-    let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
+    let (base_url, _pool, tx_broadcast, _container) =
+        setup_test_app_with_tokens(&["client1", "client2", "client3"]).await;
 
     // Connect multiple WebSocket clients
     let ws_url1 = format!("{}/ws?token=client1", base_url);
@@ -218,6 +264,7 @@ async fn test_ws_multiple_clients_receive_broadcast() {
         tenant_id: Uuid::default(),
         status: "pending".to_string(),
         timestamp: Utc::now(),
+        asset_code: Some("USDC".to_string()),
         message: None,
     };
 
@@ -261,7 +308,8 @@ async fn test_ws_multiple_clients_receive_broadcast() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_connection_cleanup_on_disconnect() {
-    let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
+    let (base_url, _pool, tx_broadcast, _container) =
+        setup_test_app_with_tokens(&["test-client"]).await;
 
     // Connect a client
     let ws_url = format!("{}/ws?token=test-client", base_url);
@@ -276,6 +324,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
         status: "test".to_string(),
         tenant_id: Uuid::default(),
         timestamp: Utc::now(),
+        asset_code: Some("USDC".to_string()),
         message: None,
     };
 
@@ -294,6 +343,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
         status: "test2".to_string(),
         tenant_id: Uuid::default(),
         timestamp: Utc::now(),
+        asset_code: Some("USDC".to_string()),
         message: None,
     };
 
@@ -307,7 +357,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_heartbeat_keeps_connection_alive() {
-    let (base_url, _pool, _tx, _container) = setup_test_app().await;
+    let (base_url, _pool, _tx, _container) = setup_test_app_with_tokens(&["heartbeat-test"]).await;
 
     // Connect WebSocket client
     let ws_url = format!("{}/ws?token=heartbeat-test", base_url);
@@ -334,7 +384,7 @@ async fn test_ws_heartbeat_keeps_connection_alive() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_client_can_send_messages() {
-    let (base_url, _pool, _tx, _container) = setup_test_app().await;
+    let (base_url, _pool, _tx, _container) = setup_test_app_with_tokens(&["send-test"]).await;
 
     // Connect WebSocket client
     let ws_url = format!("{}/ws?token=send-test", base_url);
@@ -360,7 +410,8 @@ async fn test_ws_client_can_send_messages() {
 #[tokio::test]
 #[ignore = "Requires Docker for testcontainers"]
 async fn test_ws_handles_rapid_broadcasts() {
-    let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
+    let (base_url, _pool, tx_broadcast, _container) =
+        setup_test_app_with_tokens(&["rapid-test"]).await;
 
     // Connect WebSocket client
     let ws_url = format!("{}/ws?token=rapid-test", base_url);
@@ -380,6 +431,7 @@ async fn test_ws_handles_rapid_broadcasts() {
             tenant_id: Uuid::default(),
             status: format!("status_{}", i),
             timestamp: Utc::now(),
+            asset_code: Some("USDC".to_string()),
             message: Some(format!("Update {}", i)),
         };
 

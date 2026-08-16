@@ -205,6 +205,9 @@ pub fn create_app(app_state: AppState) -> Router {
         callback_routes = callback_routes.layer(axum::Extension(store.clone()));
     }
 
+    // Inject the DB pool so `api_key_auth` can look up tenant API keys.
+    callback_routes = callback_routes.layer(axum::Extension(app_state.db.clone()));
+
     // Webhook route: rate limiting outermost (runs first) — same reasoning as
     // callback_routes above.
     let mut webhook_routes = Router::new()
@@ -235,6 +238,9 @@ pub fn create_app(app_state: AppState) -> Router {
     if let Some(store) = &app_state.secrets_store {
         webhook_routes = webhook_routes.layer(axum::Extension(store.clone()));
     }
+
+    // Inject the DB pool so `api_key_auth` can look up tenant API keys.
+    webhook_routes = webhook_routes.layer(axum::Extension(app_state.db.clone()));
 
     // Telemetry webhook route (#976): wire TelemetryWebhookHandler to an actual
     // HTTP endpoint.  The handler itself performs HMAC-SHA256 signature

@@ -19,7 +19,7 @@ impl Job for BackupVerificationJob {
     }
 
     fn schedule(&self) -> &str {
-        "0 0 2 * * 0" // Weekly on Sunday at 2 AM UTC
+        "0 0 2 * * SUN" // Weekly on Sunday at 2 AM UTC (this cron crate's day-of-week is 1=Sun..7=Sat, not the Unix 0=Sun convention)
     }
 
     async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -106,15 +106,15 @@ mod tests {
         assert_eq!(parts[1], "0");
         // Third field is hours
         assert_eq!(parts[2], "2");
-        // Sixth field (dow) is 0 for Sunday
-        assert_eq!(parts[5], "0");
+        // Sixth field (dow) is SUN — this cron crate uses 1=Sun..7=Sat, not Unix's 0=Sun
+        assert_eq!(parts[5], "SUN");
     }
 
     #[test]
     fn test_cron_expression_matches_audit_log_retention_format() {
         // Verify that BackupVerificationJob uses the same cron format
         // as other jobs in the codebase (6-field format with seconds)
-        let backup_job_schedule = "0 0 2 * * 0";
+        let backup_job_schedule = "0 0 2 * * SUN";
         let audit_log_schedule = "0 0 2 1 * * *";
 
         let backup_parsed = Schedule::from_str(backup_job_schedule);

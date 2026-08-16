@@ -124,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 cursor,
                 limit,
                 format,
+                url,
             } => {
                 cli::handle_tx_search(
                     &config,
@@ -137,16 +138,17 @@ async fn main() -> anyhow::Result<()> {
                     cursor,
                     limit,
                     &format,
+                    url,
                 )
                 .await
             }
         },
         Some(Commands::Settlements(settlements_cmd)) => match settlements_cmd {
-            SettlementsCommands::List { format } => {
-                cli::handle_settlements_list(&config, &format).await
+            SettlementsCommands::List { format, url } => {
+                cli::handle_settlements_list(&config, &format, url).await
             }
-            SettlementsCommands::Get { id, format } => {
-                cli::handle_settlements_get(&config, &id, &format).await
+            SettlementsCommands::Get { id, format, url } => {
+                cli::handle_settlements_get(&config, &id, &format, url).await
             }
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
@@ -167,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
             } => cli::handle_backup_restore_pitr(&config, &timestamp, dry_run, yes).await,
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
-        Some(Commands::Config) => cli::handle_config_validate(&config),
+        Some(Commands::Config) => cli::handle_config_validate(&config).await,
         Some(Commands::Stats(stats_cmd)) => {
             let default_url = format!("http://localhost:{}", config.server_port);
             match stats_cmd {
@@ -183,11 +185,6 @@ async fn main() -> anyhow::Result<()> {
                 StatsCommands::Cache { url, json } => {
                     cli::handle_stats_cache(&url.unwrap_or(default_url), json).await
                 }
-        Some(Commands::Config) => cli::handle_config_validate(&config).await,
-        Some(Commands::Stats(stats_cmd)) => match stats_cmd {
-            StatsCommands::Status { url, json } => cli::handle_stats_status(&url, json).await,
-            StatsCommands::Daily { url, days, json } => {
-                cli::handle_stats_daily(&url, days, json).await
             }
         }
         Some(Commands::Graphql(gql_cmd)) => match gql_cmd {

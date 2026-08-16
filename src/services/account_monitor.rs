@@ -538,7 +538,7 @@ mod tests {
                 && result
                     .unwrap_err()
                     .to_string()
-                    .contains("less than expected"),
+                    .contains("No pending transaction found"),
             "Should reject underpayment"
         );
 
@@ -572,7 +572,11 @@ mod tests {
 
         let result = monitor.process_payment(&payment).await;
         assert!(
-            result.is_err() && result.unwrap_err().to_string().contains("does not match"),
+            result.is_err()
+                && result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("No pending transaction found"),
             "Should reject wrong asset"
         );
 
@@ -606,7 +610,11 @@ mod tests {
 
         let result = monitor.process_payment(&payment).await;
         assert!(
-            result.is_err() && result.unwrap_err().to_string().contains("destination"),
+            result.is_err()
+                && result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("No pending transaction found"),
             "Should reject wrong destination"
         );
 

@@ -1,5 +1,4 @@
-use sqlx::{PgPool, Row};
-use synapse_core::db::models::{Transaction, TransactionStatus};
+use sqlx::PgPool;
 use synapse_core::services::processor::process_batch;
 use synapse_core::stellar::HorizonClient;
 use uuid::Uuid;
@@ -11,7 +10,7 @@ async fn test_process_batch_calls_horizon_verification() {
     let horizon_client = setup_horizon_client();
 
     let transaction_id = Uuid::new_v4();
-    let stellar_account = "GBEPABQLHTWVSX5V6VCMLZ5ULCVFCYX7OYXGZFHV7GBV6DWE3KQVZCSL";
+    let stellar_account = "GBYLXUZRYT4NTC4WQH6QLAEAHA4ZXFHIOJCDC7M4TI6JBLTHSNJ4LYPG";
 
     insert_pending_transaction(&pool, transaction_id, stellar_account.to_string()).await;
 
@@ -40,7 +39,7 @@ async fn test_process_batch_updates_transaction_status() {
     let horizon_client = setup_horizon_client();
 
     let transaction_id = Uuid::new_v4();
-    let stellar_account = "GBEPABQLHTWVSX5V6VCMLZ5ULCVFCYX7OYXGZFHV7GBV6DWE3KQVZCSL";
+    let stellar_account = "GBYLXUZRYT4NTC4WQH6QLAEAHA4ZXFHIOJCDC7M4TI6JBLTHSNJ4LYPG";
 
     insert_pending_transaction(&pool, transaction_id, stellar_account.to_string()).await;
 
@@ -85,9 +84,9 @@ async fn test_process_batch_respects_batch_size() {
     let pool = setup_test_db().await;
     let horizon_client = setup_horizon_client();
 
-    let stellar_account = "GBEPABQLHTWVSX5V6VCMLZ5ULCVFCYX7OYXGZFHV7GBV6DWE3KQVZCSL";
+    let stellar_account = "GBYLXUZRYT4NTC4WQH6QLAEAHA4ZXFHIOJCDC7M4TI6JBLTHSNJ4LYPG";
 
-    for i in 0..15 {
+    for _ in 0..15 {
         let transaction_id = Uuid::new_v4();
         insert_pending_transaction(&pool, transaction_id, stellar_account.to_string()).await;
     }
@@ -125,13 +124,13 @@ fn setup_horizon_client() -> HorizonClient {
     let horizon_url = std::env::var("STELLAR_HORIZON_URL")
         .unwrap_or_else(|_| "https://horizon-testnet.stellar.org".to_string());
 
-    HorizonClient::new(&horizon_url)
+    HorizonClient::new(horizon_url)
 }
 
 async fn insert_pending_transaction(pool: &PgPool, id: Uuid, stellar_account: String) {
     sqlx::query(
-        "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at, memo_type, callback_type, priority)
-         VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), $6, $7, $8)"
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at, memo_type, callback_type)
+         VALUES ($1, $2, $3::numeric, $4, $5, NOW(), NOW(), $6, $7)"
     )
     .bind(id)
     .bind(stellar_account)
@@ -140,7 +139,6 @@ async fn insert_pending_transaction(pool: &PgPool, id: Uuid, stellar_account: St
     .bind("pending")
     .bind("text")
     .bind("idempotency")
-    .bind(0)
     .execute(pool)
     .await
     .expect("Failed to insert test transaction");

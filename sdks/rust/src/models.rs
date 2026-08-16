@@ -419,32 +419,6 @@ pub struct AssetStats {
     pub total_amount: String,
 }
 
-/// Cache metrics returned by `GET /stats/cache`.
-///
-/// Empty datasets return a zeroed structure, never `null`/`None`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CacheMetrics {
-    pub hits: u64,
-    pub misses: u64,
-    pub hit_rate: f64,
-    pub evictions: u64,
-    pub size: u64,
-    pub capacity: u64,
-}
-
-impl Default for CacheMetrics {
-    fn default() -> Self {
-        Self {
-            hits: 0,
-            misses: 0,
-            hit_rate: 0.0,
-            evictions: 0,
-            size: 0,
-            capacity: 0,
-        }
-    }
-}
-
 /// Query parameters for `stats.daily()`.
 #[derive(Debug, Default)]
 pub struct DailyParams {

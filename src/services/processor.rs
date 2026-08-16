@@ -176,7 +176,7 @@ pub async fn process_batch(
         r#"
         SELECT id, stellar_account, amount, asset_code, status, created_at, updated_at,
                anchor_transaction_id, callback_type, callback_status, settlement_id,
-               memo, memo_type, metadata, priority, trace_id, tenant_id
+               memo, memo_type, metadata, trace_id, tenant_id
         FROM transactions
         WHERE status = 'pending'
         ORDER BY created_at ASC

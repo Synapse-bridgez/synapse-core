@@ -81,8 +81,13 @@ async fn test_circuit_breaker_can_record_failures() {
         ChronoDuration::seconds(30),
     );
 
-    let result = breaker.record_failure("Test error").await;
-    assert!(result.is_ok(), "Should be able to record failures");
+    let result = breaker
+        .call(|| async { Err::<(), _>("Test error".into()) })
+        .await;
+    assert!(
+        result.is_err(),
+        "The failing call should propagate its error"
+    );
 
     let state = breaker.get_state().await;
     assert_eq!(

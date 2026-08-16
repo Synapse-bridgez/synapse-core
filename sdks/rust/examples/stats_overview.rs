@@ -51,10 +51,11 @@ async fn main() {
     // cache_metrics() — always returns a zeroed struct, never null.
     match client.stats().cache_metrics().await {
         Ok(m) => println!(
-            "=== Cache metrics === hits={} misses={} hit_rate={:.1}%",
-            m.hits,
-            m.misses,
-            m.hit_rate * 100.0
+            "=== Cache metrics === hits={} misses={} hit_rate={:.1}% idempotency_hits={}",
+            m.query_cache.hits,
+            m.query_cache.misses,
+            m.query_cache.hit_rate * 100.0,
+            m.idempotency_cache_hits
         ),
         Err(e) => eprintln!("stats.cache_metrics error: {e}"),
     }

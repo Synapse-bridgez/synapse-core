@@ -193,7 +193,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<LivenessResponse> = client.get("/live").await;
+        let result: Result<LivenessResponse, synapse_sdk::SynapseError> = client.get("/live").await;
         assert!(result.is_err());
     }
 
@@ -229,7 +229,8 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         // The API client surfaces 503 as Err
-        let result: Result<ReadinessResponse> = client.get("/ready").await;
+        let result: Result<ReadinessResponse, synapse_sdk::SynapseError> =
+            client.get("/ready").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("503"));
@@ -305,7 +306,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<HealthStatus> = client.get("/health").await;
+        let result: Result<HealthStatus, synapse_sdk::SynapseError> = client.get("/health").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("503"));
     }

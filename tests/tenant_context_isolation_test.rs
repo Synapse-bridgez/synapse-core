@@ -101,10 +101,12 @@ async fn test_set_local_prevents_connection_reuse_leak() {
 
     // Insert tenants
     for (tid, name) in [(tenant_a, "TenantA"), (tenant_b, "TenantB")] {
-        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
             .bind(tid)
             .bind(name)
-            .bind(Uuid::new_v4().to_string())
+            .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+            .bind("")
+            .bind(synapse_core::db::queries::tenant_secret_key())
             .execute(&pool)
             .await
             .unwrap();
@@ -192,9 +194,11 @@ async fn test_no_context_fails_closed() {
 
     let tenant_a = Uuid::new_v4();
 
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,pgp_sym_encrypt($3,$4),'',60,true)")
         .bind(tenant_a)
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();
@@ -238,10 +242,12 @@ async fn test_concurrent_tenant_isolation() {
     let tenant_b = Uuid::new_v4();
 
     for (tid, name) in [(tenant_a, "ConcA"), (tenant_b, "ConcB")] {
-        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
             .bind(tid)
             .bind(name)
-            .bind(Uuid::new_v4().to_string())
+            .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+            .bind("")
+            .bind(synapse_core::db::queries::tenant_secret_key())
             .execute(&pool)
             .await
             .unwrap();
@@ -306,9 +312,11 @@ async fn test_null_tenant_id_admin_only() {
     .unwrap();
 
     // Create tenant
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,pgp_sym_encrypt($3,$4),'',60,true)")
         .bind(tenant_a)
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&admin_pool)
         .await
         .unwrap();
@@ -342,9 +350,11 @@ async fn test_guc_cleared_on_rollback() {
     let (pool, _admin_pool, _c) = setup_db().await;
 
     let tenant_a = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,pgp_sym_encrypt($3,$4),'',60,true)")
         .bind(tenant_a)
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();

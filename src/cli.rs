@@ -196,6 +196,12 @@ Examples:
         /// Output format (json or table)
         #[arg(long, default_value = "table")]
         format: String,
+
+        /// Base URL of the running Synapse Core server
+        ///
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
     },
 }
 
@@ -206,6 +212,12 @@ pub enum SettlementsCommands {
         /// Output format (json or table)
         #[arg(long, default_value = "table")]
         format: String,
+
+        /// Base URL of the running Synapse Core server
+        ///
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
     },
 
     /// Get a specific settlement by ID
@@ -217,6 +229,12 @@ pub enum SettlementsCommands {
         /// Output format (json or table)
         #[arg(long, default_value = "table")]
         format: String,
+
+        /// Base URL of the running Synapse Core server
+        ///
+        /// Defaults to http://localhost:<server_port> from the loaded config.
+        #[arg(long, env = "SYNAPSE_URL")]
+        url: Option<String>,
     },
 }
 
@@ -736,10 +754,9 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
         }
     };
 
-    if let Err(e) = crate::validation::state_machine::validate_status_transition(
-        &current_status,
-        "completed",
-    ) {
+    if let Err(e) =
+        crate::validation::state_machine::validate_status_transition(&current_status, "completed")
+    {
         db_tx.rollback().await?;
         tracing::warn!(
             actor = %actor,
@@ -1487,8 +1504,12 @@ mod tests {
     }
 }
 
-pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::Result<()> {
-    let base_url = format!("http://localhost:{}", config.server_port);
+pub async fn handle_settlements_list(
+    config: &Config,
+    format: &str,
+    url: Option<String>,
+) -> anyhow::Result<()> {
+    let base_url = url.unwrap_or_else(|| format!("http://localhost:{}", config.server_port));
     let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
@@ -1535,8 +1556,13 @@ pub async fn handle_settlements_list(config: &Config, format: &str) -> anyhow::R
     }
 }
 
-pub async fn handle_settlements_get(config: &Config, id: &str, format: &str) -> anyhow::Result<()> {
-    let base_url = format!("http://localhost:{}", config.server_port);
+pub async fn handle_settlements_get(
+    config: &Config,
+    id: &str,
+    format: &str,
+    url: Option<String>,
+) -> anyhow::Result<()> {
+    let base_url = url.unwrap_or_else(|| format!("http://localhost:{}", config.server_port));
     let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
@@ -1595,8 +1621,9 @@ pub async fn handle_tx_search(
     cursor: Option<String>,
     limit: i64,
     format: &str,
+    url: Option<String>,
 ) -> anyhow::Result<()> {
-    let base_url = format!("http://localhost:{}", config.server_port);
+    let base_url = url.unwrap_or_else(|| format!("http://localhost:{}", config.server_port));
     let api_key = require_api_key()?;
 
     let client = synapse_sdk::SynapseClient::new(base_url, api_key);
