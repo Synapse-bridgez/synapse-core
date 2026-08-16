@@ -160,6 +160,7 @@ fn make_update(status: &str) -> TransactionStatusUpdate {
         tenant_id: Uuid::new_v4(),
         status: status.to_string(),
         timestamp: Utc::now(),
+        asset_code: Some("USDC".to_string()),
         message: Some(format!("integration test: {status}")),
     }
 }

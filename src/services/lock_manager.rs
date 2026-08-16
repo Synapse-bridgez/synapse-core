@@ -559,7 +559,7 @@ impl LockManager {
                 token,
                 redis::SetOptions::default()
                     .conditional_set(redis::ExistenceCheck::NX)
-                    .with_expiration(redis::SetExpiry::EX(ttl.as_secs() as usize)),
+                    .with_expiration(redis::SetExpiry::PX(ttl.as_millis() as usize)),
             )
             .await?;
 
@@ -703,7 +703,7 @@ impl Lock {
         let script = Script::new(
             r#"
             if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("expire", KEYS[1], ARGV[2])
+                return redis.call("pexpire", KEYS[1], ARGV[2])
             else
                 return 0
             end
@@ -713,7 +713,7 @@ impl Lock {
         let result: i32 = script
             .key(&self.key)
             .arg(&self.token)
-            .arg(self.ttl.as_secs() as i32)
+            .arg(self.ttl.as_millis() as i64)
             .invoke_async(&mut conn)
             .await?;
 
@@ -1042,10 +1042,18 @@ mod tests {
         let mgr_poller = mgr.clone();
         let resource_str = resource.to_string();
 
-        // Spawn a task that polls for the lock throughout the body's 2 s sleep
+        // Spawn a task that polls for the lock throughout most of the body's
+        // 2 s sleep, stopping at a 1.5 s wall-clock deadline (not a fixed
+        // iteration count) to leave a real margin against the body's release
+        // boundary. `acquire`'s internal retry loop checks its own timeout
+        // only *after* a 50 ms sleep, so each poll can run well past its
+        // nominal 10 ms budget — a fixed iteration count doesn't account for
+        // that and can overshoot into the release itself, racing the
+        // assertion below against normal, expected release rather than
+        // against a keepalive failure.
         let poller = tokio::spawn(async move {
-            // Poll every 200 ms for 2 s
-            for _ in 0..10 {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+            while tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if let Ok(Some(_)) = mgr_poller
                     .acquire(&resource_str, Duration::from_millis(10))

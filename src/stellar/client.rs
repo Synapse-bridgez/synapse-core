@@ -159,6 +159,15 @@ impl HorizonClient {
         let cx = opentelemetry::Context::current();
         propagator.inject_context(&cx, &mut headers);
 
+        // A 404 ("account not found") is a normal, expected business outcome —
+        // e.g. a deposit destination that hasn't been funded on-chain yet —
+        // not an infrastructure failure. It must not count against the circuit
+        // breaker's consecutive-failure threshold, or a batch of legitimate
+        // not-yet-created accounts would trip the breaker and block Horizon
+        // verification for everyone even though Horizon itself is healthy.
+        // So the breaker only ever sees success (`Ok`) or genuine transport /
+        // non-404 HTTP failures (`Err`); "not found" is folded into the `Ok`
+        // variant and unwrapped back into an error after the call returns.
         let result = self
             .circuit_breaker
             .call(async move {
@@ -170,7 +179,7 @@ impl HorizonClient {
 
                 if !response.status().is_success() {
                     if response.status() == 404 {
-                        return Err(HorizonError::AccountNotFound(addr));
+                        return Ok(None);
                     }
                     return Err(HorizonError::InvalidResponse(format!(
                         "Horizon API error: {}",
@@ -179,12 +188,13 @@ impl HorizonClient {
                 }
 
                 let account = response.json::<AccountResponse>().await?;
-                Ok(account)
+                Ok(Some(account))
             })
             .await;
 
         match result {
-            Ok(account) => Ok(account),
+            Ok(Some(account)) => Ok(account),
+            Ok(None) => Err(HorizonError::AccountNotFound(addr)),
             Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
                 "Horizon API circuit breaker is open".to_string(),
             )),

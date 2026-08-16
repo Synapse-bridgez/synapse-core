@@ -2,7 +2,7 @@ use crate::client::ApiClient;
 use crate::formatter::{print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use synapse_sdk::models::Transaction;
+pub use synapse_sdk::models::Transaction;
 use uuid::Uuid;
 
 // ── TableDisplay impl ─────────────────────────────────────────────────────────
@@ -242,9 +242,10 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Transaction> = client.get(&format!("/transactions/{}", id)).await;
+        let result: Result<Transaction, synapse_sdk::SynapseError> =
+            client.get(&format!("/transactions/{}", id)).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("404"));
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[tokio::test]
@@ -259,7 +260,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Transaction> = client.get(&format!("/transactions/{}", id)).await;
+        let result: Result<Transaction, synapse_sdk::SynapseError> =
+            client.get(&format!("/transactions/{}", id)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
     }

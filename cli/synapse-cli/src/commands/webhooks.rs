@@ -277,7 +277,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>, synapse_sdk::SynapseError> =
+            client.get("/admin/webhooks/health").await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let endpoints = result.unwrap();
@@ -303,7 +304,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>, synapse_sdk::SynapseError> =
+            client.get("/admin/webhooks/health").await;
 
         assert!(
             result.is_ok(),
@@ -327,7 +329,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<EndpointHealth>> = client.get("/admin/webhooks/health").await;
+        let result: Result<Vec<EndpointHealth>, synapse_sdk::SynapseError> =
+            client.get("/admin/webhooks/health").await;
 
         assert!(result.is_err());
         assert!(
@@ -351,7 +354,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<EndpointHealth> =
+        let result: Result<EndpointHealth, synapse_sdk::SynapseError> =
             client.get(&format!("/admin/webhooks/health/{id}")).await;
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -379,14 +382,14 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        // Confirm the raw client surfaces 404 as an error.
-        let result: Result<EndpointHealth> =
+        // Confirm the raw client surfaces the 404 as a typed NotFound error.
+        let result: Result<EndpointHealth, synapse_sdk::SynapseError> =
             client.get(&format!("/admin/webhooks/health/{id}")).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("404"),
-            "error message should mention 404, got: {err}"
+            err.contains("not found"),
+            "error message should mention not found, got: {err}"
         );
     }
 
@@ -402,7 +405,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<EndpointHealth> =
+        let result: Result<EndpointHealth, synapse_sdk::SynapseError> =
             client.get(&format!("/admin/webhooks/health/{id}")).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));

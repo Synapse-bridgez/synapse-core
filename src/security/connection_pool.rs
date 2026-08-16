@@ -617,15 +617,18 @@ mod tests {
 
     #[test]
     fn stale_idle_connections_evicted_by_idle_count() {
+        // max_idle must be long enough that the connection is still fresh at
+        // release() time (which itself evicts already-stale connections),
+        // but short enough that the sleep below pushes it past staleness.
         let config = SecurityPoolConfig {
-            max_idle: Duration::from_nanos(1),
+            max_idle: Duration::from_millis(50),
             ..Default::default()
         };
         let pool = SecurityConnectionPool::with_config(config).unwrap();
         let conn = pool.acquire().unwrap();
         pool.release(conn);
         assert_eq!(pool.idle_count(), 1);
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(100));
         assert_eq!(pool.idle_count(), 0);
     }
 }

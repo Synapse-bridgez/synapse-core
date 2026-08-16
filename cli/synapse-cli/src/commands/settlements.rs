@@ -2,7 +2,7 @@ use crate::client::ApiClient;
 use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use synapse_sdk::models::{Settlement, SettlementList};
+pub use synapse_sdk::models::{Settlement, SettlementList};
 use uuid::Uuid;
 
 // ── TableDisplay impls ────────────────────────────────────────────────────────
@@ -280,7 +280,6 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let resp: SettlementList = client
-            .get_with_query("/settlements", &[("limit", "5"), ("direction", "forward")])
             .get_query("/settlements", &[("limit", "5"), ("direction", "forward")])
             .await
             .unwrap();
@@ -299,7 +298,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<SettlementList> = client.get("/settlements").await;
+        let result: Result<SettlementList, synapse_sdk::SynapseError> =
+            client.get("/settlements").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
     }
@@ -357,8 +357,9 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Settlement> = client.get(&format!("/settlements/{}", id)).await;
+        let result: Result<Settlement, synapse_sdk::SynapseError> =
+            client.get(&format!("/settlements/{}", id)).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("404"));
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }

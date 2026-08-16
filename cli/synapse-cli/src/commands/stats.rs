@@ -3,7 +3,7 @@ use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use synapse_sdk::models::{AssetStats, DailyTotal, StatusCount};
+pub use synapse_sdk::models::{AssetStats, DailyTotal, StatusCount};
 
 // ── Response types (mirrors src/db/queries and src/handlers/stats.rs) ─────────
 
@@ -275,7 +275,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<Vec<StatusCount>> = client.get("/stats/status").await;
+        let result: Result<Vec<StatusCount>, synapse_sdk::SynapseError> =
+            client.get("/stats/status").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("500"));
     }
@@ -460,7 +461,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<CacheMetrics> = client.get("/cache/metrics").await;
+        let result: Result<CacheMetrics, synapse_sdk::SynapseError> =
+            client.get("/cache/metrics").await;
         assert!(result.is_err());
     }
 }

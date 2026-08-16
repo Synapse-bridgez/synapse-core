@@ -1,3 +1,4 @@
+use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_sdk::metrics::{data::ResourceMetrics, SdkMeterProvider};
 use opentelemetry_sdk::testing::metrics::InMemoryMetricsExporter;
 use opentelemetry_sdk::{metrics::PeriodicReader, runtime};

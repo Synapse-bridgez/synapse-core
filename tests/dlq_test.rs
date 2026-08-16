@@ -99,7 +99,12 @@ async fn test_requeue_dlq() {
     .bind("GABCD1234TEST")
     .bind(&amount)
     .bind("USD")
-    .bind("dlq")
+    // NOTE: "dlq" is intentionally not a `transactions.status` value (see
+    // src/validation/state_transitions.rs). Dead-lettering is tracked
+    // out-of-band in `transaction_dlq`; the parent row keeps whatever
+    // status it had when `move_to_dlq` ran (never "completed"), so
+    // "pending" is the realistic pre-requeue status here.
+    .bind("pending")
     .execute(&pool)
     .await
     .expect("Failed to insert test transaction");

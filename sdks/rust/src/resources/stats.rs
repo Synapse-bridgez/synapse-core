@@ -1,6 +1,6 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
-use crate::models::{AssetStats, CacheMetrics, DailyParams, DailyTotal, StatusCount};
+use crate::models::{AssetStats, CombinedCacheMetrics, DailyParams, DailyTotal, StatusCount};
 
 /// Access the stats endpoints (`/stats/*`).
 pub struct Stats<'a> {
@@ -85,10 +85,10 @@ impl<'a> Stats<'a> {
         self.client.get("/stats/assets").await
     }
 
-    /// Fetch cache metrics (`GET /stats/cache`).
+    /// Fetch combined cache metrics (`GET /cache/metrics`).
     ///
-    /// Returns a zeroed [`CacheMetrics`] when the cache is empty — never
-    /// `null`/`None`.
+    /// Aggregates the in-process query-result cache and the Redis-backed
+    /// idempotency-key store into a single response.
     ///
     /// # Example
     ///
@@ -99,11 +99,12 @@ impl<'a> Stats<'a> {
     /// # async fn main() {
     /// let client = SynapseClient::new("https://api.example.com", "key");
     /// let m = client.stats().cache_metrics().await.unwrap();
-    /// println!("hit rate: {:.1}%", m.hit_rate * 100.0);
+    /// println!("query cache hit rate: {:.1}%", m.query_cache.hit_rate * 100.0);
+    /// println!("idempotency hits: {}", m.idempotency_cache_hits);
     /// # }
     /// ```
-    pub async fn cache_metrics(&self) -> Result<CacheMetrics, SynapseError> {
-        self.client.get("/stats/cache").await
+    pub async fn cache_metrics(&self) -> Result<CombinedCacheMetrics, SynapseError> {
+        self.client.get("/cache/metrics").await
     }
 }
 
@@ -152,17 +153,26 @@ mod tests {
     async fn cache_metrics_returns_zeroed_on_empty() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/stats/cache"))
+            .and(path("/cache/metrics"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "hits": 0, "misses": 0, "hit_rate": 0.0,
-                "evictions": 0, "size": 0, "capacity": 0
+                "query_cache": {
+                    "hits": 0, "misses": 0, "hit_rate": 0.0,
+                    "evictions": 0, "size": 0, "capacity": 0
+                },
+                "idempotency_cache_hits": 0,
+                "idempotency_cache_misses": 0,
+                "idempotency_lock_acquired": 0,
+                "idempotency_lock_contention": 0,
+                "idempotency_errors": 0,
+                "idempotency_fallback_count": 0
             })))
             .mount(&server)
             .await;
 
         let client = SynapseClient::new(server.uri(), "k");
         let m = client.stats().cache_metrics().await.unwrap();
-        assert_eq!(m.hits, 0);
-        assert_eq!(m.hit_rate, 0.0);
+        assert_eq!(m.query_cache.hits, 0);
+        assert_eq!(m.query_cache.hit_rate, 0.0);
+        assert_eq!(m.idempotency_cache_hits, 0);
     }
 }

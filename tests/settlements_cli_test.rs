@@ -15,6 +15,7 @@ fn synapse_cmd() -> Command {
         ("VAULT_URL", "http://localhost:8200"),
         ("VAULT_TOKEN", "root"),
         ("ENVIRONMENT", "testing"),
+        ("SYNAPSE_API_KEY", "dev-key"),
     ]);
     cmd
 }
@@ -52,7 +53,7 @@ async fn test_settlements_list_table_format() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("settlements")
         .arg("list")
         .arg("--format")
@@ -96,7 +97,7 @@ async fn test_settlements_list_json_format() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("settlements")
         .arg("list")
         .arg("--format")
@@ -133,7 +134,7 @@ async fn test_settlements_get_success() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("settlements").arg("get").arg(settlement_id);
 
     cmd.assert().success();
@@ -167,7 +168,7 @@ async fn test_settlements_get_json_format() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("settlements")
         .arg("get")
         .arg(settlement_id)
@@ -191,7 +192,7 @@ async fn test_settlements_get_not_found() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("settlements").arg("get").arg(settlement_id);
 
     cmd.assert().failure();

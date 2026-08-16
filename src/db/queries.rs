@@ -193,7 +193,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// and (b) as the pgcrypto passphrase for `webhook_secret` encryption at
 /// rest. Never stored in the database, so a stolen `tenants` table alone
 /// cannot be used to forge API keys or recover webhook secrets.
-fn tenant_secret_key() -> String {
+pub fn tenant_secret_key() -> String {
     std::env::var("TENANT_SECRET_KEY").unwrap_or_else(|_| {
         tracing::error!(
             "TENANT_SECRET_KEY is not set; falling back to an insecure default. \
@@ -400,7 +400,7 @@ pub async fn set_tenant_context(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// let result = with_tenant(pool, Some(tenant_id), false, |tx| Box::pin(async move {
 ///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
 ///         .bind(id)

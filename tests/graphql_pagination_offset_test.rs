@@ -76,10 +76,12 @@ async fn test_transactions_offset_parameter_is_used() {
     let tenant = Uuid::new_v4();
 
     // Insert a tenant
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
         .bind(tenant)
         .bind("TestTenant")
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();
@@ -99,6 +101,7 @@ async fn test_transactions_offset_parameter_is_used() {
         )
         .bind(id)
         .bind(100 + i as i64)
+        .bind(tenant)
         .execute(&mut *conn)
         .await
         .unwrap();
@@ -148,10 +151,12 @@ async fn test_transactions_offset_beyond_results() {
     let tenant = Uuid::new_v4();
 
     // Insert a tenant
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
         .bind(tenant)
         .bind("TestTenant")
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();
@@ -169,6 +174,7 @@ async fn test_transactions_offset_beyond_results() {
         )
         .bind(id)
         .bind(100 + i as i64)
+        .bind(tenant)
         .execute(&mut *conn)
         .await
         .unwrap();

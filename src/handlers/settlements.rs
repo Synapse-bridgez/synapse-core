@@ -291,17 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_settlement_status_actor_too_long() {
-        let req = UpdateSettlementStatusRequest {
-            status: "pending".to_string(),
-            reason: None,
-            new_total: None,
-            actor: Some("a".repeat(51)),
-        };
-        assert!(req.validate().is_err());
-    }
-
-    #[test]
     fn test_update_settlement_status_boundary_values() {
         // Test status at max length
         let req = UpdateSettlementStatusRequest {

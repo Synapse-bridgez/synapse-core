@@ -179,14 +179,28 @@ async fn test_exhausted_delivery_routed_to_dlq_with_history() {
         .create();
 
     let endpoint_url = format!("{}/fail", server.url());
-    let (_ep_id, delivery_id) =
+    let (ep_id, delivery_id) =
         insert_endpoint_and_delivery(&pool, &endpoint_url, 100, "test.exhaust").await;
 
     let dispatcher = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
 
+    let mut redis_conn = RedisClient::open(redis_url.as_str())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let cb_key = format!("webhook_cb:{ep_id}");
+
     // Run process_pending in a loop to exhaust the delivery.
     // After each failure, reset next_attempt_at so the next cycle picks it up
-    // immediately, bypassing the exponential backoff.
+    // immediately, bypassing the exponential backoff. This test targets
+    // per-delivery MAX_ATTEMPTS exhaustion in isolation, so also clear the
+    // endpoint's circuit breaker state after each cycle — otherwise a single
+    // endpoint failing every attempt trips the breaker (CB_FAILURE_THRESHOLD
+    // = 3, below MAX_ATTEMPTS = 5) and later attempts get rescheduled
+    // without consuming an attempt, so the delivery would never reach
+    // exhaustion within this fast, backoff-bypassing loop. Circuit-breaker
+    // behavior itself is covered by test_circuit_breaker_isolates_failing_endpoint.
     for _ in 0..6 {
         let _ = dispatcher.process_pending().await;
         sqlx::query(
@@ -195,6 +209,11 @@ async fn test_exhausted_delivery_routed_to_dlq_with_history() {
         .execute(&pool)
         .await
         .unwrap();
+        let _: () = redis::cmd("DEL")
+            .arg(&cb_key)
+            .query_async(&mut redis_conn)
+            .await
+            .unwrap();
     }
 
     mock.assert_async().await;

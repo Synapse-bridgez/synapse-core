@@ -181,7 +181,7 @@ impl TestApp {
     async fn create_current_partition(pool: &PgPool) {
         let _ = sqlx::query(
             r#"
-            DO $
+            DO $$
             DECLARE
                 partition_date DATE;
                 partition_name TEXT;
@@ -199,7 +199,7 @@ impl TestApp {
                         partition_name, start_date, end_date
                     );
                 END IF;
-            END $;
+            END $$;
             "#
         )
         .execute(pool)

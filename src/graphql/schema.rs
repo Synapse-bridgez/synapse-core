@@ -24,7 +24,7 @@ pub type AppSchema = async_graphql::Schema<Query, Mutation, Subscription>;
 ///
 /// Queries exceeding this depth are rejected to prevent stack overflow attacks.
 /// A passing check means the query complexity is within safe limits for recursion.
-const MAX_QUERY_DEPTH: usize = 10;
+pub const MAX_QUERY_DEPTH: usize = 10;
 
 /// Maximum query complexity score allowed.
 ///
@@ -32,7 +32,7 @@ const MAX_QUERY_DEPTH: usize = 10;
 /// Queries exceeding this limit are rejected to prevent expensive queries
 /// that could cause denial of service. A passing check means the query
 /// can execute efficiently without exhausting server resources.
-const MAX_QUERY_COMPLEXITY: usize = 1000;
+pub const MAX_QUERY_COMPLEXITY: usize = 1000;
 
 /// Maximum number of aliases allowed per query.
 ///

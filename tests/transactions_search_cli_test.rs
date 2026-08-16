@@ -15,6 +15,7 @@ fn synapse_cmd() -> Command {
         ("VAULT_URL", "http://localhost:8200"),
         ("VAULT_TOKEN", "root"),
         ("ENVIRONMENT", "testing"),
+        ("SYNAPSE_API_KEY", "dev-key"),
     ]);
     cmd
 }
@@ -53,7 +54,7 @@ async fn test_transactions_search_table_format() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("tx")
         .arg("search")
         .arg("--asset-code")
@@ -100,7 +101,7 @@ async fn test_transactions_search_json_format() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("tx")
         .arg("search")
         .arg("--status")
@@ -145,7 +146,7 @@ async fn test_transactions_search_with_pagination() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("tx")
         .arg("search")
         .arg("--min-amount")
@@ -175,7 +176,7 @@ async fn test_transactions_search_empty_results() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("tx")
         .arg("search")
         .arg("--asset-code")
@@ -218,7 +219,7 @@ async fn test_transactions_search_with_all_filters() {
         .await;
 
     let mut cmd = synapse_cmd();
-    cmd.env("SYNAPSE_API_URL", server.uri());
+    cmd.env("SYNAPSE_URL", server.uri());
     cmd.arg("tx")
         .arg("search")
         .arg("--status")

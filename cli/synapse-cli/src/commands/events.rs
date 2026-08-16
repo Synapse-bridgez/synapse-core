@@ -256,7 +256,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<ReconnectResponse> = client.get("/reconnect/status").await;
+        let result: Result<ReconnectResponse, synapse_sdk::SynapseError> =
+            client.get("/reconnect/status").await;
         assert!(
             result.is_ok(),
             "reconnect_status with no session must not error: {:?}",
@@ -286,7 +287,7 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<ReconnectResponse> = client
+        let result: Result<ReconnectResponse, synapse_sdk::SynapseError> = client
             .get_query("/reconnect/status", &[("token", cursor)])
             .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -309,7 +310,8 @@ mod tests {
             .await;
 
         let client = ApiClient::new(&server.url(), "test-key");
-        let result: Result<ReconnectResponse> = client.get("/reconnect/status").await;
+        let result: Result<ReconnectResponse, synapse_sdk::SynapseError> =
+            client.get("/reconnect/status").await;
         assert!(
             result.is_ok(),
             "session_expired must not be an error: {:?}",
@@ -337,7 +339,8 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": cursor });
-        let result: Result<ReconnectResponse> = client.post("/reconnect", body).await;
+        let result: Result<ReconnectResponse, synapse_sdk::SynapseError> =
+            client.post("/reconnect", body).await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         let resp = result.unwrap();
         assert_eq!(resp.backoff_seconds, Some(1));
@@ -358,12 +361,13 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": "some-cursor" });
-        let result: Result<ReconnectResponse> = client.post("/reconnect", body).await;
+        let result: Result<ReconnectResponse, synapse_sdk::SynapseError> =
+            client.post("/reconnect", body).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("429"),
-            "error should mention 429, got: {}",
+            err.contains("rate limit"),
+            "error should mention rate limiting, got: {}",
             err
         );
     }
@@ -383,7 +387,8 @@ mod tests {
 
         let client = ApiClient::new(&server.url(), "test-key");
         let body = json!({ "session_id": "bad-cursor" });
-        let result: Result<ReconnectResponse> = client.post("/reconnect", body).await;
+        let result: Result<ReconnectResponse, synapse_sdk::SynapseError> =
+            client.post("/reconnect", body).await;
         assert!(
             result.is_ok(),
             "HTTP 200 with error type must not fail: {:?}",

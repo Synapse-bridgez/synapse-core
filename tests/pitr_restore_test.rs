@@ -36,7 +36,12 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const ADMIN_KEY: &str = "test-admin-key-for-pitr";
+// `common::TestApp` always wires a `SecretsStore` into `AppState`, and
+// `admin_auth` checks that extension *before* falling back to the
+// `ADMIN_API_KEY` env var (see src/middleware/auth.rs) — so setting
+// `ADMIN_API_KEY` below has no effect against a `TestApp`. Authenticate
+// with the key the `SecretsStore` was actually built with instead.
+const ADMIN_KEY: &str = common::TEST_ADMIN_API_KEY;
 
 /// `PITR_RESTORE_SCRIPT` is process-global; serialize the tests that touch
 /// it so they don't race each other (mirrors the pattern in

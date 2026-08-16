@@ -99,10 +99,12 @@ async fn test_tenant_a_cannot_see_tenant_b_transactions() {
 
     // Insert tenants (required for FK)
     for (tid, name) in [(tenant_a, "TenantA"), (tenant_b, "TenantB")] {
-        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
             .bind(tid)
             .bind(name)
-            .bind(Uuid::new_v4().to_string())
+            .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+            .bind("")
+            .bind(synapse_core::db::queries::tenant_secret_key())
             .execute(&pool)
             .await
             .unwrap();
@@ -137,10 +139,12 @@ async fn test_admin_can_see_all_transactions() {
     let tenant_b = Uuid::new_v4();
 
     for (tid, name) in [(tenant_a, "AdminTA"), (tenant_b, "AdminTB")] {
-        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
             .bind(tid)
             .bind(name)
-            .bind(Uuid::new_v4().to_string())
+            .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+            .bind("")
+            .bind(synapse_core::db::queries::tenant_secret_key())
             .execute(&pool)
             .await
             .unwrap();

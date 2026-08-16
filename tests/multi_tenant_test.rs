@@ -34,11 +34,13 @@ async fn make_app_state() -> AppState {
 
 async fn insert_tenant(pool: &PgPool, tenant_id: Uuid, name: &str, api_key: &str) {
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, '', '', 60, true)"
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), '', 60, true)"
     )
     .bind(tenant_id)
     .bind(name)
-    .bind(api_key)
+    .bind(synapse_core::db::queries::hash_api_key(api_key))
+    .bind("")
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .execute(pool)
     .await
     .expect("Failed to insert tenant");
@@ -112,7 +114,12 @@ async fn test_tenant_resolution_from_api_key() {
     cleanup_tenant(&pool, tenant_id).await;
 }
 
-/// Check that X-Tenant-ID or Authorization headers are respected
+/// Check that tenant resolution trusts only authenticated credentials
+/// (X-API-Key / Authorization: Bearer <api-key>), never a raw tenant_id
+/// supplied by the caller. A bare `X-Tenant-ID` header — or a Bearer token
+/// containing the tenant_id itself rather than a real API key — must be
+/// rejected; trusting either would let a caller impersonate any tenant by
+/// just naming its UUID (issue #971).
 #[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_tenant_resolution_from_header() {
@@ -121,18 +128,18 @@ async fn test_tenant_resolution_from_header() {
     ensure_schema(&pool).await;
 
     let tenant_id = Uuid::new_v4();
-    let api_key = format!("unused-{}", tenant_id);
+    let api_key = format!("real-api-key-{}", tenant_id);
     insert_tenant(&pool, tenant_id, "HeaderTenant", &api_key).await;
 
     let state = make_app_state().await;
     // config loaded automatically from db
 
-    // try with X-Tenant-ID
+    // A real X-API-Key header resolves the tenant.
     let req = Request::builder().body(()).unwrap();
     let (mut parts, _) = req.into_parts();
     parts.headers.insert(
-        "X-Tenant-ID",
-        header::HeaderValue::from_str(&tenant_id.to_string()).unwrap(),
+        "X-API-Key",
+        header::HeaderValue::from_str(&api_key).unwrap(),
     );
 
     let ctx = TenantContext::from_request_parts(&mut parts, &state)
@@ -140,17 +147,24 @@ async fn test_tenant_resolution_from_header() {
         .unwrap();
     assert_eq!(ctx.tenant_id, tenant_id);
 
-    // try with Authorization Bearer style
+    // A bare X-Tenant-ID header must NOT be trusted as tenant identity.
     let req2 = Request::builder().body(()).unwrap();
     let (mut parts2, _) = req2.into_parts();
     parts2.headers.insert(
+        "X-Tenant-ID",
+        header::HeaderValue::from_str(&tenant_id.to_string()).unwrap(),
+    );
+    let result = TenantContext::from_request_parts(&mut parts2, &state).await;
+    assert!(matches!(result, Err(AppError::InvalidApiKey)));
+
+    // Nor should the tenant_id work as a Bearer token in place of the real API key.
+    let req3 = Request::builder().body(()).unwrap();
+    let (mut parts3, _) = req3.into_parts();
+    parts3.headers.insert(
         header::AUTHORIZATION,
         header::HeaderValue::from_str(&format!("Bearer {}", tenant_id)).unwrap(),
     );
-
-    // resolution via path extraction will parse the uuid first, so we simulate such by setting path param
-    // but our logic doesn't support Bearer for tenant id, only for API key. however the header test is still good
-    let result = TenantContext::from_request_parts(&mut parts2, &state).await;
+    let result = TenantContext::from_request_parts(&mut parts3, &state).await;
     assert!(matches!(result, Err(AppError::InvalidApiKey)));
 
     cleanup_tenant(&pool, tenant_id).await;

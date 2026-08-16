@@ -91,11 +91,13 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any, String) {
     let tenant_id = Uuid::new_v4();
     let api_key = format!("integration-test-key-{}", tenant_id);
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, '', '', 1000, true)"
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), '', 1000, true)"
     )
     .bind(tenant_id)
     .bind("integration-test-tenant")
-    .bind(&api_key)
+    .bind(synapse_core::db::queries::hash_api_key(&api_key))
+    .bind("")
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .execute(&pool)
     .await
     .unwrap();
