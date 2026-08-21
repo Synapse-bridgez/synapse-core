@@ -61,6 +61,9 @@ pub struct Transaction {
     pub memo_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub trace_id: Option<String>,
+    /// Owning tenant, used by the `tenant_isolation` RLS policy on this table.
+    /// `None` means the row is only visible to admin-context sessions (legacy/system rows).
+    pub tenant_id: Option<Uuid>,
 }
 
 #[async_graphql::Object]
@@ -135,11 +138,17 @@ impl Transaction {
             memo_type,
             metadata,
             trace_id: None,
+            tenant_id: None,
         }
     }
 
     pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
         self.trace_id = trace_id;
+        self
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: Option<Uuid>) -> Self {
+        self.tenant_id = tenant_id;
         self
     }
 }
@@ -338,7 +347,7 @@ mod tests {
             None,
             None,
         );
-        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+        let (inserted, _) = crate::db::queries::insert_transaction(&pool, &tx)
             .await
             .unwrap();
         assert_eq!(inserted.stellar_account, tx.stellar_account);
@@ -359,7 +368,7 @@ mod tests {
             None,
             None,
         );
-        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+        let (inserted, _) = crate::db::queries::insert_transaction(&pool, &tx)
             .await
             .unwrap();
         let fetched = crate::db::queries::get_transaction(&pool, inserted.id)
@@ -386,7 +395,8 @@ mod tests {
             );
             crate::db::queries::insert_transaction(&pool, &tx)
                 .await
-                .unwrap();
+                .unwrap()
+                .0;
         }
         let transactions = crate::db::queries::list_transactions(&pool, 5, None, false)
             .await
@@ -417,6 +427,9 @@ pub struct Asset {
     pub asset_issuer: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub enabled: bool,
+    pub min_amount: Option<bigdecimal::BigDecimal>,
+    pub max_amount: Option<bigdecimal::BigDecimal>,
+    pub settlement_schedule: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -424,9 +437,13 @@ pub struct Asset {
 impl Asset {
     /// Fetch all assets from the database.
     pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
-            .fetch_all(pool)
-            .await
+        sqlx::query_as::<_, Self>(
+            "SELECT id, asset_code, asset_issuer, metadata, enabled, \
+             min_amount, max_amount, settlement_schedule, created_at, updated_at \
+             FROM assets ORDER BY asset_code"
+        )
+        .fetch_all(pool)
+        .await
     }
 
     /// Check whether a given asset code is registered and enabled.

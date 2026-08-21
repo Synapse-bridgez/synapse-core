@@ -29,12 +29,46 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .unwrap();
     migrator.run(&pool).await.unwrap();
 
+    // Create partition for current month (transactions is a partitioned
+    // table; without this, inserts fail with "no partition of relation
+    // \"transactions\" found for row"). Same block used in tests/export_test.rs
+    // and tests/dlq_test.rs.
+    let _ = sqlx::query(
+        r#"
+        DO $$
+        DECLARE
+            partition_date DATE;
+            partition_name TEXT;
+            start_date TEXT;
+            end_date TEXT;
+        BEGIN
+            partition_date := DATE_TRUNC('month', NOW());
+            partition_name := 'transactions_y' || TO_CHAR(partition_date, 'YYYY') || 'm' || TO_CHAR(partition_date, 'MM');
+            start_date := TO_CHAR(partition_date, 'YYYY-MM-DD');
+            end_date := TO_CHAR(partition_date + INTERVAL '1 month', 'YYYY-MM-DD');
+
+            IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = partition_name) THEN
+                EXECUTE format(
+                    'CREATE TABLE %I PARTITION OF transactions FOR VALUES FROM (%L) TO (%L)',
+                    partition_name, start_date, end_date
+                );
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(&pool)
+    .await;
+
     let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379")
         .await
         .unwrap();
 
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .expect("failed to start asset cache in test");
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -58,6 +92,10 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
         secrets_store: None,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        quota_manager: synapse_core::middleware::quota::QuotaManager::new("redis://localhost:6379")
+            .expect("quota manager init failed"),
+        asset_cache,
+        idempotency_service: None,
     };
     let app = create_app(app_state);
 

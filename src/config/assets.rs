@@ -12,8 +12,11 @@ pub struct AssetCache {
 }
 
 impl AssetCache {
-    pub async fn start(pool: PgPool, refresh_interval: Duration) -> Arc<Self> {
-        let initial_vec = Asset::fetch_all(&pool).await.unwrap_or_default();
+    pub async fn start(pool: PgPool, refresh_interval: Duration) -> anyhow::Result<Arc<Self>> {
+        let initial_vec = Asset::fetch_all(&pool).await.map_err(|e| {
+            tracing::error!(error = %e, "asset_cache: initial fetch of assets failed");
+            e
+        })?;
         let map = Self::build_map(initial_vec);
         let cache = Arc::new(AssetCache {
             inner: ArcSwap::from(Arc::new(map)),
@@ -24,15 +27,20 @@ impl AssetCache {
         tokio::spawn(async move {
             loop {
                 sleep(refresh_interval).await;
-                if let Ok(new_assets) = Asset::fetch_all(&pool_clone).await {
-                    cache_clone
-                        .inner
-                        .store(Arc::new(Self::build_map(new_assets)));
+                match Asset::fetch_all(&pool_clone).await {
+                    Ok(new_assets) => {
+                        cache_clone
+                            .inner
+                            .store(Arc::new(Self::build_map(new_assets)));
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "asset_cache: periodic refresh failed, keeping last known snapshot");
+                    }
                 }
             }
         });
 
-        cache
+        Ok(cache)
     }
 
     fn build_map(assets: Vec<Asset>) -> HashMap<String, Asset> {
@@ -72,6 +80,9 @@ mod tests {
             asset_issuer: issuer,
             metadata: None,
             enabled: true,
+            min_amount: None,
+            max_amount: None,
+            settlement_schedule: Some("daily".to_string()),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

@@ -34,8 +34,10 @@ use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,9 +141,21 @@ where
     F: std::future::Future<Output = Result<T>>,
 {
     let dur = tier.duration();
+    let start = std::time::Instant::now();
     match timeout(dur, fut).await {
-        Ok(result) => result,
+        Ok(result) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            crate::db::slow_query::log_query_timing(
+                tier.label(),
+                sql_label,
+                duration_ms,
+                0,
+                slow_query_threshold_ms(),
+            );
+            result
+        }
         Err(_elapsed) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
             DB_QUERY_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 tier = tier.label(),
@@ -150,20 +164,63 @@ where
                 db_query_timeout_total = DB_QUERY_TIMEOUT_TOTAL.load(Ordering::Relaxed),
                 "Database query timed out; connection will be dropped"
             );
+            crate::db::slow_query::log_query_timing(
+                tier.label(),
+                sql_label,
+                duration_ms,
+                0,
+                slow_query_threshold_ms(),
+            );
             Err(sqlx::Error::PoolTimedOut)
         }
     }
 }
 
+/// Slow-query threshold in milliseconds, overridable via `SLOW_QUERY_THRESHOLD_MS`
+/// (see [`crate::config::Config::slow_query_threshold_ms`] for the app-wide default).
+fn slow_query_threshold_ms() -> u64 {
+    std::env::var("SLOW_QUERY_THRESHOLD_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500)
+}
+
 // --- Tenant Queries --------------------------------------------------------
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Server-side secret used to (a) key the HMAC-SHA256 hash of tenant API keys
+/// and (b) as the pgcrypto passphrase for `webhook_secret` encryption at
+/// rest. Never stored in the database, so a stolen `tenants` table alone
+/// cannot be used to forge API keys or recover webhook secrets.
+pub fn tenant_secret_key() -> String {
+    std::env::var("TENANT_SECRET_KEY").unwrap_or_else(|_| {
+        tracing::error!(
+            "TENANT_SECRET_KEY is not set; falling back to an insecure default. \
+             This must be set to a strong random value in any environment that \
+             handles real tenant credentials."
+        );
+        "insecure-dev-only-tenant-secret".to_string()
+    })
+}
+
+/// Hash a tenant API key for storage/lookup. HMAC-SHA256 keyed by
+/// [`tenant_secret_key`], so equality comparisons never touch the raw key.
+pub fn hash_api_key(api_key: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(tenant_secret_key().as_bytes())
+        .expect("HMAC-SHA256 accepts a key of any length");
+    mac.update(api_key.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
 
 /// Look up whether an API key exists and belongs to an active tenant.
 /// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
 pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
-    let row = sqlx::query("SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await?;
+    let row =
+        sqlx::query("SELECT 1 FROM tenants WHERE api_key_hash = $1 AND is_active = true LIMIT 1")
+            .bind(hash_api_key(api_key))
+            .fetch_optional(pool)
+            .await?;
     Ok(row.is_some())
 }
 
@@ -172,8 +229,9 @@ pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
 /// callers must not log or persist them in audit records.
 pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
     let configs = sqlx::query_as::<_, TenantConfig>(
-        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+        "SELECT tenant_id, name, pgp_sym_decrypt(webhook_secret, $1) AS webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
     )
+    .bind(tenant_secret_key())
     .fetch_all(pool)
     .await?;
     Ok(configs)
@@ -342,13 +400,13 @@ pub async fn set_tenant_context(
 ///
 /// # Example
 ///
-/// ```ignore
-/// let result = with_tenant(pool, Some(tenant_id), false, |mut tx| async {
+/// ```text
+/// let result = with_tenant(pool, Some(tenant_id), false, |tx| Box::pin(async move {
 ///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
 ///         .bind(id)
-///         .fetch_one(&mut *tx)
+///         .fetch_one(&mut **tx)
 ///         .await
-/// }).await?;
+/// })).await?;
 /// ```
 ///
 /// # Parameters
@@ -356,28 +414,14 @@ pub async fn set_tenant_context(
 /// - `tenant_id`: Some(uuid) for tenant, None for admin context
 /// - `is_admin`: If true, sets app.is_admin='true' and bypasses RLS
 /// - `work`: Async closure receiving the transaction
-/// Execute tenant-scoped database work with transaction-scoped context.
-///
-/// Wraps work in a transaction and sets app.tenant_id/app.is_admin using SET LOCAL,
-/// which auto-clears on commit/rollback. Leak-proof under connection pooling.
-///
-/// # Example
-/// ```ignore
-/// let result = with_tenant(&pool, Some(tenant_id), false, async {
-///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions")
-///         .fetch_all(&mut *tx)
-///         .await
-/// }).await?;
-/// ```
-pub async fn with_tenant<F, T>(
+pub async fn with_tenant<T>(
     pool: &PgPool,
     tenant_id: Option<Uuid>,
     is_admin: bool,
-    work: impl FnOnce(&mut SqlxTransaction<Postgres>) -> F,
-) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T>>,
-{
+    work: impl for<'c> FnOnce(
+        &'c mut SqlxTransaction<'_, Postgres>,
+    ) -> futures::future::BoxFuture<'c, Result<T>>,
+) -> Result<T> {
     let mut tx = pool.begin().await?;
 
     // Set context using SET LOCAL (transaction-scoped, auto-cleared on commit/rollback)
@@ -410,38 +454,139 @@ where
 /// entry in the same SQL transaction, and invalidates aggregate caches only
 /// after commit. Handlers should use this helper instead of issuing their own
 /// INSERT so webhook persistence remains auditable and timeout protected.
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
+///
+/// This is wrapped in [`crate::utils::retry::retry_with_backoff`], so the
+/// insert is keyed on the caller-generated `tx.id`/`tx.created_at` (the
+/// partitioned table's primary key) and uses
+/// `ON CONFLICT (id, created_at) DO NOTHING`: if an earlier attempt's commit
+/// actually succeeded but the client saw a transient error anyway (e.g. the
+/// connection dropped right after `COMMIT`), the retry observes the existing
+/// row instead of inserting a duplicate or double-writing the audit log.
+/// Coordinates with the `anchor_transaction_id` idempotency guard so the
+/// same inbound Anchor callback can't be persisted twice either.
+/// Returns `(transaction, is_new)`.
+/// `is_new = true` means this delivery created a fresh row.
+/// `is_new = false` means a prior delivery already owns the `anchor_transaction_id`
+/// and the returned transaction is that existing row - no new row was written.
+pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<(Transaction, bool)> {
     with_timeout(
         QueryTier::Write,
         "INSERT INTO transactions ... RETURNING *",
         crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
             let mut db_tx = pool.begin().await?;
 
-            let result = persist_transaction(&mut db_tx, tx).await?;
-            audit_transaction_creation(&mut db_tx, &result).await?;
+            let (result, is_new) = persist_transaction(&mut db_tx, tx).await?;
+            if is_new {
+                audit_transaction_creation(&mut db_tx, &result).await?;
+            }
 
             db_tx.commit().await?;
 
-            // Invalidate cache after successful commit
-            invalidate_transaction_caches(&result.asset_code).await;
+            if is_new {
+                invalidate_transaction_caches(&result.asset_code).await;
+            }
 
-            Ok(result)
+            Ok((result, is_new))
         }),
     )
     .await
 }
 
+/// Inserts `tx`, returning `(row, is_new)`.
+///
+/// `is_new = true`  - this call wrote the row (first delivery or first successful retry).
+/// `is_new = false` - a prior delivery already owns `anchor_transaction_id`; the
+///                    returned row is that existing transaction. No second row is written.
+///
+/// Idempotency strategy:
+/// - When `anchor_transaction_id` is `Some`, we first attempt to claim it in
+///   `anchor_transaction_dedup`, a non-partitioned table whose PRIMARY KEY enforces
+///   cross-partition uniqueness. The claim and the transaction INSERT share the same
+///   DB transaction so they are atomic.
+/// - When `anchor_transaction_id` is `None`, no cross-delivery dedup is possible;
+///   each delivery creates a new row. The PK `(id, created_at)` guard still protects
+///   against retry-duplicates of the same `tx` object.
 async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
-) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+) -> Result<(Transaction, bool)> {
+    // Set the RLS session GUCs to match `tx.tenant_id` *before* any
+    // read/write against `transactions` in this DB transaction, so the
+    // `tenant_isolation`/`tenant_isolation_insert` policies fire correctly
+    // instead of running with no context (which the policy fails closed on).
+    // Callers that don't yet resolve a tenant (nothing does today - see
+    // `Transaction::with_tenant_id`) fall back to the admin bypass, which
+    // preserves today's behavior of every row being visible/insertable.
+    let resolved_tenant_id = tx.tenant_id;
+
+    match resolved_tenant_id {
+        Some(tid) => {
+            sqlx::query("SELECT set_config('app.tenant_id', $1, true), set_config('app.is_admin', 'false', true)")
+                .bind(tid.to_string())
+                .execute(&mut **db_tx)
+                .await?;
+        }
+        None => {
+            // No owning tenant could be resolved (legacy/system-originated
+            // transaction): use the admin bypass rather than an unset
+            // context, which the policy would otherwise deny.
+            sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+                .execute(&mut **db_tx)
+                .await?;
+        }
+    }
+
+    // === Anchor-ID dedup guard (cross-partition uniqueness)
+    if let Some(ref anchor_id) = tx.anchor_transaction_id {
+        let claimed = sqlx::query(
+            r#"
+            INSERT INTO anchor_transaction_dedup
+                (anchor_transaction_id, transaction_id, transaction_created_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (anchor_transaction_id) DO NOTHING
+            "#,
+        )
+        .bind(anchor_id)
+        .bind(tx.id)
+        .bind(tx.created_at)
+        .execute(&mut **db_tx)
+        .await?;
+
+        if claimed.rows_affected() == 0 {
+            // Another delivery (or a previously committed retry) already owns this key.
+            let row = sqlx::query(
+                "SELECT transaction_id, transaction_created_at \
+                 FROM anchor_transaction_dedup WHERE anchor_transaction_id = $1",
+            )
+            .bind(anchor_id)
+            .fetch_one(&mut **db_tx)
+            .await?;
+
+            let existing_id: Uuid = row.get("transaction_id");
+            let existing_created_at: chrono::DateTime<Utc> = row.get("transaction_created_at");
+
+            let existing = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE id = $1 AND created_at = $2",
+            )
+            .bind(existing_id)
+            .bind(existing_created_at)
+            .fetch_one(&mut **db_tx)
+            .await?;
+
+            return Ok((existing, false));
+        }
+    }
+
+    // === Main insert (PK guard for retry safety)
+    let inserted = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
-            settlement_id, memo, memo_type, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            settlement_id, memo, memo_type, metadata, tenant_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        -- Partitioned by created_at; only (id, created_at) is a valid conflict target.
+        ON CONFLICT (id, created_at) DO NOTHING
         RETURNING *
         "#,
     )
@@ -459,8 +604,24 @@ async fn persist_transaction(
     .bind(&tx.memo)
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
-    .fetch_one(&mut **db_tx)
-    .await
+    .bind(resolved_tenant_id)
+    .fetch_optional(&mut **db_tx)
+    .await?;
+
+    match inserted {
+        Some(row) => Ok((row, true)),
+        None => {
+            // PK conflict: an earlier retry already committed this exact row.
+            let row = sqlx::query_as::<_, Transaction>(
+                "SELECT * FROM transactions WHERE id = $1 AND created_at = $2",
+            )
+            .bind(tx.id)
+            .bind(tx.created_at)
+            .fetch_one(&mut **db_tx)
+            .await?;
+            Ok((row, false))
+        }
+    }
 }
 
 async fn audit_transaction_creation(
@@ -835,78 +996,87 @@ pub async fn update_settlement_status(
     new_total: Option<&sqlx::types::BigDecimal>,
     actor: &str,
 ) -> Result<Settlement> {
-    let mut db_tx = pool.begin().await?;
+    with_timeout(
+        QueryTier::Write,
+        "update_settlement_status [SELECT ... FOR UPDATE + UPDATE settlements]",
+        async {
+            let mut db_tx = pool.begin().await?;
 
-    let current =
-        sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1 FOR UPDATE")
+            let current = sqlx::query_as::<_, Settlement>(
+                "SELECT * FROM settlements WHERE id = $1 FOR UPDATE",
+            )
             .bind(id)
             .fetch_optional(&mut *db_tx)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
 
-    // Validate transition against the locked row (not the pre-lock read).
-    // This catches concurrent modifications: if the status changed or no-op transition is detected,
-    // mark as stale by returning RowNotFound (which will be converted to StaleTransition in service layer).
-    if current.status != expected_from_status || current.status == new_status {
-        db_tx.rollback().await?;
-        return Err(sqlx::Error::RowNotFound);
-    }
+            // Validate transition against the locked row (not the pre-lock read).
+            // This catches concurrent modifications: if the status changed or no-op transition is detected,
+            // mark as stale by returning RowNotFound (which will be converted to StaleTransition in service layer).
+            if current.status != expected_from_status || current.status == new_status {
+                db_tx.rollback().await?;
+                return Err(sqlx::Error::RowNotFound);
+            }
 
-    // Preserve original amount on first adjustment
-    let original_total = if current.original_total_amount.is_none() && new_total.is_some() {
-        Some(current.total_amount.clone())
-    } else {
-        current.original_total_amount.clone()
-    };
+            // Preserve original amount on first adjustment
+            let original_total = if current.original_total_amount.is_none() && new_total.is_some()
+            {
+                Some(current.total_amount.clone())
+            } else {
+                current.original_total_amount.clone()
+            };
 
-    let updated = sqlx::query_as::<_, Settlement>(
-        r#"
-        UPDATE settlements SET
-            status = $1,
-            dispute_reason = COALESCE($2, dispute_reason),
-            total_amount = COALESCE($3, total_amount),
-            original_total_amount = COALESCE($4, original_total_amount),
-            reviewed_by = $5,
-            reviewed_at = NOW(),
-            updated_at = NOW()
-        WHERE id = $6 AND status = $7
-        RETURNING *
-        "#,
+            let updated = sqlx::query_as::<_, Settlement>(
+                r#"
+                UPDATE settlements SET
+                    status = $1,
+                    dispute_reason = COALESCE($2, dispute_reason),
+                    total_amount = COALESCE($3, total_amount),
+                    original_total_amount = COALESCE($4, original_total_amount),
+                    reviewed_by = $5,
+                    reviewed_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = $6 AND status = $7
+                RETURNING *
+                "#,
+            )
+            .bind(new_status)
+            .bind(reason)
+            .bind(new_total)
+            .bind(original_total)
+            .bind(actor)
+            .bind(id)
+            .bind(expected_from_status)
+            .fetch_optional(&mut *db_tx)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+
+            // If voided, release transactions back to unsettled
+            if new_status == "voided" {
+                sqlx::query(
+                    "UPDATE transactions SET settlement_id = NULL, updated_at = NOW() WHERE settlement_id = $1",
+                )
+                .bind(id)
+                .execute(&mut *db_tx)
+                .await?;
+            }
+
+            crate::db::audit::AuditLog::log(
+                &mut db_tx,
+                id,
+                crate::db::audit::ENTITY_SETTLEMENT,
+                "status_update",
+                Some(serde_json::json!({ "status": current.status })),
+                Some(serde_json::json!({ "status": new_status, "reason": reason })),
+                actor,
+            )
+            .await?;
+
+            db_tx.commit().await?;
+            Ok(updated)
+        },
     )
-    .bind(new_status)
-    .bind(reason)
-    .bind(new_total)
-    .bind(original_total)
-    .bind(actor)
-    .bind(id)
-    .bind(expected_from_status)
-    .fetch_optional(&mut *db_tx)
-    .await?
-    .ok_or(sqlx::Error::RowNotFound)?;
-
-    // If voided, release transactions back to unsettled
-    if new_status == "voided" {
-        sqlx::query(
-            "UPDATE transactions SET settlement_id = NULL, updated_at = NOW() WHERE settlement_id = $1",
-        )
-        .bind(id)
-        .execute(&mut *db_tx)
-        .await?;
-    }
-
-    crate::db::audit::AuditLog::log(
-        &mut db_tx,
-        id,
-        crate::db::audit::ENTITY_SETTLEMENT,
-        "status_update",
-        Some(serde_json::json!({ "status": current.status })),
-        Some(serde_json::json!({ "status": new_status, "reason": reason })),
-        actor,
-    )
-    .await?;
-
-    db_tx.commit().await?;
-    Ok(updated)
+    .await
 }
 
 pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
@@ -914,11 +1084,21 @@ pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
         QueryTier::Read,
         "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL",
         async {
+            // Settlement scans across every tenant's completed transactions,
+            // so this must bypass RLS rather than run with no session
+            // context (which would silently hide tenant-owned rows).
+            let mut tx = pool.begin().await?;
+            sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+                .execute(&mut *tx)
+                .await?;
+
             let rows = sqlx::query(
                 "SELECT DISTINCT asset_code FROM transactions WHERE status = 'completed' AND settlement_id IS NULL"
             )
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?;
+
+            tx.commit().await?;
 
             Ok(rows
                 .into_iter()
@@ -1413,86 +1593,99 @@ pub async fn bulk_update_transaction_status(
 ) -> Result<BulkUpdateResult> {
     use crate::validation::state_machine::validate_status_transition;
 
-    // Fetch current statuses for all requested IDs in one query
-    let rows = sqlx::query("SELECT id, status FROM transactions WHERE id = ANY($1)")
-        .bind(transaction_ids)
-        .fetch_all(pool)
-        .await?;
+    with_timeout(
+        QueryTier::Write,
+        "bulk_update_transaction_status [SELECT ... FOR UPDATE + UPDATE transactions]",
+        async {
+            let mut db_tx = pool.begin().await?;
 
-    let current: std::collections::HashMap<Uuid, String> = rows
-        .into_iter()
-        .map(|r| (r.get::<Uuid, _>("id"), r.get::<String, _>("status")))
-        .collect();
+            // Lock the target rows for the lifetime of the transaction so a concurrent
+            // update can't change their status between validation and the UPDATE below —
+            // same locked-row pattern as update_settlement_status.
+            let rows =
+                sqlx::query("SELECT id, status FROM transactions WHERE id = ANY($1) FOR UPDATE")
+                    .bind(transaction_ids)
+                    .fetch_all(&mut *db_tx)
+                    .await?;
 
-    let mut valid_ids: Vec<Uuid> = Vec::new();
-    let mut old_statuses: std::collections::HashMap<Uuid, String> =
-        std::collections::HashMap::new();
-    let mut errors: Vec<BulkUpdateError> = Vec::new();
+            let current: std::collections::HashMap<Uuid, String> = rows
+                .into_iter()
+                .map(|r| (r.get::<Uuid, _>("id"), r.get::<String, _>("status")))
+                .collect();
 
-    for &id in transaction_ids {
-        match current.get(&id) {
-            None => errors.push(BulkUpdateError {
-                transaction_id: id,
-                error: "transaction not found".to_string(),
-            }),
-            Some(from) => match validate_status_transition(from, new_status) {
-                Ok(_) => {
-                    old_statuses.insert(id, from.clone());
-                    valid_ids.push(id);
+            let mut valid_ids: Vec<Uuid> = Vec::new();
+            let mut old_statuses: std::collections::HashMap<Uuid, String> =
+                std::collections::HashMap::new();
+            let mut errors: Vec<BulkUpdateError> = Vec::new();
+
+            for &id in transaction_ids {
+                match current.get(&id) {
+                    None => errors.push(BulkUpdateError {
+                        transaction_id: id,
+                        error: "transaction not found".to_string(),
+                    }),
+                    Some(from) => match validate_status_transition(from, new_status) {
+                        Ok(_) => {
+                            old_statuses.insert(id, from.clone());
+                            valid_ids.push(id);
+                        }
+                        Err(e) => errors.push(BulkUpdateError {
+                            transaction_id: id,
+                            error: e.to_string(),
+                        }),
+                    },
                 }
-                Err(e) => errors.push(BulkUpdateError {
-                    transaction_id: id,
-                    error: e.to_string(),
-                }),
-            },
-        }
-    }
+            }
 
-    if valid_ids.is_empty() {
-        return Ok(BulkUpdateResult {
-            updated: 0,
-            failed: errors.len(),
-            errors,
-        });
-    }
+            if valid_ids.is_empty() {
+                db_tx.rollback().await?;
+                return Ok(BulkUpdateResult {
+                    updated: 0,
+                    failed: errors.len(),
+                    errors,
+                });
+            }
 
-    let mut db_tx = pool.begin().await?;
+            sqlx::query(
+                "UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)",
+            )
+            .bind(new_status)
+            .bind(&valid_ids)
+            .execute(&mut *db_tx)
+            .await?;
 
-    sqlx::query("UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = ANY($2)")
-        .bind(new_status)
-        .bind(&valid_ids)
-        .execute(&mut *db_tx)
-        .await?;
+            for &id in &valid_ids {
+                let old_status = old_statuses
+                    .get(&id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let mut new_val = serde_json::json!({ "status": new_status });
+                if let Some(r) = reason {
+                    new_val["reason"] = serde_json::json!(r);
+                }
+                AuditLog::log(
+                    &mut db_tx,
+                    id,
+                    ENTITY_TRANSACTION,
+                    "status_update",
+                    Some(serde_json::json!({ "status": old_status })),
+                    Some(new_val),
+                    actor,
+                )
+                .await?;
+            }
 
-    for &id in &valid_ids {
-        let old_status = old_statuses
-            .get(&id)
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let mut new_val = serde_json::json!({ "status": new_status });
-        if let Some(r) = reason {
-            new_val["reason"] = serde_json::json!(r);
-        }
-        AuditLog::log(
-            &mut db_tx,
-            id,
-            ENTITY_TRANSACTION,
-            "status_update",
-            Some(serde_json::json!({ "status": old_status })),
-            Some(new_val),
-            actor,
-        )
-        .await?;
-    }
+            db_tx.commit().await?;
 
-    db_tx.commit().await?;
-
-    let updated = valid_ids.len();
-    Ok(BulkUpdateResult {
-        updated,
-        failed: errors.len(),
-        errors,
-    })
+            let updated = valid_ids.len();
+            Ok(BulkUpdateResult {
+                updated,
+                failed: errors.len(),
+                errors,
+            })
+        },
+    )
+    .await
 }
 
 // --- Aggregate Queries (Cacheable) ---
@@ -1519,98 +1712,122 @@ pub struct AssetStats {
 }
 
 pub async fn get_status_counts(pool: &PgPool) -> Result<Vec<StatusCount>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT status, COUNT(*) as count
-        FROM transactions
-        GROUP BY status
-        ORDER BY status
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| StatusCount {
-            status: row.get("status"),
-            count: row.get("count"),
-        })
-        .collect())
-}
-
-pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal>> {
-    let end = Utc::now();
-    let start = end - chrono::Duration::days(days.into());
-    let sql = r#"
-        SELECT 
-            DATE(created_at)::text as date,
-            SUM(amount) as total_amount,
-            COUNT(*) as tx_count
-        FROM transactions
-        WHERE created_at >= $1
-          AND created_at < $2
-        GROUP BY DATE(created_at)
-        ORDER BY DATE(created_at) DESC
-        "#;
-
-    if cfg!(debug_assertions) {
-        let explain_rows = sqlx::query(&format!("EXPLAIN ANALYZE {}", sql))
-            .bind(start)
-            .bind(end)
+    with_timeout(
+        QueryTier::Read,
+        "SELECT status, COUNT(*) FROM transactions GROUP BY status",
+        async {
+            let rows = sqlx::query(
+                r#"
+                SELECT status, COUNT(*) as count
+                FROM transactions
+                GROUP BY status
+                ORDER BY status
+                "#,
+            )
             .fetch_all(pool)
             .await?;
 
-        let explain_plan = explain_rows
-            .into_iter()
-            .map(|row| row.get::<String, _>(0))
-            .collect::<Vec<_>>()
-            .join("\n");
+            Ok(rows
+                .into_iter()
+                .map(|row| StatusCount {
+                    status: row.get("status"),
+                    count: row.get("count"),
+                })
+                .collect())
+        },
+    )
+    .await
+}
 
-        tracing::debug!("get_daily_totals EXPLAIN ANALYZE:\n{}", explain_plan);
-    }
+pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT DATE(created_at), SUM/COUNT(amount) FROM transactions GROUP BY DATE(created_at)",
+        async {
+            let end = Utc::now();
+            let start = end - chrono::Duration::days(days.into());
+            let sql = r#"
+                SELECT
+                    DATE(created_at)::text as date,
+                    SUM(amount) as total_amount,
+                    COUNT(*) as tx_count
+                FROM transactions
+                WHERE created_at >= $1
+                  AND created_at < $2
+                GROUP BY DATE(created_at)
+                ORDER BY DATE(created_at) DESC
+                "#;
 
-    let rows = sqlx::query(sql)
-        .bind(start)
-        .bind(end)
-        .fetch_all(pool)
-        .await?;
+            // EXPLAIN ANALYZE actually executes the query, so running it unconditionally
+            // in every debug build would double the DB work on every call. Require an
+            // explicit opt-in env var so it only runs when a developer asks for it.
+            if cfg!(debug_assertions) && std::env::var("DB_EXPLAIN_ANALYZE").is_ok() {
+                let explain_rows = sqlx::query(&format!("EXPLAIN ANALYZE {}", sql))
+                    .bind(start)
+                    .bind(end)
+                    .fetch_all(pool)
+                    .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| DailyTotal {
-            date: row.get("date"),
-            total_amount: row.get("total_amount"),
-            tx_count: row.get("tx_count"),
-        })
-        .collect())
+                let explain_plan = explain_rows
+                    .into_iter()
+                    .map(|row| row.get::<String, _>(0))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                tracing::debug!("get_daily_totals EXPLAIN ANALYZE:\n{}", explain_plan);
+            }
+
+            let rows = sqlx::query(sql)
+                .bind(start)
+                .bind(end)
+                .fetch_all(pool)
+                .await?;
+
+            Ok(rows
+                .into_iter()
+                .map(|row| DailyTotal {
+                    date: row.get("date"),
+                    total_amount: row.get("total_amount"),
+                    tx_count: row.get("tx_count"),
+                })
+                .collect())
+        },
+    )
+    .await
 }
 
 pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            asset_code,
-            SUM(amount) as total_amount,
-            COUNT(*) as tx_count,
-            AVG(amount) as avg_amount
-        FROM transactions
-        GROUP BY asset_code
-        ORDER BY total_amount DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+    with_timeout(
+        QueryTier::Read,
+        "SELECT asset_code, SUM/COUNT/AVG(amount) FROM transactions GROUP BY asset_code",
+        async {
+            let rows = sqlx::query(
+                r#"
+                SELECT
+                    asset_code,
+                    SUM(amount) as total_amount,
+                    COUNT(*) as tx_count,
+                    AVG(amount) as avg_amount
+                FROM transactions
+                GROUP BY asset_code
+                ORDER BY total_amount DESC
+                "#,
+            )
+            .fetch_all(pool)
+            .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| AssetStats {
-            asset_code: row.get("asset_code"),
-            total_amount: row.get("total_amount"),
-            tx_count: row.get("tx_count"),
-            avg_amount: row.get("avg_amount"),
-        })
-        .collect())
+            Ok(rows
+                .into_iter()
+                .map(|row| AssetStats {
+                    asset_code: row.get("asset_code"),
+                    total_amount: row.get("total_amount"),
+                    tx_count: row.get("tx_count"),
+                    avg_amount: row.get("avg_amount"),
+                })
+                .collect())
+        },
+    )
+    .await
 }
 
 // --- Idempotency Fallback Queries ---
@@ -1629,11 +1846,18 @@ pub struct IdempotencyKey {
 }
 
 pub async fn check_idempotency_key(pool: &PgPool, key: &str) -> Result<Option<IdempotencyKey>> {
-    sqlx::query_as::<_, IdempotencyKey>(
-        "SELECT key, status, response, created_at, expires_at FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+    with_timeout(
+        QueryTier::Read,
+        "SELECT ... FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+        async {
+            sqlx::query_as::<_, IdempotencyKey>(
+                "SELECT key, status, response, created_at, expires_at FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+            )
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+        },
     )
-    .bind(key)
-    .fetch_optional(pool)
     .await
 }
 
@@ -1644,20 +1868,27 @@ pub async fn insert_idempotency_key(
     response: Option<&serde_json::Value>,
     expires_at: DateTime<Utc>,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO idempotency_keys (key, status, response, expires_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (key) DO NOTHING
-        "#,
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO idempotency_keys ... ON CONFLICT (key) DO NOTHING",
+        async {
+            sqlx::query(
+                r#"
+                INSERT INTO idempotency_keys (key, status, response, expires_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (key) DO NOTHING
+                "#,
+            )
+            .bind(key)
+            .bind(status)
+            .bind(response)
+            .bind(expires_at)
+            .execute(pool)
+            .await?;
+            Ok(())
+        },
     )
-    .bind(key)
-    .bind(status)
-    .bind(response)
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .await
 }
 
 pub async fn update_idempotency_key_response(
@@ -1665,19 +1896,35 @@ pub async fn update_idempotency_key_response(
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
-        .bind(key)
-        .bind(response)
-        .execute(pool)
-        .await?;
-    Ok(())
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1",
+        async {
+            sqlx::query(
+                "UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1",
+            )
+            .bind(key)
+            .bind(response)
+            .execute(pool)
+            .await?;
+            Ok(())
+        },
+    )
+    .await
 }
 
 pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM idempotency_keys WHERE expires_at <= NOW()")
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+    with_timeout(
+        QueryTier::Write,
+        "DELETE FROM idempotency_keys WHERE expires_at <= NOW()",
+        async {
+            let result = sqlx::query("DELETE FROM idempotency_keys WHERE expires_at <= NOW()")
+                .execute(pool)
+                .await?;
+            Ok(result.rows_affected())
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1699,6 +1946,131 @@ mod integration_tests {
         pool
     }
 
+    // === Idempotency tests
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_duplicate_anchor_id_returns_same_row() {
+        let pool = setup_test_db().await;
+        let anchor_id = format!("anchor-{}", uuid::Uuid::new_v4());
+        let stellar = "G".to_string() + &"A".repeat(55);
+
+        let tx1 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(100u32),
+            "USD".to_string(),
+            Some(anchor_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let (t1, is_new1) = insert_transaction(&pool, &tx1).await.unwrap();
+        assert!(is_new1, "first delivery must be new");
+
+        // Second delivery with same anchor_transaction_id but different tx object
+        let tx2 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(200u32),
+            "EUR".to_string(),
+            Some(anchor_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let (t2, is_new2) = insert_transaction(&pool, &tx2).await.unwrap();
+        assert!(!is_new2, "duplicate delivery must not be new");
+        assert_eq!(
+            t1.id, t2.id,
+            "both deliveries must return the same transaction id"
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM transactions WHERE anchor_transaction_id = $1",
+        )
+        .bind(&anchor_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "exactly one row must exist in the DB");
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_null_anchor_id_always_inserts() {
+        let pool = setup_test_db().await;
+        let stellar = "G".to_string() + &"A".repeat(55);
+
+        let tx1 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(100u32),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let tx2 = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(100u32),
+            "USD".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let (_, is_new1) = insert_transaction(&pool, &tx1).await.unwrap();
+        let (_, is_new2) = insert_transaction(&pool, &tx2).await.unwrap();
+        assert!(is_new1, "first null-key delivery must be new");
+        assert!(
+            is_new2,
+            "second null-key delivery must also be new (different tx)"
+        );
+    }
+
+    #[ignore = "Requires DATABASE_URL"]
+    #[tokio::test]
+    async fn test_retry_after_commit_no_duplicate() {
+        let pool = setup_test_db().await;
+        let anchor_id = format!("retry-{}", uuid::Uuid::new_v4());
+        let stellar = "G".to_string() + &"A".repeat(55);
+
+        let tx = crate::db::models::Transaction::new(
+            stellar.clone(),
+            sqlx::types::BigDecimal::from(50u32),
+            "USD".to_string(),
+            Some(anchor_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let (t1, is_new1) = insert_transaction(&pool, &tx).await.unwrap();
+        assert!(is_new1);
+
+        // Simulate retry: same tx object, same id, same anchor_transaction_id
+        let (t2, is_new2) = insert_transaction(&pool, &tx).await.unwrap();
+        assert!(!is_new2, "retry must not create a new row");
+        assert_eq!(t1.id, t2.id);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE id = $1")
+            .bind(t1.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "retry must not produce a duplicate row");
+    }
+
     #[ignore = "Requires DATABASE_URL"]
     #[tokio::test]
     async fn test_get_active_tenant_rate_limit() {
@@ -1706,12 +2078,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT")
         .bind(420)
         .bind(true)
@@ -1733,12 +2106,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant 2")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret2")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT2")
         .bind(50)
         .bind(true)
@@ -1814,12 +2188,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("rl-test-tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT3")
         .bind(60)
         .bind(true)

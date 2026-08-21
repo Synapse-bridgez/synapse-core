@@ -15,6 +15,7 @@ pub struct Transaction {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub tenant_id: Option<Uuid>,
     pub anchor_transaction_id: Option<String>,
     pub callback_type: Option<String>,
     pub callback_status: Option<String>,
@@ -24,10 +25,12 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stellar_account: String,
         amount: BigDecimal,
         asset_code: String,
+        tenant_id: Option<Uuid>,
         anchor_transaction_id: Option<String>,
         callback_type: Option<String>,
         callback_status: Option<String>,
@@ -44,6 +47,7 @@ impl Transaction {
             status: "pending".to_string(),
             created_at: now,
             updated_at: now,
+            tenant_id,
             anchor_transaction_id,
             callback_type,
             callback_status,

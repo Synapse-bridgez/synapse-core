@@ -144,7 +144,10 @@ impl UpdateSettlementStatusRequest {
     /// - status is empty or missing
     /// - status exceeds 50 characters
     /// - reason exceeds 255 characters
-    /// - actor exceeds 50 characters
+    ///
+    /// Note: The 'actor' field is accepted in the request for backwards compatibility
+    /// but is NOT validated and is NOT used. The actor is always set server-side to "admin"
+    /// to prevent privilege escalation through audit trail impersonation (issue #952).
     pub fn validate(&self) -> Result<(), AppError> {
         validate_required("status", &self.status)
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -157,11 +160,6 @@ impl UpdateSettlementStatusRequest {
                 .map_err(|e| AppError::BadRequest(e.to_string()))?;
         }
 
-        if let Some(actor) = &self.actor {
-            validate_max_len("actor", actor, 50)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        }
-
         Ok(())
     }
 }
@@ -169,6 +167,12 @@ impl UpdateSettlementStatusRequest {
 /// PATCH /admin/settlements/:id/status
 /// Allowed transitions: completed→pending_review, →disputed, pending_review→adjusted/voided/disputed,
 /// disputed→adjusted/voided/pending_review.
+///
+/// # Security Note
+/// The actor field in the request body is accepted for backwards compatibility but is
+/// ignored. The actor value is always derived server-side (currently set to "admin") to
+/// prevent clients from spoofing audit trail entries with arbitrary actor values
+/// (e.g., impersonating colleagues or hiding who made the change).
 pub async fn update_settlement_status(
     State(state): State<ApiState>,
     Path(id): Path<Uuid>,
@@ -184,7 +188,9 @@ pub async fn update_settlement_status(
         None => None,
     };
 
-    let actor = payload.actor.as_deref().unwrap_or("admin");
+    // Always use "admin" as actor, regardless of what client supplies.
+    // This prevents audit trail spoofing. In future, derive from authenticated principal.
+    let actor = "admin";
     let service = crate::services::SettlementService::new(state.app_state.db.clone());
 
     let settlement = service
@@ -249,14 +255,39 @@ mod tests {
     }
 
     #[test]
-    fn test_update_settlement_status_actor_too_long() {
+    fn test_update_settlement_status_actor_field_not_validated() {
+        // The actor field is accepted for backwards compatibility but should not be validated
+        // This prevents the field from being rejected if an extremely long value is passed
         let req = UpdateSettlementStatusRequest {
             status: "pending".to_string(),
             reason: None,
             new_total: None,
-            actor: Some("a".repeat(51)),
+            actor: Some("a".repeat(1000)), // Very long actor value
         };
-        assert!(req.validate().is_err());
+        // Validation should pass - actor is NOT validated
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_update_settlement_status_actor_field_ignored() {
+        // The actor field in the request is ignored; validation passes regardless of its value
+        let req_with_actor = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: Some("manual review".to_string()),
+            new_total: None,
+            actor: Some("malicious_actor".to_string()),
+        };
+        let req_without_actor = UpdateSettlementStatusRequest {
+            status: "pending".to_string(),
+            reason: Some("manual review".to_string()),
+            new_total: None,
+            actor: None,
+        };
+        // Both should validate identically - actor field should not affect validation
+        assert_eq!(
+            req_with_actor.validate().is_ok(),
+            req_without_actor.validate().is_ok()
+        );
     }
 
     #[test]

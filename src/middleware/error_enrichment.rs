@@ -37,19 +37,34 @@ pub async fn error_enrichment_middleware(
                 obj.insert("request_id".to_string(), json!(request_id));
             }
             let new_body = serde_json::to_vec(&json_value).unwrap_or_else(|_| bytes.to_vec());
-            let mut resp = Response::builder()
+            let mut resp = match Response::builder()
                 .status(parts.status)
                 .body(axum::body::boxed(axum::body::Full::from(new_body)))
-                .unwrap();
-            *resp.headers_mut() = parts.headers;
+            {
+                Ok(resp) => resp,
+                Err(_) => return Ok(parts.status.into_response()),
+            };
+            // Copy original headers, but drop Content-Length: the body is now
+            // longer (it gained a "request_id" field) so the original value
+            // would be stale and cause clients/proxies to truncate the body.
+            let mut headers = parts.headers;
+            headers.remove(axum::http::header::CONTENT_LENGTH);
+            *resp.headers_mut() = headers;
             return Ok(resp);
         }
 
-        let mut resp = Response::builder()
+        let mut resp = match Response::builder()
             .status(parts.status)
             .body(axum::body::boxed(axum::body::Full::from(bytes)))
-            .unwrap();
-        *resp.headers_mut() = parts.headers;
+        {
+            Ok(resp) => resp,
+            Err(_) => return Ok(parts.status.into_response()),
+        };
+        // Same treatment for the non-JSON fallback path: drop Content-Length
+        // so the framing stays correct even if the body was re-buffered.
+        let mut headers = parts.headers;
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+        *resp.headers_mut() = headers;
         Ok(resp)
     } else {
         Ok(response)

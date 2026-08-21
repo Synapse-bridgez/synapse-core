@@ -79,8 +79,18 @@ pub mod codes {
         ("ERR_SETTLEMENT_001", 400, "Invalid settlement amount");
     pub const SETTLEMENT_002: (&str, u16, &str) =
         ("ERR_SETTLEMENT_002", 409, "Settlement already exists");
-    pub const SETTLEMENT_003: (&str, u16, &str) =
-        ("ERR_SETTLEMENT_003", 409, "Stale transition: settlement state changed during processing");
+    pub const SETTLEMENT_003: (&str, u16, &str) = (
+        "ERR_SETTLEMENT_003",
+        409,
+        "Stale transition: settlement state changed during processing",
+    );
+
+    // Conflict errors (concurrent modification detected)
+    pub const CONFLICT_001: (&str, u16, &str) = (
+        "ERR_CONFLICT_001",
+        409,
+        "Conflict: concurrent modification detected",
+    );
 
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
@@ -189,6 +199,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::SETTLEMENT_003.2,
         },
         ErrorCode {
+            code: codes::CONFLICT_001.0,
+            http_status: codes::CONFLICT_001.1,
+            description: codes::CONFLICT_001.2,
+        },
+        ErrorCode {
             code: codes::RATE_LIMIT_001.0,
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
@@ -217,6 +232,12 @@ pub enum AppError {
 
     #[error("Internal server error: {0}")]
     Internal(String),
+
+    #[error("Export error: {0}")]
+    Export(String),
+
+    #[error("Profiling error: {0}")]
+    Profiling(String),
 
     #[error("Bad request: {0}")]
     BadRequest(String),
@@ -248,6 +269,9 @@ pub enum AppError {
 
     #[error("Stale transition: settlement state changed during processing")]
     StaleTransition,
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
 
     #[error("Invalid webhook signature")]
     InvalidWebhookSignature,
@@ -285,6 +309,8 @@ impl AppError {
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Export(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Profiling(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::TenantNotFound => StatusCode::NOT_FOUND,
@@ -295,6 +321,7 @@ impl AppError {
             AppError::TransactionAlreadyProcessed(_) => StatusCode::CONFLICT,
             AppError::InvalidStatusTransition(_) => StatusCode::BAD_REQUEST,
             AppError::StaleTransition => StatusCode::CONFLICT,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::InvalidWebhookSignature => StatusCode::UNAUTHORIZED,
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,
@@ -316,6 +343,8 @@ impl AppError {
             AppError::Validation(_) => codes::VALIDATION_001.0,
             AppError::NotFound(_) => codes::NOT_FOUND_001.0,
             AppError::Internal(_) => codes::INTERNAL_001.0,
+            AppError::Export(_) => codes::INTERNAL_001.0,
+            AppError::Profiling(_) => codes::INTERNAL_001.0,
             AppError::BadRequest(_) => codes::BAD_REQUEST_001.0,
             AppError::Unauthorized(_) => codes::UNAUTHORIZED_001.0,
             AppError::TenantNotFound => codes::NOT_FOUND_001.0,
@@ -326,6 +355,7 @@ impl AppError {
             AppError::TransactionAlreadyProcessed(_) => codes::TRANSACTION_004.0,
             AppError::InvalidStatusTransition(_) => codes::TRANSACTION_005.0,
             AppError::StaleTransition => codes::SETTLEMENT_003.0,
+            AppError::Conflict(_) => codes::CONFLICT_001.0,
             AppError::InvalidWebhookSignature => codes::WEBHOOK_001.0,
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
             AppError::InvalidSettlementAmount(_) => codes::SETTLEMENT_001.0,

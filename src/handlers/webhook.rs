@@ -49,7 +49,7 @@ pub struct WebhookPayload {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookTransactionRequest {
-    pub stellar_address: String,
+    pub stellar_account: String,
     pub amount: String,
     pub asset_code: String,
     pub anchor_transaction_id: Option<String>,
@@ -74,15 +74,13 @@ struct ValidatedWebhookTransaction {
 }
 
 fn sanitize_optional(value: Option<String>) -> Option<String> {
-    value
-        .map(|v| sanitize_string(&v))
-        .and_then(|v| if v.is_empty() { None } else { Some(v) })
+    value.map(|v| sanitize_string(&v)).filter(|v| !v.is_empty())
 }
 
 fn validate_webhook_payload(
     payload: WebhookTransactionRequest,
 ) -> Result<ValidatedWebhookTransaction, AppError> {
-    let stellar_address = sanitize_string(&payload.stellar_address);
+    let stellar_address = sanitize_string(&payload.stellar_account);
     let asset_code = sanitize_string(&payload.asset_code);
     let amount_str = sanitize_string(&payload.amount);
     let anchor_transaction_id = sanitize_optional(payload.anchor_transaction_id);
@@ -129,20 +127,30 @@ fn validate_webhook_payload(
 /// Process a raw transaction callback from an external anchor.
 ///
 /// Validates and sanitizes all fields before inserting the transaction into the
-/// database. Returns `201 Created` with the new transaction ID and initial status.
+/// database. Idempotent on `anchor_transaction_id`: a duplicate delivery returns
+/// `200 OK` with the existing transaction rather than creating a second row.
 ///
 /// # Errors
 /// - `400 Bad Request` – validation fails (invalid address, amount, field length, etc.)
 /// - `500 Internal Server Error` – database insertion fails
 #[instrument(name = "webhook.transaction_callback", skip(state, payload))]
 pub async fn transaction_callback(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Json(payload): Json<WebhookTransactionRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Validate and sanitize all inputs before any DB interaction.
     let payload = validate_webhook_payload(payload)?;
 
-    // Extract trace context from the current OpenTelemetry context.
+    if !state
+        .app_state
+        .asset_cache
+        .is_registered(&payload.asset_code)
+    {
+        return Err(AppError::Validation(format!(
+            "asset_code: '{}' is not a registered/enabled asset",
+            payload.asset_code
+        )));
+    }
+
     let trace_id = opentelemetry::global::get_text_map_propagator(|propagator| {
         let mut carrier = std::collections::HashMap::new();
         propagator.inject_context(&opentelemetry::Context::current(), &mut carrier);
@@ -162,13 +170,19 @@ pub async fn transaction_callback(
     )
     .with_trace_id(trace_id);
 
-    let inserted = queries::insert_transaction(&state.db, &tx).await?;
+    let (result, is_new) = queries::insert_transaction(&state.app_state.db, &tx).await?;
+
+    let status = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
 
     Ok((
-        StatusCode::CREATED,
+        status,
         Json(WebhookTransactionResponse {
-            id: inserted.id.to_string(),
-            status: inserted.status,
+            id: result.id.to_string(),
+            status: result.status,
         }),
     ))
 }
@@ -179,7 +193,7 @@ mod tests {
 
     fn valid_payload() -> WebhookTransactionRequest {
         WebhookTransactionRequest {
-            stellar_address: "G".to_owned() + &"A".repeat(55),
+            stellar_account: "G".to_owned() + &"A".repeat(55),
             amount: "42.50".to_string(),
             asset_code: "USD".to_string(),
             anchor_transaction_id: Some("anchor-1".to_string()),
@@ -191,7 +205,7 @@ mod tests {
     #[test]
     fn webhook_payload_rejects_unknown_fields() {
         let raw = r#"{
-            "stellar_address":"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "stellar_account":"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             "amount":"10",
             "asset_code":"USD",
             "unknown":"x"
@@ -210,7 +224,7 @@ mod tests {
     #[test]
     fn validate_webhook_payload_rejects_invalid_stellar_address() {
         let mut payload = valid_payload();
-        payload.stellar_address = "BAD".to_string();
+        payload.stellar_account = "BAD".to_string();
 
         let parsed = validate_webhook_payload(payload);
         assert!(parsed.is_err());
@@ -237,7 +251,7 @@ mod tests {
     #[test]
     fn validate_webhook_payload_rejects_empty_required_fields() {
         let mut payload = valid_payload();
-        payload.stellar_address = "   ".to_string();
+        payload.stellar_account = "   ".to_string();
         payload.amount = "   ".to_string();
         payload.asset_code = "   ".to_string();
 
@@ -248,7 +262,7 @@ mod tests {
     #[test]
     fn validate_webhook_payload_rejects_unicode_in_validated_fields() {
         let mut payload = valid_payload();
-        payload.stellar_address = format!("G{}", "Ä".repeat(55));
+        payload.stellar_account = format!("G{}", "Ä".repeat(55));
 
         let parsed = validate_webhook_payload(payload);
         assert!(parsed.is_err());
@@ -301,6 +315,41 @@ mod tests {
         let mut payload = valid_payload();
         payload.callback_status = Some("a".repeat(21));
         assert!(validate_webhook_payload(payload).is_err());
+    }
+
+    /// Regression test for the `validate_callback` schema / handler field mismatch:
+    /// a real `WebhookTransactionRequest`-shaped payload must survive the schema
+    /// middleware that actually guards `/callback/transaction` in production.
+    #[tokio::test]
+    async fn transaction_callback_payload_passes_validate_callback_middleware() {
+        use axum::{body::Body, http::Request, routing::post, Router};
+        use tower::ServiceExt;
+
+        async fn handler(Json(_payload): Json<WebhookTransactionRequest>) -> StatusCode {
+            StatusCode::OK
+        }
+
+        let app = Router::new()
+            .route("/callback/transaction", post(handler))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::validate::validate_callback,
+            ));
+
+        let body = serde_json::json!({
+            "stellar_account": "G".to_owned() + &"A".repeat(55),
+            "amount": "42.50",
+            "asset_code": "USD"
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/callback/transaction")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
 
@@ -392,9 +441,15 @@ pub async fn callback(
         payload.metadata,
     );
 
-    let inserted = queries::insert_transaction(&state.app_state.db, &tx).await?;
+    let (result, is_new) = queries::insert_transaction(&state.app_state.db, &tx).await?;
 
-    Ok((StatusCode::CREATED, Json(inserted)).into_response())
+    let status = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(result)).into_response())
 }
 
 /// Generic webhook receiver for event-driven integrations.

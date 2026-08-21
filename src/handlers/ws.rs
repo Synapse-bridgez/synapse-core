@@ -38,6 +38,7 @@ pub struct TransactionStatusUpdate {
     pub tenant_id: Uuid,
     pub status: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub asset_code: Option<String>,
     pub message: Option<String>,
 }
 
@@ -92,8 +93,36 @@ pub async fn ws_handler(
         .map(|ci| ci.0.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let _ = token; // validated above
+    if !authenticate_ws_token(&state, &token).await {
+        tracing::warn!(client_addr = %client_addr, "WebSocket authentication failed: token not recognized");
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, state, client_addr))
+}
+
+/// Checks the token against real credentials: the current/previous admin API
+/// keys (rotation-aware, constant-time comparison) and active tenant API keys.
+/// `validate_ws_token` only checks the token's shape; this is what actually
+/// authenticates the caller.
+async fn authenticate_ws_token(state: &AppState, token: &str) -> bool {
+    if let Some(store) = &state.secrets_store {
+        let valid_keys = store.valid_admin_keys().await;
+        if valid_keys
+            .iter()
+            .any(|k| crate::middleware::auth::constant_time_eq(k.as_bytes(), token.as_bytes()))
+        {
+            return true;
+        }
+    }
+
+    match crate::db::queries::lookup_api_key(&state.db, token).await {
+        Ok(valid) => valid,
+        Err(e) => {
+            tracing::error!("WebSocket token lookup failed: {}", e);
+            false
+        }
+    }
 }
 
 // ── Per-connection handler ───────────────────────────────────────────────────
@@ -227,6 +256,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_addr: String) 
     tokio::select! {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
+    }
+
+    // Send an explicit Close frame so the client sees a clean RFC 6455
+    // shutdown rather than an abrupt TCP teardown (relevant for heartbeat
+    // timeouts and broadcast-channel closure, where the client never sent
+    // a Close frame of its own to reply to).
+    {
+        let mut s = sender.lock().await;
+        let _ = s.send(Message::Close(None)).await;
     }
 
     let remaining = state.ws_connection_count.fetch_sub(1, Ordering::Relaxed) - 1;
@@ -381,6 +419,7 @@ mod tests {
             tenant_id: Uuid::new_v4(),
             status: "completed".to_string(),
             timestamp: chrono::Utc::now(),
+            asset_code: Some("USDC".to_string()),
             message: Some("Transaction processed".to_string()),
         };
         let json = serde_json::to_string(&update).unwrap();

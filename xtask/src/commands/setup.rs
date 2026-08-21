@@ -84,10 +84,19 @@ fn run_migrations() -> anyhow::Result<()> {
 fn seed_data() -> anyhow::Result<()> {
     println!("\n-- Seeding initial data --");
     // Feature flags seed — non-fatal if psql is unavailable or row already exists.
+    // `run_cmd` uses `Command` (no shell), so `${DATABASE_URL}` would be passed
+    // literally; resolve the env var in Rust first.
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.is_empty() => url,
+        _ => {
+            println!("  Warning: DATABASE_URL not set — seed step skipped.");
+            return Ok(());
+        }
+    };
     let result = run_cmd(
         "psql",
         &[
-            "${DATABASE_URL}",
+            database_url.as_str(),
             "-c",
             "INSERT INTO feature_flags (name, enabled) VALUES ('dev_seed', true) ON CONFLICT DO NOTHING;",
         ],

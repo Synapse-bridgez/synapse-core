@@ -1,3 +1,10 @@
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "request handlers must not panic on bad input or runtime state"
+)]
+
 pub mod admin;
 pub mod dlq;
 pub mod export;
@@ -10,9 +17,11 @@ pub mod search;
 pub mod session;
 pub mod settlements;
 pub mod stats;
+pub mod telemetry_webhook;
 pub mod v1;
 pub mod v2;
 pub mod webhook;
+pub mod webhook_refactored;
 pub mod ws;
 pub mod ws_error;
 
@@ -404,5 +413,20 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         };
         assert_eq!(disconnected_code, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_webhook_refactored_module_compiles() {
+        // Verify that the webhook_refactored module is declared and compiled
+        // This ensures that previously unreachable refactored webhook handlers are now part of the binary
+        let _req = crate::handlers::webhook_refactored::WebhookTransactionRequest {
+            stellar_address: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTBYYTE2UJJWUJG7IDJEKU63SJ".to_string(),
+            amount: "100.00".to_string(),
+            asset_code: "USD".to_string(),
+            anchor_transaction_id: None,
+            callback_type: None,
+            callback_status: None,
+        };
+        assert!(_req.amount == "100.00");
     }
 }

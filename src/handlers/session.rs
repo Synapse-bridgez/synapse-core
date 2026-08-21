@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::security::session::{validate_session, SessionRecord};
+
 const SESSION_PREFIX: &str = "session:";
 const SESSION_HEADER: &str = "X-Session-ID";
 
@@ -35,7 +37,7 @@ impl Session {
     pub fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
         now > self.expires_at
     }
@@ -125,6 +127,19 @@ impl SessionManager {
             serde_json::from_str(&serialized).map_err(|_| SessionError::DeserializationError)?;
 
         if session.is_expired() {
+            return Err(SessionError::Expired);
+        }
+
+        // Run the security-layer session health check (validates active flag and
+        // expiry via the security module's authoritative validation logic).
+        let security_record = SessionRecord {
+            id: session.id,
+            user_id: session.user_id.clone(),
+            expires_at: chrono::DateTime::from_timestamp_millis(session.expires_at as i64)
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC),
+            is_active: true,
+        };
+        if let Err(_e) = validate_session(&security_record) {
             return Err(SessionError::Expired);
         }
 

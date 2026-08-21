@@ -2,9 +2,29 @@ use bigdecimal::BigDecimal;
 use reqwest::StatusCode;
 use sqlx::{migrate::Migrator, PgPool};
 use std::path::Path;
+use synapse_core::secrets::SecretsStore;
 use synapse_core::{create_app, AppState};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+
+/// `/export` is mounted under `admin_router`, which requires an
+/// `Authorization: Bearer <admin key>` header validated by the `admin_auth`
+/// middleware. CI does not set `ADMIN_API_KEY`, so we wire a `SecretsStore`
+/// into the test `AppState` (same pattern as `tests/integration_test.rs`)
+/// and send this key on every request instead.
+const TEST_ADMIN_API_KEY: &str = "export-test-admin-key";
+
+fn admin_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", TEST_ADMIN_API_KEY).parse().unwrap(),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap()
+}
 
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
@@ -55,6 +75,10 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         .await
         .unwrap();
 
+    let asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
+            .await
+            .expect("failed to start asset cache in test");
     let app_state = AppState {
         db: pool.clone(),
         pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
@@ -77,9 +101,16 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         )),
         pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
-        secrets_store: None,
+        secrets_store: Some(SecretsStore::new(
+            "export-test-webhook-secret".to_string(),
+            TEST_ADMIN_API_KEY.to_string(),
+        )),
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        quota_manager: synapse_core::middleware::quota::QuotaManager::new("redis://localhost:6379")
+            .expect("quota manager init failed"),
+        asset_cache,
+        idempotency_service: None,
     };
     let app = create_app(app_state);
 
@@ -127,7 +158,7 @@ async fn insert_test_transaction(
 #[tokio::test]
 async fn test_export_csv_with_filters() {
     let (base_url, pool, _container) = setup_test_app().await;
-    let client = reqwest::Client::new();
+    let client = admin_client();
 
     insert_test_transaction(&pool, "GABC123", "100.50", "USD", "pending").await;
     insert_test_transaction(&pool, "GDEF456", "200.00", "USD", "completed").await;
@@ -160,7 +191,7 @@ async fn test_export_csv_with_filters() {
 #[tokio::test]
 async fn test_export_json_with_filters() {
     let (base_url, pool, _container) = setup_test_app().await;
-    let client = reqwest::Client::new();
+    let client = admin_client();
 
     insert_test_transaction(&pool, "GABC123", "100.50", "USD", "pending").await;
     insert_test_transaction(&pool, "GDEF456", "200.00", "USDC", "completed").await;
@@ -187,7 +218,7 @@ async fn test_export_json_with_filters() {
 #[tokio::test]
 async fn test_export_date_range() {
     let (base_url, pool, _container) = setup_test_app().await;
-    let client = reqwest::Client::new();
+    let client = admin_client();
 
     let id1 = uuid::Uuid::new_v4();
     let id2 = uuid::Uuid::new_v4();
@@ -246,7 +277,7 @@ async fn test_export_date_range() {
 #[tokio::test]
 async fn test_export_large_dataset_streaming() {
     let (base_url, pool, _container) = setup_test_app().await;
-    let client = reqwest::Client::new();
+    let client = admin_client();
 
     for i in 0..2500 {
         insert_test_transaction(
@@ -275,7 +306,7 @@ async fn test_export_large_dataset_streaming() {
 #[tokio::test]
 async fn test_export_empty_results() {
     let (base_url, _pool, _container) = setup_test_app().await;
-    let client = reqwest::Client::new();
+    let client = admin_client();
 
     let res = client
         .get(format!("{}/export?format=csv&status=nonexistent", base_url))
@@ -293,7 +324,7 @@ async fn test_export_empty_results() {
 #[tokio::test]
 async fn test_export_headers_and_filename() {
     let (base_url, pool, _container) = setup_test_app().await;
-    let client = reqwest::Client::new();
+    let client = admin_client();
 
     insert_test_transaction(&pool, "GABC123", "100.50", "USD", "pending").await;
 

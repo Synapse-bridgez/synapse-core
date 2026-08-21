@@ -5,8 +5,7 @@
 /// - Connection reuse with adversarial tenant switching doesn't leak data
 /// - No-context queries fail closed (return nothing)
 /// - Concurrent requests on same connection don't interfere
-
-use sqlx::{migrate::Migrator, PgPool};
+use sqlx::{migrate::Migrator, Acquire, PgPool};
 use std::path::Path;
 use synapse_core::db::queries::with_tenant;
 use testcontainers::runners::AsyncRunner;
@@ -75,16 +74,16 @@ async fn setup_db() -> (PgPool, PgPool, impl std::any::Any) {
 /// Insert a transaction row for a specific tenant
 async fn insert_tx_for_tenant(pool: &PgPool, tenant_id: Uuid, tx_id: Uuid) {
     with_tenant(pool, Some(tenant_id), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query(
                 r#"INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at, tenant_id)
                    VALUES ($1, 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 100, 'USD', 'pending', NOW(), NOW(), $2)"#,
             )
             .bind(tx_id)
             .bind(tenant_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
-        }
+        })
     })
     .await
     .unwrap();
@@ -102,10 +101,12 @@ async fn test_set_local_prevents_connection_reuse_leak() {
 
     // Insert tenants
     for (tid, name) in [(tenant_a, "TenantA"), (tenant_b, "TenantB")] {
-        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
             .bind(tid)
             .bind(name)
-            .bind(Uuid::new_v4().to_string())
+            .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+            .bind("")
+            .bind(synapse_core::db::queries::tenant_secret_key())
             .execute(&pool)
             .await
             .unwrap();
@@ -122,55 +123,67 @@ async fn test_set_local_prevents_connection_reuse_leak() {
 
     // Request 1: Tenant A queries its own data
     let result_a1: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_a), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions ORDER BY id")
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
     assert_eq!(result_a1.len(), 2, "tenant A should see its 2 transactions");
-    assert!(result_a1.iter().all(|(id)| id == &tx_a1 || id == &tx_a2));
+    assert!(result_a1.iter().all(|(id,)| id == &tx_a1 || id == &tx_a2));
 
     // Request 2: Tenant B queries (reuses connection, different context)
     let result_b: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_b), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions ORDER BY id")
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
-    assert_eq!(result_b.len(), 1, "tenant B should see only its 1 transaction");
+    assert_eq!(
+        result_b.len(),
+        1,
+        "tenant B should see only its 1 transaction"
+    );
     assert_eq!(result_b[0].0, tx_b);
 
     // Request 3: Tenant A queries again (connection reused, context reset again)
     let result_a2: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_a), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions ORDER BY id")
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
-    assert_eq!(result_a2.len(), 2, "tenant A should still see its 2 transactions");
-    assert!(result_a2.iter().all(|(id)| id == &tx_a1 || id == &tx_a2));
+    assert_eq!(
+        result_a2.len(),
+        2,
+        "tenant A should still see its 2 transactions"
+    );
+    assert!(result_a2.iter().all(|(id,)| id == &tx_a1 || id == &tx_a2));
 
     // Verify B didn't see A's data during request 2
     let b_sees_a: Vec<(Uuid,)> = with_tenant(&pool, Some(tenant_b), false, |tx| {
-        async move {
+        Box::pin(async move {
             sqlx::query_as("SELECT id FROM transactions WHERE id = ANY($1)")
                 .bind(vec![tx_a1, tx_a2])
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut **tx)
                 .await
-        }
+        })
     })
     .await
     .unwrap();
-    assert_eq!(b_sees_a.len(), 0, "tenant B should not see tenant A's transactions");
+    assert_eq!(
+        b_sees_a.len(),
+        0,
+        "tenant B should not see tenant A's transactions"
+    );
 }
 
 /// Test: query with no context fails closed (returns nothing)
@@ -181,9 +194,11 @@ async fn test_no_context_fails_closed() {
 
     let tenant_a = Uuid::new_v4();
 
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,pgp_sym_encrypt($3,$4),'',60,true)")
         .bind(tenant_a)
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();
@@ -227,10 +242,12 @@ async fn test_concurrent_tenant_isolation() {
     let tenant_b = Uuid::new_v4();
 
     for (tid, name) in [(tenant_a, "ConcA"), (tenant_b, "ConcB")] {
-        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,'','',60,true)")
+        sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,$2,$3,pgp_sym_encrypt($4,$5),'',60,true)")
             .bind(tid)
             .bind(name)
-            .bind(Uuid::new_v4().to_string())
+            .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+            .bind("")
+            .bind(synapse_core::db::queries::tenant_secret_key())
             .execute(&pool)
             .await
             .unwrap();
@@ -244,11 +261,11 @@ async fn test_concurrent_tenant_isolation() {
     // Run concurrent queries
     let fut_a = async {
         with_tenant(&pool, Some(tenant_a), false, |tx| {
-            async move {
+            Box::pin(async move {
                 sqlx::query_as::<_, (Uuid,)>("SELECT id FROM transactions")
-                    .fetch_all(&mut *tx)
+                    .fetch_all(&mut **tx)
                     .await
-            }
+            })
         })
         .await
         .unwrap()
@@ -256,11 +273,11 @@ async fn test_concurrent_tenant_isolation() {
 
     let fut_b = async {
         with_tenant(&pool, Some(tenant_b), false, |tx| {
-            async move {
+            Box::pin(async move {
                 sqlx::query_as::<_, (Uuid,)>("SELECT id FROM transactions")
-                    .fetch_all(&mut *tx)
+                    .fetch_all(&mut **tx)
                     .await
-            }
+            })
         })
         .await
         .unwrap()
@@ -295,15 +312,17 @@ async fn test_null_tenant_id_admin_only() {
     .unwrap();
 
     // Create tenant
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,pgp_sym_encrypt($3,$4),'',60,true)")
         .bind(tenant_a)
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&admin_pool)
         .await
         .unwrap();
 
     // Regular tenant shouldn't see NULL tenant_id rows
-    let tenant_sees_legacy: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM transactions")
+    let _tenant_sees_legacy: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM transactions")
         .fetch_all(&admin_pool)
         .await
         .unwrap();
@@ -331,9 +350,11 @@ async fn test_guc_cleared_on_rollback() {
     let (pool, _admin_pool, _c) = setup_db().await;
 
     let tenant_a = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,'','',60,true)")
+    sqlx::query("INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1,'TenantA',$2,pgp_sym_encrypt($3,$4),'',60,true)")
         .bind(tenant_a)
-        .bind(Uuid::new_v4().to_string())
+        .bind(synapse_core::db::queries::hash_api_key(&Uuid::new_v4().to_string()))
+        .bind("")
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();

@@ -55,6 +55,15 @@ pub fn validate_status(status: &str) -> Result<(), InputValidationError> {
 ///
 /// Asset codes are short alphanumeric identifiers (e.g. `USDC`, `XLM`).
 /// Only ASCII alphanumeric characters and hyphens are permitted.
+///
+/// This intentionally accepts a broader set of values than
+/// `crate::validation::validate_asset_code`: that validator gates the write
+/// path (creating a transaction) against `ALLOWED_ASSET_CODES`, a business
+/// allowlist of assets the system currently supports. This one only checks
+/// that a *query filter* is well-formed — a user must be able to search for
+/// asset codes that aren't (or aren't yet) accepted for new transactions.
+/// Don't tighten this to match the write-path allowlist without confirming
+/// that's an intended behavior change to search/filtering.
 pub fn validate_asset_code(code: &str) -> Result<(), InputValidationError> {
     if code.len() > MAX_FILTER_FIELD_LENGTH {
         return Err(InputValidationError::FieldTooLong {

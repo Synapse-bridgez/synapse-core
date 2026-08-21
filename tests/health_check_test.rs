@@ -49,7 +49,10 @@ async fn test_health_response_fields() {
 
     assert_eq!(body.version, "0.1.0");
     assert_eq!(body.db, "connected");
-    assert!(body.db_pool.max_connections > 0, "max_connections must be > 0");
+    assert!(
+        body.db_pool.max_connections > 0,
+        "max_connections must be > 0"
+    );
     assert!(
         body.db_pool.usage_percent >= 0.0 && body.db_pool.usage_percent <= 100.0,
         "usage_percent out of range"
@@ -140,7 +143,10 @@ async fn test_health_content_type_is_json() {
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert!(ct.contains("application/json"), "expected JSON content-type, got: {ct}");
+    assert!(
+        ct.contains("application/json"),
+        "expected JSON content-type, got: {ct}"
+    );
 }
 
 /// Multiple concurrent requests all succeed (no race conditions on shared state).
@@ -191,10 +197,7 @@ async fn test_ready_returns_200_when_ready() {
     let app = TestApp::new().await;
 
     // Mark the app as ready
-    app.pool
-        .acquire()
-        .await
-        .expect("pool should be alive"); // sanity check
+    app.pool.acquire().await.expect("pool should be alive"); // sanity check
     app.set_ready().await;
 
     let client = reqwest::Client::new();
@@ -250,7 +253,10 @@ async fn test_ready_content_type_is_json() {
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert!(ct.contains("application/json"), "expected JSON content-type, got: {ct}");
+    assert!(
+        ct.contains("application/json"),
+        "expected JSON content-type, got: {ct}"
+    );
 }
 
 /// Readiness transitions: not_ready → ready → not_ready (drain).
@@ -291,7 +297,10 @@ fn test_dependency_status_healthy_serialization() {
     let json = serde_json::to_value(&s).unwrap();
     assert_eq!(json["status"], "healthy");
     assert_eq!(json["latency_ms"], 42);
-    assert!(json.get("error").is_none(), "healthy variant must not have 'error'");
+    assert!(
+        json.get("error").is_none(),
+        "healthy variant must not have 'error'"
+    );
 }
 
 #[test]
@@ -306,7 +315,10 @@ fn test_dependency_status_unhealthy_serialization() {
     let json = serde_json::to_value(&s).unwrap();
     assert_eq!(json["status"], "unhealthy");
     assert_eq!(json["error"], "timeout");
-    assert!(json.get("latency_ms").is_none(), "unhealthy variant must not have 'latency_ms'");
+    assert!(
+        json.get("latency_ms").is_none(),
+        "unhealthy variant must not have 'latency_ms'"
+    );
 }
 
 #[test]

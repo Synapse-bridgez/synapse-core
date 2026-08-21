@@ -94,7 +94,7 @@ fn extract_id(query: &str) -> Option<Uuid> {
         "id:\""
     };
     let start = query.find(marker)? + marker.len();
-    let remainder = &query[start..];
+    let remainder = query.get(start..)?;
     let end = remainder.find('"')?;
-    Uuid::parse_str(&remainder[..end]).ok()
+    Uuid::parse_str(remainder.get(..end)?).ok()
 }

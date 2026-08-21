@@ -3,7 +3,7 @@ use crate::db::queries;
 use crate::error::AppError;
 use crate::validation::state_transitions::{is_valid_transition, SETTLEMENT_TRANSITIONS};
 use bigdecimal::BigDecimal;
-use chrono::Utc;
+use chrono::{Datelike, Timelike, Utc};
 use opentelemetry::metrics::Histogram;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -164,19 +164,82 @@ impl SettlementService {
         let assets = Asset::fetch_all(&self.pool)
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
-        let _asset_map: std::collections::HashMap<String, Asset> = assets
+        let asset_map: std::collections::HashMap<String, Asset> = assets
             .into_iter()
             .map(|a| (a.asset_code.clone(), a))
             .collect();
 
-        let _now = Utc::now();
+        let now = Utc::now();
         let mut results = Vec::new();
+        let mut skipped_count = 0u64;
+        let mut settled_count = 0u64;
+
         for asset_code in &asset_codes {
+            // Check if this asset is eligible for settlement based on its schedule
+            let eligible = match asset_map.get(asset_code) {
+                Some(asset) => {
+                    let schedule = asset.settlement_schedule.as_deref().unwrap_or("daily");
+                    match schedule {
+                        "hourly" => true,
+                        "daily" => {
+                            // Settle once per day - eligible if we haven't settled yet today
+                            // For simplicity, settle during the first run each day (hour 0-1)
+                            now.hour() == 0
+                        }
+                        "weekly" => {
+                            // Settle once per week on Mondays (weekday 0)
+                            now.weekday() == chrono::Weekday::Mon && now.hour() == 0
+                        }
+                        _ => {
+                            tracing::warn!(
+                                asset_code = %asset_code,
+                                schedule = %schedule,
+                                "Unknown settlement_schedule, defaulting to hourly"
+                            );
+                            true
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        asset_code = %asset_code,
+                        "Asset not found in asset map, defaulting to hourly schedule"
+                    );
+                    true
+                }
+            };
+
+            if !eligible {
+                tracing::debug!(
+                    asset_code = %asset_code,
+                    schedule = ?asset_map.get(asset_code).and_then(|a| a.settlement_schedule.as_deref()),
+                    "Skipping settlement - not yet due per schedule"
+                );
+                skipped_count += 1;
+                continue;
+            }
+
             match self.settle_asset(asset_code).await {
-                Ok(settlements) => results.extend(settlements),
+                Ok(settlements) => {
+                    settled_count += settlements.len() as u64;
+                    results.extend(settlements);
+                }
                 Err(e) => tracing::error!("Failed to settle asset {:?}: {:?}", asset_code, e),
             }
         }
+
+        // Record metrics for settlements run vs skipped
+        let skipped_metric = crate::metrics::meter()
+            .u64_counter("settlements_skipped_total")
+            .with_description("Number of settlements skipped due to schedule gating")
+            .init();
+        skipped_metric.add(skipped_count, &[]);
+
+        let settled_metric = crate::metrics::meter()
+            .u64_counter("settlements_run_total")
+            .with_description("Number of settlements executed")
+            .init();
+        settled_metric.add(settled_count, &[]);
 
         // Record metrics for the entire run_settlements operation
         let duration_ms = start.elapsed().as_millis() as f64;
@@ -201,6 +264,14 @@ impl SettlementService {
             .begin()
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Settlement is a system job spanning every tenant's transactions for
+        // this asset, so it must bypass RLS rather than run with no session
+        // context (which would silently hide tenant-owned rows).
+        sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
 
         let end_time = Utc::now();
 
@@ -382,6 +453,7 @@ mod tests {
             memo_type: None,
             metadata: None,
             trace_id: None,
+            tenant_id: None,
         }
     }
 

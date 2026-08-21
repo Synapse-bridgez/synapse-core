@@ -69,8 +69,11 @@ pub async fn process_with_helper(
     let timeout = Duration::from_secs(5);
 
     lock_manager
-        .with_lock(&resource, timeout, || {
+        .with_lock(&resource, timeout, |fence_token| {
             Box::pin(async move {
+                // Forward fence_token to protected writes so stale holders are rejected.
+                // e.g.: UPDATE ... WHERE id = $1 AND fence_token <= $2
+                let _ = fence_token;
                 processor
                     .process_transaction(tx_id)
                     .await

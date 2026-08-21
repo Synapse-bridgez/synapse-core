@@ -73,12 +73,15 @@ pub async fn detach_and_archive_old_partitions(
         if let Some((y, m)) = parse_partition_name(&child) {
             let part_date = Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0).single().unwrap();
             if part_date < cutoff {
-                // detach
+                // Detach and move to the archive schema atomically: if the
+                // schema move fails, the detach must roll back too, otherwise
+                // the partition is orphaned (detached but never archived).
+                let mut tx = pool.begin().await?;
                 let detach_sql = format!("ALTER TABLE transactions DETACH PARTITION \"{child}\"");
-                sqlx::query(&detach_sql).execute(pool).await?;
-                // move to archive schema
+                sqlx::query(&detach_sql).execute(&mut *tx).await?;
                 let set_schema = format!("ALTER TABLE \"{child}\" SET SCHEMA archive");
-                sqlx::query(&set_schema).execute(pool).await?;
+                sqlx::query(&set_schema).execute(&mut *tx).await?;
+                tx.commit().await?;
             }
         }
     }

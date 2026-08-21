@@ -23,7 +23,7 @@ body = """
 - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
 {{ commit.message | upper_first }}\
 {% if commit.breaking %} [**BREAKING**]{% endif %} \
-([`{{ commit.id | truncate(length=7, end="") }}`]({{ commit.id }}))\
+([`{{ commit.id | truncate(length=7, end="") }}`](https://github.com/Synapse-bridgez/synapse-core/commit/{{ commit.id }}))\
 {% endfor %}
 {% endfor %}\n
 """

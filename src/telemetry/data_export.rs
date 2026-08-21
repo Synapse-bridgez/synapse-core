@@ -4,6 +4,7 @@
 //! and span data with proper buffering, compression, and error handling.
 
 use crate::telemetry::error_handling::TelemetryError;
+use crate::telemetry::rate_limiting::TelemetryRateLimiter;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -266,6 +267,7 @@ pub struct DataExportService {
     #[allow(dead_code)]
     config: ExportConfig,
     buffer: Arc<RwLock<ExportBuffer>>,
+    rate_limiter: TelemetryRateLimiter,
 }
 
 impl DataExportService {
@@ -283,6 +285,7 @@ impl DataExportService {
                 config.max_buffer_size,
                 config.batch_size,
             ))),
+            rate_limiter: TelemetryRateLimiter::new(),
         }
     }
 
@@ -302,6 +305,9 @@ impl DataExportService {
     /// `Some(batch)` if buffer flushed due to batch size, `None` otherwise.
     /// This is non-fatal; the record is always buffered even if overflow occurs.
     pub async fn record(&self, record: TelemetryRecord) -> Option<ExportBatch> {
+        if !self.rate_limiter.try_acquire(&record.record_type) {
+            return None;
+        }
         let mut buffer = self.buffer.write().await;
         buffer.push(record)
     }

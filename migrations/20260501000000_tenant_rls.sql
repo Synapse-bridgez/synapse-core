@@ -10,7 +10,12 @@ ALTER TABLE transactions FORCE ROW LEVEL SECURITY;
 -- Tenants see only their own rows; NULL tenant_id rows are visible to admins only
 CREATE POLICY tenant_isolation ON transactions
     USING (
-        tenant_id IS NULL                                          -- legacy / admin rows
+        (tenant_id IS NULL AND current_setting('app.is_admin', true) = 'true')  -- legacy / admin rows, admin-only
+        OR tenant_id::text = current_setting('app.tenant_id', true)  -- tenant match
+        OR current_setting('app.is_admin', true) = 'true'         -- admin bypass
+    )
+    WITH CHECK (
+        (tenant_id IS NULL AND current_setting('app.is_admin', true) = 'true')  -- only admins may write NULL-tenant rows
         OR tenant_id::text = current_setting('app.tenant_id', true)  -- tenant match
         OR current_setting('app.is_admin', true) = 'true'         -- admin bypass
     );

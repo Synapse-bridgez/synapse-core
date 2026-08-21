@@ -49,7 +49,7 @@ use async_graphql::{
     ErrorExtensions, Response,
 };
 
-use crate::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy, RateLimiter};
+use crate::cache::rate_limiting::{RateLimitConfig, RateLimiter};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -213,13 +213,11 @@ impl Extension for GraphQlRateLimitExtension {
             RateLimitConfig {
                 max_requests: self.config.authed_limit,
                 window: self.config.window,
-                strategy: RateLimitStrategy::TokenBucket,
             }
         } else {
             RateLimitConfig {
                 max_requests: self.config.anon_limit,
                 window: self.config.window,
-                strategy: RateLimitStrategy::TokenBucket,
             }
         };
 
@@ -350,7 +348,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = store.get_or_create("test-key", &config);
         assert_eq!(limiter.available_tokens(), 5);
@@ -362,7 +359,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let l1 = store.get_or_create("key", &config);
         l1.try_acquire();
@@ -377,7 +373,6 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 2,
             window: Duration::from_secs(60),
-            strategy: RateLimitStrategy::TokenBucket,
         };
         let l1 = store.get_or_create("key-a", &config);
         l1.try_acquire();

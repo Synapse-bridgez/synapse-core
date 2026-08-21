@@ -1,30 +1,33 @@
-//! Secure connection pool for the Payments / settlement module.
+//! Connection metadata pool for the Payments / settlement module.
 //!
-//! Provides a bounded, validated connection pool for the database connections
-//! used by settlement logic.  The pool enforces hard resource caps, validates
-//! endpoint configuration at construction time, and evicts stale connections
-//! lazily to prevent unbounded resource hold.
+//! Provides metadata tracking and lifecycle management for connections to the database
+//! used by settlement logic. The pool enforces hard resource caps, validates endpoint
+//! configuration at construction time, and evicts stale connections lazily.
 //!
-//! # Security guarantees
+//! **Note:** This implementation currently manages only connection *metadata*
+//! (IDs, endpoint labels, idle tracking) and does not establish or execute queries
+//! against actual database connections. Real sqlx connection pooling integration
+//! is not yet implemented.
+//!
+//! # Security guarantees (metadata layer)
 //!
 //! - The database URL is validated for scheme (`postgres://` / `postgresql://`)
-//!   and maximum length before any connection is created, preventing injection
-//!   and SSRF vectors.
+//!   and maximum length, preventing injection and SSRF vectors.
 //! - Pool size is hard-capped at [`PaymentsPoolConfig::max_size`]; acquisition
-//!   attempts beyond this limit return [`PaymentsPoolError::Exhausted`] rather
-//!   than blocking or allocating unboundedly.
-//! - Stale idle connections are evicted lazily on the next pool operation.
+//!   attempts beyond this limit return [`PaymentsPoolError::Exhausted`].
+//! - Stale idle connections are tracked and evicted lazily on the next pool operation.
 //! - Poisoned mutexes are recovered non-fatally so a panicking thread cannot
-//!   permanently disable the payments layer.
+//!   permanently disable the pool.
 //!
-//! # Usage
+//! # Usage (metadata tracking only)
 //!
 //! ```text
 //! use synapse_core::payments::connection_pool::{PaymentsConnectionPool, PaymentsPoolConfig};
 //!
 //! let pool = PaymentsConnectionPool::new()?;
 //! let conn = pool.acquire()?;
-//! // … execute settlement query …
+//! // conn tracks metadata (id, endpoint, idle time) only
+//! // TODO: No actual database query execution is currently possible
 //! pool.release(conn);
 //! ```
 
@@ -242,13 +245,19 @@ impl PaymentsConnectionPool {
     }
 
     /// Number of idle connections currently available in the pool.
+    ///
+    /// Recovers gracefully from poisoned mutexes, consistent with acquire/release.
     pub fn idle_count(&self) -> usize {
-        self.state.lock().map(|s| s.available.len()).unwrap_or(0)
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.available.len()
     }
 
     /// Total connections managed by the pool (idle + currently in use).
+    ///
+    /// Recovers gracefully from poisoned mutexes, consistent with acquire/release.
     pub fn total_count(&self) -> usize {
-        self.state.lock().map(|s| s.total).unwrap_or(0)
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.total
     }
 
     fn evict_stale_locked(&self, state: &mut PoolState) {

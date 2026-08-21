@@ -4,6 +4,7 @@
 //! and ensure data integrity.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Maximum allowed length for string fields
 const MAX_STRING_LENGTH: usize = 1024;
@@ -11,6 +12,15 @@ const MAX_STRING_LENGTH: usize = 1024;
 const MAX_ATTRIBUTES: usize = 128;
 /// Allowed characters in identifiers (alphanumeric, underscore, hyphen, dot)
 const IDENTIFIER_PATTERN: &str = r"^[a-zA-Z0-9_\-\.]+$";
+
+/// Pre-compiled identifier regex — compiled once at first use and reused on every call.
+///
+/// Compiling a `Regex` on each invocation is one of the most common `regex`-crate
+/// performance footguns (full NFA construction per call).  Using `LazyLock` ensures
+/// the pattern is compiled exactly once and then borrowed cheaply on every subsequent
+/// call to [`InputValidator::validate_span_name`].
+static IDENTIFIER_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(IDENTIFIER_PATTERN).expect("IDENTIFIER_PATTERN is valid"));
 
 /// Validates telemetry input data to prevent injection and format attacks.
 ///
@@ -46,10 +56,7 @@ impl InputValidator {
             )));
         }
 
-        if !regex::Regex::new(IDENTIFIER_PATTERN)
-            .unwrap()
-            .is_match(name)
-        {
+        if !IDENTIFIER_RE.is_match(name) {
             return Err(ValidationError::InvalidFormat(
                 "span name contains invalid characters".into(),
             ));

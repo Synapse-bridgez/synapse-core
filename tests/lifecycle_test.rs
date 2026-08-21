@@ -8,12 +8,52 @@
 
 mod common;
 
+use hmac::{Hmac, Mac};
 use mockito::Server as MockServer;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use sqlx::Row;
+use sha2::Sha256;
+use sqlx::{PgPool, Row};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
+
+/// Sign `body` the way the `signature_verification` middleware expects:
+/// HMAC-SHA256 over `"{timestamp}.{hex(body)}"`. Returns `(timestamp, signature)`
+/// as the exact header values to send.
+fn sign_body(secret: &str, body: &[u8]) -> (String, String) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let signed_payload = format!("{}.{}", timestamp, hex::encode(body));
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(signed_payload.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    (timestamp, signature)
+}
+
+/// Seed a tenant so `X-API-Key` auth (`api_key_auth` middleware) succeeds,
+/// and return the plaintext API key to send in the `X-API-Key` header.
+async fn seed_tenant(pool: &PgPool) -> String {
+    let tenant_id = Uuid::new_v4();
+    let api_key = format!("lifecycle-test-key-{}", tenant_id);
+    sqlx::query(
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), '', 1000, true)"
+    )
+    .bind(tenant_id)
+    .bind(format!("lifecycle-test-tenant-{}", tenant_id))
+    .bind(synapse_core::db::queries::hash_api_key(&api_key))
+    .bind("")
+    .bind(synapse_core::db::queries::tenant_secret_key())
+    .execute(pool)
+    .await
+    .unwrap();
+    api_key
+}
 
 /// Poll `f` until it returns `Some(T)` or the timeout elapses.
 async fn poll_until<F, Fut, T>(timeout: Duration, interval: Duration, f: F) -> Option<T>
@@ -39,6 +79,7 @@ async fn test_full_transaction_lifecycle() {
     // ── 1. Spin up test app ───────────────────────────────────────────────────
     let app = common::TestApp::new().await;
     let client = reqwest::Client::new();
+    let api_key = seed_tenant(&app.pool).await;
 
     // ── 2. Set up mock webhook endpoint ──────────────────────────────────────
     let mut mock_server = MockServer::new_async().await;
@@ -76,9 +117,16 @@ async fn test_full_transaction_lifecycle() {
         "memo_type": "text"
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (timestamp, signature) = sign_body(common::TEST_WEBHOOK_SECRET, &body_bytes);
+
     let res = client
         .post(format!("{}/callback", app.base_url))
-        .json(&payload)
+        .header("X-API-Key", &api_key)
+        .header("X-Webhook-Timestamp", timestamp)
+        .header("X-Webhook-Signature", signature)
+        .header("Content-Type", "application/json")
+        .body(body_bytes)
         .send()
         .await
         .unwrap();
@@ -244,14 +292,23 @@ async fn test_full_transaction_lifecycle() {
 async fn test_callback_returns_201_and_persists() {
     let app = common::TestApp::new().await;
     let client = reqwest::Client::new();
+    let api_key = seed_tenant(&app.pool).await;
+
+    let payload = json!({
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        "amount": "50.00",
+        "asset_code": "USDC"
+    });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (timestamp, signature) = sign_body(common::TEST_WEBHOOK_SECRET, &body_bytes);
 
     let res = client
         .post(format!("{}/callback", app.base_url))
-        .json(&json!({
-            "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-            "amount": "50.00",
-            "asset_code": "USDC"
-        }))
+        .header("X-API-Key", &api_key)
+        .header("X-Webhook-Timestamp", timestamp)
+        .header("X-Webhook-Signature", signature)
+        .header("Content-Type", "application/json")
+        .body(body_bytes)
         .send()
         .await
         .unwrap();
@@ -273,15 +330,24 @@ async fn test_callback_returns_201_and_persists() {
 async fn test_all_state_transitions_are_audited() {
     let app = common::TestApp::new().await;
     let client = reqwest::Client::new();
+    let api_key = seed_tenant(&app.pool).await;
 
     // Create transaction
+    let payload = json!({
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        "amount": "75.00",
+        "asset_code": "USD"
+    });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (timestamp, signature) = sign_body(common::TEST_WEBHOOK_SECRET, &body_bytes);
+
     let res = client
         .post(format!("{}/callback", app.base_url))
-        .json(&json!({
-            "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-            "amount": "75.00",
-            "asset_code": "USD"
-        }))
+        .header("X-API-Key", &api_key)
+        .header("X-Webhook-Timestamp", timestamp)
+        .header("X-Webhook-Signature", signature)
+        .header("Content-Type", "application/json")
+        .body(body_bytes)
         .send()
         .await
         .unwrap();

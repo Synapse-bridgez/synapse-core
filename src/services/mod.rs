@@ -1,8 +1,18 @@
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "services used by live requests must not panic on bad input or runtime state"
+)]
+
 pub mod account_monitor;
 pub mod backup;
+pub mod backup_verification_job;
+pub mod circuit_breaker;
 pub mod compliance;
 pub mod feature_flags;
 pub mod lock_manager;
+pub mod pitr;
 pub mod processor;
 pub mod query_cache;
 pub mod reconciliation;
@@ -15,6 +25,8 @@ pub mod webhook_dispatcher;
 
 pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
+pub use backup_verification_job::BackupVerificationJob;
+pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use feature_flags::FeatureFlagService;
 pub use lock_manager::LeaderElection;
 pub use lock_manager::{FairLockConfig, FairLockManager};

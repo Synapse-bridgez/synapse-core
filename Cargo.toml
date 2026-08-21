@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+members = [".", "sdks/rust", "cli/synapse-cli"]
 
 [package]
 name = "synapse-core"
@@ -17,6 +18,7 @@ name = "synapse_core"
 path = "src/lib.rs"
 
 [dependencies]
+synapse-sdk = { path = "sdks/rust" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.6", features = ["ws"] }
 vaultrs = "0.7"
@@ -46,7 +48,7 @@ home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json", "stream"] }
 bytes = "1"
 failsafe = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.4", features = ["cors", "limit"] }
 hyper = "0.14"
@@ -71,6 +73,7 @@ async-trait = "0.1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+subtle = "2.5"
 pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 flate2 = "1.0"
 opentelemetry = { version = "0.22", features = ["metrics", "trace"] }
@@ -84,6 +87,7 @@ parking_lot = "0.12"
 lazy_static = "1"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio", "metrics", "trace", "testing"] }
 mockito = "1"
 proptest = "1"
 tempfile = "3"
@@ -94,10 +98,16 @@ sqlx = { version = "0.7", features = [
     "migrate",
 ] }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
 reqwest = { version = "0.11", features = ["json"] }
-tokio-tungstenite = "0.21"
+# Pinned to match the tokio-tungstenite/tungstenite version axum 0.6's `ws`
+# feature vendors internally (axum's Cargo.toml hard-pins ^0.20) — keeping
+# this in lockstep avoids two majors of tungstenite resolving side by side.
+tokio-tungstenite = "0.20"
 assert_cmd = "2"
+assert_fs = "1"
+wiremock = "0.5"
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 
 [[bench]]
 name = "critical_paths"
