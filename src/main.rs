@@ -520,6 +520,16 @@ async fn serve(
     let app = synapse_core::create_app(app_state.clone());
     let readiness = app_state.readiness.clone();
 
+    // Run initialization checks and mark the service as ready
+    if let Err(e) = readiness
+        .run_initialization_checks(&pool, &config.redis_url, &config.stellar_horizon_url)
+        .await
+    {
+        tracing::error!("Initialization checks failed: {}", e);
+        return Err(anyhow::anyhow!("Failed to initialize service: {}", e));
+    }
+    tracing::info!("Service initialization complete - ready to accept traffic");
+
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =
         app.merge(SwaggerUi::new("/api/docs").url("/api/docs/openapi.json", ApiDoc::openapi()));
