@@ -190,6 +190,8 @@ impl std::fmt::Display for InitializationError {
     }
 }
 
+impl std::error::Error for InitializationError {}
+
 impl Default for ReadinessState {
     fn default() -> Self {
         Self::new()
