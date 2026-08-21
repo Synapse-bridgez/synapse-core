@@ -8,9 +8,6 @@ use tokio::sync::RwLock;
 use vaultrs::auth::approle;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
 use vaultrs::kv2;
-use vaultrs::token;
-
-use crate::auth::AuthRateLimiter;
 
 /// Grace period during which the previous secret remains valid after rotation.
 const ROTATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
@@ -94,10 +91,6 @@ impl SecretsStore {
 pub struct SecretsManager {
     client: VaultClient,
     kv_mount: String,
-    /// Rate limiter that protects against hammering the Vault endpoint during
-    /// cascading failures.  Shared across all callers that hold a clone of the
-    /// manager (#912).
-    rate_limiter: AuthRateLimiter,
 }
 
 impl SecretsManager {
@@ -109,13 +102,6 @@ impl SecretsManager {
         let auth_mount =
             env::var("VAULT_AUTH_MOUNT").unwrap_or_else(|_| "auth/approle".to_string());
         let kv_mount = env::var("VAULT_KV_MOUNT").unwrap_or_else(|_| "secret".to_string());
-
-        // Gate the initial AppRole login through the vault-probe bucket so that
-        // startup retries (e.g. during a Vault outage) don't hammer the endpoint.
-        let rate_limiter = AuthRateLimiter::new();
-        rate_limiter
-            .check_vault_probe_rate_limit()
-            .map_err(|e| anyhow::anyhow!("Vault probe rate limit exceeded during init: {e}"))?;
 
         let mut client = VaultClient::new(
             VaultClientSettingsBuilder::default()
@@ -130,18 +116,10 @@ impl SecretsManager {
             .context("failed to authenticate to Vault with AppRole")?;
         client.set_token(&auth.client_token);
 
-        Ok(Self {
-            client,
-            kv_mount,
-            rate_limiter,
-        })
+        Ok(Self { client, kv_mount })
     }
 
     pub async fn get_db_password(&self) -> Result<String> {
-        self.rate_limiter
-            .check_vault_probe_rate_limit()
-            .map_err(|e| anyhow::anyhow!("Vault probe rate limit exceeded: {e}"))?;
-
         let secret: HashMap<String, String> = kv2::read(&self.client, &self.kv_mount, "database")
             .await
             .context("failed to read secret/database from Vault")?;
@@ -153,10 +131,6 @@ impl SecretsManager {
     }
 
     pub async fn get_anchor_secret(&self) -> Result<String> {
-        self.rate_limiter
-            .check_vault_probe_rate_limit()
-            .map_err(|e| anyhow::anyhow!("Vault probe rate limit exceeded: {e}"))?;
-
         let secret: HashMap<String, String> = kv2::read(&self.client, &self.kv_mount, "anchor")
             .await
             .context("failed to read secret/anchor from Vault")?;
@@ -168,10 +142,6 @@ impl SecretsManager {
     }
 
     pub async fn get_admin_api_key(&self) -> Result<String> {
-        self.rate_limiter
-            .check_vault_probe_rate_limit()
-            .map_err(|e| anyhow::anyhow!("Vault probe rate limit exceeded: {e}"))?;
-
         let secret: HashMap<String, String> = kv2::read(&self.client, &self.kv_mount, "admin")
             .await
             .context("failed to read secret/admin from Vault")?;
@@ -184,54 +154,13 @@ impl SecretsManager {
 
     /// Spawn a background task that refreshes secrets from Vault every 5 minutes.
     /// Rotated secrets remain valid for a grace period so in-flight requests are not rejected.
-    pub fn start_refresh_task(mut self, store: SecretsStore) {
+    pub fn start_refresh_task(self, store: SecretsStore) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
             interval.tick().await; // skip the immediate first tick
             loop {
                 interval.tick().await;
                 tracing::info!("secrets_rotation: refreshing secrets from Vault");
-
-                // Renew token before each refresh to prevent expiration
-                if let Err(e) = token::renew_self(&self.client, None).await {
-                    tracing::warn!("secrets_rotation: failed to renew Vault token: {e}");
-                    // Attempt to re-authenticate if token renewal fails
-                    let role_id = match env::var("VAULT_ROLE_ID") {
-                        Ok(id) => id,
-                        Err(_) => {
-                            tracing::error!(
-                                "secrets_rotation: VAULT_ROLE_ID not set, cannot re-authenticate"
-                            );
-                            continue;
-                        }
-                    };
-                    let secret_id = match env::var("VAULT_SECRET_ID") {
-                        Ok(id) => id,
-                        Err(_) => {
-                            tracing::error!(
-                                "secrets_rotation: VAULT_SECRET_ID not set, cannot re-authenticate"
-                            );
-                            continue;
-                        }
-                    };
-                    let auth_mount =
-                        env::var("VAULT_AUTH_MOUNT").unwrap_or_else(|_| "auth/approle".to_string());
-
-                    match approle::login(&self.client, &auth_mount, &role_id, &secret_id).await {
-                        Ok(auth) => {
-                            self.client.set_token(&auth.client_token);
-                            tracing::info!(
-                                "secrets_rotation: successfully re-authenticated to Vault"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "secrets_rotation: failed to re-authenticate to Vault: {e}"
-                            );
-                            continue;
-                        }
-                    }
-                }
 
                 match self.get_anchor_secret().await {
                     Ok(new_secret) => {

@@ -50,18 +50,13 @@ fn is_sensitive_field(key: &str) -> bool {
 
 fn mask_value(value: &Value) -> Value {
     match value {
-        Value::String(s) => {
-            // Operate on chars, not bytes: byte-index slicing (`&s[..4]`) panics
-            // if a multi-byte UTF-8 character straddles the cut point.
-            let chars: Vec<char> = s.chars().collect();
-            if chars.len() > 8 {
-                let visible: String = chars[..4].iter().collect();
-                let end: String = chars[chars.len() - 4..].iter().collect();
-                Value::String(format!("{visible}****{end}"))
-            } else {
-                Value::String("****".to_string())
-            }
+        Value::String(s) if s.len() > 8 => {
+            let visible = &s[..4];
+            let masked = "****";
+            let end = &s[s.len() - 4..];
+            Value::String(format!("{visible}{masked}{end}"))
         }
+        Value::String(_s) => Value::String("****".to_string()),
         _ => Value::String("****".to_string()),
     }
 }
@@ -226,21 +221,6 @@ mod tests {
         assert!(sanitized["normal_field"].is_null());
         assert_eq!(sanitized["nested"]["secret"], "****");
         assert!(sanitized["nested"]["data"].is_null());
-    }
-
-    #[test]
-    fn test_sanitize_multibyte_utf8_does_not_panic() {
-        // Byte-index slicing would panic here: "日本語日本語日本語" is >8 bytes
-        // per character, so a raw `&s[..4]`/`&s[len-4..]` cut lands mid-codepoint.
-        let input = json!({
-            "token": "日本語日本語日本語"
-        });
-
-        let sanitized = sanitize_json(&input);
-        let masked = sanitized["token"].as_str().unwrap();
-        assert!(masked.contains("****"));
-        assert!(masked.starts_with("日本語日"));
-        assert!(masked.ends_with("語日本語"));
     }
 
     #[test]

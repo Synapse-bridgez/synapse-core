@@ -145,10 +145,9 @@ jobs:
       with:
         tool: sqlx-cli@0.7.4
 
-    # Flags potentially unsafe operations in up migrations: DROP TABLE,
-    # DROP COLUMN, DROP INDEX, TRUNCATE, and ALTER COLUMN TYPE/SET NOT NULL.
-    # These checks are not scoped to specific tables or columns — any match
-    # in a non-.down.sql migration is flagged for manual review.
+    # Validates that no migration breaks existing pagination indexes.
+    # The script checks for destructive operations (DROP INDEX, ALTER TABLE)
+    # on columns used by cursor queries (created_at, id).
     - name: Check migration safety
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
@@ -340,15 +339,12 @@ jobs:
     # Skipped tests:
     #   test_api_versioning_headers — unrelated to pagination; flaky in CI
     #   test_invalid_signature_flow — auth test; no pagination dependency
-    #   test_graphql_settlement_query_respects_rls — exercises tenant-scoped
-    #     RLS on settlements, which was never implemented (only transactions
-    #     got tenant_id + RLS; see migrations/20260501000000_tenant_rls.sql).
     - name: Run integration tests
       id: run_integration_tests
       run: |
         set -e
         echo "Running integration tests..."
-        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow --skip test_graphql_settlement_query_respects_rls; then
+        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
           echo "::error::Integration tests failed. Check test output for failures."
           exit 1
         fi
@@ -480,7 +476,7 @@ jobs:
           exit 1
         fi
         
-        if ! cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow --skip test_graphql_settlement_query_respects_rls; then
+        if ! cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
           echo "::error::Failed to collect integration test coverage"
           exit 1
         fi

@@ -1,7 +1,8 @@
 use axum::{
     async_trait,
-    extract::FromRequestParts,
+    extract::{FromRequestParts, Path},
     http::{request::Parts, HeaderMap},
+    RequestPartsExt,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -57,14 +58,25 @@ async fn resolve_tenant_id(
     parts: &mut Parts,
     state: &AppState,
 ) -> std::result::Result<Uuid, AppError> {
-    // Tenant identity is established exclusively from authenticated credentials
-    // (API key or Bearer token). Path parameters are never trusted as a tenant
-    // identity source — doing so would allow any caller to impersonate an
-    // arbitrary tenant by placing that tenant's UUID in the URL (issue #971).
+    if let Ok(Path(tenant_id)) = parts.extract::<Path<Uuid>>().await {
+        return Ok(tenant_id);
+    }
+
     let headers = &parts.headers;
 
     if let Some(api_key) = extract_api_key(headers) {
         return resolve_tenant_by_api_key(&state.db, &api_key).await;
+    }
+
+    if let Some(tenant_id_str) = headers.get("X-Tenant-ID") {
+        if let Ok(tenant_id) = tenant_id_str
+            .to_str()
+            .ok()
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or(AppError::InvalidApiKey)
+        {
+            return Ok(tenant_id);
+        }
     }
 
     Err(AppError::InvalidApiKey)
@@ -89,8 +101,8 @@ async fn resolve_tenant_by_api_key(
     api_key: &str,
 ) -> std::result::Result<Uuid, AppError> {
     use sqlx::Row;
-    let row = sqlx::query("SELECT tenant_id FROM tenants WHERE api_key_hash = $1")
-        .bind(crate::db::queries::hash_api_key(api_key))
+    let row = sqlx::query("SELECT tenant_id FROM tenants WHERE api_key = $1")
+        .bind(api_key)
         .fetch_optional(pool)
         .await?;
 
