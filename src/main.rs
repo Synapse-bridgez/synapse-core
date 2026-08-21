@@ -606,15 +606,14 @@ async fn serve(
                 readiness.start_drain();
             }
             readiness.wait_for_drain().await;
+
+            // Gracefully drain and close all database pools before exiting
+            // This must happen after the readiness drain so that in-flight requests can complete
+            tracing::info!("Starting graceful database shutdown sequence");
+            pool_manager.graceful_shutdown().await;
+            synapse_core::db::graceful_shutdown(&pool).await;
         })
         .await?;
-
-    // Gracefully drain and close all database pools before exiting.
-    // This must happen after the HTTP server graceful shutdown
-    // so that in-flight requests can complete.
-    tracing::info!("Starting graceful database shutdown sequence");
-    pool_manager.graceful_shutdown().await;
-    synapse_core::db::graceful_shutdown(&pool).await;
 
     // Flush and shut down the OTel exporter on clean exit.
     tracer_manager.shutdown();
