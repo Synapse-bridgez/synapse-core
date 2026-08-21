@@ -393,7 +393,7 @@ async fn serve(
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
-        pool_manager,
+        pool_manager: pool_manager.clone(),
         horizon_client: horizon_client.clone(),
         feature_flags,
         redis_url: config.redis_url.clone(),
