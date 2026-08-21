@@ -3,19 +3,20 @@ use axum::{
     middleware::Next,
     response::Response as AxumResponse,
 };
+use std::str::FromStr;
 
 pub async fn inject_deprecation_headers<B>(req: Request<B>, next: Next<B>) -> AxumResponse {
     let mut response = next.run(req).await;
 
     // Set Deprecation header to true
     response.headers_mut().insert(
-        HeaderName::from_static("deprecation"),
+        HeaderName::from_str("Deprecation").unwrap(),
         HeaderValue::from_static("true"),
     );
 
     // Set Sunset header (example date)
     response.headers_mut().insert(
-        HeaderName::from_static("sunset"),
+        HeaderName::from_str("Sunset").unwrap(),
         HeaderValue::from_static("Fri, 31 Dec 2026 23:59:59 GMT"),
     );
 
@@ -42,11 +43,11 @@ pub async fn inject_api_version_header<B>(
 pub async fn v1_version_middleware<B>(req: Request<B>, next: Next<B>) -> AxumResponse {
     let mut response = inject_api_version_header("v1", req, next).await;
     response.headers_mut().insert(
-        HeaderName::from_static("deprecation"),
+        HeaderName::from_str("Deprecation").unwrap(),
         HeaderValue::from_static("true"),
     );
     response.headers_mut().insert(
-        HeaderName::from_static("sunset"),
+        HeaderName::from_str("Sunset").unwrap(),
         HeaderValue::from_static("Fri, 31 Dec 2026 23:59:59 GMT"),
     );
     response

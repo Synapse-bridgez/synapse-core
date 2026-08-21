@@ -8,8 +8,6 @@ use axum::{
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::cache::webhook as webhook_security;
-
 type HmacSha256 = Hmac<Sha256>;
 
 /// Extractor that verifies the X-Stellar-Signature header
@@ -44,21 +42,7 @@ impl FromRequest<crate::AppState> for VerifiedWebhook {
 
     async fn from_request(req: Request, state: &crate::AppState) -> Result<Self, Self::Rejection> {
         let headers = req.headers().clone();
-
-        // --- Replay protection (fix #977) -------------------------------------
-        // Require an X-Webhook-Timestamp header and reject payloads whose
-        // timestamp is more than 5 minutes old or from the future.  This
-        // prevents a captured, validly-signed request from being replayed
-        // indefinitely, since the signature alone is deterministic.
-        let timestamp_str = headers
-            .get("X-Webhook-Timestamp")
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AuthError::MissingTimestamp)?;
-
-        webhook_security::validate_timestamp(timestamp_str)
-            .map_err(|_| AuthError::TimestampOutOfRange)?;
-        // ----------------------------------------------------------------------
-
+        
         // Extract the signature header
         let signature = headers
             .get("X-Stellar-Signature")
@@ -85,10 +69,6 @@ pub enum AuthError {
     InvalidSecret,
     SignatureMismatch,
     BodyReadError,
-    /// The X-Webhook-Timestamp header is absent.
-    MissingTimestamp,
-    /// The timestamp is outside the 5-minute replay-protection window.
-    TimestampOutOfRange,
 }
 
 impl IntoResponse for AuthError {
@@ -108,12 +88,6 @@ impl IntoResponse for AuthError {
             }
             AuthError::BodyReadError => {
                 (StatusCode::BAD_REQUEST, "Failed to read request body")
-            }
-            AuthError::MissingTimestamp => {
-                (StatusCode::BAD_REQUEST, "Missing X-Webhook-Timestamp header")
-            }
-            AuthError::TimestampOutOfRange => {
-                (StatusCode::UNAUTHORIZED, "Webhook timestamp outside the allowed window (replay protection)")
             }
         };
 

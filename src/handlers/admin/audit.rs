@@ -105,9 +105,12 @@ fn rows_to_csv(rows: &[AuditLogRow]) -> Result<String, csv::Error> {
         ])?;
     }
     wtr.flush()?;
-    let inner = wtr
-        .into_inner()
-        .map_err(|e| csv::Error::from(std::io::Error::other(e.to_string())))?;
+    let inner = wtr.into_inner().map_err(|e| {
+        csv::Error::from(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))
+    })?;
     Ok(String::from_utf8_lossy(&inner).into_owned())
 }
 
@@ -127,7 +130,13 @@ pub async fn search_audit_logs_handler(
 ) -> Result<Response, AppError> {
     let limit = q.limit.clamp(1, 500);
 
-    let cursor = q.cursor.as_deref().and_then(decode_cursor);
+    let cursor = q
+        .cursor
+        .as_deref()
+        .map(decode_cursor)
+        .transpose()
+        .ok()
+        .flatten();
 
     let params = AuditSearchParams {
         actor: q.actor.as_deref(),

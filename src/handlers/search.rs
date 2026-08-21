@@ -107,9 +107,7 @@ pub async fn search_transactions(
     });
 
     if let Some(cursor) = next_cursor {
-        if let Some(obj) = resp.as_object_mut() {
-            obj.insert("next_cursor".to_string(), serde_json::Value::String(cursor));
-        }
+        resp["next_cursor"] = serde_json::Value::String(cursor);
     }
 
     let mut response = (StatusCode::OK, Json(resp)).into_response();

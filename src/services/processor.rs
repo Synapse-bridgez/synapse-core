@@ -3,12 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{debug, error, info, warn};
 
-use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Transaction, TransactionStatus};
+use crate::db::models::Transaction;
 use crate::services::lock_manager::LeaderElection;
-use crate::stellar::{HorizonClient, HorizonError};
+use crate::stellar::HorizonClient;
 
 const LEADER_HEARTBEAT_SECS: u64 = 15;
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -159,24 +158,16 @@ impl ProcessorPool {
 
 pub async fn process_batch(
     pool: &PgPool,
-    horizon_client: &HorizonClient,
+    _horizon_client: &HorizonClient,
     batch_size: u32,
 ) -> anyhow::Result<usize> {
     let mut tx = pool.begin().await?;
-
-    // The processor is a system worker that must see and advance every
-    // tenant's pending transactions, not just one tenant's rows. Without
-    // this, the `tenant_isolation` RLS policy would run with no session
-    // context and silently hide every row that has a `tenant_id` set.
-    sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
-        .execute(&mut *tx)
-        .await?;
 
     let pending: Vec<Transaction> = sqlx::query_as::<_, Transaction>(
         r#"
         SELECT id, stellar_account, amount, asset_code, status, created_at, updated_at,
                anchor_transaction_id, callback_type, callback_status, settlement_id,
-               memo, memo_type, metadata, trace_id, tenant_id
+               memo, memo_type, metadata, priority, trace_id
         FROM transactions
         WHERE status = 'pending'
         ORDER BY created_at ASC
@@ -195,63 +186,26 @@ pub async fn process_batch(
 
     debug!("Processing {} pending transaction(s)", pending.len());
 
+    let count = pending.len();
     let mut asset_codes = std::collections::HashSet::new();
-    let mut processed = 0usize;
-
-    for transaction in pending {
+    for transaction in &pending {
         asset_codes.insert(transaction.asset_code.clone());
 
-        let span = transaction.trace_id.as_ref().map(|trace_id| {
-            tracing::info_span!(
+        // Create linked span for transaction processing if trace_id exists
+        if let Some(ref trace_id) = transaction.trace_id {
+            let span = tracing::info_span!(
                 "transaction.process",
                 transaction_id = %transaction.id,
                 trace_id = %trace_id,
-            )
-        });
+            );
+            let _guard = span.enter();
+            debug!("Processing transaction with trace context");
+        }
+    }
 
-        let verify = horizon_client.get_account(&transaction.stellar_account);
-        let verification = match span {
-            Some(span) => verify.instrument(span).await,
-            None => verify.await,
-        };
-
-        let new_status = match verification {
-            Ok(_) => TransactionStatus::Completed,
-            Err(HorizonError::AccountNotFound(_)) => TransactionStatus::Failed,
-            Err(e) => {
-                warn!(
-                    transaction_id = %transaction.id,
-                    stellar_account = %transaction.stellar_account,
-                    error = %e,
-                    "Horizon verification failed transiently; leaving transaction pending for retry"
-                );
-                continue;
-            }
-        };
-
-        sqlx::query("UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = $2")
-            .bind(new_status.to_string())
-            .bind(transaction.id)
-            .execute(&mut *tx)
-            .await?;
-
-        AuditLog::log(
-            &mut tx,
-            transaction.id,
-            ENTITY_TRANSACTION,
-            "status_update",
-            Some(serde_json::json!({ "status": "pending" })),
-            Some(serde_json::json!({ "status": new_status.to_string() })),
-            "processor",
-        )
-        .await?;
-
-        debug!(
-            transaction_id = %transaction.id,
-            status = %new_status,
-            "Transaction verified against Horizon"
-        );
-        processed += 1;
+    // TODO: per-transaction processing logic
+    for _transaction in pending {
+        // process each transaction
     }
 
     tx.commit().await?;
@@ -260,7 +214,7 @@ pub async fn process_batch(
         crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
     }
 
-    Ok(processed)
+    Ok(count)
 }
 
 /// Legacy single-worker entry point kept for backward compatibility.
@@ -279,25 +233,12 @@ pub async fn queue_depth_task(pool: PgPool, pending_queue_depth: Arc<AtomicU64>)
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     loop {
         interval.tick().await;
-        // Same admin-context requirement as `process_batch`: this counts
-        // pending work across every tenant, so it must bypass RLS rather
-        // than run with no session context (which would hide tenant-owned rows).
-        let count_result: sqlx::Result<i64> = async {
-            let mut tx = pool.begin().await?;
-            sqlx::query("SELECT set_config('app.is_admin', 'true', true)")
-                .execute(&mut *tx)
-                .await?;
-            let count = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM transactions WHERE status = 'pending'",
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok(count)
-        }
-        .await;
-
-        match count_result {
+        match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM transactions WHERE status = 'pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        {
             Ok(count) => {
                 let depth = count.max(0) as u64;
                 pending_queue_depth.store(depth, Ordering::Relaxed);

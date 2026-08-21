@@ -88,23 +88,14 @@ impl AccountMonitor {
 
         info!("Found {} new payments for {}", payments.len(), account);
 
-        // Track the id of every payment we observe, regardless of outcome.
-        // The Horizon cursor is exclusive-after-cursor, so we must advance past
-        // ALL seen payments — not just successful ones — to avoid permanently
-        // skipping payments whose process_payment call failed transiently.
-        let mut last_seen_id: Option<String> = None;
+        let mut last_successful_id: Option<String> = None;
 
         for payment in payments {
-            // Record this payment's id before processing so a panic/early-return
-            // below cannot prevent the cursor from advancing past it.
-            last_seen_id = Some(payment.id.clone());
-
             match self.process_payment(&payment).await {
-                Ok(_) => {}
+                Ok(_) => last_successful_id = Some(payment.id.clone()),
                 Err(e) => {
                     warn!("Failed to process payment {}: {}", payment.id, e);
-                    // Route to DLQ so the failure is recorded even though we
-                    // will advance the cursor past this payment.
+                    // Route to DLQ if match found but verification failed
                     if let Err(dlq_err) = self.route_to_dlq(&payment, &e).await {
                         error!("Failed to route payment {} to DLQ: {}", payment.id, dlq_err);
                     }
@@ -112,7 +103,7 @@ impl AccountMonitor {
             }
         }
 
-        if let Some(id) = last_seen_id {
+        if let Some(id) = last_successful_id {
             self.save_cursor(account, &id).await?;
         }
 
@@ -161,17 +152,14 @@ impl AccountMonitor {
     async fn process_payment(&self, payment: &Payment) -> anyhow::Result<()> {
         // Check for duplicate payment ID (idempotency)
         let already_processed = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM transactions WHERE horizon_payment_id = $1)",
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE horizon_payment_id = $1)"
         )
         .bind(&payment.id)
         .fetch_one(&self.pool)
         .await?;
 
         if already_processed {
-            info!(
-                "Horizon payment {} already processed (idempotent)",
-                payment.id
-            );
+            info!("Horizon payment {} already processed (idempotent)", payment.id);
             return Ok(());
         }
 
@@ -179,56 +167,56 @@ impl AccountMonitor {
             return Err(anyhow::anyhow!("Payment {} has no memo", payment.id));
         }
 
-        let Some(memo) = payment.memo.as_ref() else {
-            return Err(anyhow::anyhow!("Payment {} has no memo", payment.id));
-        };
+        let memo = payment.memo.as_ref().unwrap();
+        let payment_amount = payment.amount.parse::<f64>()?;
 
-        // #922: parse payment amount as BigDecimal to preserve decimal precision
-        // and avoid f64 rounding errors in financial comparisons.
-        let payment_amount = sqlx::types::BigDecimal::from_str(&payment.amount).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse payment amount '{}' as decimal: {}",
-                payment.amount,
-                e
-            )
-        })?;
-
-        // #924: Scope the lookup by both memo AND stellar_account (payment.to)
-        // so that memo collisions across different accounts cannot match the
-        // wrong transaction.  Fetch all matching pending rows (not LIMIT 1) and
-        // also filter by asset_code so we only iterate plausible candidates.
-        // ORDER BY created_at ASC to give deterministic, oldest-first matching.
-        let candidates = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::BigDecimal)>(
-            "SELECT id, stellar_account, asset_code, amount \
-             FROM transactions \
-             WHERE memo = $1 \
-               AND stellar_account = $2 \
-               AND asset_code = $3 \
-               AND status = 'pending' \
-             ORDER BY created_at ASC",
+        let tx = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::Decimal)>(
+            "SELECT id, stellar_account, asset_code, amount FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
         )
         .bind(memo)
-        .bind(&payment.to)
-        .bind(&payment.asset_code)
-        .fetch_all(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
 
-        // Walk all matching candidates and take the first one whose amount is
-        // satisfied by this payment (allow overpayment).
-        let matched = candidates.into_iter().find(|(_, _, _, expected_amount)| {
-            // #922: compare BigDecimal values directly — no f64 round-trip.
-            &payment_amount >= expected_amount
-        });
+        if let Some((tx_id, expected_account, expected_asset, expected_amount)) = tx {
+            // Verify destination account matches
+            if payment.to != expected_account {
+                return Err(anyhow::anyhow!(
+                    "Payment destination {} does not match transaction account {}",
+                    payment.to,
+                    expected_account
+                ));
+            }
 
-        if let Some((tx_id, _expected_account, _expected_asset, expected_amount)) = matched {
+            // Verify asset code matches
+            if payment.asset_code != expected_asset {
+                return Err(anyhow::anyhow!(
+                    "Payment asset {} does not match transaction asset {}",
+                    payment.asset_code,
+                    expected_asset
+                ));
+            }
+
+            // Verify amount is at least equal to expected (allow overpayment)
+            let expected_amount_f64 = expected_amount.to_string().parse::<f64>()?;
+            if payment_amount < expected_amount_f64 {
+                return Err(anyhow::anyhow!(
+                    "Payment amount {} is less than expected amount {}",
+                    payment_amount,
+                    expected_amount_f64
+                ));
+            }
+
             info!(
-                "Verified payment {} matches transaction {} (amount {} >= expected {})",
-                payment.id, tx_id, payment_amount, expected_amount
+                "Verified payment {} matches transaction {}",
+                payment.id, tx_id
             );
 
             // Validate status transition: pending → completed
-            crate::validation::state_machine::validate_status_transition("pending", "completed")
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            crate::validation::state_machine::validate_status_transition(
+                "pending",
+                "completed",
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             // Update transaction to completed and record horizon_payment_id
             sqlx::query(
@@ -242,11 +230,8 @@ impl AccountMonitor {
             info!("Completed transaction {} via payment monitoring", tx_id);
         } else {
             return Err(anyhow::anyhow!(
-                "No pending transaction found for memo {}, account {}, asset {}, amount {}",
-                memo,
-                payment.to,
-                payment.asset_code,
-                payment_amount
+                "No pending transaction found with memo {}",
+                memo
             ));
         }
 
@@ -280,34 +265,13 @@ impl AccountMonitor {
     }
 
     async fn route_to_dlq(&self, payment: &Payment, error: &anyhow::Error) -> anyhow::Result<()> {
-        // Try to extract transaction ID and details if a matching transaction exists.
-        // #924: scope by stellar_account (payment.to) and asset_code so we don't
-        // accidentally DLQ a transaction belonging to a different account that
-        // happens to share the same memo.
+        // Try to extract transaction ID and details if a matching transaction exists
         if let Some(memo) = &payment.memo {
             if let Ok(Some((tx_id, stellar_account, amount, asset_code, anchor_tx_id))) =
-                sqlx::query_as::<
-                    _,
-                    (
-                        Uuid,
-                        String,
-                        sqlx::types::BigDecimal,
-                        String,
-                        Option<String>,
-                    ),
-                >(
-                    "SELECT id, stellar_account, amount, asset_code, anchor_transaction_id \
-                     FROM transactions \
-                     WHERE memo = $1 \
-                       AND stellar_account = $2 \
-                       AND asset_code = $3 \
-                       AND status = 'pending' \
-                     ORDER BY created_at ASC \
-                     LIMIT 1",
+                sqlx::query_as::<_, (Uuid, String, sqlx::types::Decimal, String, Option<String>)>(
+                    "SELECT id, stellar_account, amount, asset_code, anchor_transaction_id FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
                 )
                 .bind(memo)
-                .bind(&payment.to)
-                .bind(&payment.asset_code)
                 .fetch_optional(&self.pool)
                 .await
             {
@@ -337,28 +301,22 @@ impl AccountMonitor {
     pub async fn start_streaming(&self, account: &str) -> anyhow::Result<()> {
         info!("Starting SSE stream for account {}", account);
 
-        // Load the persisted paging token so the stream resumes without gaps.
-        let initial_cursor = self.get_cursor(account).await?;
-
         let (tx, mut rx) = mpsc::channel(100);
 
         let client = self.horizon_client.clone();
         let account_clone = account.to_string();
-        let cursor_clone = initial_cursor.clone();
 
+        // Spawn stream task
         tokio::spawn(async move {
-            if let Err(e) = client
-                .stream_payments(&account_clone, tx, cursor_clone)
-                .await
-            {
+            if let Err(e) = client.stream_payments(&account_clone, tx).await {
                 error!("Stream error for {}: {}", account_clone, e);
             }
         });
 
+        // Process stream events
         while let Some(result) = rx.recv().await {
             match result {
                 Ok(payment) => {
-                    let payment_id = payment.id.clone();
                     let payment_obj = Payment {
                         id: payment.id,
                         from: payment.from,
@@ -369,28 +327,17 @@ impl AccountMonitor {
                         memo_type: payment.memo_type,
                     };
 
-                    match self.process_payment(&payment_obj).await {
-                        Ok(_) => {
-                            // Persist cursor so a process restart resumes from here.
-                            if let Err(e) = self.save_cursor(account, &payment_id).await {
-                                warn!("Failed to persist stream cursor for {}: {}", account, e);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to process streamed payment {}: {}", payment_id, e);
-                            if let Err(dlq_err) = self.route_to_dlq(&payment_obj, &e).await {
-                                error!(
-                                    "Failed to route payment {} to DLQ: {}",
-                                    payment_id, dlq_err
-                                );
-                            }
-                        }
+                    if let Err(e) = self.process_payment(&payment_obj).await {
+                        warn!("Failed to process streamed payment: {}", e);
                     }
                 }
                 Err(e) => {
                     warn!("Stream error: {}, falling back to polling", e);
-                    self.start().await;
-                    return Ok(());
+                    // Fall back to polling
+                    return {
+                        self.start().await;
+                        Ok(())
+                    };
                 }
             }
         }
@@ -399,10 +346,10 @@ impl AccountMonitor {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     async fn get_pool() -> PgPool {
         sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL not set"))
@@ -420,11 +367,11 @@ mod tests {
         let tx_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, memo) 
-             VALUES ($1, $2, $3, $4, 'pending', $5)",
+             VALUES ($1, $2, $3, $4, 'pending', $5)"
         )
         .bind(tx_id)
         .bind(account)
-        .bind(sqlx::types::BigDecimal::from_str(&amount.to_string()).unwrap())
+        .bind(sqlx::types::Decimal::from_str_exact(&amount.to_string()).unwrap())
         .bind(asset_code)
         .bind(memo)
         .execute(pool)
@@ -452,13 +399,11 @@ mod tests {
     }
 
     async fn get_dlq_count(pool: &PgPool, tx_id: Uuid) -> i64 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM transaction_dlq WHERE transaction_id = $1",
-        )
-        .bind(tx_id)
-        .fetch_one(pool)
-        .await
-        .expect("fetch failed")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM transaction_dlq WHERE transaction_id = $1")
+            .bind(tx_id)
+            .fetch_one(pool)
+            .await
+            .expect("fetch failed")
     }
 
     #[tokio::test]
@@ -479,7 +424,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -526,7 +471,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -534,11 +479,7 @@ mod tests {
 
         let result = monitor.process_payment(&payment).await;
         assert!(
-            result.is_err()
-                && result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("No pending transaction found"),
+            result.is_err() && result.unwrap_err().to_string().contains("less than expected"),
             "Should reject underpayment"
         );
 
@@ -564,7 +505,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -572,11 +513,7 @@ mod tests {
 
         let result = monitor.process_payment(&payment).await;
         assert!(
-            result.is_err()
-                && result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("No pending transaction found"),
+            result.is_err() && result.unwrap_err().to_string().contains("does not match"),
             "Should reject wrong asset"
         );
 
@@ -602,7 +539,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -610,11 +547,7 @@ mod tests {
 
         let result = monitor.process_payment(&payment).await;
         assert!(
-            result.is_err()
-                && result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("No pending transaction found"),
+            result.is_err() && result.unwrap_err().to_string().contains("destination"),
             "Should reject wrong destination"
         );
 
@@ -640,7 +573,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -674,7 +607,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -705,7 +638,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,
@@ -745,7 +678,7 @@ mod tests {
         };
 
         let monitor = AccountMonitor::new(
-            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            HorizonClient::new("https://horizon-testnet.stellar.org"),
             pool.clone(),
             vec![account.to_string()],
             60,

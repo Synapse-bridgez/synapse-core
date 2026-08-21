@@ -1,11 +1,6 @@
 use clap::Parser;
 use sqlx::migrate::Migrator;
 use std::{net::SocketAddr, path::Path, sync::atomic::AtomicU64, sync::Arc};
-use synapse_core::cli;
-use synapse_core::cli::{
-    BackupCommands, Cli, Commands, DbCommands, GraphqlCommands, SettlementsCommands, StatsCommands,
-    TxCommands,
-};
 use synapse_core::{
     config, db,
     db::pool_manager::PoolManager,
@@ -26,6 +21,8 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+mod cli;
+use cli::{BackupCommands, Cli, Commands, DbCommands, TxCommands};
 
 /// OpenAPI Schema for the Synapse Core API
 #[derive(OpenApi)]
@@ -100,56 +97,12 @@ async fn main() -> anyhow::Result<()> {
                 let pool = db::create_pool(&config).await?;
                 cli::handle_tx_force_complete(&pool, tx_id).await
             }
-            TxCommands::List {
-                cursor,
-                limit,
-                from_date,
-                to_date,
-                format,
-            } => cli::handle_tx_list(&config, cursor, limit, from_date, to_date, &format).await,
             TxCommands::Reconcile {
                 account,
                 start,
                 end,
                 format,
             } => cli::handle_tx_reconcile(&config, &account, &start, &end, &format).await,
-            TxCommands::Search {
-                status,
-                asset_code,
-                min_amount,
-                max_amount,
-                from,
-                to,
-                stellar_account,
-                cursor,
-                limit,
-                format,
-                url,
-            } => {
-                cli::handle_tx_search(
-                    &config,
-                    status,
-                    asset_code,
-                    min_amount,
-                    max_amount,
-                    from,
-                    to,
-                    stellar_account,
-                    cursor,
-                    limit,
-                    &format,
-                    url,
-                )
-                .await
-            }
-        },
-        Some(Commands::Settlements(settlements_cmd)) => match settlements_cmd {
-            SettlementsCommands::List { format, url } => {
-                cli::handle_settlements_list(&config, &format, url).await
-            }
-            SettlementsCommands::Get { id, format, url } => {
-                cli::handle_settlements_get(&config, &id, &format, url).await
-            }
         },
         Some(Commands::Db(db_cmd)) => match db_cmd {
             DbCommands::Migrate => cli::handle_db_migrate(&config).await,
@@ -162,42 +115,12 @@ async fn main() -> anyhow::Result<()> {
             BackupCommands::Restore { filename } => {
                 cli::handle_backup_restore(&config, &filename).await
             }
-            BackupCommands::RestorePitr {
-                timestamp,
-                dry_run,
-                yes,
-            } => cli::handle_backup_restore_pitr(&config, &timestamp, dry_run, yes).await,
+            BackupCommands::RestorePitr { timestamp } => {
+                cli::handle_backup_restore_pitr(&config, &timestamp).await
+            }
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
-        Some(Commands::Config) => cli::handle_config_validate(&config).await,
-        Some(Commands::Stats(stats_cmd)) => {
-            let default_url = format!("http://localhost:{}", config.server_port);
-            match stats_cmd {
-                StatsCommands::Status { url, json } => {
-                    cli::handle_stats_status(&url.unwrap_or(default_url), json).await
-                }
-                StatsCommands::Daily { url, days, json } => {
-                    cli::handle_stats_daily(&url.unwrap_or(default_url), days, json).await
-                }
-                StatsCommands::Assets { url, json } => {
-                    cli::handle_stats_assets(&url.unwrap_or(default_url), json).await
-                }
-                StatsCommands::Cache { url, json } => {
-                    cli::handle_stats_cache(&url.unwrap_or(default_url), json).await
-                }
-            }
-        }
-        Some(Commands::Graphql(gql_cmd)) => match gql_cmd {
-            GraphqlCommands::Query {
-                query,
-                variables,
-                url,
-            } => {
-                let base_url =
-                    url.unwrap_or_else(|| format!("http://localhost:{}", config.server_port));
-                cli::handle_graphql_query(&base_url, &query, variables.as_deref()).await
-            }
-        },
+        Some(Commands::Config) => cli::handle_config_validate(&config),
     }
 }
 
@@ -217,7 +140,6 @@ async fn serve(
 
     if pool_manager.replica().is_some() {
         tracing::info!("Database replica configured - read queries will be routed to replica");
-        pool_manager.start_health_checks();
     } else {
         tracing::info!("No replica configured - all queries will use primary database");
     }
@@ -322,7 +244,7 @@ async fn serve(
     let idempotency_lock_contention = Arc::new(AtomicU64::new(0));
     let idempotency_errors = Arc::new(AtomicU64::new(0));
     let idempotency_fallback_count = Arc::new(AtomicU64::new(0));
-    let idempotency_service = IdempotencyService::new(
+    let _idempotency_service = IdempotencyService::new(
         &config.redis_url,
         pool.clone(),
         Arc::clone(&idempotency_cache_hits),
@@ -331,8 +253,7 @@ async fn serve(
         Arc::clone(&idempotency_lock_contention),
         Arc::clone(&idempotency_errors),
         Arc::clone(&idempotency_fallback_count),
-    )
-    .ok();
+    )?;
     tracing::info!("Redis idempotency service initialized");
 
     // Initialize query cache
@@ -356,11 +277,7 @@ async fn serve(
     tracing::info!("Feature flags service initialized");
 
     // Initialize secrets store and start rotation task (if Vault is configured).
-    // Mirrors the use_vault check in Config::load() (config.rs) so both agree
-    // on whether Vault is enabled.
-    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok()
-        && std::env::var("VAULT_SECRET_ID").is_ok()
-    {
+    let secrets_store = if std::env::var("VAULT_ROLE_ID").is_ok() {
         match synapse_core::secrets::SecretsManager::new().await {
             Ok(manager) => {
                 let anchor_secret = manager.get_anchor_secret().await?;
@@ -386,14 +303,12 @@ async fn serve(
         config.processor_min_batch as u64,
     ));
     // Initialize asset registry cache (refreshes every 5 minutes)
-    let asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to initialize asset registry cache: {e}"))?;
+    let _asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
-        pool_manager: pool_manager.clone(),
+        pool_manager,
         horizon_client: horizon_client.clone(),
         feature_flags,
         redis_url: config.redis_url.clone(),
@@ -410,10 +325,6 @@ async fn serve(
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
         ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        quota_manager: synapse_core::middleware::quota::QuotaManager::new(&config.redis_url)
-            .map_err(|e| anyhow::anyhow!("Failed to initialise QuotaManager: {e}"))?,
-        asset_cache,
-        idempotency_service,
     };
 
     // Load tenant configs on startup
@@ -465,7 +376,7 @@ async fn serve(
         current_batch_size,
         pending_queue_depth,
     );
-    let processor_shutdown = processor_pool.start();
+    let _processor_shutdown = processor_pool.start();
 
     // Register and start scheduled jobs
     let scheduler = synapse_core::services::JobScheduler::new();
@@ -483,54 +394,10 @@ async fn serve(
     } else {
         tracing::info!("RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled");
     }
-
-    // Register transaction processor job
-    let tx_processor_job =
-        synapse_core::services::TransactionProcessorJob::new(pool.clone(), horizon_client.clone());
-    if let Err(e) = scheduler.register_job(Box::new(tx_processor_job)).await {
-        tracing::warn!("Failed to register transaction processor job: {}", e);
-    }
-
-    // Register audit log retention job
-    let audit_log_job = synapse_core::services::AuditLogRetentionJob::new(pool.clone());
-    if let Err(e) = scheduler.register_job(Box::new(audit_log_job)).await {
-        tracing::warn!("Failed to register audit log retention job: {}", e);
-    }
-
-    // Register backup verification job
-    let backup_service = std::sync::Arc::new(synapse_core::services::BackupService::new(
-        std::env::var("DATABASE_URL").unwrap_or_default(),
-        std::path::PathBuf::from(&config.backup_dir),
-        config.backup_encryption_key.clone(),
-    ));
-    let backup_verification_job =
-        synapse_core::services::BackupVerificationJob::new(backup_service);
-    if let Err(e) = scheduler
-        .register_job(Box::new(backup_verification_job))
-        .await
-    {
-        tracing::warn!("Failed to register backup verification job: {}", e);
-    }
-
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
     tracing::info!("Job scheduler started");
-
-    // Run initialization checks and mark service as ready
-    // This must happen before the HTTP listener starts accepting traffic
-    if let Err(e) = app_state.readiness
-        .run_initialization_checks(
-            &pool,
-            &config.redis_url,
-            &config.stellar_horizon_url,
-        )
-        .await
-    {
-        tracing::error!("Initialization checks failed: {}", e);
-        return Err(e.into());
-    }
-    tracing::info!("Initialization checks passed — service is now ready");
 
     let app = synapse_core::create_app(app_state.clone());
     let readiness = app_state.readiness.clone();
@@ -589,31 +456,16 @@ async fn serve(
                 tracing::info!("Received Ctrl-C");
             }
 
-            // Signal background workers to stop accepting new work
-            // This must happen BEFORE readiness drain so existing connections can complete
-            tracing::info!("Signaling background workers (processor pool and scheduler) to stop");
-
-            // Stop the processor pool - workers will finish current batches then exit
-            drop(processor_shutdown);
-
-            // Stop the job scheduler - jobs will stop accepting new work
-            if let Err(e) = scheduler.stop().await {
-                tracing::error!("Error stopping scheduler: {}", e);
-            }
-
             // If not already draining (e.g. /admin/drain was not called), start drain now
             if !readiness.is_draining() {
                 readiness.start_drain();
             }
             readiness.wait_for_drain().await;
-
-            // Gracefully drain and close all database pools before exiting
-            // This must happen after the readiness drain so that in-flight requests can complete
-            tracing::info!("Starting graceful database shutdown sequence");
-            pool_manager.graceful_shutdown().await;
-            synapse_core::db::graceful_shutdown(&pool).await;
         })
         .await?;
+
+    // Gracefully drain and close the database pool before exiting.
+    synapse_core::db::graceful_shutdown(&pool).await;
 
     // Flush and shut down the OTel exporter on clean exit.
     tracer_manager.shutdown();

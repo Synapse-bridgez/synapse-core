@@ -53,6 +53,7 @@ pub mod models;
 pub mod partition;
 pub mod pool_manager;
 pub mod queries;
+pub mod session;
 pub mod slow_query;
 pub mod webhook;
 

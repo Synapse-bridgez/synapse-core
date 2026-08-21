@@ -9,7 +9,6 @@ pub mod error_handling;
 pub mod health_checks;
 pub mod input_validation;
 pub mod metrics_optimization;
-pub mod rate_limiting;
 pub mod reconnection;
 pub mod webhook;
 
@@ -19,11 +18,8 @@ pub use error_handling::{ErrorAction, ErrorHandler, TelemetryError, TelemetryRes
 pub use health_checks::{HealthCheckConfig, HealthCheckManager, HealthCheckResult};
 pub use input_validation::InputValidator;
 pub use metrics_optimization::{CardinalityLimiter, MetricsInstruments};
-pub use rate_limiting::{
-    TelemetryRateLimitConfig, TelemetryRateLimitMetrics, TelemetryRateLimiter,
-};
 pub use reconnection::ReconnectionManager;
-pub use webhook::{TelemetryWebhookHandler, WebhookEventPayload, WebhookResult};
+pub use webhook::{TelemetryWebhookHandler, WebhookPayload, WebhookResult};
 
 // ---------------------------------------------------------------------------
 // OpenTelemetry tracer initialisation.
