@@ -113,10 +113,34 @@ impl PoolManager {
             }
         });
     }
+
+    /// Gracefully shutdown all managed pools (primary and optional replica).
+    /// Waits for in-flight queries to complete before closing.
+    pub async fn graceful_shutdown(&self) {
+        tracing::info!("Gracefully shutting down PoolManager pools");
+
+        // Shutdown primary pool
+        if !self.primary.is_closed() {
+            shutdown_pool(&self.primary, "primary").await;
+        }
+
+        // Shutdown replica pool if configured
+        if let Some(replica) = &self.replica {
+            if !replica.is_closed() {
+                shutdown_pool(replica, "replica").await;
+            }
+        }
+
+        tracing::info!("PoolManager graceful shutdown complete");
+    }
+}
 }
 
 /// How often the background health-check task probes primary/replica.
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Maximum time to wait for in-flight queries to finish during graceful shutdown.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn build_pool(
     url: &str,
@@ -127,4 +151,47 @@ fn build_pool(
         // Fail fast instead of hanging when the pool is exhausted.
         .acquire_timeout(Duration::from_secs(5))
         .connect(url)
+}
+
+/// Gracefully shutdown a single pool, waiting for in-flight queries.
+async fn shutdown_pool(pool: &PgPool, name: &str) {
+    if pool.is_closed() {
+        tracing::debug!("Database {} pool already closed; skipping graceful shutdown", name);
+        return;
+    }
+
+    let active = pool.size().saturating_sub(pool.num_idle() as u32);
+    tracing::info!(
+        pool_name = name,
+        active_connections = active,
+        timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+        "Starting graceful shutdown of {} pool",
+        name
+    );
+
+    let drained = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, async {
+        loop {
+            let in_flight = pool.size().saturating_sub(pool.num_idle() as u32);
+            if in_flight == 0 {
+                break;
+            }
+            tracing::debug!(in_flight, "Waiting for {} pool in-flight queries to complete", name);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    if drained.is_err() {
+        let remaining = pool.size().saturating_sub(pool.num_idle() as u32);
+        tracing::warn!(
+            pool_name = name,
+            remaining_connections = remaining,
+            timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "Graceful shutdown timeout exceeded for {} pool; forcing close",
+            name
+        );
+    }
+
+    pool.close().await;
+    tracing::info!("Database {} pool closed", name);
 }
