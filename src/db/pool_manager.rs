@@ -134,7 +134,6 @@ impl PoolManager {
         tracing::info!("PoolManager graceful shutdown complete");
     }
 }
-}
 
 /// How often the background health-check task probes primary/replica.
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
