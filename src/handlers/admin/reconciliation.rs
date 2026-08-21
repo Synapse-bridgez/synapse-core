@@ -402,19 +402,22 @@ pub async fn run_reconciliation(
         }
     };
 
-    if let Err(e) = ReconciliationService::store_report(&pool, &report).await {
-        tracing::error!("Failed to store reconciliation report: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "Failed to store reconciliation report"
-            })),
-        )
-            .into_response();
-    }
+    let report_id = match ReconciliationService::store_report(&pool, &report).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("Failed to store reconciliation report: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to store reconciliation report"
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let summary = ReconciliationReportSummary::from((
-        Uuid::new_v4(),
+        report_id,
         report.generated_at,
         report.period_start,
         report.period_end,

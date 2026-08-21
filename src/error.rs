@@ -258,6 +258,9 @@ pub enum AppError {
     #[error("Stale transition: settlement state changed during processing")]
     StaleTransition,
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Invalid webhook signature")]
     InvalidWebhookSignature,
 
@@ -306,6 +309,7 @@ impl AppError {
             AppError::TransactionAlreadyProcessed(_) => StatusCode::CONFLICT,
             AppError::InvalidStatusTransition(_) => StatusCode::BAD_REQUEST,
             AppError::StaleTransition => StatusCode::CONFLICT,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::InvalidWebhookSignature => StatusCode::UNAUTHORIZED,
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,

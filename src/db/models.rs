@@ -427,6 +427,9 @@ pub struct Asset {
     pub asset_issuer: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub enabled: bool,
+    pub min_amount: Option<bigdecimal::BigDecimal>,
+    pub max_amount: Option<bigdecimal::BigDecimal>,
+    pub settlement_schedule: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -434,9 +437,13 @@ pub struct Asset {
 impl Asset {
     /// Fetch all assets from the database.
     pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
-            .fetch_all(pool)
-            .await
+        sqlx::query_as::<_, Self>(
+            "SELECT id, asset_code, asset_issuer, metadata, enabled, \
+             min_amount, max_amount, settlement_schedule, created_at, updated_at \
+             FROM assets ORDER BY asset_code"
+        )
+        .fetch_all(pool)
+        .await
     }
 
     /// Check whether a given asset code is registered and enabled.
