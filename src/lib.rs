@@ -1,10 +1,7 @@
-pub mod adapters;
 pub mod auth;
 pub mod cache;
-pub mod cli;
 pub mod config;
 pub mod db;
-pub mod domain;
 pub mod error;
 pub mod graphql;
 pub mod handlers;
@@ -12,7 +9,6 @@ pub mod health;
 pub mod metrics;
 pub mod middleware;
 pub mod payments;
-pub mod ports;
 pub mod readiness;
 pub mod schemas;
 pub mod secrets;
@@ -22,7 +18,6 @@ pub mod startup;
 pub mod stellar;
 pub mod telemetry;
 pub mod tenant;
-pub mod use_cases;
 pub mod utils;
 pub mod validation;
 pub mod ws;
@@ -72,14 +67,6 @@ pub struct AppState {
     pub metrics_handle: crate::metrics::MetricsHandle,
     /// Active WebSocket connection count
     pub ws_connection_count: Arc<AtomicUsize>,
-    /// Shared QuotaManager — constructed once at startup so the Redis circuit
-    /// breaker can accumulate failure history across requests and actually trip
-    /// open when Redis is down.
-    pub quota_manager: crate::middleware::quota::QuotaManager,
-    /// Dynamic asset registry, refreshed from the `assets` table every 5 minutes.
-    pub asset_cache: Arc<AssetCache>,
-    /// Redis idempotency service for webhook deduplication
-    pub idempotency_service: Option<crate::middleware::idempotency::IdempotencyService>,
 }
 
 impl AppState {
@@ -100,10 +87,8 @@ impl AppState {
     pub async fn test_new(database_url: &str) -> Self {
         let pool = sqlx::PgPool::connect(database_url).await.unwrap();
         let (tx, _) = broadcast::channel(100);
-        let redis_url = "redis://localhost:6379".to_string();
-        let asset_cache = AssetCache::start(pool.clone(), std::time::Duration::from_secs(300))
-            .await
-            .expect("failed to start asset cache in test_new");
+        let _asset_cache =
+            AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
         Self {
             db: pool.clone(),
             pool_manager: crate::db::pool_manager::PoolManager::new(database_url, None, 10)
@@ -111,7 +96,7 @@ impl AppState {
                 .unwrap(),
             horizon_client: HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
             feature_flags: FeatureFlagService::new(pool),
-            redis_url: redis_url.clone(),
+            redis_url: "redis://localhost:6379".to_string(),
             start_time: std::time::Instant::now(),
             readiness: ReadinessState::new(),
             tx_broadcast: tx,
@@ -123,10 +108,6 @@ impl AppState {
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
             ws_connection_count: Arc::new(AtomicUsize::new(0)),
-            quota_manager: crate::middleware::quota::QuotaManager::new(&redis_url)
-                .expect("quota manager init failed in test_new"),
-            asset_cache,
-            idempotency_service: None,
         }
     }
 }
@@ -143,24 +124,6 @@ impl std::fmt::Debug for ApiState {
     }
 }
 
-/// Build the complete API router with all routes and middleware.
-///
-/// Includes:
-/// - Core API routes (transactions, settlements, callbacks, webhooks)
-/// - Admin routes (quota, locks, webhooks, DLQ, reconciliation, backup)
-/// - Health check endpoints (live, ready, health, errors)
-/// - WebSocket and reconnection endpoints
-///
-/// # Admin Routes Mounted
-/// - `/admin/dlq` - Dead-letter queue listing and requeue operations
-/// - `/admin/webhooks/failed` - List failed webhook deliveries
-/// - `/admin/webhooks/replay/:id` - Replay a single failed webhook
-/// - `/admin/webhooks/replay/batch` - Batch replay failed webhooks
-/// - `/admin/webhooks/endpoints/:id/rate-limit` - Update webhook rate limits
-/// - `/admin/reconciliation/*` - Reconciliation reports
-/// - `/admin/backup/*` - Point-in-time recovery backup restores
-///
-/// All admin routes are protected by admin_auth middleware.
 pub fn create_app(app_state: AppState) -> Router {
     let graphql_schema = crate::graphql::schema::build_schema(app_state.clone());
     let api_state = ApiState {
@@ -168,90 +131,28 @@ pub fn create_app(app_state: AppState) -> Router {
         graphql_schema,
     };
 
-    // Callback routes: rate limiting outermost (runs first) so unauthenticated
-    // floods are throttled before the expensive signature/API-key checks run.
-    // Layer execution order is the reverse of declaration order in axum/tower,
-    // so the last .layer() call becomes the outermost wrapper.
-    let mut callback_routes = Router::new()
+    // Callback routes with validation + quota middleware
+    let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
-        .route(
-            "/callback/transaction",
-            post(handlers::webhook::transaction_callback),
-        )
+        .route("/callback/transaction", post(handlers::webhook::callback))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
+        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::auth::api_key_auth,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::signature_verification::signature_verification,
-        ))
+        ));
+
+    // Webhook route with validation + quota middleware
+    let webhook_routes = Router::new()
+        .route("/webhook", post(handlers::webhook::handle_webhook))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
-        ));
-
-    // Mount idempotency middleware on callback routes when the service is available (#910).
-    if let Some(idempotency) = &app_state.idempotency_service {
-        callback_routes = callback_routes.layer(axum_middleware::from_fn_with_state(
-            idempotency.clone(),
-            crate::middleware::idempotency::idempotency_middleware,
-        ));
-    }
-
-    // Inject SecretsStore for signature verification
-    if let Some(store) = &app_state.secrets_store {
-        callback_routes = callback_routes.layer(axum::Extension(store.clone()));
-    }
-
-    // Inject the DB pool so `api_key_auth` can look up tenant API keys.
-    callback_routes = callback_routes.layer(axum::Extension(app_state.db.clone()));
-
-    // Webhook route: rate limiting outermost (runs first) — same reasoning as
-    // callback_routes above.
-    let mut webhook_routes = Router::new()
-        .route("/webhook", post(handlers::webhook::handle_webhook))
+        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::auth::api_key_auth,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::signature_verification::signature_verification,
-        ))
-        .layer(axum_middleware::from_fn_with_state(
-            app_state.clone(),
-            crate::middleware::quota::rate_limit_middleware,
         ));
-
-    // Mount idempotency middleware on webhook routes when the service is available (#910).
-    if let Some(idempotency) = &app_state.idempotency_service {
-        webhook_routes = webhook_routes.layer(axum_middleware::from_fn_with_state(
-            idempotency.clone(),
-            crate::middleware::idempotency::idempotency_middleware,
-        ));
-    }
-
-    // Inject SecretsStore for signature verification
-    if let Some(store) = &app_state.secrets_store {
-        webhook_routes = webhook_routes.layer(axum::Extension(store.clone()));
-    }
-
-    // Inject the DB pool so `api_key_auth` can look up tenant API keys.
-    webhook_routes = webhook_routes.layer(axum::Extension(app_state.db.clone()));
-
-    // Telemetry webhook route (#976): wire TelemetryWebhookHandler to an actual
-    // HTTP endpoint.  The handler itself performs HMAC-SHA256 signature
-    // verification, payload-size cap, timestamp replay protection, and field
-    // validation — so no additional middleware auth layer is needed here.
-    let telemetry_webhook_routes = Router::new()
-        .route(
-            "/telemetry/webhook",
-            post(handlers::telemetry_webhook::handle_telemetry_webhook),
-        )
-        .with_state(api_state.clone());
 
     // Core API routes (shared between versioned and unversioned)
     let core_routes = Router::new()
@@ -282,18 +183,25 @@ pub fn create_app(app_state: AppState) -> Router {
         middleware::versioning::v2_version_middleware,
     ));
 
-    // Health/liveness/readiness probes: intentionally unauthenticated so load
-    // balancers and orchestrators (e.g. Kubernetes) can reach them without an
-    // API key. Must NOT be added to `admin_router` below, since that router
-    // is wrapped in `admin_auth`.
-    let health_routes = Router::new()
+    // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
+    let mut admin_router = Router::new()
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))
         .route("/errors", get(handlers::error_catalog));
 
-    // Admin routes — auth + SecretsStore injected for rotation-aware auth
-    let mut admin_router = Router::new()
+    if let Some(store) = &app_state.secrets_store {
+        admin_router = admin_router.layer(axum::Extension(store.clone()));
+    }
+
+    admin_router
+        // Unversioned routes default to V2 behaviour
+        .merge(core_routes.layer(axum_middleware::from_fn(
+            middleware::versioning::v2_version_middleware,
+        )))
+        // Versioned route groups
+        .nest("/api/v1", v1_routes)
+        .nest("/api/v2", v2_routes)
         .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
@@ -346,32 +254,9 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
         )
-        // Admin: point-in-time-recovery backup restores
-        .nest("/admin/backup", handlers::admin::backup::backup_routes())
-        // Admin: dead-letter queue and transaction requeue operations
-        .nest("/admin", handlers::dlq::dlq_routes())
-        // Admin: webhook replay and batch operations
-        .nest("/admin", handlers::admin::webhook_replay_routes())
         .layer(axum_middleware::from_fn(
-            crate::middleware::auth::admin_auth,
-        ));
-
-    if let Some(store) = &app_state.secrets_store {
-        admin_router = admin_router.layer(axum::Extension(store.clone()));
-    }
-
-    admin_router
-        // Unauthenticated health/liveness/readiness probes
-        .merge(health_routes)
-        // Unversioned routes default to V2 behaviour
-        .merge(core_routes.layer(axum_middleware::from_fn(
-            middleware::versioning::v2_version_middleware,
-        )))
-        // Versioned route groups
-        .nest("/api/v1", v1_routes)
-        .nest("/api/v2", v2_routes)
-        // Telemetry webhook ingestion — HMAC-authenticated by the handler (#976)
-        .merge(telemetry_webhook_routes)
+            middleware::panic_recovery::panic_recovery_middleware,
+        ))
         .with_state(api_state)
         .merge(
             Router::new()
@@ -383,20 +268,6 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/reconnect", post(handlers::reconnection::reconnect))
                 .with_state(app_state),
         )
-        // Middleware order (innermost to outermost):
-        // 1. panic_recovery — catch panics before they escape (innermost)
-        // 2. error_enrichment — read error responses
-        // 3. request_logger — set request ID extension (outermost)
-        // Note: In Axum, the last .layer() call is the outermost (runs first on request,
-        // last on response). So we apply them in reverse order of desired execution.
-        // This ensures request_logger runs first and sets the request ID that
-        // error_enrichment can then read.
-        .layer(axum_middleware::from_fn(
-            middleware::panic_recovery::panic_recovery_middleware,
-        ))
-        .layer(axum_middleware::from_fn(
-            middleware::error_enrichment::error_enrichment_middleware,
-        ))
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))

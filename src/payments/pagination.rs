@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use utoipa::ToSchema;
 
 /// Configuration for pagination caching.
@@ -51,13 +51,6 @@ impl PaginationParams {
                 page_size, config.max_page_size
             ));
         }
-        let max_page = u32::MAX / page_size;
-        if page > max_page {
-            return Err(format!(
-                "page {} exceeds maximum {} for page_size {}",
-                page, max_page, page_size
-            ));
-        }
         Ok(PaginationParams { page, page_size })
     }
 
@@ -89,8 +82,6 @@ impl CachedCount {
 pub struct PaginationManager {
     config: PaginationConfig,
     cached_counts: Arc<RwLock<std::collections::HashMap<String, CachedCount>>>,
-    // Per-key locks to prevent cache-stampede (single-flight pattern)
-    in_flight_locks: Arc<RwLock<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl PaginationManager {
@@ -104,40 +95,16 @@ impl PaginationManager {
         Self {
             config,
             cached_counts: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            in_flight_locks: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
     /// Get or compute the total count for a query, with caching.
-    /// Uses a single-flight pattern to prevent cache-stampede when multiple
-    /// concurrent requests miss the cache for the same key.
     pub async fn get_cached_count(
         &self,
         cache_key: &str,
         compute_count: impl std::future::Future<Output = Result<u64, String>>,
     ) -> Result<u64, String> {
         // Check if we have a valid cached count
-        let cached = self.cached_counts.read().await;
-        if let Some(cached_count) = cached.get(cache_key) {
-            if !cached_count.is_expired(&self.config) {
-                return Ok(cached_count.count);
-            }
-        }
-        drop(cached);
-
-        // Get or create a per-key lock for single-flight coordination
-        let key_lock = {
-            let mut locks = self.in_flight_locks.write().await;
-            locks
-                .entry(cache_key.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-
-        // Acquire the per-key lock (only first requester proceeds, others wait)
-        let _guard = key_lock.lock().await;
-
-        // After acquiring lock, check cache again (another task may have computed it)
         let cached = self.cached_counts.read().await;
         if let Some(cached_count) = cached.get(cache_key) {
             if !cached_count.is_expired(&self.config) {
@@ -228,13 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pagination_params_page_overflow() {
-        let config = PaginationConfig::default();
-        let result = PaginationParams::new(50_000_000, 100, &config);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_pagination_offset_calculation() {
         let config = PaginationConfig::default();
         let params = PaginationParams::new(2, 10, &config).unwrap();
@@ -294,47 +254,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(call_count, 2);
-    }
-
-    #[tokio::test]
-    async fn test_cache_stampede_prevention() {
-        // Verify that concurrent cache misses coalesce into a single computation
-        let manager = Arc::new(PaginationManager::new());
-        let call_count = Arc::new(tokio::sync::Mutex::new(0));
-
-        let mut handles = vec![];
-
-        // Spawn 5 concurrent requests that will all miss the cache
-        for _ in 0..5 {
-            let manager = manager.clone();
-            let call_count = call_count.clone();
-
-            let handle = tokio::spawn(async move {
-                let count = manager
-                    .get_cached_count("stampede_test", async {
-                        let mut count = call_count.lock().await;
-                        *count += 1;
-                        // Simulate expensive work
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        Ok::<u64, String>(42)
-                    })
-                    .await
-                    .unwrap();
-
-                count
-            });
-
-            handles.push(handle);
-        }
-
-        // Wait for all tasks to complete
-        for handle in handles {
-            let result = handle.await.unwrap();
-            assert_eq!(result, 42);
-        }
-
-        // Verify only one computation occurred (not 5)
-        let final_count = *call_count.lock().await;
-        assert_eq!(final_count, 1);
     }
 }

@@ -12,6 +12,7 @@ pub const ANCHOR_TRANSACTION_ID_MAX_LEN: usize = 255;
 pub const CALLBACK_TYPE_MAX_LEN: usize = 20;
 pub const CALLBACK_STATUS_MAX_LEN: usize = 20;
 pub const AMOUNT_INPUT_MAX_LEN: usize = 64;
+pub const ALLOWED_ASSET_CODES: &[&str] = &["USD"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,9 +131,6 @@ pub fn validate_stellar_account(account: &str) -> ValidationResult {
     validate_stellar_address(account)
 }
 
-/// Validates the *shape* of an asset code (charset, length). This does not check
-/// whether the asset is actually registered/enabled — callers with access to the
-/// dynamic asset registry (`AssetCache`) must check that separately.
 pub fn validate_asset_code(asset_code: &str) -> ValidationResult {
     let asset_code = sanitize_string(asset_code);
     validate_required("asset_code", &asset_code)?;
@@ -147,6 +145,8 @@ pub fn validate_asset_code(asset_code: &str) -> ValidationResult {
             "must contain only uppercase letters and digits",
         ));
     }
+
+    validate_enum("asset_code", &asset_code, ALLOWED_ASSET_CODES)?;
 
     Ok(())
 }
@@ -230,9 +230,8 @@ mod tests {
     fn validates_asset_code() {
         assert!(validate_asset_code("USD").is_ok());
         assert!(validate_asset_code("  USD  ").is_ok());
-        assert!(validate_asset_code("EUR").is_ok());
-        assert!(validate_asset_code("USDC").is_ok());
         assert!(validate_asset_code("usd").is_err());
+        assert!(validate_asset_code("EUR").is_err());
         assert!(validate_asset_code(&"A".repeat(13)).is_err());
         assert!(validate_asset_code("US D").is_err());
         assert!(validate_asset_code("").is_err());
@@ -373,14 +372,14 @@ mod property_tests {
     // --- validate_asset_code ---
 
     proptest! {
-        /// Any well-formed (1-12 uppercase alphanumeric chars) asset code must be
-        /// accepted at the shape-validation layer; registry membership is checked
-        /// separately via `AssetCache`.
+        /// Only "USD" is a valid asset code; any other uppercase string must be rejected.
         #[test]
-        fn prop_well_formed_asset_code_accepted(
+        fn prop_non_usd_asset_code_rejected(
             code in "[A-Z]{1,12}"
         ) {
-            prop_assert!(validate_asset_code(&code).is_ok(), "Expected well-formed code to be accepted: {}", code);
+            if code != "USD" {
+                prop_assert!(validate_asset_code(&code).is_err(), "Expected non-USD code to be rejected: {}", code);
+            }
         }
 
         /// Asset codes longer than 12 chars must always be rejected.

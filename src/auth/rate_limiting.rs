@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use crate::auth::error::AuthError;
 use crate::auth::metrics::AuthMetrics;
-use crate::cache::rate_limiting::{RateLimitConfig, RateLimiter};
+use crate::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy, RateLimiter};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,10 +60,6 @@ const MAX_IDENTITY_KEY_LEN: usize = 256;
 
 /// Minimum allowed length for an identity key.
 const MIN_IDENTITY_KEY_LEN: usize = 1;
-
-/// Maximum number of per-identity auth buckets held in memory at once.
-/// Mirrors the cap in `middleware::quota::LocalFallbackLimiter` (#912).
-const MAX_AUTH_BUCKETS: usize = 10_000;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -153,6 +149,7 @@ impl AuthRateLimiter {
         let vault_bucket = RateLimiter::with_config(RateLimitConfig {
             max_requests: config.vault_probe_limit,
             window: config.window,
+            strategy: RateLimitStrategy::TokenBucket,
         });
         Self {
             config,
@@ -256,29 +253,12 @@ impl AuthRateLimiter {
 
     fn get_or_create_auth_bucket(&self, identity: &str) -> RateLimiter {
         let mut map = self.auth_buckets.lock().unwrap_or_else(|p| p.into_inner());
-
-        // If the map is at capacity and the identity doesn't already have a bucket,
-        // sweep expired entries before creating a new one.  This mirrors the eviction
-        // policy in `middleware::quota::LocalFallbackLimiter` and prevents unbounded
-        // memory growth when callers present many distinct identity strings (#912).
-        if !map.contains_key(identity) && map.len() >= MAX_AUTH_BUCKETS {
-            map.retain(|_, limiter| limiter.available_tokens() < self.config.auth_limit);
-        }
-
-        // If still at capacity after eviction (all buckets are actively rate-limited),
-        // deny by returning a bucket that has zero tokens remaining.
-        if !map.contains_key(identity) && map.len() >= MAX_AUTH_BUCKETS {
-            return RateLimiter::with_config(RateLimitConfig {
-                max_requests: 0,
-                window: self.config.window,
-            });
-        }
-
         map.entry(identity.to_string())
             .or_insert_with(|| {
                 RateLimiter::with_config(RateLimitConfig {
                     max_requests: self.config.auth_limit,
                     window: self.config.window,
+                    strategy: RateLimitStrategy::TokenBucket,
                 })
             })
             .clone()

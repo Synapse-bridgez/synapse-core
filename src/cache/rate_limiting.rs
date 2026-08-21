@@ -1,6 +1,7 @@
-//! Rate limiting implementation using a token-bucket algorithm.
+//! Rate limiting implementation using Redis.
 //!
-//! Provides token-bucket rate limiting with configurable limits and time windows.
+//! Provides token bucket and sliding window rate limiting strategies
+//! with configurable limits and time windows.
 //!
 //! # Performance optimisations (#454)
 //! - Token refill is computed in a single integer division instead of floating-point
@@ -19,16 +20,18 @@ use std::time::Duration;
 ///
 /// * `max_requests` - Maximum number of requests allowed within the time window
 /// * `window` - Duration of the time window
+/// * `strategy` - Algorithm to use for rate limiting
 ///
 /// # Example
 ///
 /// ```
-/// use synapse_core::cache::rate_limiting::RateLimitConfig;
+/// use synapse_core::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy};
 /// use std::time::Duration;
 ///
 /// let config = RateLimitConfig {
 ///     max_requests: 100,
 ///     window: Duration::from_secs(60),
+///     strategy: RateLimitStrategy::TokenBucket,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -37,17 +40,28 @@ pub struct RateLimitConfig {
     pub max_requests: u32,
     /// Time window for the rate limit
     pub window: Duration,
+    /// Strategy to use for rate limiting
+    pub strategy: RateLimitStrategy,
 }
 
-/// Rate limiter metrics for tracking token acquisition and rejection.
+/// Rate limiting strategies
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitStrategy {
+    /// Token bucket algorithm
+    TokenBucket,
+    /// Sliding window algorithm
+    SlidingWindow,
+}
+
+/// Cache-level metrics for rate limiting operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RateLimiterMetrics {
+pub struct CacheMetrics {
     acquired_requests: u64,
     rejected_requests: u64,
     refill_events: u64,
 }
 
-impl RateLimiterMetrics {
+impl CacheMetrics {
     /// Creates a new metrics collector.
     pub fn new() -> Self {
         Self::default()
@@ -89,6 +103,7 @@ impl Default for RateLimitConfig {
         Self {
             max_requests: 100,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         }
     }
 }
@@ -210,8 +225,8 @@ impl RateLimiter {
     }
 
     /// Returns a snapshot of the rate-limiter metrics.
-    pub fn metrics(&self) -> RateLimiterMetrics {
-        RateLimiterMetrics {
+    pub fn metrics(&self) -> CacheMetrics {
+        CacheMetrics {
             acquired_requests: self.inner.acquired.load(Ordering::Relaxed),
             rejected_requests: self.inner.rejected.load(Ordering::Relaxed),
             refill_events: self.inner.refills.load(Ordering::Relaxed),
@@ -251,9 +266,7 @@ impl RateLimiter {
             let tokens_to_add = (self.config.max_requests as u64 * elapsed_ms / window_ms) as u32;
             if tokens_to_add > 0 {
                 let current = self.inner.tokens.load(Ordering::Acquire);
-                let new_val = current
-                    .saturating_add(tokens_to_add)
-                    .min(self.config.max_requests);
+                let new_val = (current + tokens_to_add).min(self.config.max_requests);
                 self.inner.tokens.store(new_val, Ordering::Release);
                 self.inner.last_refill_ms.store(now_ms, Ordering::Release);
                 self.inner.refills.fetch_add(1, Ordering::Relaxed);
@@ -291,6 +304,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -305,6 +319,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -318,6 +333,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -331,6 +347,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -347,6 +364,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -364,6 +382,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -381,6 +400,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(1),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -397,6 +417,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -411,6 +432,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 4,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
         let clone = limiter.clone();
@@ -426,6 +448,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -440,6 +463,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_millis(50),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -462,6 +486,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(1),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -476,6 +501,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -491,6 +517,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 2,
             window: Duration::from_millis(50),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -514,6 +541,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 2,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
 
         let client_a = RateLimiter::with_config(config.clone());
@@ -537,6 +565,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(60),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limited_endpoint = RateLimiter::with_config(config);
 
@@ -555,6 +584,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(1),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -573,6 +603,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 10,
             window: Duration::from_millis(100),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -600,6 +631,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 100,
             window: Duration::from_secs(1),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 
@@ -639,6 +671,7 @@ mod tests {
         let config = RateLimitConfig {
             max_requests: 1,
             window: Duration::from_secs(10),
+            strategy: RateLimitStrategy::TokenBucket,
         };
         let limiter = RateLimiter::with_config(config);
 

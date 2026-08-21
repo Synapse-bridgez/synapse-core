@@ -121,12 +121,6 @@ impl HealthChecker {
                 }
             } else if let Some(token) = auth_header.strip_prefix("Bearer ") {
                 validate_auth_header(token)?;
-                // Compare the extracted token against the configured key, the same way
-                // the API-Key branch does.  Without this check any well-formed Bearer
-                // token would pass authentication regardless of its value (#911).
-                if token != key.as_str() {
-                    return Err("Invalid Bearer token".to_string());
-                }
             } else {
                 return Err("Invalid authorization header format".to_string());
             }

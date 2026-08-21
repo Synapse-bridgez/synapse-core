@@ -39,19 +39,11 @@ impl PartitionManager {
         });
     }
 
-    /// Run partition maintenance: create the upcoming partition, then detach
-    /// and archive partitions past the retention window.
-    ///
-    /// Creation still goes through the `create_monthly_partition()` SQL
-    /// function, but retention uses [`crate::db::cron::detach_and_archive_old_partitions`]
-    /// instead of the SQL-only `detach_old_partitions()` so that old
-    /// partitions are actually moved into the `archive` schema rather than
-    /// left as loose, unmanaged tables in `public`.
+    /// Run partition maintenance (create new partitions, detach old ones)
     async fn maintain_partitions(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT create_monthly_partition()")
+        sqlx::query("SELECT maintain_partitions()")
             .execute(&self.pool)
             .await?;
-        crate::db::cron::detach_and_archive_old_partitions(&self.pool, 12).await?;
         Ok(())
     }
 

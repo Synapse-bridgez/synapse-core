@@ -45,8 +45,7 @@ use std::sync::OnceLock;
 
 static METER: OnceLock<Meter> = OnceLock::new();
 
-/// Public accessor to the global meter for creating ad-hoc instruments.
-pub fn meter() -> &'static Meter {
+fn meter() -> &'static Meter {
     METER.get_or_init(|| global::meter("synapse-core"))
 }
 

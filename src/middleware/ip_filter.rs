@@ -102,16 +102,11 @@ fn extract_client_ip(
 fn extract_from_x_forwarded_for(headers: &HeaderMap, trusted_proxy_depth: usize) -> Option<IpAddr> {
     let raw = headers.get("x-forwarded-for")?.to_str().ok()?;
 
-    // Reject the entire header if *any* segment fails to parse (#913).
-    // Silently dropping unparsable entries with filter_map would let an attacker
-    // inject garbage tokens to shift the trusted-depth index and spoof an
-    // allow-listed IP.  By collecting into Option<Vec<_>> we return None (fall
-    // back to ConnectInfo) whenever the header is malformed.
     let chain: Vec<IpAddr> = raw
         .split(',')
         .map(str::trim)
-        .map(parse_ip_from_xff_entry)
-        .collect::<Option<Vec<IpAddr>>>()?;
+        .filter_map(parse_ip_from_xff_entry)
+        .collect();
 
     if chain.is_empty() || trusted_proxy_depth >= chain.len() {
         return None;

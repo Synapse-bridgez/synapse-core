@@ -1,5 +1,5 @@
 use crate::secrets::SecretsManager;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
 use std::env;
@@ -34,13 +34,13 @@ impl AppEnv {
 }
 
 /// Load the profile-specific .env file (.env.development, .env.staging, .env.production)
-/// with precedence over the base .env. Profile-specific values override base .env values.
+/// then fall back to the base .env. Profile file is loaded first so base .env can override.
 fn load_env_profile(app_env: &AppEnv) {
     // Load base .env first (lowest priority)
     dotenv().ok();
-    // Load profile-specific file (higher priority — use _override to ensure it takes precedence)
+    // Load profile-specific file (higher priority — values set here override base .env)
     let profile_file = format!(".env.{}", app_env.as_str());
-    dotenvy::from_filename_override(&profile_file).ok();
+    dotenvy::from_filename(&profile_file).ok();
 }
 
 /// Apply profile defaults for any env vars not already set
@@ -194,19 +194,13 @@ impl Config {
             let db_template = env::var("DATABASE_URL_TEMPLATE").ok();
             let db_url = db_template
                 .map(|template| template.replace("{password}", &db_password))
-                .or_else(|| env::var("DATABASE_URL").ok())
-                .context("DATABASE_URL must be set (or DATABASE_URL_TEMPLATE when using Vault)")?;
+                .unwrap_or_else(|| env::var("DATABASE_URL").unwrap_or_default());
 
             (db_url, anchor_secret)
         } else {
-            let env_secrets = crate::secrets::env_secrets::EnvSecretsManager::new();
             (
-                env_secrets
-                    .get_secret("DATABASE_URL")
-                    .map_err(|e| anyhow::anyhow!(e))?,
-                env_secrets
-                    .get_secret("ANCHOR_WEBHOOK_SECRET")
-                    .map_err(|e| anyhow::anyhow!(e))?,
+                env::var("DATABASE_URL")?,
+                env::var("ANCHOR_WEBHOOK_SECRET")?,
             )
         };
 
@@ -235,13 +229,16 @@ impl Config {
             db_timeouts: DbTimeoutConfig {
                 read_query_secs: env::var("DB_TIMEOUT_READ_SECS")
                     .unwrap_or_else(|_| "5".to_string())
-                    .parse()?,
+                    .parse()
+                    .unwrap_or(5),
                 write_query_secs: env::var("DB_TIMEOUT_WRITE_SECS")
                     .unwrap_or_else(|_| "10".to_string())
-                    .parse()?,
+                    .parse()
+                    .unwrap_or(10),
                 admin_query_secs: env::var("DB_TIMEOUT_ADMIN_SECS")
                     .unwrap_or_else(|_| "60".to_string())
-                    .parse()?,
+                    .parse()
+                    .unwrap_or(60),
             },
             otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")

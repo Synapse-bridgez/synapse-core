@@ -11,7 +11,6 @@
 //! |---------|------|-------------|
 //! | [`RateLimitExceeded`](SecurityError::RateLimitExceeded) | 429 | `ERR_SECURITY_001` |
 //! | [`SessionValidation`](SecurityError::SessionValidation) | 400 | `ERR_SECURITY_002` |
-//! | [`Misconfigured`](SecurityError::Misconfigured) | 500 | `ERR_SECURITY_003` |
 //!
 //! # Security notes
 //!
@@ -55,16 +54,6 @@ pub enum SecurityError {
     /// to **400 Bad Request**.
     #[error("Session validation failed: {0}")]
     SessionValidation(#[from] SessionValidationError),
-
-    /// A security backend is invalid or misconfigured (e.g. a connection pool
-    /// with an invalid endpoint or zero capacity).
-    ///
-    /// This is a static server-side defect, not a client mistake or a
-    /// transient condition — retrying will not help. The HTTP layer maps
-    /// this to **500 Internal Server Error**. No internal configuration
-    /// detail is carried here; full context is logged at the error site.
-    #[error("Security backend misconfigured")]
-    Misconfigured,
 }
 
 impl SecurityError {
@@ -73,7 +62,6 @@ impl SecurityError {
         match self {
             SecurityError::RateLimitExceeded => 429,
             SecurityError::SessionValidation(_) => 400,
-            SecurityError::Misconfigured => 500,
         }
     }
 
@@ -85,7 +73,6 @@ impl SecurityError {
         match self {
             SecurityError::RateLimitExceeded => "ERR_SECURITY_001",
             SecurityError::SessionValidation(_) => "ERR_SECURITY_002",
-            SecurityError::Misconfigured => "ERR_SECURITY_003",
         }
     }
 }

@@ -1,7 +1,4 @@
-pub mod audit;
-pub mod backup;
 pub mod bulk_status;
-pub mod compliance;
 pub mod locks;
 pub mod quota;
 pub mod reconciliation;
@@ -9,7 +6,7 @@ pub mod webhook_replay;
 
 use crate::error::AppError;
 use crate::validation::{validate_max_len, validate_required};
-use crate::{ApiState, AppState};
+use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -70,12 +67,12 @@ pub struct SetAssetEnabledRequest {
 }
 
 /// Create admin routes for queue management
-pub fn admin_routes() -> Router<ApiState> {
+pub fn admin_routes() -> Router<sqlx::PgPool> {
     Router::new().route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
 }
 
 /// Create webhook replay admin routes
-pub fn webhook_replay_routes() -> Router<ApiState> {
+pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
     Router::new()
         .route(
             "/webhooks/failed",
@@ -135,7 +132,7 @@ pub async fn update_flag(
 }
 
 pub async fn update_webhook_rate_limit(
-    State(state): State<ApiState>,
+    State(pool): State<sqlx::PgPool>,
     Path(endpoint_id): Path<uuid::Uuid>,
     Json(payload): Json<UpdateWebhookRateLimitRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -154,7 +151,7 @@ pub async fn update_webhook_rate_limit(
     )
     .bind(payload.max_delivery_rate)
     .bind(endpoint_id)
-    .execute(&state.app_state.db)
+    .execute(&pool)
     .await?;
 
     if result.rows_affected() == 0 {
@@ -331,38 +328,5 @@ pub async fn set_asset_enabled(
             )
                 .into_response()
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_audit_module_declared() {
-        // Verify audit module is properly declared and compiled into the binary
-        // This ensures compliance and audit-log search functionality is accessible
-        let _module_exists = true;
-        assert!(_module_exists);
-    }
-
-    #[test]
-    fn test_compliance_module_declared() {
-        // Verify compliance module is properly declared and compiled into the binary
-        // This ensures regulatory compliance report generation is accessible
-        let _module_exists = true;
-        assert!(_module_exists);
-    }
-
-    #[test]
-    fn test_admin_modules_compilation() {
-        // Meta-test: Verify all admin submodules compile together
-        // If this module compiles, audit and compliance are properly declared
-        let _request = CreateAssetRequest {
-            asset_code: "USD".to_string(),
-            asset_issuer: None,
-            metadata: None,
-        };
-        assert!(_request.asset_code == "USD");
     }
 }

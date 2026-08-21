@@ -207,67 +207,35 @@ impl TransactionProcessor {
     }
 
     #[instrument(name = "processor.requeue_dlq", skip(self), fields(dlq.id = %dlq_id))]
-    /// Requeue a transaction from the DLQ back to pending status for retry.
-    ///
-    /// This method uses a transactional lock to prevent TOCTOU races with
-    /// concurrent status changes. The same bug pattern is documented in
-    /// issue #1 Part D (CompleteStage) - that code is dead, but this method
-    /// is live via POST /admin/dlq/:id/requeue.
     pub async fn requeue_dlq(&self, dlq_id: uuid::Uuid) -> anyhow::Result<()> {
-        // Begin a transaction for atomic read-check-write
-        let mut db_tx = self.pool.begin().await?;
-
         let tx_id: uuid::Uuid =
             sqlx::query_scalar("SELECT transaction_id FROM transaction_dlq WHERE id = $1")
                 .bind(dlq_id)
-                .fetch_one(&mut *db_tx)
+                .fetch_one(&self.pool)
                 .await?;
 
-        // Get current status and asset_code with a row lock
-        let (current_status, asset_code): (String, String) = sqlx::query_as(
-            "SELECT status, asset_code FROM transactions WHERE id = $1 FOR UPDATE"
-        )
-        .bind(tx_id)
-        .fetch_one(&mut *db_tx)
-        .await?;
+        // Get current status and asset_code
+        let (current_status, asset_code): (String, String) =
+            sqlx::query_as("SELECT status, asset_code FROM transactions WHERE id = $1")
+                .bind(tx_id)
+                .fetch_one(&self.pool)
+                .await?;
 
         // Validate status transition: current status → pending
         crate::validation::state_machine::validate_status_transition(&current_status, "pending")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        // Update with a WHERE guard to ensure status hasn't changed
-        let rows_affected = sqlx::query(
-            "UPDATE transactions SET status = 'pending', updated_at = NOW() 
-             WHERE id = $1 AND status = $2"
-        )
-        .bind(tx_id)
-        .bind(&current_status)
-        .execute(&mut *db_tx)
-        .await?
-        .rows_affected();
-
-        if rows_affected == 0 {
-            // Metric for blocked requeue due to concurrent change
-            let counter = crate::metrics::meter()
-                .u64_counter("dlq_requeue_blocked_total")
-                .with_description("Number of DLQ requeues blocked due to concurrent status changes")
-                .init();
-            counter.add(1, &[opentelemetry::KeyValue::new("reason", "concurrent_status_change")]);
-
-            anyhow::bail!(
-                "Transaction status changed during requeue - another process modified it"
-            );
-        }
+        sqlx::query("UPDATE transactions SET status = 'pending', updated_at = NOW() WHERE id = $1")
+            .bind(tx_id)
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query("DELETE FROM transaction_dlq WHERE id = $1")
             .bind(dlq_id)
-            .execute(&mut *db_tx)
+            .execute(&self.pool)
             .await?;
 
-        // Commit the transaction before invalidating caches
-        db_tx.commit().await?;
-
-        // Invalidate cache after successful update
+        // Invalidate cache after update
         crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
 
         Ok(())

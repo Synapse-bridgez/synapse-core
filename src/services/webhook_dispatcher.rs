@@ -90,13 +90,7 @@ impl WebhookDispatcher {
             http: HttpClient::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
-                .map_err(|e| {
-                    redis::RedisError::from((
-                        redis::ErrorKind::IoError,
-                        "failed to build webhook HTTP client",
-                        e.to_string(),
-                    ))
-                })?,
+                .expect("failed to build reqwest client"),
             redis: Client::open(redis_url)?,
             concurrency,
         })
@@ -371,20 +365,17 @@ impl WebhookDispatcher {
 
         let result = self.send_webhook(delivery, endpoint).await;
 
-        // Record circuit breaker outcome. `send_webhook` returns `Ok(true)`
-        // only for an actual 2xx delivery; `Ok(false)` (business-level
-        // failure, e.g. HTTP 500) and `Err` (transport/bookkeeping failure)
-        // both count as a failure for breaker purposes.
+        // Record circuit breaker outcome
         match &result {
-            Ok(true) => {
+            Ok(()) => {
                 let _ = self.circuit_breaker_succeeded(&delivery.endpoint_id).await;
             }
-            Ok(false) | Err(_) => {
+            Err(_) => {
                 let _ = self.circuit_breaker_failed(&delivery.endpoint_id).await;
             }
         }
 
-        result.map(|_| ())
+        result
     }
 
     /// Build an attempt-history entry and append it to the delivery's JSONB column.
@@ -420,22 +411,11 @@ impl WebhookDispatcher {
         Ok(())
     }
 
-    /// Send a single webhook delivery attempt.
-    ///
-    /// Returns `Ok(true)` when the endpoint responded with a 2xx status
-    /// (delivered), `Ok(false)` when the endpoint responded but with a
-    /// non-2xx status (a business-level failure that was still recorded via
-    /// `handle_failure`), and `Err` only for genuine failures to complete
-    /// the attempt (transport errors or a bookkeeping/DB error). Callers use
-    /// the `bool` — not just `is_ok()` — to drive circuit-breaker state,
-    /// since an `Ok(())` used to be returned even when the endpoint itself
-    /// was failing (e.g. HTTP 500), which meant the breaker never tripped
-    /// on a misbehaving endpoint.
     async fn send_webhook(
         &self,
         delivery: &WebhookDelivery,
         endpoint: &WebhookEndpoint,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         let body = serde_json::to_string(&delivery.payload)?;
 
         // Extract timestamp from payload (OutgoingPayload includes timestamp field)
@@ -517,7 +497,6 @@ impl WebhookDispatcher {
                         endpoint = %endpoint.url,
                         "Webhook delivered successfully"
                     );
-                    return Ok(true);
                 } else {
                     self.handle_failure(
                         delivery,
@@ -548,7 +527,7 @@ impl WebhookDispatcher {
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -587,7 +566,7 @@ impl WebhookDispatcher {
                 .fetch_one(&self.pool)
                 .await?;
 
-        self.send_webhook(delivery, &endpoint).await.map(|_| ())
+        self.send_webhook(delivery, &endpoint).await
     }
 
     /// Handle a failed delivery attempt.
@@ -723,10 +702,9 @@ impl WebhookDispatcher {
         match data {
             Some(json) => {
                 let state: serde_json::Value = serde_json::from_str(&json)?;
-                if state.get("state").and_then(|value| value.as_str()) == Some("open") {
-                    let opened_at = state
-                        .get("opened_at")
-                        .and_then(|value| value.as_str())
+                if state["state"] == "open" {
+                    let opened_at = state["opened_at"]
+                        .as_str()
                         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or(Utc::now());
@@ -1106,7 +1084,7 @@ const SIGNATURE_VERSION: &str = "v1";
 /// # Signed Content
 /// The signed content is formatted as: `timestamp.body`
 /// where timestamp is included in the X-Webhook-Timestamp header.
-pub fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> String {
+fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> String {
     let signed_content = format!("{timestamp}.{body}");
     let signature_hex = sign_payload_v1(secret, &signed_content);
     format!("{SIGNATURE_VERSION}={signature_hex}")
@@ -1114,9 +1092,6 @@ pub fn sign_payload_with_version(secret: &str, timestamp: &str, body: &str) -> S
 
 /// Compute HMAC-SHA256 hex signature (v1).
 fn sign_payload_v1(secret: &str, signed_content: &str) -> String {
-    // HMAC constructors accept keys of any length; the `hmac` crate only returns
-    // an error for fixed-size MACs, which these HMAC-SHA variants are not.
-    #[allow(clippy::expect_used, reason = "HMAC-SHA256 accepts any key length")]
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(signed_content.as_bytes());
@@ -1127,9 +1102,6 @@ fn sign_payload_v1(secret: &str, signed_content: &str) -> String {
 /// Currently returns the same as v1 for compatibility.
 #[allow(dead_code)]
 fn sign_payload_v2(secret: &str, signed_content: &str) -> String {
-    // HMAC constructors accept keys of any length; the `hmac` crate only returns
-    // an error for fixed-size MACs, which these HMAC-SHA variants are not.
-    #[allow(clippy::expect_used, reason = "HMAC-SHA512 accepts any key length")]
     let mut mac =
         Hmac::<Sha512>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(signed_content.as_bytes());
@@ -1140,9 +1112,6 @@ fn sign_payload_v2(secret: &str, signed_content: &str) -> String {
 /// This is deprecated in favor of sign_payload_with_version.
 #[allow(dead_code)]
 fn sign_payload(secret: &str, body: &str) -> String {
-    // HMAC constructors accept keys of any length; the `hmac` crate only returns
-    // an error for fixed-size MACs, which these HMAC-SHA variants are not.
-    #[allow(clippy::expect_used, reason = "HMAC-SHA256 accepts any key length")]
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());

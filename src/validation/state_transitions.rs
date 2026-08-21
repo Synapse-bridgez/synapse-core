@@ -1,5 +1,7 @@
-//! Declarative state transition table consumed by all domains.
-//! Each domain builds its allowed transitions from these definitions.
+/// Declarative state transition table consumed by all domains.
+/// Each domain builds its allowed transitions from these definitions.
+
+use std::collections::HashSet;
 
 /// A single allowed transition from one state to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -9,80 +11,40 @@ pub struct Transition {
 }
 
 /// Transaction status state machine.
-/// Valid transitions for transaction lifecycle (pending → processing → completed/failed, …).
-///
-/// `"dlq"` is *not* a `transactions.status` value and intentionally has no
-/// transitions here: dead-lettering is tracked out-of-band in the
-/// `transaction_dlq` side table (see `TransactionProcessor::move_to_dlq`),
-/// which never touches `transactions.status`. `requeue_dlq` transitions the
-/// transaction's existing status back to `"pending"`, which the same-state
-/// and `failed -> pending` rules below already cover.
+/// Valid transitions for transaction lifecycle (pending → processing → completed/failed, dlq → pending, …).
 pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
     // From pending
-    Transition {
-        from: "pending",
-        to: "processing",
-    },
-    Transition {
-        from: "pending",
-        to: "completed",
-    },
-    Transition {
-        from: "pending",
-        to: "failed",
-    },
+    Transition { from: "pending", to: "processing" },
+    Transition { from: "pending", to: "completed" },
+    Transition { from: "pending", to: "failed" },
     // From processing
-    Transition {
-        from: "processing",
-        to: "completed",
-    },
-    Transition {
-        from: "processing",
-        to: "failed",
-    },
+    Transition { from: "processing", to: "completed" },
+    Transition { from: "processing", to: "failed" },
     // From failed (reprocess)
-    Transition {
-        from: "failed",
-        to: "pending",
-    },
+    Transition { from: "failed", to: "pending" },
+    // From dlq (requeue)
+    Transition { from: "dlq", to: "pending" },
 ];
 
 /// Settlement status state machine.
 /// Valid transitions for settlement lifecycle (completed → pending_review → disputed → adjusted → …).
 pub const SETTLEMENT_TRANSITIONS: &[Transition] = &[
-    Transition {
-        from: "completed",
-        to: "pending_review",
-    },
-    Transition {
-        from: "pending_review",
-        to: "disputed",
-    },
-    Transition {
-        from: "pending_review",
-        to: "voided",
-    },
-    Transition {
-        from: "pending_review",
-        to: "completed",
-    },
-    Transition {
-        from: "disputed",
-        to: "adjusted",
-    },
-    Transition {
-        from: "disputed",
-        to: "voided",
-    },
-    Transition {
-        from: "adjusted",
-        to: "completed",
-    },
+    Transition { from: "completed", to: "pending_review" },
+    Transition { from: "pending_review", to: "disputed" },
+    Transition { from: "pending_review", to: "voided" },
+    Transition { from: "pending_review", to: "completed" },
+    Transition { from: "disputed", to: "adjusted" },
+    Transition { from: "disputed", to: "voided" },
+    Transition { from: "adjusted", to: "completed" },
 ];
 
 /// Validates a transition within a given set of allowed transitions.
 /// Allows same-state transitions (idempotent).
-pub fn is_valid_transition(from: &str, to: &str, allowed: &[Transition]) -> bool {
+pub fn is_valid_transition(
+    from: &str,
+    to: &str,
+    allowed: &[Transition],
+) -> bool {
     if from == to {
         return true;
     }
@@ -92,16 +54,11 @@ pub fn is_valid_transition(from: &str, to: &str, allowed: &[Transition]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn test_transaction_transitions_coverage() {
         let transitions: HashSet<_> = TRANSACTION_TRANSITIONS.iter().cloned().collect();
-        assert_eq!(
-            transitions.len(),
-            TRANSACTION_TRANSITIONS.len(),
-            "no duplicate transitions"
-        );
+        assert_eq!(transitions.len(), TRANSACTION_TRANSITIONS.len(), "no duplicate transitions");
 
         // Verify expected pairs exist
         assert!(transitions.contains(&Transition {
@@ -112,20 +69,16 @@ mod tests {
             from: "failed",
             to: "pending"
         }));
-        // "dlq" is deliberately absent: see the doc comment on
-        // `TRANSACTION_TRANSITIONS` — DLQ state lives in the `transaction_dlq`
-        // table, never in `transactions.status`.
-        assert!(!transitions.iter().any(|t| t.from == "dlq" || t.to == "dlq"));
+        assert!(transitions.contains(&Transition {
+            from: "dlq",
+            to: "pending"
+        }));
     }
 
     #[test]
     fn test_settlement_transitions_coverage() {
         let transitions: HashSet<_> = SETTLEMENT_TRANSITIONS.iter().cloned().collect();
-        assert_eq!(
-            transitions.len(),
-            SETTLEMENT_TRANSITIONS.len(),
-            "no duplicate transitions"
-        );
+        assert_eq!(transitions.len(), SETTLEMENT_TRANSITIONS.len(), "no duplicate transitions");
 
         assert!(transitions.contains(&Transition {
             from: "completed",
@@ -139,16 +92,8 @@ mod tests {
 
     #[test]
     fn test_same_state_always_valid() {
-        assert!(is_valid_transition(
-            "pending",
-            "pending",
-            TRANSACTION_TRANSITIONS
-        ));
-        assert!(is_valid_transition(
-            "completed",
-            "completed",
-            SETTLEMENT_TRANSITIONS
-        ));
+        assert!(is_valid_transition("pending", "pending", TRANSACTION_TRANSITIONS));
+        assert!(is_valid_transition("completed", "completed", SETTLEMENT_TRANSITIONS));
         assert!(is_valid_transition(
             "arbitrary_state",
             "arbitrary_state",
@@ -172,8 +117,11 @@ mod tests {
 
     #[test]
     fn test_invalid_settlement_transitions_rejected() {
-        // Same-state transitions are always valid (idempotent) — see
-        // `test_same_state_always_valid` — so only cross-state rejections belong here.
+        assert!(!is_valid_transition(
+            "pending_review",
+            "pending_review",
+            SETTLEMENT_TRANSITIONS
+        ));
         assert!(!is_valid_transition(
             "adjusted",
             "disputed",
