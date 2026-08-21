@@ -411,19 +411,64 @@ pub async fn batch_replay_webhooks(
 /// Reprocess a webhook by updating its status to pending
 /// This respects idempotency keys and existing transaction state
 async fn reprocess_webhook(pool: &PgPool, transaction: &Transaction) -> Result<(), AppError> {
-    // Update transaction status to pending for reprocessing
-    sqlx::query(
-        "UPDATE transactions 
-         SET status = 'pending', updated_at = NOW() 
-         WHERE id = $1",
+    // Begin a transaction to ensure atomic read-check-write.
+    // Use FOR UPDATE to lock the row and prevent concurrent modifications.
+    let mut db_tx = pool.begin().await.map_err(|e| {
+        AppError::DatabaseError(format!("Failed to begin transaction: {e}"))
+    })?;
+
+    // Re-read the current status with a row lock
+    let current_status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM transactions WHERE id = $1 FOR UPDATE"
     )
     .bind(transaction.id)
-    .execute(pool)
+    .fetch_optional(&mut *db_tx)
     .await?;
 
+    let current_status = current_status.ok_or_else(|| {
+        AppError::NotFound(format!("Transaction {} not found", transaction.id))
+    })?;
+
+    // Validate the transition is still valid
+    if current_status == "completed" {
+        return Err(AppError::BadRequest(
+            "Cannot replay transaction that was completed by another process".to_string(),
+        ));
+    }
+
+    // Update with a WHERE guard to ensure we only update if status hasn't changed
+    let rows_affected = sqlx::query(
+        "UPDATE transactions 
+         SET status = 'pending', updated_at = NOW() 
+         WHERE id = $1 AND status = $2",
+    )
+    .bind(transaction.id)
+    .bind(&current_status)
+    .execute(&mut *db_tx)
+    .await?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        // Metric for blocked replay due to concurrent change
+        let counter = crate::metrics::meter()
+            .u64_counter("webhook_replay_blocked_total")
+            .with_description("Number of webhook replays blocked due to concurrent status changes")
+            .init();
+        counter.add(1, &[opentelemetry::KeyValue::new("reason", "concurrent_status_change")]);
+
+        return Err(AppError::Conflict(
+            "Transaction status changed during replay - another process modified it".to_string(),
+        ));
+    }
+
+    db_tx.commit().await.map_err(|e| {
+        AppError::DatabaseError(format!("Failed to commit transaction: {e}"))
+    })?;
+
     tracing::info!(
-        "Transaction {} status updated to pending for reprocessing",
-        transaction.id
+        "Transaction {} status updated to pending for reprocessing (from status: {})",
+        transaction.id,
+        current_status
     );
 
     Ok(())

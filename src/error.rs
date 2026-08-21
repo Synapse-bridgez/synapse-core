@@ -85,6 +85,13 @@ pub mod codes {
         "Stale transition: settlement state changed during processing",
     );
 
+    // Conflict errors (concurrent modification detected)
+    pub const CONFLICT_001: (&str, u16, &str) = (
+        "ERR_CONFLICT_001",
+        409,
+        "Conflict: concurrent modification detected",
+    );
+
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
         ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
@@ -192,6 +199,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::SETTLEMENT_003.2,
         },
         ErrorCode {
+            code: codes::CONFLICT_001.0,
+            http_status: codes::CONFLICT_001.1,
+            description: codes::CONFLICT_001.2,
+        },
+        ErrorCode {
             code: codes::RATE_LIMIT_001.0,
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
@@ -258,6 +270,9 @@ pub enum AppError {
     #[error("Stale transition: settlement state changed during processing")]
     StaleTransition,
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Invalid webhook signature")]
     InvalidWebhookSignature,
 
@@ -306,6 +321,7 @@ impl AppError {
             AppError::TransactionAlreadyProcessed(_) => StatusCode::CONFLICT,
             AppError::InvalidStatusTransition(_) => StatusCode::BAD_REQUEST,
             AppError::StaleTransition => StatusCode::CONFLICT,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::InvalidWebhookSignature => StatusCode::UNAUTHORIZED,
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,
@@ -339,6 +355,7 @@ impl AppError {
             AppError::TransactionAlreadyProcessed(_) => codes::TRANSACTION_004.0,
             AppError::InvalidStatusTransition(_) => codes::TRANSACTION_005.0,
             AppError::StaleTransition => codes::SETTLEMENT_003.0,
+            AppError::Conflict(_) => codes::CONFLICT_001.0,
             AppError::InvalidWebhookSignature => codes::WEBHOOK_001.0,
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
             AppError::InvalidSettlementAmount(_) => codes::SETTLEMENT_001.0,

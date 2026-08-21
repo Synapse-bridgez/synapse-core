@@ -217,12 +217,40 @@ impl PitrService {
     /// restores a background task is spawned so this call returns as soon as
     /// the job is persisted — the caller polls [`Self::get_job`] for
     /// completion.
+    /// Submit a new restore job. Returns the job record immediately; the actual
+    /// restore runs asynchronously in the background (unless dry_run is true).
+    ///
+    /// Uses leader election (advisory lock) to prevent concurrent restore jobs
+    /// from running against the same target database.
     pub async fn submit_restore(
         &self,
         target: DateTime<Utc>,
         requested_by: &str,
         dry_run: bool,
     ) -> Result<RestoreJob, PitrError> {
+        // Check for existing running restore job before proceeding
+        let existing_running: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM pitr_restore_jobs WHERE status = $1 LIMIT 1"
+        )
+        .bind(STATUS_RUNNING)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(job_id) = existing_running {
+            // Record metric for rejected concurrent restore
+            let counter = crate::metrics::meter()
+                .u64_counter("pitr_restore_rejected_concurrent_total")
+                .with_description("Number of PITR restore requests rejected due to concurrent job")
+                .init();
+            counter.add(1, &[]);
+
+            return Err(PitrError::Internal(format!(
+                "A restore job is already running (job_id: {}). \
+                 Only one restore can run at a time. Please wait for it to complete.",
+                job_id
+            )));
+        }
+
         let coverage = get_pitr_coverage(&self.pool).await?;
         let now = Utc::now();
         let validation = validate_target_timestamp(target, now, coverage.as_ref());

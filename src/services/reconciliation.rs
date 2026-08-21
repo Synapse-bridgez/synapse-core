@@ -608,16 +608,21 @@ fn match_no_memo_records(
 
 impl ReconciliationService {
     /// Persist a reconciliation report to the database.
-    pub async fn store_report(pool: &PgPool, report: &ReconciliationReport) -> anyhow::Result<()> {
+    pub async fn store_report(pool: &PgPool, report: &ReconciliationReport) -> anyhow::Result<Uuid> {
         let report_json = serde_json::to_value(report)?;
-        sqlx::query(
+        let has_discrepancies = !report.missing_on_chain.is_empty()
+            || !report.orphaned_payments.is_empty()
+            || !report.amount_mismatches.is_empty();
+
+        let id: Uuid = sqlx::query_scalar(
             r#"
             INSERT INTO reconciliation_reports (
                 generated_at, period_start, period_end,
                 total_db_transactions, total_chain_payments,
                 missing_on_chain_count, orphaned_payments_count,
-                amount_mismatches_count, report_json
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                amount_mismatches_count, has_discrepancies, report_json
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING id
             "#,
         )
         .bind(report.generated_at)
@@ -628,10 +633,21 @@ impl ReconciliationService {
         .bind(report.missing_on_chain.len() as i32)
         .bind(report.orphaned_payments.len() as i32)
         .bind(report.amount_mismatches.len() as i32)
+        .bind(has_discrepancies)
         .bind(report_json)
-        .execute(pool)
+        .fetch_one(pool)
         .await?;
-        Ok(())
+
+        // Record metric for discrepancy-flagged reports
+        if has_discrepancies {
+            let counter = crate::metrics::meter()
+                .u64_counter("reconciliation_discrepancies_total")
+                .with_description("Number of reconciliation reports with discrepancies detected")
+                .init();
+            counter.add(1, &[]);
+        }
+
+        Ok(id)
     }
 }
 
