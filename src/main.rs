@@ -393,7 +393,7 @@ async fn serve(
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
-        pool_manager,
+        pool_manager: pool_manager.clone(),
         horizon_client: horizon_client.clone(),
         feature_flags,
         redis_url: config.redis_url.clone(),
@@ -465,7 +465,7 @@ async fn serve(
         current_batch_size,
         pending_queue_depth,
     );
-    let _processor_shutdown = processor_pool.start();
+    let processor_shutdown = processor_pool.start();
 
     // Register and start scheduled jobs
     let scheduler = synapse_core::services::JobScheduler::new();
@@ -516,6 +516,21 @@ async fn serve(
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
     tracing::info!("Job scheduler started");
+
+    // Run initialization checks and mark service as ready
+    // This must happen before the HTTP listener starts accepting traffic
+    if let Err(e) = app_state.readiness
+        .run_initialization_checks(
+            &pool,
+            &config.redis_url,
+            &config.stellar_horizon_url,
+        )
+        .await
+    {
+        tracing::error!("Initialization checks failed: {}", e);
+        return Err(e.into());
+    }
+    tracing::info!("Initialization checks passed — service is now ready");
 
     let app = synapse_core::create_app(app_state.clone());
     let readiness = app_state.readiness.clone();
@@ -574,16 +589,31 @@ async fn serve(
                 tracing::info!("Received Ctrl-C");
             }
 
+            // Signal background workers to stop accepting new work
+            // This must happen BEFORE readiness drain so existing connections can complete
+            tracing::info!("Signaling background workers (processor pool and scheduler) to stop");
+
+            // Stop the processor pool - workers will finish current batches then exit
+            drop(processor_shutdown);
+
+            // Stop the job scheduler - jobs will stop accepting new work
+            if let Err(e) = scheduler.stop().await {
+                tracing::error!("Error stopping scheduler: {}", e);
+            }
+
             // If not already draining (e.g. /admin/drain was not called), start drain now
             if !readiness.is_draining() {
                 readiness.start_drain();
             }
             readiness.wait_for_drain().await;
+
+            // Gracefully drain and close all database pools before exiting
+            // This must happen after the readiness drain so that in-flight requests can complete
+            tracing::info!("Starting graceful database shutdown sequence");
+            pool_manager.graceful_shutdown().await;
+            synapse_core::db::graceful_shutdown(&pool).await;
         })
         .await?;
-
-    // Gracefully drain and close the database pool before exiting.
-    synapse_core::db::graceful_shutdown(&pool).await;
 
     // Flush and shut down the OTel exporter on clean exit.
     tracer_manager.shutdown();

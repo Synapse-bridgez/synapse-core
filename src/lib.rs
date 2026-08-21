@@ -383,17 +383,21 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/reconnect", post(handlers::reconnection::reconnect))
                 .with_state(app_state),
         )
-        // panic_recovery_middleware is applied after the final .merge() so it
-        // covers every route including /ws, /reconnect/status, and /reconnect
-        // (fix for #918: previously applied before the ws/reconnect merge and
-        // therefore did not protect those routes from ungraceful panics).
+        // Middleware order (innermost to outermost):
+        // 1. panic_recovery — catch panics before they escape (innermost)
+        // 2. error_enrichment — read error responses
+        // 3. request_logger — set request ID extension (outermost)
+        // Note: In Axum, the last .layer() call is the outermost (runs first on request,
+        // last on response). So we apply them in reverse order of desired execution.
+        // This ensures request_logger runs first and sets the request ID that
+        // error_enrichment can then read.
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
         .layer(axum_middleware::from_fn(
-            middleware::request_logger::request_logger_middleware,
+            middleware::error_enrichment::error_enrichment_middleware,
         ))
         .layer(axum_middleware::from_fn(
-            middleware::error_enrichment::error_enrichment_middleware,
+            middleware::request_logger::request_logger_middleware,
         ))
 }
