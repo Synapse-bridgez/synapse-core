@@ -79,8 +79,11 @@ pub mod codes {
         ("ERR_SETTLEMENT_001", 400, "Invalid settlement amount");
     pub const SETTLEMENT_002: (&str, u16, &str) =
         ("ERR_SETTLEMENT_002", 409, "Settlement already exists");
-    pub const SETTLEMENT_003: (&str, u16, &str) =
-        ("ERR_SETTLEMENT_003", 409, "Stale transition: settlement state changed during processing");
+    pub const SETTLEMENT_003: (&str, u16, &str) = (
+        "ERR_SETTLEMENT_003",
+        409,
+        "Stale transition: settlement state changed during processing",
+    );
 
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =

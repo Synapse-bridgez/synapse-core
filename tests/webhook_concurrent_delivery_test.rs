@@ -132,15 +132,17 @@ async fn test_concurrent_process_pending_delivers_exactly_once() {
         insert_endpoint_and_delivery(&pool, &endpoint_url, 100, "test.event").await;
 
     // Create two independent dispatcher instances (simulating two replicas).
-    let dispatcher1 =
-        WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher 1");
-    let dispatcher2 =
-        WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher 2");
+    let dispatcher1 = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher 1");
+    let dispatcher2 = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher 2");
 
     // Run both process_pending calls concurrently.
     let (r1, r2) = tokio::join!(dispatcher1.process_pending(), dispatcher2.process_pending());
     assert!(r1.is_ok(), "first process_pending should succeed: {:?}", r1);
-    assert!(r2.is_ok(), "second process_pending should succeed: {:?}", r2);
+    assert!(
+        r2.is_ok(),
+        "second process_pending should succeed: {:?}",
+        r2
+    );
 
     // The mock was set to expect(1), so mockito will assert that only one
     // request was received.
@@ -152,7 +154,10 @@ async fn test_concurrent_process_pending_delivers_exactly_once() {
         .fetch_one(&pool)
         .await
         .expect("delivery should exist");
-    assert_eq!(status, "delivered", "delivery should be delivered exactly once");
+    assert_eq!(
+        status, "delivered",
+        "delivery should be delivered exactly once"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -177,8 +182,7 @@ async fn test_exhausted_delivery_routed_to_dlq_with_history() {
     let (_ep_id, delivery_id) =
         insert_endpoint_and_delivery(&pool, &endpoint_url, 100, "test.exhaust").await;
 
-    let dispatcher =
-        WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
+    let dispatcher = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
 
     // Run process_pending in a loop to exhaust the delivery.
     // After each failure, reset next_attempt_at so the next cycle picks it up
@@ -201,7 +205,10 @@ async fn test_exhausted_delivery_routed_to_dlq_with_history() {
         .fetch_one(&pool)
         .await
         .expect("delivery should exist");
-    assert_eq!(status, "failed", "delivery should be failed after exhaustion");
+    assert_eq!(
+        status, "failed",
+        "delivery should be failed after exhaustion"
+    );
 
     // Verify the DLQ entry exists.
     let dlq_entry: Option<(Uuid, i32, serde_json::Value)> = sqlx::query_as(
@@ -239,7 +246,10 @@ async fn test_exhausted_delivery_routed_to_dlq_with_history() {
             );
         }
     } else {
-        panic!("attempt_history should be a JSON array, got {:?}", attempt_history);
+        panic!(
+            "attempt_history should be a JSON array, got {:?}",
+            attempt_history
+        );
     }
 }
 
@@ -330,8 +340,7 @@ async fn test_circuit_breaker_isolates_failing_endpoint() {
     .await
     .expect("Failed to insert healthy delivery");
 
-    let dispatcher =
-        WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
+    let dispatcher = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
 
     // Run process_pending multiple times, resetting next_attempt_at so the
     // failures happen back-to-back (bypassing exponential backoff).

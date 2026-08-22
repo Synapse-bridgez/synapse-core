@@ -97,7 +97,8 @@ mod tests {
     fn same_state_transitions_always_valid() {
         let states = vec!["pending", "completed", "processing", "failed"];
         for state in states {
-            assert!(is_valid_transition(state, state, TRANSACTION_TRANSITIONS),
+            assert!(
+                is_valid_transition(state, state, TRANSACTION_TRANSITIONS),
                 "{} → {} should be valid (idempotent)",
                 state,
                 state
@@ -106,7 +107,8 @@ mod tests {
 
         let settlement_states = vec!["completed", "pending_review", "disputed", "adjusted"];
         for state in settlement_states {
-            assert!(is_valid_transition(state, state, SETTLEMENT_TRANSITIONS),
+            assert!(
+                is_valid_transition(state, state, SETTLEMENT_TRANSITIONS),
                 "{} → {} should be valid (idempotent)",
                 state,
                 state

@@ -343,19 +343,22 @@ pub async fn set_tenant_context(
 /// # Example
 ///
 /// ```ignore
-/// let result = with_tenant(pool, Some(tenant_id), false, |mut tx| async {
+/// let result = with_tenant(pool, Some(tenant_id), false, |tx| Box::pin(async move {
 ///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
 ///         .bind(id)
 ///         .fetch_one(&mut *tx)
 ///         .await
-/// }).await?;
+/// })).await?;
 /// ```
 ///
 /// # Parameters
 /// - `pool`: Connection pool
 /// - `tenant_id`: Some(uuid) for tenant, None for admin context
 /// - `is_admin`: If true, sets app.is_admin='true' and bypasses RLS
-/// - `work`: Async closure receiving the transaction
+/// - `work`: Closure receiving the transaction and returning a boxed future.
+///   Boxing (`Box::pin(async move { .. })`) is required because the future
+///   borrows the transaction, and that borrow's lifetime must be tied to
+///   each individual call rather than fixed at the closure's definition site.
 /// Execute tenant-scoped database work with transaction-scoped context.
 ///
 /// Wraps work in a transaction and sets app.tenant_id/app.is_admin using SET LOCAL,
@@ -363,21 +366,20 @@ pub async fn set_tenant_context(
 ///
 /// # Example
 /// ```ignore
-/// let result = with_tenant(&pool, Some(tenant_id), false, async {
+/// let result = with_tenant(&pool, Some(tenant_id), false, |tx| Box::pin(async move {
 ///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions")
 ///         .fetch_all(&mut *tx)
 ///         .await
-/// }).await?;
+/// })).await?;
 /// ```
-pub async fn with_tenant<F, T>(
+pub async fn with_tenant<T>(
     pool: &PgPool,
     tenant_id: Option<Uuid>,
     is_admin: bool,
-    work: impl FnOnce(&mut SqlxTransaction<Postgres>) -> F,
-) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T>>,
-{
+    work: impl for<'c> FnOnce(
+        &'c mut SqlxTransaction<'_, Postgres>,
+    ) -> futures::future::BoxFuture<'c, Result<T>>,
+) -> Result<T> {
     let mut tx = pool.begin().await?;
 
     // Set context using SET LOCAL (transaction-scoped, auto-cleared on commit/rollback)
