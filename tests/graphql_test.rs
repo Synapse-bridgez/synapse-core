@@ -84,7 +84,11 @@ async fn test_graphql_queries() {
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
         secrets_store: None,
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
-        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ws_connection_pool: std::sync::Arc::new(
+            synapse_core::ws::connection_pool::ConnectionPool::new(
+                synapse_core::ws::connection_pool::PoolConfig::default(),
+            ),
+        ),
     };
     let app = create_app(app_state);
 

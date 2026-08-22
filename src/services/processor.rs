@@ -339,6 +339,53 @@ mod tests {
         assert!(s.current() > initial);
     }
 
+    /// Regression test for issue #1060 Part C: `ProcessorPool::start()`'s
+    /// shutdown sender was bound to `_processor_shutdown` in `main.rs` and
+    /// never sent to, so workers never received a shutdown signal. This
+    /// verifies the sender/receiver pair `main.rs` now drives: a signal sent
+    /// on the returned `watch::Sender` is observable by a worker-side
+    /// receiver, which is exactly what each worker's `shutdown_rx.changed()`
+    /// select branch keys off to stop claiming new batches.
+    #[tokio::test]
+    async fn shutdown_signal_propagates_to_worker_receivers() {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
+        });
+        let pool = match PgPool::connect(&database_url).await {
+            Ok(pool) => pool,
+            Err(_) => {
+                eprintln!("skipping shutdown_signal_propagates_to_worker_receivers: database not reachable");
+                return;
+            }
+        };
+
+        let processor_pool = ProcessorPool::new(
+            pool,
+            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            1,
+            20,
+            10,
+            500,
+            0.5,
+            Arc::new(AtomicU64::new(10)),
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        let shutdown_tx = processor_pool.start();
+        let mut worker_rx = shutdown_tx.subscribe();
+        assert!(!*worker_rx.borrow(), "shutdown signal must start false");
+
+        shutdown_tx
+            .send(true)
+            .expect("send must succeed while workers are still subscribed");
+
+        tokio::time::timeout(Duration::from_secs(2), worker_rx.changed())
+            .await
+            .expect("worker-side receiver must observe the shutdown signal")
+            .unwrap();
+        assert!(*worker_rx.borrow(), "receiver must see the signal as true");
+    }
+
     #[test]
     fn batch_sizer_decreases_during_idle() {
         let mut s = BatchSizer::new(10, 500, 0.5);
