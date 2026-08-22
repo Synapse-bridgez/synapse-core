@@ -359,6 +359,7 @@ pub async fn set_tenant_context(
 ///   Boxing (`Box::pin(async move { .. })`) is required because the future
 ///   borrows the transaction, and that borrow's lifetime must be tied to
 ///   each individual call rather than fixed at the closure's definition site.
+///
 /// Execute tenant-scoped database work with transaction-scoped context.
 ///
 /// Wraps work in a transaction and sets app.tenant_id/app.is_admin using SET LOCAL,
