@@ -172,11 +172,18 @@ impl AccountMonitor {
         let memo = payment.memo.as_ref().unwrap();
         let payment_amount = payment.amount.parse::<f64>()?;
 
+        // Hold the row lock across the read-decide-write sequence so a second
+        // concurrent process_payment call for the same memo (e.g. two
+        // monitored payments racing in, or overlapping polling/streaming
+        // paths) blocks on the SELECT rather than both passing the match
+        // check and racing on the UPDATE.
+        let mut db_tx = self.pool.begin().await?;
+
         let tx = sqlx::query_as::<_, (Uuid, String, String, sqlx::types::BigDecimal)>(
-            "SELECT id, stellar_account, asset_code, amount FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1"
+            "SELECT id, stellar_account, asset_code, amount FROM transactions WHERE memo = $1 AND status = 'pending' LIMIT 1 FOR UPDATE"
         )
         .bind(memo)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *db_tx)
         .await?;
 
         if let Some((tx_id, expected_account, expected_asset, expected_amount)) = tx {
@@ -217,17 +224,33 @@ impl AccountMonitor {
             crate::validation::state_machine::validate_status_transition("pending", "completed")
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Update transaction to completed and record horizon_payment_id
-            sqlx::query(
-                "UPDATE transactions SET status = 'completed', horizon_payment_id = $1, updated_at = NOW() WHERE id = $2"
+            // Update transaction to completed and record horizon_payment_id.
+            // The WHERE status = 'pending' guard is defense in depth: the
+            // FOR UPDATE lock above already serializes concurrent callers of
+            // this function, but this also protects against any other write
+            // path that changes status without going through this lock.
+            let result = sqlx::query(
+                "UPDATE transactions SET status = 'completed', horizon_payment_id = $1, updated_at = NOW() WHERE id = $2 AND status = 'pending'"
             )
             .bind(&payment.id)
             .bind(tx_id)
-            .execute(&self.pool)
+            .execute(&mut *db_tx)
             .await?;
 
+            if result.rows_affected() == 0 {
+                drop(db_tx);
+                crate::metrics::account_monitor_concurrent_write_prevented_total().add(1, &[]);
+                return Err(anyhow::anyhow!(
+                    "Transaction {} was no longer pending by the time completion was applied \
+                     (concurrent writer won the race)",
+                    tx_id
+                ));
+            }
+
+            db_tx.commit().await?;
             info!("Completed transaction {} via payment monitoring", tx_id);
         } else {
+            drop(db_tx);
             return Err(anyhow::anyhow!(
                 "No pending transaction found with memo {}",
                 memo
@@ -363,6 +386,16 @@ mod tests {
         memo: &str,
     ) -> Uuid {
         let tx_id = Uuid::new_v4();
+        // This raw insert bypasses queries::insert_transaction's 23514
+        // self-heal (Part A), so it needs the current month's partition to
+        // already exist. Ensure it directly rather than relying on whatever
+        // months the migration seed data happened to precreate — this test
+        // would otherwise start failing every time the wall clock crosses
+        // into a month the seed migration didn't anticipate.
+        sqlx::query("SELECT ensure_partition_for(NOW()::date)")
+            .execute(pool)
+            .await
+            .expect("failed to ensure current month's partition exists");
         sqlx::query(
             "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, memo) 
              VALUES ($1, $2, $3, $4, 'pending', $5)",
@@ -456,6 +489,70 @@ mod tests {
 
         let status = get_transaction_status(&pool, tx_id).await;
         assert_eq!(status, "completed", "Transaction should be completed");
+    }
+
+    /// Part C regression test: two concurrent Horizon payments both matching
+    /// the same candidate transaction's memo/account/asset/amount must not
+    /// both succeed in completing it. Before the FOR UPDATE + WHERE
+    /// status = 'pending' guard, both selects could pass the match check and
+    /// both updates would succeed unconditionally, with the second silently
+    /// overwriting the first's horizon_payment_id.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL and migrations"]
+    async fn test_concurrent_process_payment_only_one_completes() {
+        let pool = get_pool().await;
+        let account = "GACCOUNTCONCURRENT";
+        let memo = "concurrent-memo";
+        let tx_id = insert_pending_transaction(&pool, account, 100.0, "USD", memo).await;
+
+        let monitor = AccountMonitor::new(
+            HorizonClient::new("https://horizon-testnet.stellar.org".to_string()),
+            pool.clone(),
+            vec![account.to_string()],
+            60,
+        );
+
+        let payment_a = Payment {
+            id: "payment-race-a".to_string(),
+            from: "GSENDER".to_string(),
+            to: account.to_string(),
+            amount: "100.0".to_string(),
+            asset_code: "USD".to_string(),
+            memo: Some(memo.to_string()),
+            memo_type: Some("text".to_string()),
+        };
+        let payment_b = Payment {
+            id: "payment-race-b".to_string(),
+            from: "GSENDER".to_string(),
+            to: account.to_string(),
+            amount: "100.0".to_string(),
+            asset_code: "USD".to_string(),
+            memo: Some(memo.to_string()),
+            memo_type: Some("text".to_string()),
+        };
+
+        let (result_a, result_b) = tokio::join!(
+            monitor.process_payment(&payment_a),
+            monitor.process_payment(&payment_b)
+        );
+
+        let successes = [&result_a, &result_b].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "expected exactly one of the two concurrent payments to complete the \
+             transaction, got a={:?} b={:?}",
+            result_a, result_b
+        );
+
+        let status = get_transaction_status(&pool, tx_id).await;
+        assert_eq!(status, "completed");
+
+        let horizon_id = get_transaction_horizon_id(&pool, tx_id).await;
+        assert!(
+            horizon_id == Some("payment-race-a".to_string())
+                || horizon_id == Some("payment-race-b".to_string()),
+            "horizon_payment_id should be set to whichever payment actually won"
+        );
     }
 
     #[tokio::test]

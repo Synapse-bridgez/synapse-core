@@ -34,6 +34,8 @@ See [000-template.md](000-template.md) for the full template.
 | [001](001-database-partitioning.md) | Database Partitioning Strategy | Accepted | 2025-02 |
 | [002](002-circuit-breaker.md) | Circuit Breaker Pattern for External APIs | Accepted | 2025-02 |
 | [003](003-multi-tenant-isolation.md) | Multi-Tenant Isolation Strategy | Accepted | 2025-02 |
+| [004](004-payment-matching-authority.md) | Payment-Matching Authority: ReconciliationJob vs. AccountMonitor | Proposed | 2026-08 |
+| [005](005-transaction-completion-pipeline-authority.md) | Transaction Completion Pipeline Authority: processor.rs vs. transaction_processor.rs | Proposed | 2026-08 |
 
 ## When to Create an ADR
 

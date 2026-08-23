@@ -153,6 +153,44 @@ fn _lock_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:lock:{tenant_id}:{key}")
 }
 
+/// Converts a database fallback row into the equivalent `IdempotencyStatus`,
+/// shared by the degraded-mode DB path and the healthy-path DB-recovery check.
+fn db_key_to_status(db_key: crate::db::queries::IdempotencyKey) -> IdempotencyStatus {
+    match db_key.status.as_str() {
+        "completed" => {
+            if let Some(response_json) = db_key.response {
+                let status = response_json
+                    .get("status")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(200) as u16;
+                let body = response_json
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
+                let content_type = response_json
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let encoding = response_json
+                    .get("encoding")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                IdempotencyStatus::Completed(CachedResponse {
+                    status,
+                    body,
+                    content_type,
+                    encoding,
+                })
+            } else {
+                // No response stored yet, treat as processing.
+                IdempotencyStatus::Processing
+            }
+        }
+        _ => IdempotencyStatus::Processing,
+    }
+}
+
 fn _lock_value(token: &str) -> String {
     let instance_id =
         std::env::var("INSTANCE_ID").unwrap_or_else(|_| std::process::id().to_string());
@@ -223,6 +261,34 @@ impl IdempotencyService {
 
                 self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
+                // A Redis miss here doesn't necessarily mean this key is new:
+                // it may have been recorded via the database fallback while
+                // Redis was unreachable, then Redis recovered before the
+                // caller retried. Consult the DB fallback table before
+                // treating this as a fresh request, or a retry after an
+                // outage would double-execute.
+                //
+                // A DB error here must not fail the whole check — Redis is
+                // healthy and that's the primary path; if Postgres happens
+                // to be slow/unreachable at this exact moment, degrade to
+                // "no fallback record found" rather than propagating the
+                // error and failing the request open with no idempotency
+                // protection at all.
+                match crate::db::queries::check_idempotency_key(&self.pool, key).await {
+                    Ok(Some(db_key)) => {
+                        crate::metrics::idempotency_db_fallback_recovered_total().add(1, &[]);
+                        return Ok(db_key_to_status(db_key));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "DB fallback lookup failed during healthy-Redis idempotency \
+                             check, proceeding without it: {}",
+                            e
+                        );
+                    }
+                }
+
                 // Try to acquire lock; store a JSON lock value so
                 // recover_stale_locks can inspect the locked_at timestamp.
                 let lock_token = uuid::Uuid::new_v4().to_string();
@@ -266,41 +332,7 @@ impl IdempotencyService {
 
         // Check if key exists in database
         if let Some(db_key) = crate::db::queries::check_idempotency_key(&self.pool, key).await? {
-            match db_key.status.as_str() {
-                "completed" => {
-                    if let Some(response_json) = db_key.response {
-                        let status = response_json
-                            .get("status")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(200) as u16;
-                        let body = response_json
-                            .get("body")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("{}")
-                            .to_string();
-                        let content_type = response_json
-                            .get("content_type")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let encoding = response_json
-                            .get("encoding")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-                        let cached = CachedResponse {
-                            status,
-                            body,
-                            content_type,
-                            encoding,
-                        };
-                        Ok(IdempotencyStatus::Completed(cached))
-                    } else {
-                        // No response stored, treat as processing
-                        Ok(IdempotencyStatus::Processing)
-                    }
-                }
-                "processing" => Ok(IdempotencyStatus::Processing),
-                _ => Ok(IdempotencyStatus::Processing),
-            }
+            Ok(db_key_to_status(db_key))
         } else {
             // Key doesn't exist, try to insert as processing
             let expires_at = Utc::now() + Duration::hours(24);

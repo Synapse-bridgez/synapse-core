@@ -284,9 +284,18 @@ impl ReconciliationService {
 
 impl ReconciliationService {
     /// Persist a reconciliation report to the database.
-    pub async fn store_report(pool: &PgPool, report: &ReconciliationReport) -> anyhow::Result<()> {
+    ///
+    /// Relies on the `reconciliation_reports_period_unique` constraint on
+    /// `(period_start, period_end)` to collapse a concurrent duplicate insert
+    /// for the same window into a no-op instead of a second report row.
+    /// Returns `true` if a new report was inserted, `false` if a report for
+    /// this exact period already existed (a duplicate run was prevented).
+    pub async fn store_report(
+        pool: &PgPool,
+        report: &ReconciliationReport,
+    ) -> anyhow::Result<bool> {
         let report_json = serde_json::to_value(report)?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO reconciliation_reports (
                 generated_at, period_start, period_end,
@@ -294,6 +303,7 @@ impl ReconciliationService {
                 missing_on_chain_count, orphaned_payments_count,
                 amount_mismatches_count, report_json
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (period_start, period_end) DO NOTHING
             "#,
         )
         .bind(report.generated_at)
@@ -307,7 +317,7 @@ impl ReconciliationService {
         .bind(report_json)
         .execute(pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -317,6 +327,13 @@ pub struct ReconciliationJob {
     pub horizon_client: HorizonClient,
     /// Stellar account to reconcile (from config / env).
     pub stellar_account: String,
+    /// Gates execution so only the elected leader runs reconciliation when
+    /// more than one instance has this job registered. `None` runs
+    /// ungated (e.g. in tests, or if Redis-based leader election isn't
+    /// configured) — the `(period_start, period_end)` unique constraint on
+    /// `reconciliation_reports` is the backstop against duplicate reports
+    /// either way.
+    pub leader_election: Option<std::sync::Arc<crate::services::LeaderElection>>,
 }
 
 #[async_trait]
@@ -331,8 +348,43 @@ impl crate::services::scheduler::Job for ReconciliationJob {
     }
 
     async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let end = Utc::now();
-        let start = end - Duration::hours(24);
+        if let Some(election) = &self.leader_election {
+            match election.try_acquire_leadership().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    info!(
+                        instance_id = election.instance_id(),
+                        "Skipping daily reconciliation: this instance is not the leader"
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Fail open: a job that silently never runs anywhere is
+                    // worse than an occasional redundant run, and the unique
+                    // constraint on reconciliation_reports still prevents a
+                    // duplicate report even if two instances both fail open
+                    // at once. Mirrors run_processor_with_leader_election's
+                    // fail-open behavior on Redis unavailability.
+                    tracing::warn!(
+                        "Leader election check failed ({e}); running reconciliation \
+                         without the leader guard for this cycle"
+                    );
+                }
+            }
+        }
+
+        // Truncate to the UTC day boundary so that if this does run
+        // concurrently on more than one instance (leader election disabled,
+        // failed open, or a lease handed off mid-check), every instance
+        // computes an identical (period_start, period_end) for "today's"
+        // run — required for the unique constraint to actually catch the
+        // duplicate instead of two inserts differing by microseconds.
+        let end = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is always a valid time")
+            .and_utc();
+        let start = end - Duration::days(1);
 
         info!(
             account = %self.stellar_account,
@@ -359,8 +411,15 @@ impl crate::services::scheduler::Job for ReconciliationJob {
             info!("Reconciliation completed with no discrepancies");
         }
 
-        ReconciliationService::store_report(&self.pool, &report).await?;
-        info!("Reconciliation report stored");
+        if ReconciliationService::store_report(&self.pool, &report).await? {
+            info!("Reconciliation report stored");
+        } else {
+            crate::metrics::reconciliation_duplicate_report_prevented_total().add(1, &[]);
+            info!(
+                "Reconciliation report for this period already existed; \
+                 duplicate insert from a concurrent run was prevented"
+            );
+        }
 
         Ok(())
     }

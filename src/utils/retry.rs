@@ -25,6 +25,24 @@ pub fn is_transient_db_error(err: &sqlx::Error) -> bool {
     }
 }
 
+/// Applies a jitter band (±25%) around `base_delay`, using wall-clock
+/// nanoseconds as the entropy source rather than an RNG crate. Unit-agnostic
+/// (works for milliseconds, seconds, whatever unit `base_delay` is in) — the
+/// caller is responsible for any max-delay clamping appropriate to their
+/// unit. Shared by [`retry_with_backoff`]'s DB retry delay and
+/// `webhook_dispatcher`'s failure backoff / circuit-breaker reschedule
+/// delays, so a shared "reset" moment doesn't turn into a shared "fire this
+/// instant" moment for every caller.
+pub fn apply_jitter(base_delay: u64) -> u64 {
+    let jitter = (base_delay / 4).max(1);
+    let jitter_offset = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64)
+        % (jitter * 2);
+    base_delay.saturating_sub(jitter) + jitter_offset
+}
+
 /// Retry a fallible async operation with exponential backoff + jitter.
 ///
 /// - `max_retries`: maximum number of retry attempts (not counting the initial try)
@@ -49,15 +67,7 @@ where
                 attempt += 1;
                 // Exponential backoff: base * 2^(attempt-1), capped at 10s
                 let exp_delay = base_delay_ms * (1u64 << (attempt - 1).min(6));
-                // Jitter: ±25% of the delay using a simple pseudo-random approach
-                let jitter = (exp_delay / 4).max(1);
-                let jitter_offset = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() as u64)
-                    % (jitter * 2);
-                let delay_ms = exp_delay.saturating_sub(jitter) + jitter_offset;
-                let delay_ms = delay_ms.min(10_000);
+                let delay_ms = apply_jitter(exp_delay).min(10_000);
 
                 warn!(
                     operation = operation_name,

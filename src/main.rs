@@ -226,27 +226,39 @@ async fn serve(
         }
     });
 
-    // Start background webhook delivery worker (runs every 30 seconds)
-    let webhook_pool = pool.clone();
-    let redis_url = config.redis_url.clone();
-    let webhook_limiter_clone = webhook_limiter.clone();
-    tokio::spawn(async move {
-        let dispatcher = WebhookDispatcher::new(webhook_pool, &redis_url)
-            .expect("failed to create webhook dispatcher");
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            match webhook_limiter_clone
-                .run(async { dispatcher.process_pending().await })
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::error!("Webhook dispatcher error: {e}"),
-                Err(e) => tracing::error!("Webhook task resource limit error: {}", e),
-            }
+    // Construct the webhook dispatcher once, shared between the delivery
+    // poll loop below and the processor pool (which enqueues deliveries on
+    // transaction completion — see Part E / processor.rs::process_batch).
+    let webhook_dispatcher = match WebhookDispatcher::new(pool.clone(), &config.redis_url) {
+        Ok(dispatcher) => Some(dispatcher),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to create WebhookDispatcher ({e}); outbound webhook \
+                 delivery is disabled for this instance"
+            );
+            None
         }
-    });
-    tracing::info!("Webhook dispatcher background worker started");
+    };
+
+    // Start background webhook delivery worker (runs every 30 seconds)
+    if let Some(dispatcher) = webhook_dispatcher.clone() {
+        let webhook_limiter_clone = webhook_limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                match webhook_limiter_clone
+                    .run(async { dispatcher.process_pending().await })
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::error!("Webhook dispatcher error: {e}"),
+                    Err(e) => tracing::error!("Webhook task resource limit error: {}", e),
+                }
+            }
+        });
+        tracing::info!("Webhook dispatcher background worker started");
+    }
 
     // Initialize metrics (OTLP exporter + pool stats background task)
     let metrics_handle = metrics::init_metrics()
@@ -391,7 +403,7 @@ async fn serve(
     });
 
     // Concurrent processor pool
-    let processor_pool = synapse_core::services::processor::ProcessorPool::new(
+    let mut processor_pool = synapse_core::services::processor::ProcessorPool::new(
         pool.clone(),
         horizon_client.clone(),
         config.processor_workers,
@@ -402,6 +414,9 @@ async fn serve(
         current_batch_size,
         pending_queue_depth,
     );
+    if let Some(dispatcher) = webhook_dispatcher.clone() {
+        processor_pool = processor_pool.with_webhook_dispatcher(dispatcher);
+    }
     let processor_shutdown = processor_pool.start();
 
     // Register and start scheduled jobs
@@ -409,10 +424,23 @@ async fn serve(
     let stellar_account = std::env::var("RECONCILIATION_ACCOUNT").ok();
 
     if let Some(account) = stellar_account {
+        let recon_leader_election =
+            match synapse_core::services::LeaderElection::new(&config.redis_url) {
+                Ok(election) => Some(std::sync::Arc::new(election)),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create LeaderElection for reconciliation job ({e}); \
+                     it will run ungated on every instance (duplicate reports are \
+                     still prevented by the DB unique constraint)"
+                    );
+                    None
+                }
+            };
         let recon_job = synapse_core::services::reconciliation::ReconciliationJob {
             pool: pool.clone(),
             horizon_client: horizon_client.clone(),
             stellar_account: account,
+            leader_election: recon_leader_election,
         };
         if let Err(e) = scheduler.register_job(Box::new(recon_job)).await {
             tracing::warn!("Failed to register reconciliation job: {}", e);
