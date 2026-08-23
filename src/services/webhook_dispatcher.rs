@@ -25,6 +25,43 @@ const CLAIM_TIMEOUT_SECS: i64 = 300;
 const CB_FAILURE_THRESHOLD: u32 = 3;
 /// Circuit breaker: seconds before an open breaker transitions to half-open.
 const CB_RESET_TIMEOUT_SECS: i64 = 300;
+/// Atomically increments the rate-limit counter and sets its TTL in one
+/// round-trip, self-healing a counter left without a TTL by a crash between
+/// a separate INCR and EXPIRE (or by the pre-fix two-call version of this
+/// check). Same pattern as `middleware::quota::INCREMENT_WITH_EXPIRY_SCRIPT`.
+const RATE_LIMIT_INCREMENT_SCRIPT: &str = r#"
+local current = redis.call('INCR', KEYS[1])
+local healed = 0
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+elseif redis.call('TTL', KEYS[1]) < 0 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    healed = 1
+end
+return {current, healed}
+"#;
+
+/// How long a half-open probe lease is held, in milliseconds — long enough
+/// to cover one delivery attempt's HTTP timeout plus margin, short enough
+/// that a crashed probe holder doesn't wedge the breaker in "no one may
+/// probe" for long.
+const CB_PROBE_LEASE_MS: i64 = 30_000;
+
+/// Result of checking an endpoint's circuit breaker state.
+#[derive(Debug, PartialEq, Eq)]
+enum CircuitDecision {
+    /// Breaker is closed (or was never tripped); all deliveries proceed.
+    Closed,
+    /// Breaker is open and still within its reset timeout; all deliveries
+    /// for this endpoint should be rescheduled.
+    Open,
+    /// Breaker is open but past its reset timeout, and this caller acquired
+    /// the half-open probe lease: exactly one delivery should be let
+    /// through as the probe; the rest should be rescheduled. If the probe
+    /// succeeds the breaker resets; if it fails, `opened_at` is refreshed
+    /// and the endpoint stays open for another full reset window.
+    HalfOpenProbe,
+}
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
@@ -202,41 +239,35 @@ impl WebhookDispatcher {
             endpoints.into_iter().map(|ep| (ep.id, ep)).collect();
 
         for ep_id in &endpoint_ids {
-            if let Some(ep) = endpoint_map.get(ep_id) {
-                let blocked = self
-                    .circuit_breaker_is_open(ep_id, &ep.url)
-                    .await
-                    .unwrap_or(false);
+            if !endpoint_map.contains_key(ep_id) {
+                continue;
+            }
 
-                if blocked {
-                    // Reschedule every delivery for this endpoint without
-                    // burning an attempt, then release the claim.
+            let decision = self
+                .circuit_breaker_decision(ep_id)
+                .await
+                .unwrap_or(CircuitDecision::Closed);
+
+            match decision {
+                CircuitDecision::Closed => {}
+                CircuitDecision::Open => {
                     if let Some(deliveries) = by_endpoint.get(ep_id) {
-                        let next_cycle =
-                            Utc::now() + chrono::Duration::seconds(CB_RESET_TIMEOUT_SECS);
-                        for d in deliveries {
-                            sqlx::query(
-                                r#"
-                                UPDATE webhook_deliveries
-                                SET status        = 'pending',
-                                    claimed_at    = NULL,
-                                    next_attempt_at = $1
-                                WHERE id = $2
-                                "#,
-                            )
-                            .bind(next_cycle)
-                            .bind(d.id)
-                            .execute(&self.pool)
+                        self.reschedule_after_breaker_block(ep_id, deliveries)
                             .await?;
-
-                            tracing::warn!(
-                                delivery_id = %d.id,
-                                endpoint_id = %ep_id,
-                                "Circuit breaker open, rescheduled delivery without consuming attempt"
-                            );
-                        }
                     }
                     by_endpoint.remove(ep_id);
+                }
+                CircuitDecision::HalfOpenProbe => {
+                    // Let exactly one delivery through as the probe; every
+                    // other delivery queued for this endpoint gets
+                    // rescheduled rather than joining a synchronized burst
+                    // the instant the reset timeout elapses.
+                    if let Some(deliveries) = by_endpoint.get_mut(ep_id) {
+                        if deliveries.len() > 1 {
+                            let rest = deliveries.split_off(1);
+                            self.reschedule_after_breaker_block(ep_id, &rest).await?;
+                        }
+                    }
                 }
             }
         }
@@ -288,13 +319,23 @@ impl WebhookDispatcher {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = format!("webhook_rate:{endpoint_id}");
 
-        // Use Redis INCR to atomically increment the counter
-        // If the key doesn't exist, INCR sets it to 1
-        let current_count: i32 = conn.incr(&key, 1).await?;
-
-        // If this is the first request in the window, set expiry
-        if current_count == 1 {
-            let _: () = conn.expire(&key, 60).await?;
+        // INCR + conditional EXPIRE as a single atomic Lua script (same
+        // pattern as middleware/quota.rs's INCREMENT_WITH_EXPIRY_SCRIPT):
+        // if this process died between a separate INCR and EXPIRE, the key
+        // would be left with no TTL and never reset, permanently pinning
+        // this endpoint's rate limit. The TTL < 0 check also self-heals any
+        // counter already left in that state by the pre-fix two-call version.
+        let (current_count, healed): (i32, i32) = Script::new(RATE_LIMIT_INCREMENT_SCRIPT)
+            .key(&key)
+            .arg(60)
+            .invoke_async(&mut conn)
+            .await?;
+        if healed == 1 {
+            crate::metrics::webhook_rate_limit_self_healed_total().add(1, &[]);
+            tracing::warn!(
+                endpoint_id = %endpoint_id,
+                "Rate limit counter found without a TTL and self-healed"
+            );
         }
 
         // Check if we're within the rate limit
@@ -363,19 +404,43 @@ impl WebhookDispatcher {
             }
         };
 
+        let started = std::time::Instant::now();
         let result = self.send_webhook(delivery, endpoint).await;
+        crate::metrics::webhook_delivery_duration_ms()
+            .record(started.elapsed().as_secs_f64() * 1000.0, &[]);
 
-        // Record circuit breaker outcome
+        let outcome = if matches!(result, Ok(true)) {
+            "success"
+        } else {
+            "failure"
+        };
+        crate::metrics::webhook_delivery_total().add(
+            1,
+            &[
+                opentelemetry::KeyValue::new("outcome", outcome),
+                opentelemetry::KeyValue::new("endpoint_id", delivery.endpoint_id.to_string()),
+            ],
+        );
+
+        // Record circuit breaker outcome based on whether the delivery
+        // itself succeeded or failed (not just whether send_webhook ran
+        // without a Rust-level error — a 4xx/5xx response is a business
+        // failure that must trip the breaker, previously it didn't).
         match &result {
-            Ok(()) => {
+            Ok(true) => {
                 let _ = self.circuit_breaker_succeeded(&delivery.endpoint_id).await;
             }
-            Err(_) => {
+            Ok(false) => {
                 let _ = self.circuit_breaker_failed(&delivery.endpoint_id).await;
+            }
+            Err(_) => {
+                // A genuine Rust/DB-level error while recording the attempt
+                // isn't information about the endpoint's health; leave the
+                // breaker state untouched either way.
             }
         }
 
-        result
+        result.map(|_| ())
     }
 
     /// Build an attempt-history entry and append it to the delivery's JSONB column.
@@ -411,11 +476,19 @@ impl WebhookDispatcher {
         Ok(())
     }
 
+    /// Sends the HTTP request and persists the outcome. Returns `Ok(true)`
+    /// if the delivery succeeded (2xx response), `Ok(false)` if it failed
+    /// (non-2xx response or a transport error — both already handled via
+    /// `handle_failure` before returning). `Err` is reserved for a genuine
+    /// Rust/DB-level failure while recording the attempt, which is distinct
+    /// from "the webhook delivery itself failed" and should not be read as
+    /// information about the endpoint's health by callers gating a circuit
+    /// breaker on this result.
     async fn send_webhook(
         &self,
         delivery: &WebhookDelivery,
         endpoint: &WebhookEndpoint,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let body = serde_json::to_string(&delivery.payload)?;
 
         // Extract timestamp from payload (OutgoingPayload includes timestamp field)
@@ -497,6 +570,7 @@ impl WebhookDispatcher {
                         endpoint = %endpoint.url,
                         "Webhook delivered successfully"
                     );
+                    Ok(true)
                 } else {
                     self.handle_failure(
                         delivery,
@@ -506,6 +580,7 @@ impl WebhookDispatcher {
                         Some(resp_body),
                     )
                     .await?;
+                    Ok(false)
                 }
             }
             Err(e) => {
@@ -524,10 +599,9 @@ impl WebhookDispatcher {
 
                 self.handle_failure(delivery, new_attempt_count, now, None, Some(err_msg))
                     .await?;
+                Ok(false)
             }
         }
-
-        Ok(())
     }
 
     #[allow(dead_code)]
@@ -566,7 +640,7 @@ impl WebhookDispatcher {
                 .fetch_one(&self.pool)
                 .await?;
 
-        self.send_webhook(delivery, &endpoint).await
+        self.send_webhook(delivery, &endpoint).await.map(|_| ())
     }
 
     /// Handle a failed delivery attempt.
@@ -592,7 +666,8 @@ impl WebhookDispatcher {
             );
             ("failed", None)
         } else {
-            let delay = BASE_DELAY_SECS * (1_i64 << attempt_count);
+            let base_delay = BASE_DELAY_SECS * (1_i64 << attempt_count);
+            let delay = crate::utils::retry::apply_jitter(base_delay as u64) as i64;
             let next = now + chrono::Duration::seconds(delay);
             tracing::warn!(
                 delivery_id = %delivery.id,
@@ -688,42 +763,123 @@ impl WebhookDispatcher {
     // Circuit breaker helpers (Redis-backed)
     // -------------------------------------------------------------------
 
-    /// Check whether the circuit breaker is open for this endpoint.
-    /// Returns `true` if the endpoint is temporarily blocked.
-    async fn circuit_breaker_is_open(
+    /// Reschedule deliveries blocked by an open/half-open-but-not-probing
+    /// circuit breaker, without consuming an attempt. Each delivery gets an
+    /// independently jittered `next_attempt_at` around the reset timeout
+    /// instead of the identical instant, so when the breaker does reset,
+    /// the endpoint sees a spread-out trickle of retries rather than every
+    /// queued delivery for it firing in the same `process_pending` tick.
+    async fn reschedule_after_breaker_block(
         &self,
         endpoint_id: &Uuid,
-        _url: &str,
-    ) -> anyhow::Result<bool> {
+        deliveries: &[WebhookDelivery],
+    ) -> anyhow::Result<()> {
+        for d in deliveries {
+            let jittered_secs =
+                crate::utils::retry::apply_jitter(CB_RESET_TIMEOUT_SECS as u64) as i64;
+            let next_cycle = Utc::now() + chrono::Duration::seconds(jittered_secs);
+            sqlx::query(
+                r#"
+                UPDATE webhook_deliveries
+                SET status        = 'pending',
+                    claimed_at    = NULL,
+                    next_attempt_at = $1
+                WHERE id = $2
+                "#,
+            )
+            .bind(next_cycle)
+            .bind(d.id)
+            .execute(&self.pool)
+            .await?;
+
+            tracing::warn!(
+                delivery_id = %d.id,
+                endpoint_id = %endpoint_id,
+                next_attempt_in_secs = jittered_secs,
+                "Circuit breaker open, rescheduled delivery without consuming attempt"
+            );
+        }
+        Ok(())
+    }
+
+    /// Check the circuit breaker state for this endpoint and, if it's past
+    /// its reset timeout, try to acquire the half-open probe lease.
+    ///
+    /// There was previously no half-open gating anywhere in this codebase
+    /// (the separate `CircuitBreaker` type in `circuit_breaker.rs` doesn't
+    /// implement it either — its "half-open" is an in-process mutex guard
+    /// dropped before the call runs, with no lease of any kind, and its
+    /// Redis persistence is write-only/never read back). This lease
+    /// (`SET NX PX`) is what actually makes "exactly one probe through"
+    /// true, including across multiple instances sharing the same Redis.
+    async fn circuit_breaker_decision(
+        &self,
+        endpoint_id: &Uuid,
+    ) -> anyhow::Result<CircuitDecision> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = format!("webhook_cb:{endpoint_id}");
         let data: Option<String> = conn.get(&key).await?;
 
-        match data {
-            Some(json) => {
-                let state: serde_json::Value = serde_json::from_str(&json)?;
-                if state["state"] == "open" {
-                    let opened_at = state["opened_at"]
-                        .as_str()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or(Utc::now());
-                    let elapsed = Utc::now() - opened_at;
-                    if elapsed < chrono::Duration::seconds(CB_RESET_TIMEOUT_SECS) {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            }
-            None => Ok(false),
+        let Some(json) = data else {
+            return Ok(CircuitDecision::Closed);
+        };
+        let state: serde_json::Value = serde_json::from_str(&json)?;
+        if state["state"] != "open" {
+            return Ok(CircuitDecision::Closed);
+        }
+
+        let opened_at = state["opened_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(Utc::now());
+        let elapsed = Utc::now() - opened_at;
+        if elapsed < chrono::Duration::seconds(CB_RESET_TIMEOUT_SECS) {
+            return Ok(CircuitDecision::Open);
+        }
+
+        let probe_key = format!("webhook_cb_probe:{endpoint_id}");
+        let acquired: Option<String> = redis::cmd("SET")
+            .arg(&probe_key)
+            .arg("1")
+            .arg("NX")
+            .arg("PX")
+            .arg(CB_PROBE_LEASE_MS)
+            .query_async(&mut conn)
+            .await?;
+
+        if acquired.is_some() {
+            crate::metrics::webhook_circuit_breaker_transitions_total().add(
+                1,
+                &[opentelemetry::KeyValue::new("transition", "probe_sent")],
+            );
+            Ok(CircuitDecision::HalfOpenProbe)
+        } else {
+            // Someone else already holds the probe lease for this window.
+            crate::metrics::webhook_circuit_breaker_transitions_total().add(
+                1,
+                &[opentelemetry::KeyValue::new("transition", "probe_blocked")],
+            );
+            Ok(CircuitDecision::Open)
         }
     }
 
-    /// Record a successful delivery — reset the circuit breaker.
+    /// Record a successful delivery — reset the circuit breaker and release
+    /// the probe lease so a future trip can probe again immediately rather
+    /// than waiting out a stale lease.
     async fn circuit_breaker_succeeded(&self, endpoint_id: &Uuid) -> anyhow::Result<()> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = format!("webhook_cb:{endpoint_id}");
-        let _: i32 = redis::cmd("DEL").arg(&key).query_async(&mut conn).await?;
+        let probe_key = format!("webhook_cb_probe:{endpoint_id}");
+        let deleted: i32 = redis::cmd("DEL")
+            .arg(&key)
+            .arg(&probe_key)
+            .query_async(&mut conn)
+            .await?;
+        if deleted > 0 {
+            crate::metrics::webhook_circuit_breaker_transitions_total()
+                .add(1, &[opentelemetry::KeyValue::new("transition", "closed")]);
+        }
         Ok(())
     }
 
@@ -751,11 +907,11 @@ impl WebhookDispatcher {
                 state.state = 'closed'
             end
             redis.call('SETEX', KEYS[1], ARGV[4], cjson.encode(state))
-            return state.failure_count
+            return {state.failure_count, state.state}
             "#,
         );
 
-        let _: i32 = script
+        let (_, new_state): (i32, String) = script
             .key(&key)
             .arg("delivery failed")
             .arg(CB_FAILURE_THRESHOLD)
@@ -763,6 +919,11 @@ impl WebhookDispatcher {
             .arg(CB_RESET_TIMEOUT_SECS)
             .invoke_async(&mut conn)
             .await?;
+
+        if new_state == "open" {
+            crate::metrics::webhook_circuit_breaker_transitions_total()
+                .add(1, &[opentelemetry::KeyValue::new("transition", "opened")]);
+        }
 
         Ok(())
     }
@@ -1381,6 +1542,146 @@ mod tests {
     // calling enqueue twice for the same (endpoint_id, transaction_id, event_type)
     // creates only one delivery record due to the unique constraint and
     // ON CONFLICT DO NOTHING clause.
+
+    // ── Part E regression tests ────────────────────────────────────────────
+
+    fn test_redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
+    fn make_dispatcher(redis_url: &str) -> WebhookDispatcher {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://dummy")
+            .unwrap();
+        WebhookDispatcher::new(pool, redis_url).unwrap()
+    }
+
+    /// Part E.3 regression: a rate-limit counter left without a TTL (e.g. by
+    /// a crash between a separate INCR and EXPIRE, which is exactly what the
+    /// pre-fix two-call version of check_rate_limit could produce) must
+    /// self-heal on the next check rather than remaining permanently
+    /// rate-limited forever.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_rate_limit_self_heals_counter_left_without_ttl() {
+        let redis_url = test_redis_url();
+        let dispatcher = make_dispatcher(&redis_url);
+        let endpoint_id = Uuid::new_v4();
+
+        let client = redis::Client::open(redis_url).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let key = format!("webhook_rate:{endpoint_id}");
+
+        // Directly construct the "crashed between INCR and EXPIRE" state.
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(999)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let ttl_before: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(ttl_before, -1, "test precondition: key should have no TTL");
+
+        // max_rate well above the pre-existing count — we're testing TTL
+        // self-heal here, not the limit threshold itself.
+        let allowed = dispatcher
+            .check_rate_limit(endpoint_id, 1000)
+            .await
+            .unwrap();
+        assert!(allowed);
+
+        let ttl_after: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            ttl_after > 0,
+            "expected the self-heal to set a TTL on the previously-stuck key, got {ttl_after}"
+        );
+
+        let _: () = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
+
+    /// Part E.2 regression: once a breaker is past its reset timeout,
+    /// exactly one concurrent caller should be granted the half-open probe
+    /// lease; every other concurrent caller for the same endpoint must see
+    /// `Open`, not also `HalfOpenProbe` — otherwise every queued delivery
+    /// for that endpoint fires as soon as the timeout elapses instead of a
+    /// single probe deciding whether the endpoint has actually recovered.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_half_open_probe_lease_grants_exactly_one_probe() {
+        let redis_url = test_redis_url();
+        let dispatcher = make_dispatcher(&redis_url);
+        let endpoint_id = Uuid::new_v4();
+
+        let client = redis::Client::open(redis_url.clone()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let cb_key = format!("webhook_cb:{endpoint_id}");
+        let probe_key = format!("webhook_cb_probe:{endpoint_id}");
+        let _: () = redis::cmd("DEL")
+            .arg(&cb_key)
+            .arg(&probe_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Directly construct "open, past its reset timeout" state rather
+        // than waiting out CB_RESET_TIMEOUT_SECS in real time.
+        let opened_at = Utc::now() - chrono::Duration::seconds(CB_RESET_TIMEOUT_SECS + 5);
+        let state = serde_json::json!({
+            "state": "open",
+            "failure_count": CB_FAILURE_THRESHOLD,
+            "opened_at": opened_at.to_rfc3339(),
+            "last_error": "test",
+        });
+        let _: () = redis::cmd("SET")
+            .arg(&cb_key)
+            .arg(state.to_string())
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let dispatcher_a = dispatcher.clone();
+        let dispatcher_b = make_dispatcher(&redis_url);
+        let (decision_a, decision_b) = tokio::join!(
+            dispatcher_a.circuit_breaker_decision(&endpoint_id),
+            dispatcher_b.circuit_breaker_decision(&endpoint_id),
+        );
+        let decision_a = decision_a.unwrap();
+        let decision_b = decision_b.unwrap();
+
+        let probes = [&decision_a, &decision_b]
+            .iter()
+            .filter(|d| ***d == CircuitDecision::HalfOpenProbe)
+            .count();
+        assert_eq!(
+            probes, 1,
+            "expected exactly one concurrent caller to win the probe lease, got a={:?} b={:?}",
+            decision_a, decision_b
+        );
+        let blocked = [&decision_a, &decision_b]
+            .iter()
+            .filter(|d| ***d == CircuitDecision::Open)
+            .count();
+        assert_eq!(blocked, 1, "expected the loser to be told Open, not Closed");
+
+        let _: () = redis::cmd("DEL")
+            .arg(&cb_key)
+            .arg(&probe_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------

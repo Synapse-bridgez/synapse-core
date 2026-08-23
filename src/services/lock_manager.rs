@@ -82,12 +82,21 @@ impl FairLockManager {
         let now_ms = unix_ms();
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
-        // Enqueue with timestamp score (NX — don't overwrite if somehow already present)
-        let _: () = conn.zadd(&queue_key, &token, now_ms as f64).await?;
-
-        // Publish heartbeat so others can detect us as alive
+        // Publish the heartbeat BEFORE enqueueing. These are two separate,
+        // non-atomic Redis calls; if the order were reversed, a concurrently
+        // running waiter's prune_stale_waiters() could scan the queue in the
+        // narrow window after our ZADD lands but before our heartbeat key
+        // exists, see an entry with no heartbeat, and evict us as "crashed"
+        // before we ever get a turn — silently, permanently, and only under
+        // enough scheduling pressure to widen that window (which is why this
+        // only reproduced under full CI parallel load, not in isolation).
+        // Publishing the heartbeat first means the entry can never be visible
+        // in the queue without a heartbeat already backing it.
         conn.set_ex::<_, _, ()>(&heartbeat_key, "alive", waiter_ttl_secs)
             .await?;
+
+        // Enqueue with timestamp score (NX — don't overwrite if somehow already present)
+        let _: () = conn.zadd(&queue_key, &token, now_ms as f64).await?;
 
         debug!(resource, %token, "Enqueued in fair lock queue");
         crate::metrics::lock_contention_total().add(

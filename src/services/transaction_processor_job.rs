@@ -34,9 +34,20 @@ impl Job for TransactionProcessorJob {
     async fn execute(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         info!("Running scheduled transaction processor job");
 
-        // Process a single batch of transactions instead of running continuously
-        let result =
-            crate::services::processor::process_batch(&self.pool, &self.horizon_client, 10).await;
+        // Process a single batch of transactions instead of running continuously.
+        // No webhook dispatcher wired here — this job is not currently
+        // registered with the scheduler in main.rs (ProcessorPool::start is
+        // the live path that dispatches webhooks).
+        let feature_flags =
+            crate::services::feature_flags::FeatureFlagService::new(self.pool.clone());
+        let result = crate::services::processor::process_batch(
+            &self.pool,
+            &self.horizon_client,
+            10,
+            None,
+            &feature_flags,
+        )
+        .await;
 
         match result {
             Ok(_) => {

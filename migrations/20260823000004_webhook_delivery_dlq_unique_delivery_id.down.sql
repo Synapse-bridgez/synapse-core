@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_webhook_delivery_dlq_delivery_id_unique;

@@ -74,9 +74,7 @@ struct ValidatedWebhookTransaction {
 }
 
 fn sanitize_optional(value: Option<String>) -> Option<String> {
-    value
-        .map(|v| sanitize_string(&v))
-        .filter(|v| !v.is_empty())
+    value.map(|v| sanitize_string(&v)).filter(|v| !v.is_empty())
 }
 
 fn validate_webhook_payload(
