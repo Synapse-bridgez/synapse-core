@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use tokio::sync::RwLock;
 use vaultrs::auth::approle;
 use vaultrs::client::{Client, VaultClient, VaultClientSettingsBuilder};
@@ -11,8 +12,18 @@ use vaultrs::kv2;
 
 /// Grace period during which the previous secret remains valid after rotation.
 const ROTATION_GRACE_PERIOD: Duration = Duration::from_secs(300);
-/// How often to poll Vault for updated secrets.
+/// How often to poll Vault for updated secrets. This is now a *fallback*
+/// cadence, not the primary detection path: `start_refresh_task` also
+/// subscribes to `ROTATION_CHANNEL` so a rotation detected by any one
+/// instance's poll is pushed to every other instance immediately instead of
+/// each instance waiting up to a full `REFRESH_INTERVAL` on its own clock.
+/// See the coordination-gap issue this fixes for why the two independent
+/// polling clocks alone could double the effective grace period fleet-wide.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+/// Redis pub/sub channel used to fan out "a rotation was just detected" to
+/// every instance. Reuses the same Redis infrastructure/pattern already
+/// proven for cross-instance coordination in `circuit_breaker.rs`.
+const ROTATION_CHANNEL: &str = "secrets:rotation";
 
 /// A double-buffered secret: keeps current and previous value.
 /// During the grace period both are accepted for signature validation.
@@ -45,6 +56,25 @@ impl RotatingSecret {
     pub fn rotate(&mut self, new_value: String) {
         let old = std::mem::replace(&mut self.current, new_value);
         self.previous = Some((old, Instant::now()));
+    }
+
+    /// Checks `candidate` against this secret's valid values, distinguishing
+    /// which one matched. `Some(true)` = matched `current`; `Some(false)` =
+    /// matched `previous` within the grace period; `None` = matched neither.
+    /// Callers use the `Some(false)` case to record the
+    /// `secrets_previous_value_verified_total` metric — a caller still
+    /// presenting the old secret well after a rotation is exactly the signal
+    /// that motivates bounding the fleet-wide propagation window.
+    pub fn verify(&self, candidate: &str) -> Option<bool> {
+        if candidate == self.current {
+            return Some(true);
+        }
+        if let Some((prev, rotated_at)) = &self.previous {
+            if rotated_at.elapsed() < ROTATION_GRACE_PERIOD && candidate == prev {
+                return Some(false);
+            }
+        }
+        None
     }
 }
 
@@ -85,6 +115,41 @@ impl SecretsStore {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// Verifies `candidate` against the admin API key, recording
+    /// `secrets_previous_value_verified_total` when it only matches the
+    /// grace-period previous value rather than current.
+    pub async fn verify_admin_key(&self, candidate: &str) -> bool {
+        Self::verify_and_record(&self.admin_api_key, candidate, "admin_api_key").await
+    }
+
+    /// Verifies `candidate` against the anchor webhook secret, recording
+    /// `secrets_previous_value_verified_total` when it only matches the
+    /// grace-period previous value rather than current.
+    pub async fn verify_webhook_secret(&self, candidate: &str) -> bool {
+        Self::verify_and_record(
+            &self.anchor_webhook_secret,
+            candidate,
+            "anchor_webhook_secret",
+        )
+        .await
+    }
+
+    async fn verify_and_record(
+        secret: &Arc<RwLock<RotatingSecret>>,
+        candidate: &str,
+        secret_name: &'static str,
+    ) -> bool {
+        match secret.read().await.verify(candidate) {
+            Some(true) => true,
+            Some(false) => {
+                crate::metrics::secrets_previous_value_verified_total()
+                    .add(1, &[opentelemetry::KeyValue::new("secret", secret_name)]);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -152,21 +217,98 @@ impl SecretsManager {
             .context("api_key not found in Vault secret/admin")
     }
 
-    /// Spawn a background task that refreshes secrets from Vault every 5 minutes.
-    /// Rotated secrets remain valid for a grace period so in-flight requests are not rejected.
-    pub fn start_refresh_task(self, store: SecretsStore) {
+    /// Spawn the background tasks that keep secrets fresh and coordinated
+    /// across the fleet:
+    ///
+    /// - A poll loop (unchanged cadence, `REFRESH_INTERVAL`) that remains the
+    ///   sole source of truth for *whether* a rotation happened, and the
+    ///   fallback detection path if pub/sub is unavailable.
+    /// - A dedicated pub/sub listener (reusing the Redis infrastructure
+    ///   already proven for `circuit_breaker.rs`'s cross-instance
+    ///   coordination) that wakes the poll loop immediately when *any*
+    ///   instance's poll detects and announces a rotation, instead of this
+    ///   instance waiting up to its own `REFRESH_INTERVAL`.
+    ///
+    /// Without this, two instances' independently-clocked polls could leave
+    /// the old secret valid fleet-wide for up to `REFRESH_INTERVAL +
+    /// ROTATION_GRACE_PERIOD` — double what either constant suggests alone.
+    pub fn start_refresh_task(self, store: SecretsStore, redis_url: String) {
+        let (notify_tx, mut notify_rx) = tokio::sync::mpsc::unbounded_channel::<i64>();
+
+        // Dedicated listener: owns its own pub/sub connection, reconnects
+        // with backoff if it drops, and forwards the publish timestamp of
+        // any rotation notification. Kept separate from the refresh loop
+        // below so a Redis outage degrades this to poll-only (the refresh
+        // loop's `tokio::select!` simply never receives from `notify_rx`)
+        // rather than blocking secret refresh entirely.
+        {
+            let redis_url = redis_url.clone();
+            tokio::spawn(async move {
+                loop {
+                    match Self::connect_rotation_pubsub(&redis_url).await {
+                        Some(mut pubsub) => {
+                            let mut stream = pubsub.on_message();
+                            while let Some(msg) = stream.next().await {
+                                let published_at_ms = msg
+                                    .get_payload::<String>()
+                                    .ok()
+                                    .and_then(|p| p.parse::<i64>().ok())
+                                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                                let _ = notify_tx.send(published_at_ms);
+                            }
+                            // Stream ended: connection dropped; fall through to reconnect.
+                        }
+                        None => {
+                            crate::metrics::secrets_rotation_pubsub_unavailable_total().add(1, &[]);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+            });
+        }
+
+        let publish_client = redis::Client::open(redis_url.as_str()).ok();
+        if publish_client.is_none() {
+            tracing::warn!(
+                "secrets_rotation: could not build Redis client for rotation \
+                 announcements ({redis_url}); this instance will still detect \
+                 its own rotations via polling but cannot notify others"
+            );
+        }
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
             interval.tick().await; // skip the immediate first tick
             loop {
-                interval.tick().await;
-                tracing::info!("secrets_rotation: refreshing secrets from Vault");
+                let published_at_ms = tokio::select! {
+                    _ = interval.tick() => None,
+                    Some(ts) = notify_rx.recv() => Some(ts),
+                };
+                let via_pubsub = published_at_ms.is_some();
+                let lag_ms = published_at_ms
+                    .map(|ts| (chrono::Utc::now().timestamp_millis() - ts).max(0) as f64)
+                    .unwrap_or(0.0);
+
+                tracing::info!(
+                    via_pubsub,
+                    "secrets_rotation: refreshing secrets from Vault"
+                );
+
+                let mut rotated_any = false;
 
                 match self.get_anchor_secret().await {
                     Ok(new_secret) => {
                         let mut lock = store.anchor_webhook_secret.write().await;
                         if lock.current != new_secret {
                             lock.rotate(new_secret);
+                            rotated_any = true;
+                            crate::metrics::secrets_rotation_detection_lag_ms().record(
+                                lag_ms,
+                                &[
+                                    opentelemetry::KeyValue::new("secret", "anchor_webhook_secret"),
+                                    opentelemetry::KeyValue::new("via_pubsub", via_pubsub),
+                                ],
+                            );
                             tracing::info!(
                                 "secrets_rotation: anchor_webhook_secret rotated; \
                                  previous value valid for {}s grace period",
@@ -184,6 +326,14 @@ impl SecretsManager {
                         let mut lock = store.admin_api_key.write().await;
                         if lock.current != new_key {
                             lock.rotate(new_key);
+                            rotated_any = true;
+                            crate::metrics::secrets_rotation_detection_lag_ms().record(
+                                lag_ms,
+                                &[
+                                    opentelemetry::KeyValue::new("secret", "admin_api_key"),
+                                    opentelemetry::KeyValue::new("via_pubsub", via_pubsub),
+                                ],
+                            );
                             tracing::info!(
                                 "secrets_rotation: admin_api_key rotated; \
                                  previous value valid for {}s grace period",
@@ -195,8 +345,59 @@ impl SecretsManager {
                         tracing::error!("secrets_rotation: failed to refresh admin key: {e}");
                     }
                 }
+
+                // Announce to the rest of the fleet so their grace-period
+                // clocks start now instead of on their own next poll tick.
+                // Redundant if another instance already announced the same
+                // rotation (harmless: recipients only rotate on an actual
+                // value change).
+                if rotated_any {
+                    if let Some(client) = &publish_client {
+                        if let Ok(mut conn) = client.get_async_connection().await {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            let _: std::result::Result<(), _> = redis::cmd("PUBLISH")
+                                .arg(ROTATION_CHANNEL)
+                                .arg(now_ms.to_string())
+                                .query_async(&mut conn)
+                                .await;
+                        }
+                    }
+                }
             }
         });
+    }
+
+    /// Best-effort: connects and subscribes to `ROTATION_CHANNEL`, returning
+    /// `None` (rather than erroring) on any failure so callers can fall back
+    /// to poll-only detection.
+    async fn connect_rotation_pubsub(redis_url: &str) -> Option<redis::aio::PubSub> {
+        let client = match redis::Client::open(redis_url) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("secrets_rotation: failed to build Redis client: {e}");
+                return None;
+            }
+        };
+        let conn = match client.get_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "secrets_rotation: pub/sub connection unavailable, falling back \
+                     to poll-only detection: {e}"
+                );
+                return None;
+            }
+        };
+        let mut pubsub = conn.into_pubsub();
+        if let Err(e) = pubsub.subscribe(ROTATION_CHANNEL).await {
+            tracing::warn!("secrets_rotation: failed to subscribe to {ROTATION_CHANNEL}: {e}");
+            return None;
+        }
+        tracing::info!(
+            "secrets_rotation: subscribed to {ROTATION_CHANNEL} for fleet-wide \
+             rotation notifications"
+        );
+        Some(pubsub)
     }
 }
 
@@ -409,5 +610,152 @@ mod tests {
 
         // Clean up
         env::remove_var("CONCURRENT_SECRET");
+    }
+}
+
+/// Part D regression tests: fleet-wide rotation coordination.
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    /// A caller presenting the old secret must be accepted during the grace
+    /// period and rejected once it elapses — the bound the coordination fix
+    /// exists to make actually hold fleet-wide (see the module-level doc on
+    /// `REFRESH_INTERVAL` for why two independently-clocked instances could
+    /// previously double this window).
+    #[test]
+    fn verify_rejects_previous_value_once_grace_period_elapses() {
+        let mut secret = RotatingSecret::new("v1".to_string());
+        assert_eq!(secret.verify("v1"), Some(true));
+        assert_eq!(secret.verify("v0"), None);
+
+        secret.rotate("v2".to_string());
+        assert_eq!(secret.verify("v2"), Some(true));
+        assert_eq!(
+            secret.verify("v1"),
+            Some(false),
+            "previous value should still verify within the grace period"
+        );
+
+        // Back-date the rotation timestamp instead of sleeping for real —
+        // simulates the grace period having elapsed.
+        secret.previous = secret.previous.take().map(|(v, _)| {
+            (
+                v,
+                Instant::now() - ROTATION_GRACE_PERIOD - Duration::from_secs(1),
+            )
+        });
+
+        assert_eq!(
+            secret.verify("v1"),
+            None,
+            "old secret must stop being accepted once the grace period has elapsed"
+        );
+        assert_eq!(secret.verify("v2"), Some(true));
+    }
+
+    /// Simulates two fleet instances whose `RotatingSecret` state is
+    /// coordinated (both rotate to the same new value within milliseconds of
+    /// each other via pub/sub, not up to `REFRESH_INTERVAL` apart) and
+    /// confirms the old secret is rejected on *both* once the shared grace
+    /// period elapses — the previously-unbounded fleet-wide window this
+    /// fixes is exactly the gap between independently-clocked instances.
+    #[test]
+    fn staggered_instances_both_reject_stale_secret_after_shared_grace_period() {
+        let mut instance_a = RotatingSecret::new("old-secret".to_string());
+        let mut instance_b = RotatingSecret::new("old-secret".to_string());
+
+        // Instance A detects the rotation (e.g. via its own poll)...
+        instance_a.rotate("new-secret".to_string());
+        // ...and instance B applies the same rotation shortly after, via the
+        // pub/sub notification A's poll loop announces — not on B's own
+        // independent REFRESH_INTERVAL clock.
+        instance_b.rotate("new-secret".to_string());
+
+        for instance in [&instance_a, &instance_b] {
+            assert_eq!(instance.verify("new-secret"), Some(true));
+            assert_eq!(
+                instance.verify("old-secret"),
+                Some(false),
+                "old secret should still verify during the shared grace period"
+            );
+        }
+
+        for instance in [&mut instance_a, &mut instance_b] {
+            instance.previous = instance.previous.take().map(|(v, _)| {
+                (
+                    v,
+                    Instant::now() - ROTATION_GRACE_PERIOD - Duration::from_secs(1),
+                )
+            });
+        }
+
+        for instance in [&instance_a, &instance_b] {
+            assert_eq!(
+                instance.verify("old-secret"),
+                None,
+                "old secret must be rejected on every instance once the shared \
+                 grace period elapses, not just the one that detected it first"
+            );
+        }
+    }
+
+    /// Task item 3: the pub/sub connect helper must degrade to `None`
+    /// (fallback to poll-only) rather than error/panic when Redis is
+    /// unreachable.
+    #[tokio::test]
+    async fn connect_rotation_pubsub_falls_back_gracefully_when_redis_unreachable() {
+        let result =
+            SecretsManager::connect_rotation_pubsub("redis://invalid-host-xyz-12345:6379").await;
+        assert!(
+            result.is_none(),
+            "pub/sub connect must return None, not panic or hang, when Redis is unreachable"
+        );
+    }
+
+    /// Real end-to-end roundtrip through Redis: a message published to
+    /// `ROTATION_CHANNEL` from one connection is received by a subscriber
+    /// created via `connect_rotation_pubsub`, with the publish timestamp
+    /// intact (the same value `start_refresh_task` uses to compute
+    /// `secrets_rotation_detection_lag_ms`).
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn rotation_pubsub_roundtrip() {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+
+        let mut pubsub = match SecretsManager::connect_rotation_pubsub(&redis_url).await {
+            Some(p) => p,
+            None => {
+                println!("Skipping: Redis not available");
+                return;
+            }
+        };
+
+        let publisher = redis::Client::open(redis_url.as_str()).unwrap();
+        let mut publish_conn = publisher.get_async_connection().await.unwrap();
+
+        // Give the SUBSCRIBE a moment to be registered server-side before publishing.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let published_at_ms = chrono::Utc::now().timestamp_millis();
+        let _: i64 = redis::cmd("PUBLISH")
+            .arg(ROTATION_CHANNEL)
+            .arg(published_at_ms.to_string())
+            .query_async(&mut publish_conn)
+            .await
+            .unwrap();
+
+        let mut stream = pubsub.on_message();
+        let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("should receive the published rotation notification within 5s")
+            .expect("stream should yield a message, not end");
+        let payload: String = msg.get_payload().unwrap();
+        assert_eq!(
+            payload.parse::<i64>().unwrap(),
+            published_at_ms,
+            "received payload should be the exact publish timestamp used for lag calculation"
+        );
     }
 }

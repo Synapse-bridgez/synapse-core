@@ -20,6 +20,7 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
         whitelisted_ips: String::new(),
         log_format: LogFormat::Text,
         allowed_ips: AllowedIps::Any,
+        trusted_proxy_depth: 1,
         backup_dir: "./backups".to_string(),
         backup_encryption_key: None,
         db_timeouts: synapse_core::config::DbTimeoutConfig::default(),

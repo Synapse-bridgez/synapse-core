@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use flate2::{write::GzEncoder, Compression};
 use serde_json::{json, Value as JsonValue};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction as SqlxTransaction};
 use std::io::Write;
 use uuid::Uuid;
@@ -176,23 +177,103 @@ pub fn retention_days() -> i64 {
 pub struct RetentionResult {
     /// Number of rows exported to the archive file.
     pub exported: usize,
-    /// Path of the gzip-compressed archive that was written.
+    /// Location the gzip-compressed archive was written to (backend-specific:
+    /// a local path for `LocalDiskArchiveStorage`, a bucket/key URI for a
+    /// future durable backend).
     pub archive_path: String,
     /// Number of rows deleted from the database.
     pub deleted: u64,
 }
 
+/// Confirmation that an archive write landed on its storage backend.
+#[derive(Debug, Clone)]
+pub struct ArchiveWriteConfirmation {
+    /// SHA-256 hex digest of the archived bytes, as actually written.
+    pub checksum: String,
+}
+
+/// Pluggable durable-storage backend for audit log archives.
+///
+/// `run_retention`'s hard invariant is: rows are deleted from `audit_logs`
+/// only after `write` returns `Ok`. Implementations must return `Err` rather
+/// than `Ok` on any doubt about durability — a write that merely landed on
+/// local disk (see `LocalDiskArchiveStorage`) is explicitly NOT what "durable"
+/// means in a deployment with ephemeral containers; see
+/// `docs/audit_log_retention.md`.
+#[async_trait::async_trait]
+pub trait ArchiveStorage: Send + Sync {
+    async fn write(
+        &self,
+        key: &str,
+        data: &[u8],
+    ) -> Result<ArchiveWriteConfirmation, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Human-readable location description for the given key, recorded in
+    /// `audit_log_archives.location` (e.g. a filesystem path or bucket URI).
+    fn location_description(&self, key: &str) -> String;
+}
+
+/// Writes archives to local disk. **Not durable** in any deployment where
+/// application instances run in ephemeral containers: the archive file (and
+/// with it, the only remaining copy of the deleted rows) is lost on the next
+/// redeploy/restart/reschedule of whichever container happened to run this
+/// job. This is the only backend implemented today; see
+/// `docs/audit_log_retention.md` for why a real durable backend (object
+/// storage, a dedicated archival database) is left as a follow-up rather
+/// than guessed at here.
+pub struct LocalDiskArchiveStorage {
+    dir: String,
+}
+
+impl LocalDiskArchiveStorage {
+    pub fn new(dir: impl Into<String>) -> Self {
+        Self { dir: dir.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl ArchiveStorage for LocalDiskArchiveStorage {
+    async fn write(
+        &self,
+        key: &str,
+        data: &[u8],
+    ) -> Result<ArchiveWriteConfirmation, Box<dyn std::error::Error + Send + Sync>> {
+        std::fs::create_dir_all(&self.dir)?;
+        let path = format!("{}/{}", self.dir, key);
+        std::fs::write(&path, data)?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let checksum = format!("{:x}", hasher.finalize());
+
+        Ok(ArchiveWriteConfirmation { checksum })
+    }
+
+    fn location_description(&self, key: &str) -> String {
+        format!("{}/{}", self.dir, key)
+    }
+}
+
 /// Export audit logs older than `cutoff` (excluding protected entity IDs) to a
-/// gzip-compressed NDJSON file, then delete them from the database.
+/// gzip-compressed NDJSON archive on `storage`, record the archive in
+/// `audit_log_archives`, then delete them from `audit_logs`.
 ///
 /// Rows whose `entity_id` belongs to a transaction with status `'disputed'` are
 /// never deleted (they are still exported to the archive).
+///
+/// # Hard invariant
+///
+/// Rows are deleted **only if** `storage.write` returns `Ok`. If the archive
+/// write fails or its durability is in doubt, this function returns `Err`
+/// before touching `audit_logs` — archival "succeeding" and rows actually
+/// being safe to delete must never be allowed to diverge, since the archive
+/// write is the only remaining copy of what's about to be deleted.
 ///
 /// Returns `Ok(None)` when there is nothing to do (no rows older than cutoff).
 pub async fn run_retention(
     pool: &PgPool,
     cutoff: DateTime<Utc>,
-    archive_dir: &str,
+    storage: &dyn ArchiveStorage,
 ) -> Result<Option<RetentionResult>, Box<dyn std::error::Error + Send + Sync>> {
     // 1. Fetch all rows older than the cutoff.
     let rows = sqlx::query(
@@ -232,13 +313,14 @@ pub async fn run_retention(
 
     let disputed_set: std::collections::HashSet<Uuid> = disputed.into_iter().collect();
 
-    // 3. Serialize all rows (including protected ones) to NDJSON and compress.
+    // 3. Serialize all rows (including protected ones) to NDJSON, gzip
+    //    in-memory (rows are already fully materialized above via
+    //    fetch_all, so this adds no meaningful additional memory pressure).
+    let earliest: DateTime<Utc> = rows[0].try_get("timestamp")?;
     let timestamp_str = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let archive_path = format!("{}/audit_logs_{}.ndjson.gz", archive_dir, timestamp_str);
+    let key = format!("audit_logs_{}.ndjson.gz", timestamp_str);
 
-    let file = std::fs::File::create(&archive_path)?;
-    let mut gz = GzEncoder::new(file, Compression::default());
-
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
     for row in &rows {
         let id: Uuid = row.try_get("id")?;
         let entity_id: Uuid = row.try_get("entity_id")?;
@@ -262,11 +344,50 @@ pub async fn run_retention(
 
         writeln!(gz, "{}", record)?;
     }
-
-    gz.finish()?;
+    let archive_bytes = gz.finish()?;
     let exported = rows.len();
 
-    // 4. Delete only the non-protected rows.
+    // 4. Write to durable storage. On failure, return here — do NOT proceed
+    //    to delete. This is the hard invariant: a failed/unconfirmed archive
+    //    write must never be followed by row deletion.
+    let write_result = storage.write(&key, &archive_bytes).await;
+    let confirmation = match write_result {
+        Ok(c) => {
+            crate::metrics::audit_archive_write_total()
+                .add(1, &[opentelemetry::KeyValue::new("result", "success")]);
+            c
+        }
+        Err(e) => {
+            crate::metrics::audit_archive_write_total()
+                .add(1, &[opentelemetry::KeyValue::new("result", "failure")]);
+            return Err(format!(
+                "audit archive write failed, skipping deletion of {exported} rows \
+                 (they remain in audit_logs, safe, until the next successful run): {e}"
+            )
+            .into());
+        }
+    };
+    let archive_path = storage.location_description(&key);
+
+    // 5. Record the archive in the metadata table — must land before
+    //    deletion too, so a run that fails here also skips deletion rather
+    //    than deleting rows whose archive location was never recorded.
+    sqlx::query(
+        r#"
+        INSERT INTO audit_log_archives
+            (location, checksum, row_count, covers_from, covers_to)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(&archive_path)
+    .bind(&confirmation.checksum)
+    .bind(exported as i64)
+    .bind(earliest)
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+
+    // 6. Delete only the non-protected rows.
     let deletable_ids: Vec<Uuid> = rows
         .iter()
         .filter_map(|r| {
@@ -324,14 +445,24 @@ mod tests {
         assert_eq!(log.actor, "system");
     }
 
+    // Pre-existing flake fixed as a labeled aside: these four tests all
+    // mutate the process-global AUDIT_LOG_RETENTION_DAYS env var with no
+    // synchronization, so under cargo test's default multi-threaded runner
+    // they can interleave and observe each other's value mid-test. This
+    // mutex forces them to run one at a time relative to each other without
+    // affecting any other test in the crate.
+    static RETENTION_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_retention_days_default() {
+        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
         assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
     }
 
     #[test]
     fn test_retention_days_from_env() {
+        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "90");
         assert_eq!(retention_days(), 90);
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
@@ -339,6 +470,7 @@ mod tests {
 
     #[test]
     fn test_retention_days_invalid_env_falls_back() {
+        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "not-a-number");
         assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
@@ -346,6 +478,7 @@ mod tests {
 
     #[test]
     fn test_retention_days_zero_falls_back() {
+        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "0");
         assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
         std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");

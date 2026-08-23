@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// An in-memory LRU entry. `expires_at` is enforced in `QueryCache::get` so
+/// entries that outlive the configured memory-cache TTL are treated as
+/// misses (and evicted) instead of being served indefinitely until the LRU
+/// capacity happens to push them out.
 #[derive(Clone)]
-#[allow(dead_code)]
-struct CacheEntry<T> {
-    value: T,
+struct CacheEntry {
+    value: String,
     expires_at: Instant,
 }
 
@@ -64,7 +67,8 @@ pub struct QueryCache {
     misses: Arc<AtomicU64>,
     memory_hits: Arc<AtomicU64>,
     memory_misses: Arc<AtomicU64>,
-    lru: Arc<Mutex<LruCache<String, String>>>,
+    lru: Arc<Mutex<LruCache<String, CacheEntry>>>,
+    memory_ttl: Duration,
 }
 
 impl std::fmt::Debug for QueryCache {
@@ -131,6 +135,11 @@ impl QueryCache {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000);
+        // OPT: Read in-memory entry TTL from env var, default 30s (CacheConfig::default()).
+        let memory_ttl_secs = std::env::var("MEMORY_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(CacheConfig::default().memory_cache_ttl);
 
         Ok(Self {
             pool,
@@ -143,6 +152,7 @@ impl QueryCache {
             lru: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(cache_size).unwrap(),
             ))),
+            memory_ttl: Duration::from_secs(memory_ttl_secs),
         })
     }
 
@@ -162,13 +172,18 @@ impl QueryCache {
     ) -> Result<Option<T>, redis::RedisError> {
         CacheValidator::validate_key(key).map_err(cache_validation_error)?;
 
-        // Try in-memory cache first
+        // Try in-memory cache first. An entry past its `expires_at` is treated
+        // as a miss and evicted rather than served — see `CacheEntry` doc.
         {
             let mut lru = self.lru.lock().unwrap();
-            if let Some(cached) = lru.get(key) {
-                self.memory_hits.fetch_add(1, Ordering::Relaxed);
-                if let Ok(value) = serde_json::from_str::<T>(cached) {
-                    return Ok(Some(value));
+            if let Some(entry) = lru.get(key) {
+                if entry.expires_at > Instant::now() {
+                    self.memory_hits.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(value) = serde_json::from_str::<T>(&entry.value) {
+                        return Ok(Some(value));
+                    }
+                } else {
+                    lru.pop(key);
                 }
             }
         }
@@ -182,6 +197,7 @@ impl QueryCache {
         let hits = self.hits.clone();
         let misses = self.misses.clone();
         let lru = self.lru.clone();
+        let memory_ttl = self.memory_ttl;
 
         self.cb
             .call(|| async move {
@@ -194,7 +210,13 @@ impl QueryCache {
                         // Populate in-memory cache
                         {
                             let mut lru_cache = lru.lock().unwrap();
-                            lru_cache.put(key.clone(), v.clone());
+                            lru_cache.put(
+                                key.clone(),
+                                CacheEntry {
+                                    value: v.clone(),
+                                    expires_at: Instant::now() + memory_ttl,
+                                },
+                            );
                         }
                         serde_json::from_str(&v).map(Some).map_err(|e| {
                             redis::RedisError::from((
@@ -245,10 +267,19 @@ impl QueryCache {
         CacheValidator::validate_value_size(serialized.as_bytes())
             .map_err(cache_validation_error)?;
 
-        // Store in in-memory cache
+        // Store in in-memory cache. The in-memory entry's TTL is
+        // `memory_ttl` (independent of the caller-supplied Redis `ttl`) so a
+        // short-lived local cache never outlives the Redis-side value by more
+        // than `memory_ttl`.
         {
             let mut lru = self.lru.lock().unwrap();
-            lru.put(key.to_string(), serialized.clone());
+            lru.put(
+                key.to_string(),
+                CacheEntry {
+                    value: serialized.clone(),
+                    expires_at: Instant::now() + self.memory_ttl,
+                },
+            );
         }
 
         // OPT: Reuse pooled connection instead of creating new one

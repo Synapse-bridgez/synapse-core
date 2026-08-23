@@ -45,6 +45,7 @@ impl Job for TransactionProcessorJob {
             &self.horizon_client,
             10,
             None,
+            None,
             &feature_flags,
         )
         .await;

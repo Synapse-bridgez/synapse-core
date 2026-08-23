@@ -132,6 +132,13 @@ pub struct Config {
     pub whitelisted_ips: String,
     pub log_format: LogFormat,
     pub allowed_ips: AllowedIps,
+    /// Number of trusted reverse proxies / load balancers in front of this
+    /// deployment. Used by `IpFilterLayer` to index into a possibly-spoofed
+    /// `X-Forwarded-For` chain from the right instead of trusting the
+    /// client-supplied leftmost entry. Must match the real proxy topology:
+    /// too low and a client can spoof an allowed IP; too high and the
+    /// filter reads into attacker-controlled parts of the header.
+    pub trusted_proxy_depth: usize,
     pub backup_dir: String,
     pub backup_encryption_key: Option<String>,
     pub db_timeouts: DbTimeoutConfig,
@@ -224,6 +231,13 @@ impl Config {
             whitelisted_ips: env::var("WHITELISTED_IPS").unwrap_or_default(),
             log_format,
             allowed_ips,
+            // Default of 1 assumes a single trusted proxy/load balancer in front of
+            // the app (the common case for this deployment shape). A deployment with
+            // a different topology (e.g. no proxy, or a proxy chain) must set this
+            // explicitly rather than relying on the default.
+            trusted_proxy_depth: env::var("TRUSTED_PROXY_DEPTH")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
             backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
             backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
             db_timeouts: DbTimeoutConfig {

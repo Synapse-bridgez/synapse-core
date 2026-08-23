@@ -1,3 +1,4 @@
+use crate::services::query_cache::QueryCache;
 use crate::services::webhook_dispatcher::WebhookDispatcher;
 use sqlx::PgPool;
 use tracing::instrument;
@@ -60,11 +61,12 @@ impl ProcessingStage for VerifyStage {
 
 pub struct CompleteStage {
     pool: PgPool,
+    query_cache: Option<QueryCache>,
 }
 
 impl CompleteStage {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, query_cache: Option<QueryCache>) -> Self {
+        Self { pool, query_cache }
     }
 }
 
@@ -112,7 +114,8 @@ impl ProcessingStage for CompleteStage {
         db_tx.commit().await?;
 
         // Invalidate cache after commit
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        crate::db::queries::invalidate_caches_for_asset(self.query_cache.as_ref(), &asset_code)
+            .await;
 
         tracing::info!("Completion stage completed for transaction {}", tx.id);
         Ok(())
@@ -127,6 +130,7 @@ impl ProcessingStage for CompleteStage {
 pub struct TransactionProcessor {
     pool: PgPool,
     webhook_dispatcher: Option<WebhookDispatcher>,
+    query_cache: Option<QueryCache>,
     feature_flags: crate::services::feature_flags::FeatureFlagService,
 }
 
@@ -135,6 +139,7 @@ impl TransactionProcessor {
         Self {
             pool: pool.clone(),
             webhook_dispatcher: None,
+            query_cache: None,
             feature_flags: crate::services::feature_flags::FeatureFlagService::new(pool),
         }
     }
@@ -142,6 +147,14 @@ impl TransactionProcessor {
     /// Attach a WebhookDispatcher so state transitions trigger outgoing webhooks.
     pub fn with_webhook_dispatcher(mut self, dispatcher: WebhookDispatcher) -> Self {
         self.webhook_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach the process's shared `QueryCache` so completion/requeue cache
+    /// invalidation reaches the same instance reads go through instead of
+    /// silently no-oping (see `db::queries::invalidate_transaction_caches`).
+    pub fn with_query_cache(mut self, cache: QueryCache) -> Self {
+        self.query_cache = Some(cache);
         self
     }
 
@@ -188,7 +201,10 @@ impl TransactionProcessor {
         }
 
         // Complete stage - always enabled
-        stages.push(Box::new(CompleteStage::new(self.pool.clone())));
+        stages.push(Box::new(CompleteStage::new(
+            self.pool.clone(),
+            self.query_cache.clone(),
+        )));
 
         // Execute the pipeline
         for stage in stages {
@@ -265,7 +281,8 @@ impl TransactionProcessor {
             .await?;
 
         // Invalidate cache after update
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        crate::db::queries::invalidate_caches_for_asset(self.query_cache.as_ref(), &asset_code)
+            .await;
 
         Ok(())
     }

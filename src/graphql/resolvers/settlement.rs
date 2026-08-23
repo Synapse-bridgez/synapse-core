@@ -7,6 +7,9 @@ pub struct SettlementQuery;
 
 #[Object]
 impl SettlementQuery {
+    /// Cost scales with the requested `limit` (default 20) — see the
+    /// equivalent doc comment on `TransactionQuery::transactions` for why.
+    #[graphql(complexity = "limit.unwrap_or(20).max(1) as usize + child_complexity")]
     async fn settlements(
         &self,
         ctx: &Context<'_>,

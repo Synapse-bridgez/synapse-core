@@ -36,6 +36,7 @@ See [000-template.md](000-template.md) for the full template.
 | [003](003-multi-tenant-isolation.md) | Multi-Tenant Isolation Strategy | Accepted | 2025-02 |
 | [004](004-payment-matching-authority.md) | Payment-Matching Authority: ReconciliationJob vs. AccountMonitor | Proposed | 2026-08 |
 | [005](005-transaction-completion-pipeline-authority.md) | Transaction Completion Pipeline Authority: processor.rs vs. transaction_processor.rs | Proposed | 2026-08 |
+| [006](006-backup-verification-checksum-only.md) | Backup Verification Is Checksum-Only, Not Restore-and-Verify | Accepted | 2026-08 |
 
 ## When to Create an ADR
 

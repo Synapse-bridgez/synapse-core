@@ -74,7 +74,7 @@ async fn test_audit_log_on_insert() {
         .build();
     let tx_id = tx.id;
 
-    insert_transaction(&pool, &tx).await.unwrap();
+    insert_transaction(&pool, &tx, None).await.unwrap();
 
     // Verify audit log was created
     let audit_log = sqlx::query(
@@ -356,4 +356,127 @@ async fn test_audit_log_immutability() {
     // 1. Database-level triggers to prevent UPDATE/DELETE
     // 2. Append-only table with no UPDATE permissions
     // 3. Blockchain or cryptographic verification
+}
+
+// ---------------------------------------------------------------------------
+// Part F regression tests: retention must not delete rows unless the
+// archive write is confirmed durable.
+// ---------------------------------------------------------------------------
+
+/// Test-only `ArchiveStorage` that always fails, standing in for a durable
+/// backend being unreachable (network partition, bucket permissions, etc.).
+struct FailingArchiveStorage;
+
+#[async_trait::async_trait]
+impl synapse_core::db::audit::ArchiveStorage for FailingArchiveStorage {
+    async fn write(
+        &self,
+        _key: &str,
+        _data: &[u8],
+    ) -> Result<
+        synapse_core::db::audit::ArchiveWriteConfirmation,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        Err("simulated durable-storage outage".into())
+    }
+
+    fn location_description(&self, key: &str) -> String {
+        format!("unreachable-backend/{key}")
+    }
+}
+
+async fn insert_old_audit_log(pool: &PgPool, entity_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO audit_logs (entity_id, entity_type, action, actor, timestamp) \
+         VALUES ($1, $2, $3, $4, NOW() - INTERVAL '400 days')",
+    )
+    .bind(entity_id)
+    .bind(ENTITY_TRANSACTION)
+    .bind("status_update")
+    .bind("system")
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn retention_skips_deletion_when_archive_write_fails() {
+    use synapse_core::db::audit::run_retention;
+
+    let (pool, _container) = setup_test_db().await;
+    let entity_id = Uuid::new_v4();
+    insert_old_audit_log(&pool, entity_id).await;
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
+    let storage = FailingArchiveStorage;
+
+    let result = run_retention(&pool, cutoff, &storage).await;
+    assert!(
+        result.is_err(),
+        "run_retention must return Err when the archive write fails"
+    );
+
+    // The row must still be present — the hard invariant this fixes.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE entity_id = $1")
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "row must NOT be deleted when the archive write failed"
+    );
+
+    // No archive metadata should have been recorded either.
+    let archive_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log_archives")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        archive_count, 0,
+        "no archive metadata row should exist for a failed write"
+    );
+}
+
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn retention_deletes_rows_and_records_archive_metadata_on_success() {
+    use synapse_core::db::audit::{run_retention, LocalDiskArchiveStorage};
+
+    let (pool, _container) = setup_test_db().await;
+    let entity_id = Uuid::new_v4();
+    insert_old_audit_log(&pool, entity_id).await;
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = LocalDiskArchiveStorage::new(temp_dir.path().to_string_lossy().to_string());
+
+    let result = run_retention(&pool, cutoff, &storage)
+        .await
+        .expect("retention run should succeed")
+        .expect("there should be work to do");
+    assert_eq!(result.exported, 1);
+    assert_eq!(result.deleted, 1);
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE entity_id = $1")
+        .bind(entity_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "row should be deleted after a successful archive write"
+    );
+
+    let archive_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log_archives WHERE location = $1")
+            .bind(&result.archive_path)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        archive_count, 1,
+        "a metadata row should be recorded for the successful archive"
+    );
 }

@@ -173,12 +173,35 @@ async fn serve(
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Initialize query cache. This must happen before the partition manager
+    // is constructed below: PartitionManager::create_partition only warms the
+    // cache `if let Some(cache) = &self.cache`, so constructing the manager
+    // first (with `None`, because no cache existed yet) silently and
+    // permanently disabled cache warming for the life of the process — see
+    // the issue this fixes for the full history of that bug.
+    let query_cache = synapse_core::services::QueryCache::new(&config.redis_url).await?;
+    tracing::info!("Query cache initialized");
+
+    // Warm cache on startup
+    let cache_config = synapse_core::services::CacheConfig::default();
+    if let Err(e) = query_cache.warm_cache(&pool, &cache_config).await {
+        tracing::warn!("Failed to warm cache on startup: {:?}", e);
+    }
+
     // Initialize resource limiters for background tasks
     let settlement_limiter = ResourceLimiter::new(TaskLimits::new(1, 120), "settlement");
     let webhook_limiter = ResourceLimiter::new(TaskLimits::new(10, 60), "webhook");
 
-    // Initialize partition manager (runs every 24 hours)
-    let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24, None);
+    // Initialize partition manager (runs every 24 hours). Startup-time assertion:
+    // fail loudly rather than silently regress to the dead-cache-warming bug this
+    // fixes if a future refactor reintroduces the construction-order mistake.
+    let partition_manager =
+        db::partition::PartitionManager::new(pool.clone(), 24, Some(query_cache.clone()));
+    assert!(
+        partition_manager.has_cache(),
+        "PartitionManager must be constructed with a cache so create_partition's \
+         warming path actually runs; see query_cache initialization above"
+    );
     partition_manager.start();
     tracing::info!("Partition manager started");
 
@@ -194,19 +217,22 @@ async fn serve(
         pool.clone(),
         config.settlement_max_batch_size,
         config.settlement_min_tx_count,
-    );
+    )
+    .with_query_cache(query_cache.clone());
 
     // Start background settlement worker
     let settlement_pool = pool.clone();
     let settlement_max_batch = config.settlement_max_batch_size;
     let settlement_min_tx = config.settlement_min_tx_count;
     let settlement_limiter_clone = settlement_limiter.clone();
+    let settlement_query_cache = query_cache.clone();
     tokio::spawn(async move {
         let service = SettlementService::with_config(
             settlement_pool,
             settlement_max_batch,
             settlement_min_tx,
-        );
+        )
+        .with_query_cache(settlement_query_cache);
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Default to hourly
         loop {
             interval.tick().await;
@@ -292,16 +318,6 @@ async fn serve(
     )?;
     tracing::info!("Redis idempotency service initialized");
 
-    // Initialize query cache
-    let query_cache = synapse_core::services::QueryCache::new(&config.redis_url).await?;
-    tracing::info!("Query cache initialized");
-
-    // Warm cache on startup
-    let cache_config = synapse_core::services::CacheConfig::default();
-    if let Err(e) = query_cache.warm_cache(&pool, &cache_config).await {
-        tracing::warn!("Failed to warm cache on startup: {:?}", e);
-    }
-
     // Create broadcast channel for WebSocket notifications.
     // Capacity of 100: slow subscribers will receive a RecvError::Lagged — the WS handler
     // detects this, notifies the client with a "messages_dropped" frame, and offers resync.
@@ -319,7 +335,7 @@ async fn serve(
                 let anchor_secret = manager.get_anchor_secret().await?;
                 let admin_key = manager.get_admin_api_key().await?;
                 let store = SecretsStore::new(anchor_secret, admin_key);
-                manager.start_refresh_task(store.clone());
+                manager.start_refresh_task(store.clone(), config.redis_url.clone());
                 tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
                 Some(store)
             }
@@ -351,7 +367,9 @@ async fn serve(
         start_time: std::time::Instant::now(),
         readiness: ReadinessState::new(),
         tx_broadcast,
-        query_cache,
+        query_cache: query_cache.clone(),
+        allowed_ips: config.allowed_ips.clone(),
+        trusted_proxy_depth: config.trusted_proxy_depth,
         profiling_manager: crate::handlers::profiling::ProfilingManager::new(),
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
@@ -413,7 +431,8 @@ async fn serve(
         config.processor_scaling_factor,
         current_batch_size,
         pending_queue_depth,
-    );
+    )
+    .with_query_cache(query_cache.clone());
     if let Some(dispatcher) = webhook_dispatcher.clone() {
         processor_pool = processor_pool.with_webhook_dispatcher(dispatcher);
     }
@@ -448,6 +467,29 @@ async fn serve(
     } else {
         tracing::info!("RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled");
     }
+
+    let backup_service = std::sync::Arc::new(synapse_core::services::BackupService::new(
+        config.database_url.clone(),
+        std::path::PathBuf::from(&config.backup_dir),
+        config.backup_encryption_key.clone(),
+    ));
+    let backup_verification_job =
+        synapse_core::services::BackupVerificationJob::new(backup_service);
+    if let Err(e) = scheduler
+        .register_job(Box::new(backup_verification_job))
+        .await
+    {
+        tracing::warn!("Failed to register backup verification job: {}", e);
+    }
+
+    let audit_log_retention_job = synapse_core::services::AuditLogRetentionJob::new(pool.clone());
+    if let Err(e) = scheduler
+        .register_job(Box::new(audit_log_retention_job))
+        .await
+    {
+        tracing::warn!("Failed to register audit log retention job: {}", e);
+    }
+
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
