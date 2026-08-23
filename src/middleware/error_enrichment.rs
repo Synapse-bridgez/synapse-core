@@ -42,6 +42,13 @@ pub async fn error_enrichment_middleware(
                 .body(axum::body::boxed(axum::body::Full::from(new_body)))
                 .unwrap();
             *resp.headers_mut() = parts.headers;
+            // The injected `request_id` field changes the body length, so the
+            // original response's Content-Length header (computed for the
+            // pre-enrichment body) is now stale and must be dropped rather than
+            // copied — otherwise clients see a length mismatch and fail to
+            // parse the response.
+            resp.headers_mut()
+                .remove(axum::http::header::CONTENT_LENGTH);
             return Ok(resp);
         }
 

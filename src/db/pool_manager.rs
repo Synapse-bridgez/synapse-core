@@ -68,6 +68,17 @@ impl PoolManager {
     pub async fn get_write_pool(&self) -> &PgPool {
         &self.primary
     }
+
+    /// Gracefully drain and close the primary pool and, if configured, the
+    /// replica pool. Mirrors [`crate::db::graceful_shutdown`] so that
+    /// `PoolManager`'s pools are drained on process shutdown alongside the
+    /// application's main pool, instead of being dropped mid-query.
+    pub async fn graceful_shutdown(&self) {
+        crate::db::graceful_shutdown(&self.primary).await;
+        if let Some(replica) = &self.replica {
+            crate::db::graceful_shutdown(replica).await;
+        }
+    }
 }
 
 fn build_pool(
@@ -79,4 +90,35 @@ fn build_pool(
         // Fail fast instead of hanging when the pool is exhausted.
         .acquire_timeout(Duration::from_secs(5))
         .connect(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for issue #1060 Part B: `PoolManager`'s pools were
+    /// never drained on shutdown, only dropped — any in-flight query on them
+    /// would be abruptly cut regardless of the main pool's graceful drain.
+    #[tokio::test]
+    async fn graceful_shutdown_closes_the_primary_pool() {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
+        });
+        let manager = match PoolManager::new(&database_url, None, 2).await {
+            Ok(manager) => manager,
+            Err(_) => {
+                eprintln!(
+                    "skipping graceful_shutdown_closes_the_primary_pool: database not reachable"
+                );
+                return;
+            }
+        };
+
+        assert!(!manager.primary().is_closed());
+        manager.graceful_shutdown().await;
+        assert!(
+            manager.primary().is_closed(),
+            "graceful_shutdown must close the primary pool, not just drop its handle"
+        );
+    }
 }
