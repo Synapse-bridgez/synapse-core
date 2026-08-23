@@ -130,11 +130,19 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let pool = db::create_pool(&config).await?;
 
-    // Initialize pool manager for multi-region failover
+    // Initialize pool manager for multi-region failover.
+    //
+    // `pool_manager` fronts a minority of read-path handlers (webhook, settlements,
+    // stats, search) alongside the general-purpose `pool` above. Sizing it at the
+    // *same* config.db_max_connections would let one instance open up to 2x its
+    // configured connection budget against the database; give it a documented
+    // fraction instead.
+    let pool_manager_max_connections =
+        (config.db_max_connections / 4).max(config.db_min_connections);
     let pool_manager = PoolManager::new(
         &config.database_url,
         config.database_replica_url.as_deref(),
-        config.db_max_connections,
+        pool_manager_max_connections,
     )
     .await?;
 
@@ -143,6 +151,22 @@ async fn serve(
     } else {
         tracing::info!("No replica configured - all queries will use primary database");
     }
+
+    let total_connection_ceiling = config.db_max_connections
+        + pool_manager_max_connections
+        + if pool_manager.replica().is_some() {
+            pool_manager_max_connections
+        } else {
+            0
+        };
+    tracing::info!(
+        primary_pool_max = config.db_max_connections,
+        pool_manager_max = pool_manager_max_connections,
+        pool_manager_has_replica = pool_manager.replica().is_some(),
+        total_connection_ceiling,
+        "Database connection budget across all pools — compare against this Postgres \
+         instance's max_connections"
+    );
 
     // Run migrations
     let migrator = Migrator::new(Path::new("./migrations")).await?;
@@ -324,7 +348,9 @@ async fn serve(
         pending_queue_depth: pending_queue_depth.clone(),
         current_batch_size: current_batch_size.clone(),
         metrics_handle,
-        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ws_connection_pool: Arc::new(synapse_core::ws::connection_pool::ConnectionPool::new(
+            synapse_core::ws::connection_pool::PoolConfig::default(),
+        )),
     };
 
     // Load tenant configs on startup
@@ -376,7 +402,7 @@ async fn serve(
         current_batch_size,
         pending_queue_depth,
     );
-    let _processor_shutdown = processor_pool.start();
+    let processor_shutdown = processor_pool.start();
 
     // Register and start scheduled jobs
     let scheduler = synapse_core::services::JobScheduler::new();
@@ -401,6 +427,25 @@ async fn serve(
 
     let app = synapse_core::create_app(app_state.clone());
     let readiness = app_state.readiness.clone();
+
+    // Run initialization checks in the background so the HTTP listener can start
+    // accepting connections immediately; /ready stays 503 until they complete.
+    // This is what actually flips readiness — without it every instance stays
+    // permanently unready and is never added to load balancer rotation.
+    {
+        let readiness = readiness.clone();
+        let pool = pool.clone();
+        let redis_url = config.redis_url.clone();
+        let horizon_url = config.stellar_horizon_url.clone();
+        tokio::spawn(async move {
+            if let Err(e) = readiness
+                .run_initialization_checks(&pool, &redis_url, &horizon_url)
+                .await
+            {
+                tracing::error!("Initialization checks failed: {e}");
+            }
+        });
+    }
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =
@@ -464,8 +509,16 @@ async fn serve(
         })
         .await?;
 
-    // Gracefully drain and close the database pool before exiting.
+    // Stop background workers from claiming new work *before* draining DB
+    // connections, so in-flight queries aren't force-cut when the pool closes.
+    let _ = processor_shutdown.send(true);
+    if let Err(e) = scheduler.stop().await {
+        tracing::warn!("Error stopping job scheduler: {}", e);
+    }
+
+    // Gracefully drain and close the database pools before exiting.
     synapse_core::db::graceful_shutdown(&pool).await;
+    app_state.pool_manager.graceful_shutdown().await;
 
     // Flush and shut down the OTel exporter on clean exit.
     tracer_manager.shutdown();

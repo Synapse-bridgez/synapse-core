@@ -40,7 +40,7 @@ use axum::{
     Router,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -65,8 +65,8 @@ pub struct AppState {
     pub current_batch_size: Arc<AtomicU64>,
     /// Prometheus metrics handle
     pub metrics_handle: crate::metrics::MetricsHandle,
-    /// Active WebSocket connection count
-    pub ws_connection_count: Arc<AtomicUsize>,
+    /// Admission-controlled pool capping concurrent WebSocket connections.
+    pub ws_connection_pool: Arc<crate::ws::connection_pool::ConnectionPool>,
 }
 
 impl AppState {
@@ -107,7 +107,9 @@ impl AppState {
             pending_queue_depth: Arc::new(AtomicU64::new(0)),
             current_batch_size: Arc::new(AtomicU64::new(10)),
             metrics_handle: crate::metrics::init_metrics().unwrap(),
-            ws_connection_count: Arc::new(AtomicUsize::new(0)),
+            ws_connection_pool: Arc::new(crate::ws::connection_pool::ConnectionPool::new(
+                crate::ws::connection_pool::PoolConfig::default(),
+            )),
         }
     }
 }
@@ -268,6 +270,15 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/reconnect", post(handlers::reconnection::reconnect))
                 .with_state(app_state),
         )
+        // NOTE: axum applies the *last* `.layer()` call as the *outermost* wrapper,
+        // so it runs first on the request path and last on the response path.
+        // `request_logger` must stay outermost relative to `error_enrichment`:
+        // it sets the `RequestId` extension before `next.run()`, which
+        // `error_enrichment` reads before its own `next.run()`. Reversing this
+        // order makes every enriched error body report `request_id: "unknown"`.
+        .layer(axum_middleware::from_fn(
+            middleware::error_enrichment::error_enrichment_middleware,
+        ))
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))

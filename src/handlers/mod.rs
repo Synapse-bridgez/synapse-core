@@ -178,10 +178,7 @@ pub async fn health(State(state): State<ApiState>) -> Result<impl IntoResponse, 
         .app_state
         .current_batch_size
         .load(std::sync::atomic::Ordering::Relaxed);
-    let ws_connection_count = state
-        .app_state
-        .ws_connection_count
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let ws_connection_count = state.app_state.ws_connection_pool.active_connections();
 
     let health_response = HealthStatus {
         status: if db_status == "connected" {

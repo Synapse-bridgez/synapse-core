@@ -88,18 +88,38 @@ pub async fn ws_handler(
         }
     };
 
+    // Reject new upgrades once shutdown draining has started. Existing
+    // connections are closed cleanly by the drain check in `handle_socket`.
+    if state.readiness.is_draining() {
+        tracing::info!("Rejecting WebSocket upgrade — service is draining");
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    let permit = match state.ws_connection_pool.acquire() {
+        Ok(permit) => permit,
+        Err(e) => {
+            tracing::info!(counter.ws_connections_rejected_total = 1u64, "{e}");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+
     let client_addr = connect_info
         .map(|ci| ci.0.to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
     let _ = token; // validated above
-    ws.on_upgrade(move |socket| handle_socket(socket, state, client_addr))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, client_addr, permit))
 }
 
 // ── Per-connection handler ───────────────────────────────────────────────────
 
-async fn handle_socket(socket: WebSocket, state: AppState, client_addr: String) {
-    let count = state.ws_connection_count.fetch_add(1, Ordering::Relaxed) + 1;
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    client_addr: String,
+    permit: crate::ws::connection_pool::ConnectionPermit,
+) {
+    let count = state.ws_connection_pool.active_connections();
     tracing::info!(
         client_addr = %client_addr,
         active_connections = count,
@@ -150,11 +170,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_addr: String) 
     let pong_flag2 = Arc::clone(&pong_received);
     let dropped_counter = Arc::clone(&messages_dropped_total);
     let send_addr = client_addr.clone();
+    let drain_readiness = state.readiness.clone();
     let mut send_task = tokio::spawn(async move {
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut drain_check_interval = tokio::time::interval(Duration::from_secs(2));
 
         loop {
             tokio::select! {
+                _ = drain_check_interval.tick() => {
+                    if drain_readiness.is_draining() {
+                        tracing::info!(
+                            client_addr = %send_addr,
+                            "Service draining — sending close frame and ending WebSocket connection"
+                        );
+                        let mut s = sender_clone.lock().await;
+                        let _ = s.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
+
                 _ = heartbeat_interval.tick() => {
                     if !pong_flag2.swap(false, Ordering::Relaxed) {
                         tracing::warn!(
@@ -229,7 +263,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, client_addr: String) 
         _ = (&mut recv_task) => send_task.abort(),
     }
 
-    let remaining = state.ws_connection_count.fetch_sub(1, Ordering::Relaxed) - 1;
+    drop(permit);
+    let remaining = state.ws_connection_pool.active_connections();
     let total_dropped = messages_dropped_total.load(Ordering::Relaxed);
     tracing::info!(
         client_addr = %client_addr,

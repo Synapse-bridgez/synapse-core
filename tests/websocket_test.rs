@@ -63,7 +63,11 @@ async fn setup_test_app() -> (
         current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
         secrets_store: None,
         metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
-        ws_connection_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        ws_connection_pool: std::sync::Arc::new(
+            synapse_core::ws::connection_pool::ConnectionPool::new(
+                synapse_core::ws::connection_pool::PoolConfig::default(),
+            ),
+        ),
     };
 
     let app = create_app(app_state);
@@ -82,6 +86,82 @@ async fn setup_test_app() -> (
 
     let base_url = format!("ws://{}", addr);
     (base_url, pool, tx_broadcast, container)
+}
+
+/// Variant of [`setup_test_app`] that exposes the [`ReadinessState`] handle and
+/// allows configuring the WebSocket connection pool's capacity, for testing
+/// admission control (Part E of issue #1060).
+async fn setup_test_app_with(
+    max_ws_connections: usize,
+) -> (String, synapse_core::ReadinessState, impl std::any::Any) {
+    let container = Postgres::default().start().await.unwrap();
+    let host_port = container.get_host_port_ipv4(5432).await.unwrap();
+    let database_url = format!(
+        "postgres://postgres:postgres@127.0.0.1:{}/postgres",
+        host_port
+    );
+
+    let pool = PgPool::connect(&database_url).await.unwrap();
+    let migrator = Migrator::new(Path::join(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        "migrations",
+    ))
+    .await
+    .unwrap();
+    migrator.run(&pool).await.unwrap();
+
+    let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
+    let (tx_broadcast, _) = broadcast::channel::<TransactionStatusUpdate>(100);
+    let readiness = synapse_core::ReadinessState::new();
+
+    let app_state = AppState {
+        db: pool.clone(),
+        pool_manager,
+        horizon_client: synapse_core::stellar::HorizonClient::new(
+            "https://horizon-testnet.stellar.org".to_string(),
+        ),
+        feature_flags: FeatureFlagService::new(pool.clone()),
+        redis_url: "redis://localhost:6379".to_string(),
+        start_time: std::time::Instant::now(),
+        readiness: readiness.clone(),
+        tx_broadcast,
+        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
+            .await
+            .unwrap(),
+        profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
+        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+        secrets_store: None,
+        metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
+        ws_connection_pool: std::sync::Arc::new(
+            synapse_core::ws::connection_pool::ConnectionPool::new(
+                synapse_core::ws::connection_pool::PoolConfig {
+                    max_connections: max_ws_connections,
+                    min_connections: 0,
+                },
+            ),
+        ),
+    };
+
+    let app = create_app(app_state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let std_listener = listener.into_std().unwrap();
+
+    tokio::spawn(async move {
+        axum::Server::from_tcp(std_listener)
+            .unwrap()
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let base_url = format!("ws://{}", addr);
+    (base_url, readiness, container)
 }
 
 #[tokio::test]
@@ -415,5 +495,57 @@ async fn test_ws_connection_with_empty_token() {
         Err(_) => {
             // Connection rejected - this is expected
         }
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn test_ws_upgrade_rejected_when_pool_at_capacity() {
+    // Pool capacity of 1: the first connection is admitted, the second must be
+    // rejected with 503 rather than admitted unbounded (Part E of issue #1060).
+    let (base_url, _readiness, _container) = setup_test_app_with(1).await;
+
+    let ws_url = format!("{}/ws?token=valid-token-123", base_url);
+    let (first_stream, _) = connect_async(&ws_url)
+        .await
+        .expect("first connection should be admitted");
+
+    let second = connect_async(&ws_url).await;
+    match second {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(
+                response.status(),
+                503,
+                "expected 503 when the WebSocket pool is at capacity"
+            );
+        }
+        Err(e) => panic!("expected HTTP 503 rejection, got a different error: {e}"),
+        Ok(_) => panic!("expected the second connection to be rejected at capacity"),
+    }
+
+    drop(first_stream);
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn test_ws_upgrade_rejected_when_draining() {
+    // Once shutdown draining has started, new upgrades must be rejected so
+    // load balancers stop routing new WS clients to this instance (Part E).
+    let (base_url, readiness, _container) = setup_test_app_with(100).await;
+    readiness.start_drain();
+
+    let ws_url = format!("{}/ws?token=valid-token-123", base_url);
+    let result = connect_async(&ws_url).await;
+
+    match result {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(
+                response.status(),
+                503,
+                "expected 503 for new WebSocket upgrades while draining"
+            );
+        }
+        Err(e) => panic!("expected HTTP 503 rejection, got a different error: {e}"),
+        Ok(_) => panic!("expected the connection to be rejected while draining"),
     }
 }
