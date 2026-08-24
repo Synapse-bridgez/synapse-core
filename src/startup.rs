@@ -178,6 +178,7 @@ mod tests {
             whitelisted_ips: String::new(),
             log_format: crate::config::LogFormat::Text,
             allowed_ips: crate::config::AllowedIps::Any,
+            trusted_proxy_depth: 1,
             backup_dir: "/tmp".to_string(),
             backup_encryption_key: None,
             db_timeouts: crate::config::DbTimeoutConfig::default(),

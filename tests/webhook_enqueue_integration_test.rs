@@ -56,7 +56,7 @@ async fn test_completed_transaction_enqueues_webhook_delivery() {
         .with_asset_code("USD")
         .build();
     let tx_id = tx.id;
-    insert_transaction(&pool, &tx).await.unwrap();
+    insert_transaction(&pool, &tx, None).await.unwrap();
 
     // An endpoint subscribed to the completion event.
     let endpoint_id = uuid::Uuid::new_v4();
@@ -94,6 +94,7 @@ async fn test_completed_transaction_enqueues_webhook_delivery() {
         &horizon_client,
         10,
         Some(&dispatcher),
+        None,
         &feature_flags,
     )
     .await
@@ -141,7 +142,7 @@ async fn test_enqueue_stays_off_until_flag_enabled() {
         .with_asset_code("USD")
         .build();
     let tx_id = tx.id;
-    insert_transaction(&pool, &tx).await.unwrap();
+    insert_transaction(&pool, &tx, None).await.unwrap();
 
     let endpoint_id = uuid::Uuid::new_v4();
     sqlx::query(
@@ -167,6 +168,7 @@ async fn test_enqueue_stays_off_until_flag_enabled() {
         &horizon_client,
         10,
         Some(&dispatcher),
+        None,
         &feature_flags,
     )
     .await

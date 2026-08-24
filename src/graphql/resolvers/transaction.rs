@@ -58,6 +58,16 @@ impl TransactionQuery {
     /// # Returns
     ///
     /// A vector of transactions matching the criteria.
+    ///
+    /// # Complexity
+    ///
+    /// Cost scales with the requested `limit` (default 20) rather than the
+    /// field-occurrence default of 1, so `MAX_QUERY_COMPLEXITY` reflects the
+    /// real row-fetch cost. Without this, `AliasLimitExtension`'s 20-alias cap
+    /// still permits up to `MAX_QUERY_LIMIT` (1000) rows per alias — a single
+    /// query could request 20,000 rows while staying "cheap" under the old
+    /// per-field accounting.
+    #[graphql(complexity = "limit.unwrap_or(20).max(1) as usize + child_complexity")]
     async fn transactions(
         &self,
         ctx: &Context<'_>,
@@ -168,7 +178,8 @@ impl TransactionMutation {
         .fetch_one(&state.db)
         .await?;
 
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        crate::db::queries::invalidate_caches_for_asset(Some(&state.query_cache), &asset_code)
+            .await;
 
         Ok(result)
     }

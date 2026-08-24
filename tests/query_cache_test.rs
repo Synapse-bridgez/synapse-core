@@ -74,6 +74,63 @@ async fn test_cache_invalidation() {
     assert_eq!(result2, None);
 }
 
+/// Part A regression test: `CacheEntry.expires_at` (previously dead code —
+/// see `#[allow(dead_code)]` this removes) must actually be enforced. A
+/// memory-cache entry past `MEMORY_CACHE_TTL_SECS` should be treated as a
+/// miss (re-fetched from Redis) rather than served indefinitely until LRU
+/// capacity happens to evict it.
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_memory_cache_entry_expires_after_configured_ttl() {
+    // SAFETY: test-only env var set before any QueryCache in this process is
+    // constructed; no concurrent access.
+    unsafe {
+        std::env::set_var("MEMORY_CACHE_TTL_SECS", "1");
+    }
+    let cache = QueryCache::new("redis://localhost:6379").await.unwrap();
+    unsafe {
+        std::env::remove_var("MEMORY_CACHE_TTL_SECS");
+    }
+
+    let key = "test:ttl:expiry";
+    cache
+        .set(
+            key,
+            &"value".to_string(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+    // Immediately after set, the value is served from the in-memory LRU.
+    let before_hits = cache.metrics().memory_hits;
+    let hit: Option<String> = cache.get(key).await.unwrap();
+    assert_eq!(hit, Some("value".to_string()));
+    assert_eq!(
+        cache.metrics().memory_hits,
+        before_hits + 1,
+        "expected an in-memory hit before the TTL elapses"
+    );
+
+    // After the 1s memory TTL elapses, the same key must fall through to
+    // Redis (a memory miss) instead of being served from the stale entry.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let memory_misses_before = cache.metrics().memory_misses;
+    let still_there: Option<String> = cache.get(key).await.unwrap();
+    assert_eq!(
+        still_there,
+        Some("value".to_string()),
+        "value should still be served (from Redis) after the memory TTL expires"
+    );
+    assert_eq!(
+        cache.metrics().memory_misses,
+        memory_misses_before + 1,
+        "expired in-memory entry should count as a memory miss, not a hit"
+    );
+
+    cache.invalidate_exact(key).await.ok();
+}
+
 #[test]
 fn test_cache_config_defaults() {
     let config = CacheConfig::default();

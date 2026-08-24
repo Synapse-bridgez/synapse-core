@@ -20,6 +20,15 @@ impl PartitionManager {
         }
     }
 
+    /// Whether this manager was constructed with a cache to warm on partition
+    /// creation. Used as a startup-time assertion at the call site so a
+    /// future refactor that reintroduces the `None`-before-cache-exists
+    /// construction-order bug fails loudly instead of silently regressing to
+    /// dead code (see `create_partition`).
+    pub fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
     /// Start the partition maintenance background task
     pub fn start(self) {
         tokio::spawn(async move {
@@ -136,6 +145,10 @@ mod tests {
         cache.invalidate("query:asset_stats").await.ok();
 
         let manager = PartitionManager::new(pool.clone(), 24, Some(cache.clone()));
+        assert!(
+            manager.has_cache(),
+            "manager constructed with Some(cache) must report has_cache() == true"
+        );
 
         // First call: may or may not create a new partition depending on state.
         let created = manager.create_partition().await.unwrap();

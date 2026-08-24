@@ -264,9 +264,7 @@ impl Job for AuditLogRetentionJob {
         let days = crate::db::audit::retention_days();
         let cutoff = Utc::now() - Duration::days(days);
         let archive_dir = Self::archive_dir();
-
-        // Ensure the archive directory exists.
-        std::fs::create_dir_all(&archive_dir)?;
+        let storage = crate::db::audit::LocalDiskArchiveStorage::new(archive_dir.clone());
 
         info!(
             retention_days = days,
@@ -275,7 +273,7 @@ impl Job for AuditLogRetentionJob {
             "Starting audit log retention run"
         );
 
-        match crate::db::audit::run_retention(&self.pool, cutoff, &archive_dir).await? {
+        match crate::db::audit::run_retention(&self.pool, cutoff, &storage).await? {
             None => {
                 info!("Audit log retention: no logs older than cutoff, nothing to do");
             }

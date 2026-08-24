@@ -61,6 +61,10 @@ pub struct ProcessorPool {
     /// Enqueues outbound webhook deliveries for completed transactions.
     /// `None` disables webhook delivery (e.g. Redis unavailable at startup).
     webhook_dispatcher: Option<WebhookDispatcher>,
+    /// Shared `QueryCache` for cache invalidation after completing
+    /// transactions. `None` means invalidation is skipped (see
+    /// `with_query_cache`).
+    query_cache: Option<crate::services::query_cache::QueryCache>,
     feature_flags: crate::services::feature_flags::FeatureFlagService,
 }
 
@@ -89,6 +93,7 @@ impl ProcessorPool {
             current_batch_size,
             pending_queue_depth,
             webhook_dispatcher: None,
+            query_cache: None,
             feature_flags,
         }
     }
@@ -98,6 +103,14 @@ impl ProcessorPool {
     /// transactions but never calls `enqueue()`.
     pub fn with_webhook_dispatcher(mut self, dispatcher: WebhookDispatcher) -> Self {
         self.webhook_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach the process's shared `QueryCache` so completing a transaction
+    /// invalidates the same instance reads go through instead of silently
+    /// no-oping (see `db::queries::invalidate_transaction_caches`).
+    pub fn with_query_cache(mut self, cache: crate::services::query_cache::QueryCache) -> Self {
+        self.query_cache = Some(cache);
         self
     }
 
@@ -115,6 +128,7 @@ impl ProcessorPool {
         let pool = self.pool;
         let horizon_client = self.horizon_client;
         let webhook_dispatcher = self.webhook_dispatcher;
+        let query_cache = self.query_cache;
         let feature_flags = self.feature_flags;
 
         info!("Starting ProcessorPool with {} workers", workers);
@@ -126,6 +140,7 @@ impl ProcessorPool {
             let current_batch_size = current_batch_size.clone();
             let pending_queue_depth = pending_queue_depth.clone();
             let webhook_dispatcher = webhook_dispatcher.clone();
+            let query_cache = query_cache.clone();
             let feature_flags = feature_flags.clone();
             let mut sizer = BatchSizer::new(min_batch, max_batch, scaling_factor);
 
@@ -148,6 +163,7 @@ impl ProcessorPool {
                         &horizon_client,
                         batch_size,
                         webhook_dispatcher.as_ref(),
+                        query_cache.as_ref(),
                         &feature_flags,
                     )
                     .await
@@ -197,6 +213,7 @@ pub async fn process_batch(
     _horizon_client: &HorizonClient,
     batch_size: u32,
     webhook_dispatcher: Option<&WebhookDispatcher>,
+    query_cache: Option<&crate::services::query_cache::QueryCache>,
     feature_flags: &crate::services::feature_flags::FeatureFlagService,
 ) -> anyhow::Result<usize> {
     let mut tx = pool.begin().await?;
@@ -272,7 +289,7 @@ pub async fn process_batch(
     tx.commit().await?;
 
     for asset_code in asset_codes {
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        crate::db::queries::invalidate_caches_for_asset(query_cache, &asset_code).await;
     }
 
     if let Some(dispatcher) = webhook_dispatcher {
@@ -316,7 +333,8 @@ pub async fn run_processor(pool: PgPool, horizon_client: HorizonClient) {
     info!("Async transaction processor started (legacy single-worker)");
     let feature_flags = crate::services::feature_flags::FeatureFlagService::new(pool.clone());
     loop {
-        if let Err(e) = process_batch(&pool, &horizon_client, 10, None, &feature_flags).await {
+        if let Err(e) = process_batch(&pool, &horizon_client, 10, None, None, &feature_flags).await
+        {
             error!("Processor batch error: {}", e);
         }
         sleep(Duration::from_secs(5)).await;
@@ -397,7 +415,7 @@ pub async fn run_processor_with_leader_election(
                 // All instances process transactions (SKIP LOCKED handles concurrency).
                 // No webhook dispatcher wired here — this function is not currently
                 // invoked from main.rs (ProcessorPool::start is the live path).
-                if let Err(e) = process_batch(&pool, &horizon_client, 10, None, &feature_flags).await {
+                if let Err(e) = process_batch(&pool, &horizon_client, 10, None, None, &feature_flags).await {
                     error!("Processor batch error: {e}");
                 }
             }

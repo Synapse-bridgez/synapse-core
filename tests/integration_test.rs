@@ -7,6 +7,13 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
+    setup_test_app_with_ip_filter(synapse_core::config::AllowedIps::Any, 1).await
+}
+
+async fn setup_test_app_with_ip_filter(
+    allowed_ips: synapse_core::config::AllowedIps,
+    trusted_proxy_depth: usize,
+) -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let database_url = format!(
@@ -71,6 +78,8 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
         query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
             .await
             .unwrap(),
+        allowed_ips,
+        trusted_proxy_depth,
         profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
         tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
@@ -306,4 +315,93 @@ async fn test_invalid_signature_flow() {
         .as_str()
         .unwrap()
         .contains("Invalid signature"));
+}
+
+// ---------------------------------------------------------------------------
+// IP allowlist middleware (Part C) — exercised through the real middleware
+// stack via create_app(), not ip_filter.rs's unit-level tower service tests.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "Requires Docker/external services"]
+async fn test_callback_blocked_from_disallowed_ip() {
+    use synapse_core::config::AllowedIps;
+
+    let allowed = AllowedIps::Cidrs(vec!["203.0.113.0/24".parse().unwrap()]);
+    // depth 0: the single X-Forwarded-For entry is trusted directly (no proxy hop).
+    let (base_url, _pool, _container) = setup_test_app_with_ip_filter(allowed, 0).await;
+    let client = reqwest::Client::new();
+
+    let payload = json!({
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "amount": "100.50",
+        "asset_code": "USD",
+        "callback_type": "deposit",
+        "callback_status": "completed"
+    });
+
+    // Outside the allowlist -> rejected before validation/handler logic runs.
+    let blocked = client
+        .post(format!("{}/callback", base_url))
+        .header("X-Forwarded-For", "198.51.100.55")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+    // Inside the allowlist -> passes the IP filter (may still fail downstream
+    // validation, but must not be a 403 from the filter itself).
+    let allowed_resp = client
+        .post(format!("{}/callback", base_url))
+        .header("X-Forwarded-For", "203.0.113.10")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(allowed_resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker/external services"]
+async fn test_callback_trusted_proxy_depth_changes_trusted_entry() {
+    use synapse_core::config::AllowedIps;
+
+    // Allowlist only the real client IP, never the proxy's own IP.
+    let allowed = || AllowedIps::Cidrs(vec!["203.0.113.0/24".parse().unwrap()]);
+    let xff = "203.0.113.10, 198.51.100.7"; // client, then one trusted proxy hop
+    let payload = json!({
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "amount": "100.50",
+        "asset_code": "USD",
+        "callback_type": "deposit",
+        "callback_status": "completed"
+    });
+
+    // depth = 1: correctly skips the one trusted proxy hop and reads the real
+    // client entry -> passes the filter.
+    let (base_url_correct, _pool1, _container1) = setup_test_app_with_ip_filter(allowed(), 1).await;
+    let client = reqwest::Client::new();
+    let res_correct = client
+        .post(format!("{}/callback", base_url_correct))
+        .header("X-Forwarded-For", xff)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(res_correct.status(), StatusCode::FORBIDDEN);
+
+    // depth = 0: misconfigured for this topology — trusts the proxy's own
+    // (non-allowlisted) IP instead of the real client -> blocked. This proves
+    // the depth setting actually changes which chain entry is authoritative,
+    // not just that it compiles.
+    let (base_url_wrong, _pool2, _container2) = setup_test_app_with_ip_filter(allowed(), 0).await;
+    let res_wrong = client
+        .post(format!("{}/callback", base_url_wrong))
+        .header("X-Forwarded-For", xff)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res_wrong.status(), StatusCode::FORBIDDEN);
 }

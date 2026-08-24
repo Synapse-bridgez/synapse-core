@@ -80,7 +80,7 @@ async fn test_concurrent_burst_insert_into_missing_partition_all_self_heal() {
 
     // Fire all inserts at once so every one of them races to self-heal the
     // same missing partition concurrently.
-    let results = join_all(txs.iter().map(|tx| insert_transaction(&pool, tx))).await;
+    let results = join_all(txs.iter().map(|tx| insert_transaction(&pool, tx, None))).await;
 
     let failures: Vec<_> = results
         .iter()

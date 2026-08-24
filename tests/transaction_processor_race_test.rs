@@ -43,7 +43,7 @@ async fn test_concurrent_completions_only_one_wins() {
         .with_status("pending")
         .build();
     let tx_id = tx.id;
-    insert_transaction(&pool, &tx).await.unwrap();
+    insert_transaction(&pool, &tx, None).await.unwrap();
 
     let processor_a = TransactionProcessor::new(pool.clone());
     let processor_b = TransactionProcessor::new(pool.clone());

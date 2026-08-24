@@ -56,6 +56,8 @@ pub struct AppState {
     pub readiness: ReadinessState,
     pub tx_broadcast: broadcast::Sender<TransactionStatusUpdate>,
     pub query_cache: QueryCache,
+    pub allowed_ips: crate::config::AllowedIps,
+    pub trusted_proxy_depth: usize,
     pub profiling_manager: ProfilingManager,
     pub tenant_configs: Arc<tokio::sync::RwLock<HashMap<Uuid, TenantConfig>>>,
     pub secrets_store: Option<SecretsStore>,
@@ -101,6 +103,8 @@ impl AppState {
             readiness: ReadinessState::new(),
             tx_broadcast: tx,
             query_cache: QueryCache::new("redis://localhost:6379").await.unwrap(),
+            allowed_ips: crate::config::AllowedIps::Any,
+            trusted_proxy_depth: 1,
             profiling_manager: ProfilingManager::new(),
             tenant_configs: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             secrets_store: None,
@@ -133,7 +137,10 @@ pub fn create_app(app_state: AppState) -> Router {
         graphql_schema,
     };
 
-    // Callback routes with validation + quota middleware
+    // Callback routes with IP allowlist + validation + quota middleware.
+    // IpFilterLayer is outermost among these three so a request from a
+    // non-whitelisted source is rejected before quota/signature validation
+    // spend any work on it.
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
@@ -143,6 +150,10 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
+        ))
+        .layer(crate::middleware::ip_filter::IpFilterLayer::new(
+            app_state.allowed_ips.clone(),
+            app_state.trusted_proxy_depth,
         ));
 
     // Webhook route with validation + quota middleware

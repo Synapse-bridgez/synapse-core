@@ -114,9 +114,19 @@ pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Res
 
     match result {
         Some(_) => {
-            // Invalidate cache after update
+            // Invalidate cache after update. This CLI command is a one-shot
+            // process with no long-lived in-memory cache of its own to keep
+            // coherent, so (unlike the server's request-handling paths) a
+            // freshly constructed QueryCache is fine here: it still issues a
+            // correct Redis SCAN+DEL, which is all that's needed to eventually
+            // desync any *server* process's in-memory LRU once that server's
+            // own memory-cache TTL expires the stale entry.
             if let Some(asset) = asset_code {
-                crate::db::queries::invalidate_caches_for_asset(&asset).await;
+                if let Ok(redis_url) = std::env::var("REDIS_URL") {
+                    if let Ok(cache) = synapse_core::services::QueryCache::new(&redis_url).await {
+                        crate::db::queries::invalidate_caches_for_asset(Some(&cache), &asset).await;
+                    }
+                }
             }
 
             tracing::info!("Transaction {} marked as completed", tx_id);
