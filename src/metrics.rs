@@ -16,6 +16,16 @@
 //! | `db_pool_idle_connections`        | Gauge      | Idle DB connections                          |
 //! | `db_query_timeout_total`          | Counter    | Number of timed-out DB queries               |
 //! | `pending_queue_depth`             | Gauge      | Depth of the pending transaction queue       |
+//! | `transaction_insert_missing_partition_total` | Counter | 23514 hits at insert_transaction, triggering self-heal |
+//! | `partition_self_heal_duration_ms` | Histogram  | ensure_partition_for latency (advisory-lock wait dominated) |
+//! | `idempotency_db_fallback_recovered_total` | Counter | DB-fallback idempotency keys recognized after Redis recovery |
+//! | `reconciliation_duplicate_report_prevented_total` | Counter | Duplicate reconciliation report inserts caught by the unique constraint |
+//! | `account_monitor_concurrent_write_prevented_total` | Counter | AccountMonitor completion writes that lost a row-lock race |
+//! | `transaction_processor_completion_conflict_prevented_total` | Counter | CompleteStage writes that lost a row-lock race |
+//! | `transaction_processor_stage_executions_total` | Counter | Stage executions, labeled by stage (verifies rollout-percentage gating in prod) |
+//! | `webhook_delivery_total`          | Counter    | Webhook delivery attempts, labeled by outcome and endpoint_id |
+//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type |
+//! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //!
 //! ## Configuration
 //!
@@ -136,6 +146,133 @@ pub fn db_slow_queries_total() -> Counter<u64> {
         .init()
 }
 
+/// Missing-partition (23514) counter at the `insert_transaction` call site.
+pub fn transaction_insert_missing_partition_total() -> Counter<u64> {
+    meter()
+        .u64_counter("transaction_insert_missing_partition_total")
+        .with_description(
+            "Number of transaction inserts that hit a missing-partition (23514) error \
+             and triggered the synchronous ensure_partition_for self-heal path",
+        )
+        .init()
+}
+
+/// Latency of the synchronous missing-partition self-heal call
+/// (`ensure_partition_for`), in milliseconds. Under contention this is
+/// dominated by `pg_advisory_xact_lock` wait time; uncontended calls are
+/// dominated by the `CREATE TABLE` DDL itself.
+pub fn partition_self_heal_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("partition_self_heal_duration_ms")
+        .with_description(
+            "Latency of the missing-partition self-heal call, dominated by \
+             advisory-lock wait time under concurrent contention",
+        )
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Counter for idempotency keys recovered from the database fallback table
+/// on the healthy-Redis lookup path (i.e. a key written during a Redis
+/// outage, found again after Redis recovered), instead of being silently
+/// double-executed.
+pub fn idempotency_db_fallback_recovered_total() -> Counter<u64> {
+    meter()
+        .u64_counter("idempotency_db_fallback_recovered_total")
+        .with_description(
+            "Idempotency keys recovered from the DB fallback table on Redis-healthy \
+             lookup, i.e. requests recorded during a Redis outage and recognized \
+             again after recovery instead of being double-executed",
+        )
+        .init()
+}
+
+/// Counter for reconciliation report inserts skipped because a report for
+/// the same `(period_start, period_end)` already existed — i.e. a duplicate
+/// caught by the unique constraint after a concurrent job run, rather than
+/// producing a second report row.
+pub fn reconciliation_duplicate_report_prevented_total() -> Counter<u64> {
+    meter()
+        .u64_counter("reconciliation_duplicate_report_prevented_total")
+        .with_description(
+            "Reconciliation report inserts skipped due to the (period_start, period_end) \
+             unique constraint catching a concurrent duplicate run",
+        )
+        .init()
+}
+
+/// Counter for AccountMonitor completion writes that lost the race for a
+/// candidate transaction because `FOR UPDATE` row locking meant a concurrent
+/// `process_payment` call already claimed it (rows_affected == 0 on the
+/// guarded completion UPDATE).
+pub fn account_monitor_concurrent_write_prevented_total() -> Counter<u64> {
+    meter()
+        .u64_counter("account_monitor_concurrent_write_prevented_total")
+        .with_description(
+            "AccountMonitor completion writes that lost a row-lock race for the same \
+             candidate transaction, prevented from overwriting a concurrent winner",
+        )
+        .init()
+}
+
+/// Counter for `TransactionProcessor::CompleteStage` completion writes that
+/// lost a row-lock race for the same transaction (rows_affected == 0 on the
+/// guarded completion UPDATE), analogous to
+/// `account_monitor_concurrent_write_prevented_total`.
+pub fn transaction_processor_completion_conflict_prevented_total() -> Counter<u64> {
+    meter()
+        .u64_counter("transaction_processor_completion_conflict_prevented_total")
+        .with_description(
+            "TransactionProcessor CompleteStage writes that lost a row-lock race for \
+             the same transaction, prevented from overwriting a concurrent winner",
+        )
+        .init()
+}
+
+/// Stage-execution counter for `TransactionProcessor`, broken down by which
+/// rollout-percentage bucket a stage ran in, so the fixed tenant/account-
+/// scoped percentage gating is provably respected in production rather than
+/// only in the unit test.
+pub fn transaction_processor_stage_executions_total() -> Counter<u64> {
+    meter()
+        .u64_counter("transaction_processor_stage_executions_total")
+        .with_description(
+            "TransactionProcessor stage executions, labeled by stage name and whether \
+             the stage's feature flag was rollout-percentage-gated",
+        )
+        .init()
+}
+
+/// Webhook delivery outcome counter, labeled by `outcome` ("success" |
+/// "failure") and `endpoint_id`.
+pub fn webhook_delivery_total() -> Counter<u64> {
+    meter()
+        .u64_counter("webhook_delivery_total")
+        .with_description("Webhook delivery attempts, labeled by outcome and endpoint_id")
+        .init()
+}
+
+/// Circuit breaker state-transition counter, labeled by `transition`
+/// ("opened" | "closed" | "probe_sent" | "probe_blocked").
+pub fn webhook_circuit_breaker_transitions_total() -> Counter<u64> {
+    meter()
+        .u64_counter("webhook_circuit_breaker_transitions_total")
+        .with_description("Webhook circuit breaker state transitions, labeled by transition type")
+        .init()
+}
+
+/// Counter for rate-limit counters found without a TTL and self-healed
+/// (see webhook_dispatcher::check_rate_limit's atomic INCR+EXPIRE script).
+pub fn webhook_rate_limit_self_healed_total() -> Counter<u64> {
+    meter()
+        .u64_counter("webhook_rate_limit_self_healed_total")
+        .with_description(
+            "Webhook rate-limit counters found without a TTL (e.g. a crash between a \
+             separate INCR and EXPIRE) and self-healed instead of staying stuck",
+        )
+        .init()
+}
+
 /// Pending transaction queue depth gauge.
 pub fn pending_queue_depth() -> ObservableGauge<u64> {
     meter()
@@ -161,11 +298,84 @@ pub fn lock_acquired_total() -> Counter<u64> {
         .init()
 }
 
+/// Requests verified against a secret's `previous` (grace-period) value
+/// rather than `current`. A nonzero rate outside the window immediately
+/// following a rotation indicates a caller stuck on the old secret.
+pub fn secrets_previous_value_verified_total() -> Counter<u64> {
+    meter()
+        .u64_counter("secrets_previous_value_verified_total")
+        .with_description(
+            "Number of requests verified against a rotating secret's previous \
+             (grace-period) value rather than its current value",
+        )
+        .init()
+}
+
+/// Time between this instance's local secret rotation timestamp and the
+/// original detection that triggered the fleet-wide notification, in
+/// milliseconds. Bounds the real-world propagation window described in the
+/// secret-rotation coordination fix (see `secrets::SecretsManager`).
+pub fn secrets_rotation_detection_lag_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("secrets_rotation_detection_lag_ms")
+        .with_description(
+            "Lag between a secret rotation being detected on this instance and \
+             the pub/sub notification that triggered it (0 for the instance \
+             that detected the rotation itself via polling)",
+        )
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Incremented each time the pub/sub rotation-notification channel is
+/// unavailable and an instance falls back to poll-only detection.
+pub fn secrets_rotation_pubsub_unavailable_total() -> Counter<u64> {
+    meter()
+        .u64_counter("secrets_rotation_pubsub_unavailable_total")
+        .with_description(
+            "Number of times the secret-rotation pub/sub channel was unavailable, \
+             forcing fallback to poll-only detection",
+        )
+        .init()
+}
+
 /// Total number of lock contention events (failed acquire attempts).
 pub fn lock_contention_total() -> Counter<u64> {
     meter()
         .u64_counter("lock_contention_total")
         .with_description("Total number of distributed lock contention events")
+        .init()
+}
+
+/// Backup verification outcome counter, labeled by `result` ("success" |
+/// "failure" | "no_backups").
+pub fn backup_verification_total() -> Counter<u64> {
+    meter()
+        .u64_counter("backup_verification_total")
+        .with_description("Outcome of the scheduled backup verification job, labeled by result")
+        .init()
+}
+
+/// Duration of a single backup verification run, in milliseconds.
+pub fn backup_verification_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("backup_verification_duration_ms")
+        .with_description("Duration of the scheduled backup verification job")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Audit log archive write outcome counter, labeled by `result` ("success" |
+/// "failure"). A `failure` here means `run_retention` skipped deletion for
+/// that run — see the hard invariant documented on `db::audit::run_retention`.
+pub fn audit_archive_write_total() -> Counter<u64> {
+    meter()
+        .u64_counter("audit_archive_write_total")
+        .with_description(
+            "Outcome of writing an audit log retention archive to its storage \
+             backend, labeled by result. A 'failure' means the corresponding \
+             rows were NOT deleted from audit_logs this run.",
+        )
         .init()
 }
 

@@ -338,7 +338,7 @@ mod tests {
             None,
             None,
         );
-        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx, None)
             .await
             .unwrap();
         assert_eq!(inserted.stellar_account, tx.stellar_account);
@@ -359,7 +359,7 @@ mod tests {
             None,
             None,
         );
-        let inserted = crate::db::queries::insert_transaction(&pool, &tx)
+        let inserted = crate::db::queries::insert_transaction(&pool, &tx, None)
             .await
             .unwrap();
         let fetched = crate::db::queries::get_transaction(&pool, inserted.id)
@@ -384,7 +384,7 @@ mod tests {
                 None,
                 None,
             );
-            crate::db::queries::insert_transaction(&pool, &tx)
+            crate::db::queries::insert_transaction(&pool, &tx, None)
                 .await
                 .unwrap();
         }

@@ -74,9 +74,7 @@ struct ValidatedWebhookTransaction {
 }
 
 fn sanitize_optional(value: Option<String>) -> Option<String> {
-    value
-        .map(|v| sanitize_string(&v))
-        .filter(|v| !v.is_empty())
+    value.map(|v| sanitize_string(&v)).filter(|v| !v.is_empty())
 }
 
 fn validate_webhook_payload(
@@ -162,7 +160,7 @@ pub async fn transaction_callback(
     )
     .with_trace_id(trace_id);
 
-    let inserted = queries::insert_transaction(&state.db, &tx).await?;
+    let inserted = queries::insert_transaction(&state.db, &tx, Some(&state.query_cache)).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -392,7 +390,9 @@ pub async fn callback(
         payload.metadata,
     );
 
-    let inserted = queries::insert_transaction(&state.app_state.db, &tx).await?;
+    let inserted =
+        queries::insert_transaction(&state.app_state.db, &tx, Some(&state.app_state.query_cache))
+            .await?;
 
     Ok((StatusCode::CREATED, Json(inserted)).into_response())
 }

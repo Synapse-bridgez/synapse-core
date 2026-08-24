@@ -74,8 +74,7 @@ pub async fn admin_auth(req: Request<Body>, next: Next<Body>) -> Result<Response
 
     // Try SecretsStore extension first (rotation-aware).
     if let Some(store) = req.extensions().get::<SecretsStore>() {
-        let valid_keys = store.valid_admin_keys().await;
-        if valid_keys.iter().any(|k| k == &provided) {
+        if store.verify_admin_key(&provided).await {
             return Ok(next.run(req).await);
         }
         return Err(StatusCode::UNAUTHORIZED);

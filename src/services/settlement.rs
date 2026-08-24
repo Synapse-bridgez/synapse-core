@@ -41,6 +41,9 @@ pub struct SettlementService {
     readiness: Option<Arc<crate::readiness::ReadinessState>>,
     /// Settlement operation duration histogram
     settlement_duration_ms: Histogram<f64>,
+    /// Shared `QueryCache` for cache invalidation after settlement. `None`
+    /// means invalidation is skipped (see `with_query_cache`).
+    query_cache: Option<crate::services::query_cache::QueryCache>,
 }
 
 impl SettlementService {
@@ -52,6 +55,7 @@ impl SettlementService {
             health_check_timeout: Duration::from_secs(5),
             readiness: None,
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
+            query_cache: None,
         }
     }
 
@@ -63,7 +67,16 @@ impl SettlementService {
             health_check_timeout: Duration::from_secs(5),
             readiness: None,
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
+            query_cache: None,
         }
+    }
+
+    /// Attach the process's shared `QueryCache` so post-settlement cache
+    /// invalidation reaches the same instance reads go through instead of
+    /// silently no-oping (see `db::queries::invalidate_transaction_caches`).
+    pub fn with_query_cache(mut self, cache: crate::services::query_cache::QueryCache) -> Self {
+        self.query_cache = Some(cache);
+        self
     }
 
     /// Create a new settlement service with readiness state for graceful shutdown
@@ -75,6 +88,7 @@ impl SettlementService {
             health_check_timeout: Duration::from_secs(5),
             readiness: Some(readiness),
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
+            query_cache: None,
         }
     }
 
@@ -91,6 +105,7 @@ impl SettlementService {
             health_check_timeout: Duration::from_secs(5),
             readiness: Some(readiness),
             settlement_duration_ms,
+            query_cache: None,
         }
     }
 
@@ -298,7 +313,7 @@ impl SettlementService {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        queries::invalidate_caches_for_asset(asset_code).await;
+        queries::invalidate_caches_for_asset(self.query_cache.as_ref(), asset_code).await;
 
         // Record metrics for the settle_asset operation
         let duration_ms = start.elapsed().as_millis() as f64;

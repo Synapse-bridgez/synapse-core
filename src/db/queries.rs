@@ -32,6 +32,7 @@
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -342,7 +343,7 @@ pub async fn set_tenant_context(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// let result = with_tenant(pool, Some(tenant_id), false, |tx| Box::pin(async move {
 ///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = $1")
 ///         .bind(id)
@@ -366,7 +367,7 @@ pub async fn set_tenant_context(
 /// which auto-clears on commit/rollback. Leak-proof under connection pooling.
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// let result = with_tenant(&pool, Some(tenant_id), false, |tx| Box::pin(async move {
 ///     sqlx::query_as::<_, Transaction>("SELECT * FROM transactions")
 ///         .fetch_all(&mut *tx)
@@ -413,25 +414,85 @@ pub async fn with_tenant<T>(
 /// entry in the same SQL transaction, and invalidates aggregate caches only
 /// after commit. Handlers should use this helper instead of issuing their own
 /// INSERT so webhook persistence remains auditable and timeout protected.
-pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
+///
+/// `cache` should be the process's single shared `QueryCache` (e.g.
+/// `AppState.query_cache`) so invalidation actually clears the in-memory LRU
+/// that reads go through — a throwaway `QueryCache::new(..)` here would issue
+/// correct Redis SCAN+DEL calls but leave the shared instance's local cache
+/// stale. Pass `None` only where no shared instance exists (e.g. unit tests
+/// that don't exercise cache behavior).
+pub async fn insert_transaction(
+    pool: &PgPool,
+    tx: &Transaction,
+    cache: Option<&QueryCache>,
+) -> Result<Transaction> {
     with_timeout(
         QueryTier::Write,
         "INSERT INTO transactions ... RETURNING *",
         crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
-            let mut db_tx = pool.begin().await?;
-
-            let result = persist_transaction(&mut db_tx, tx).await?;
-            audit_transaction_creation(&mut db_tx, &result).await?;
-
-            db_tx.commit().await?;
-
-            // Invalidate cache after successful commit
-            invalidate_transaction_caches(&result.asset_code).await;
-
-            Ok(result)
+            insert_transaction_once(pool, tx, cache).await
         }),
     )
     .await
+}
+
+/// A single insert attempt. On a missing-partition error (23514 — the row's
+/// `created_at` falls outside every existing partition's range), synchronously
+/// creates the missing partition via the concurrency-safe `ensure_partition_for`
+/// SQL function and retries the insert exactly once. Any other error, or a
+/// second 23514 after the self-heal, propagates immediately.
+async fn insert_transaction_once(
+    pool: &PgPool,
+    tx: &Transaction,
+    cache: Option<&QueryCache>,
+) -> Result<Transaction> {
+    let mut db_tx = pool.begin().await?;
+
+    match persist_transaction(&mut db_tx, tx).await {
+        Ok(result) => {
+            audit_transaction_creation(&mut db_tx, &result).await?;
+            db_tx.commit().await?;
+            invalidate_transaction_caches(cache, &result.asset_code).await;
+            Ok(result)
+        }
+        Err(err) if is_missing_partition_error(&err) => {
+            // Not retryable as-is: nothing changed about the missing partition
+            // since we entered this transaction, so let it end before healing.
+            let _ = db_tx.rollback().await;
+
+            crate::metrics::transaction_insert_missing_partition_total().add(1, &[]);
+            let heal_started = std::time::Instant::now();
+            ensure_partition_for(pool, tx.created_at).await?;
+            crate::metrics::partition_self_heal_duration_ms()
+                .record(heal_started.elapsed().as_secs_f64() * 1000.0, &[]);
+
+            let mut db_tx = pool.begin().await?;
+            let result = persist_transaction(&mut db_tx, tx).await?;
+            audit_transaction_creation(&mut db_tx, &result).await?;
+            db_tx.commit().await?;
+            invalidate_transaction_caches(cache, &result.asset_code).await;
+            Ok(result)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Postgres 23514 = "no partition of relation found for row".
+fn is_missing_partition_error(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23514"))
+}
+
+/// Ensure the monthly partition covering `ts` exists. Delegates to the
+/// `ensure_partition_for` SQL function, which serializes concurrent callers
+/// targeting the same partition via `pg_advisory_xact_lock` and tolerates a
+/// losing concurrent `CREATE TABLE` rather than propagating it. Safe to call
+/// from multiple concurrent `insert_transaction` self-heal paths at once.
+async fn ensure_partition_for(pool: &PgPool, ts: DateTime<Utc>) -> Result<()> {
+    sqlx::query("SELECT ensure_partition_for($1::date)")
+        .bind(ts.date_naive())
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 async fn persist_transaction(
@@ -705,22 +766,32 @@ pub async fn update_transactions_settlement(
 // Cache invalidation helper
 // ---------------------------------------------------------------------------
 
-async fn invalidate_transaction_caches(asset_code: &str) {
-    if let Ok(redis_url) = std::env::var("REDIS_URL") {
-        if let Ok(cache) = crate::services::QueryCache::new(&redis_url).await {
-            let _ = cache.invalidate("query:status_counts").await;
-            let _ = cache.invalidate("query:daily_totals:*").await;
-            let _ = cache.invalidate("query:asset_stats").await;
-            let _ = cache
-                .invalidate_exact(&format!("query:asset_total:{}", asset_code))
-                .await;
-        }
-    }
+/// Invalidates the shared `QueryCache` instance passed in by the caller.
+///
+/// This must operate on the process's single shared `QueryCache` (e.g.
+/// `AppState.query_cache`), never a freshly constructed one: `QueryCache::get`
+/// checks a process-local in-memory LRU before Redis, so invalidating a
+/// throwaway instance clears that instance's (empty) LRU and correctly issues
+/// Redis SCAN+DEL, but never touches the shared instance's in-memory entries —
+/// readers going through the shared instance would keep serving stale data
+/// until those entries individually expire or are evicted by LRU capacity.
+async fn invalidate_transaction_caches(cache: Option<&QueryCache>, asset_code: &str) {
+    let Some(cache) = cache else {
+        return;
+    };
+    let _ = cache.invalidate("query:status_counts").await;
+    let _ = cache.invalidate("query:daily_totals:*").await;
+    let _ = cache.invalidate("query:asset_stats").await;
+    let _ = cache
+        .invalidate_exact(&format!("query:asset_total:{}", asset_code))
+        .await;
 }
 
-/// Public cache invalidation function for use by other modules
-pub async fn invalidate_caches_for_asset(asset_code: &str) {
-    invalidate_transaction_caches(asset_code).await;
+/// Public cache invalidation function for use by other modules. `cache`
+/// should be the caller's shared `QueryCache` instance — see
+/// `invalidate_transaction_caches` for why a freshly constructed one won't work.
+pub async fn invalidate_caches_for_asset(cache: Option<&QueryCache>, asset_code: &str) {
+    invalidate_transaction_caches(cache, asset_code).await;
 }
 
 // ---------------------------------------------------------------------------

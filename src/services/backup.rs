@@ -412,6 +412,38 @@ impl BackupService {
         Ok(())
     }
 
+    /// Verifies a backup's on-disk integrity via checksum comparison only:
+    /// loads the backup's `.meta` sidecar, recomputes the backup file's
+    /// checksum, and compares. Returns the metadata on success.
+    ///
+    /// This deliberately does **not** decrypt, decompress, or restore
+    /// anywhere — unlike `restore_backup`, which always targets
+    /// `self.database_url` (the live application's own database in every
+    /// deployment of this service today; see module docs). A weekly
+    /// unattended job calling `restore_backup` would run a full logical
+    /// restore against production every week. Checksum-only verification
+    /// proves the backup *file* wasn't corrupted at rest without touching
+    /// any database at all, which is the right tradeoff for routine,
+    /// automated, repeated verification; a full restore-and-checksum
+    /// against an isolated target is a materially larger undertaking
+    /// (provisioning/tearing down a scratch database per deployment
+    /// topology) intentionally left out of this change — see
+    /// `docs/backup_verification.md` for the full tradeoff and the
+    /// follow-up this leaves open.
+    pub async fn verify_backup_checksum(&self, filename: &str) -> Result<BackupMetadata> {
+        let backup_path = self.backup_dir.join(filename);
+        if !backup_path.exists() {
+            anyhow::bail!("Backup file not found: {filename}");
+        }
+
+        let meta_path = backup_path.with_extension("meta");
+        let metadata = self.load_metadata(&meta_path).await?;
+
+        self.verify_backup(&backup_path, &metadata).await?;
+
+        Ok(metadata)
+    }
+
     fn generate_filename(&self, backup_type: BackupType, timestamp: DateTime<Utc>) -> String {
         let type_str = match backup_type {
             BackupType::Hourly => "hourly",

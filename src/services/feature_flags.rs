@@ -32,7 +32,14 @@ impl FeatureFlagService {
         Self { pool }
     }
 
-    pub async fn is_enabled(&self, flag_name: &str) -> Result<bool, sqlx::Error> {
+    /// Checks whether a flag is enabled, **ignoring `rollout_percentage`
+    /// entirely**. If the flag has a `rollout_percentage` configured, an
+    /// operator's attempt to limit blast radius to X% is silently not
+    /// applied here — every caller sees the flag as fully on. Only use this
+    /// for flags that genuinely have no natural per-caller scoping key (e.g.
+    /// a process-wide toggle); anything gating per-request/per-tenant/
+    /// per-account behavior should use [`Self::is_enabled_for_key`] instead.
+    pub async fn is_enabled_ignoring_rollout(&self, flag_name: &str) -> Result<bool, sqlx::Error> {
         let result =
             sqlx::query_scalar::<_, bool>("SELECT enabled FROM feature_flags WHERE name = $1")
                 .bind(flag_name)
@@ -42,10 +49,28 @@ impl FeatureFlagService {
         Ok(result.unwrap_or(false))
     }
 
+    /// Checks whether a flag is enabled for a given tenant, correctly
+    /// applying `rollout_percentage` via a deterministic per-tenant hash.
     pub async fn is_enabled_for_tenant(
         &self,
         flag_name: &str,
         tenant_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        self.is_enabled_for_key(flag_name, tenant_id).await
+    }
+
+    /// Checks whether a flag is enabled for an arbitrary stable scope key
+    /// (tenant id, stellar account, etc.), correctly applying
+    /// `rollout_percentage`: if the flag is enabled and `rollout_percentage`
+    /// is set below 100, `key` is hashed together with `flag_name` and only
+    /// included if the hash falls within the configured percentage — the
+    /// same key always gets the same answer for a given flag, so a gradual
+    /// rollout is stable across repeated calls instead of coin-flipping
+    /// per call.
+    pub async fn is_enabled_for_key(
+        &self,
+        flag_name: &str,
+        key: &str,
     ) -> Result<bool, sqlx::Error> {
         let flag = sqlx::query_as::<_, (bool, Option<i32>)>(
             "SELECT enabled, rollout_percentage FROM feature_flags WHERE name = $1",
@@ -63,7 +88,7 @@ impl FeatureFlagService {
 
                 if let Some(percentage) = rollout_percentage {
                     if percentage < 100 {
-                        let hash = Self::hash_tenant_flag(tenant_id, flag_name);
+                        let hash = Self::hash_key_flag(key, flag_name);
                         return Ok((hash % 100) < (percentage as u64));
                     }
                 }
@@ -73,12 +98,12 @@ impl FeatureFlagService {
         }
     }
 
-    fn hash_tenant_flag(tenant_id: &str, flag_name: &str) -> u64 {
+    fn hash_key_flag(key: &str, flag_name: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
-        tenant_id.hash(&mut hasher);
+        key.hash(&mut hasher);
         flag_name.hash(&mut hasher);
         hasher.finish()
     }
@@ -228,8 +253,8 @@ mod tests {
         let tenant_id = "tenant-123";
         let flag_name = "test_flag";
 
-        let hash1 = FeatureFlagService::hash_tenant_flag(tenant_id, flag_name);
-        let hash2 = FeatureFlagService::hash_tenant_flag(tenant_id, flag_name);
+        let hash1 = FeatureFlagService::hash_key_flag(tenant_id, flag_name);
+        let hash2 = FeatureFlagService::hash_key_flag(tenant_id, flag_name);
 
         assert_eq!(
             hash1, hash2,
@@ -245,7 +270,7 @@ mod tests {
         let mut activated = 0;
         for i in 0..100 {
             let tenant_id = format!("tenant-{}", i);
-            let hash = FeatureFlagService::hash_tenant_flag(&tenant_id, flag_name);
+            let hash = FeatureFlagService::hash_key_flag(&tenant_id, flag_name);
             if (hash % 100) < (percentage as u64) {
                 activated += 1;
             }
@@ -262,8 +287,8 @@ mod tests {
     #[test]
     fn test_different_tenants_different_results() {
         let flag_name = "test_flag";
-        let hash1 = FeatureFlagService::hash_tenant_flag("tenant-1", flag_name);
-        let hash2 = FeatureFlagService::hash_tenant_flag("tenant-2", flag_name);
+        let hash1 = FeatureFlagService::hash_key_flag("tenant-1", flag_name);
+        let hash2 = FeatureFlagService::hash_key_flag("tenant-2", flag_name);
 
         assert_ne!(
             hash1, hash2,

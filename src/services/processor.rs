@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::models::Transaction;
 use crate::services::lock_manager::LeaderElection;
+use crate::services::webhook_dispatcher::WebhookDispatcher;
 use crate::stellar::HorizonClient;
 
 const LEADER_HEARTBEAT_SECS: u64 = 15;
@@ -57,6 +58,14 @@ pub struct ProcessorPool {
     current_batch_size: Arc<AtomicU64>,
     /// Shared atomic for queue depth (read by back-pressure task).
     pending_queue_depth: Arc<AtomicU64>,
+    /// Enqueues outbound webhook deliveries for completed transactions.
+    /// `None` disables webhook delivery (e.g. Redis unavailable at startup).
+    webhook_dispatcher: Option<WebhookDispatcher>,
+    /// Shared `QueryCache` for cache invalidation after completing
+    /// transactions. `None` means invalidation is skipped (see
+    /// `with_query_cache`).
+    query_cache: Option<crate::services::query_cache::QueryCache>,
+    feature_flags: crate::services::feature_flags::FeatureFlagService,
 }
 
 impl ProcessorPool {
@@ -72,6 +81,7 @@ impl ProcessorPool {
         current_batch_size: Arc<AtomicU64>,
         pending_queue_depth: Arc<AtomicU64>,
     ) -> Self {
+        let feature_flags = crate::services::feature_flags::FeatureFlagService::new(pool.clone());
         Self {
             pool,
             horizon_client,
@@ -82,7 +92,26 @@ impl ProcessorPool {
             scaling_factor,
             current_batch_size,
             pending_queue_depth,
+            webhook_dispatcher: None,
+            query_cache: None,
+            feature_flags,
         }
+    }
+
+    /// Attach a WebhookDispatcher so completed transactions enqueue outbound
+    /// webhook deliveries. Without this, process_batch still completes
+    /// transactions but never calls `enqueue()`.
+    pub fn with_webhook_dispatcher(mut self, dispatcher: WebhookDispatcher) -> Self {
+        self.webhook_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach the process's shared `QueryCache` so completing a transaction
+    /// invalidates the same instance reads go through instead of silently
+    /// no-oping (see `db::queries::invalidate_transaction_caches`).
+    pub fn with_query_cache(mut self, cache: crate::services::query_cache::QueryCache) -> Self {
+        self.query_cache = Some(cache);
+        self
     }
 
     /// Start the processor pool. Returns a shutdown sender; drop or send to it to stop workers.
@@ -98,6 +127,9 @@ impl ProcessorPool {
         let pending_queue_depth = self.pending_queue_depth.clone();
         let pool = self.pool;
         let horizon_client = self.horizon_client;
+        let webhook_dispatcher = self.webhook_dispatcher;
+        let query_cache = self.query_cache;
+        let feature_flags = self.feature_flags;
 
         info!("Starting ProcessorPool with {} workers", workers);
 
@@ -107,6 +139,9 @@ impl ProcessorPool {
             let mut shutdown_rx = shutdown_rx.clone();
             let current_batch_size = current_batch_size.clone();
             let pending_queue_depth = pending_queue_depth.clone();
+            let webhook_dispatcher = webhook_dispatcher.clone();
+            let query_cache = query_cache.clone();
+            let feature_flags = feature_flags.clone();
             let mut sizer = BatchSizer::new(min_batch, max_batch, scaling_factor);
 
             tokio::spawn(async move {
@@ -123,7 +158,16 @@ impl ProcessorPool {
                     current_batch_size.store(batch_size as u64, Ordering::Relaxed);
                     debug!(worker_id, batch_size, depth, "adaptive batch size");
 
-                    match process_batch(&pool, &horizon_client, batch_size).await {
+                    match process_batch(
+                        &pool,
+                        &horizon_client,
+                        batch_size,
+                        webhook_dispatcher.as_ref(),
+                        query_cache.as_ref(),
+                        &feature_flags,
+                    )
+                    .await
+                    {
                         Ok(processed) => {
                             if processed > 0 {
                                 tracing::info!(
@@ -156,10 +200,21 @@ impl ProcessorPool {
     }
 }
 
+/// Webhook enqueue-on-completion is gated behind this flag (default off —
+/// see migration `20260823000002_webhook_enqueue_rollout_flag.sql`) so
+/// enabling outbound webhook delivery for the first time is an explicit,
+/// gradual operator action (ramp `rollout_percentage` up by
+/// `stellar_account`) rather than firing at 100% of traffic the moment this
+/// PR merges.
+const WEBHOOK_ENQUEUE_FLAG: &str = "webhook_enqueue_on_completion";
+
 pub async fn process_batch(
     pool: &PgPool,
     _horizon_client: &HorizonClient,
     batch_size: u32,
+    webhook_dispatcher: Option<&WebhookDispatcher>,
+    query_cache: Option<&crate::services::query_cache::QueryCache>,
+    feature_flags: &crate::services::feature_flags::FeatureFlagService,
 ) -> anyhow::Result<usize> {
     let mut tx = pool.begin().await?;
 
@@ -167,7 +222,7 @@ pub async fn process_batch(
         r#"
         SELECT id, stellar_account, amount, asset_code, status, created_at, updated_at,
                anchor_transaction_id, callback_type, callback_status, settlement_id,
-               memo, memo_type, metadata, priority, trace_id
+               memo, memo_type, metadata, trace_id
         FROM transactions
         WHERE status = 'pending'
         ORDER BY created_at ASC
@@ -186,8 +241,8 @@ pub async fn process_batch(
 
     debug!("Processing {} pending transaction(s)", pending.len());
 
-    let count = pending.len();
     let mut asset_codes = std::collections::HashSet::new();
+    let mut completed = Vec::with_capacity(pending.len());
     for transaction in &pending {
         asset_codes.insert(transaction.asset_code.clone());
 
@@ -201,27 +256,85 @@ pub async fn process_batch(
             let _guard = span.enter();
             debug!("Processing transaction with trace context");
         }
-    }
 
-    // TODO: per-transaction processing logic
-    for _transaction in pending {
-        // process each transaction
+        if let Err(e) = crate::validation::state_machine::validate_status_transition(
+            &transaction.status,
+            "completed",
+        ) {
+            warn!(
+                transaction_id = %transaction.id,
+                status = %transaction.status,
+                error = %e,
+                "Skipping invalid status transition in batch"
+            );
+            continue;
+        }
+
+        // The FOR UPDATE SKIP LOCKED claim above already holds this row's
+        // lock; WHERE status = $2 is defense in depth against any other
+        // write path changing it without going through that lock.
+        let result = sqlx::query(
+            "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 AND status = $2",
+        )
+        .bind(transaction.id)
+        .bind(&transaction.status)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() > 0 {
+            completed.push(transaction.clone());
+        }
     }
 
     tx.commit().await?;
 
     for asset_code in asset_codes {
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        crate::db::queries::invalidate_caches_for_asset(query_cache, &asset_code).await;
     }
 
-    Ok(count)
+    if let Some(dispatcher) = webhook_dispatcher {
+        for transaction in &completed {
+            let enqueue_enabled = feature_flags
+                .is_enabled_for_key(WEBHOOK_ENQUEUE_FLAG, &transaction.stellar_account)
+                .await
+                .unwrap_or(false);
+            if !enqueue_enabled {
+                continue;
+            }
+
+            let payload = serde_json::json!({
+                "status": "completed",
+                "asset_code": transaction.asset_code,
+                "amount": transaction.amount.to_string(),
+                "stellar_account": transaction.stellar_account,
+            });
+            if let Err(e) = dispatcher
+                .enqueue(transaction.id, "transaction.completed", payload)
+                .await
+            {
+                error!(
+                    transaction_id = %transaction.id,
+                    error = %e,
+                    "Failed to enqueue webhook delivery for completed transaction"
+                );
+            }
+        }
+    }
+
+    Ok(completed.len())
 }
 
-/// Legacy single-worker entry point kept for backward compatibility.
+/// Legacy single-worker entry point kept for backward compatibility. Not
+/// currently invoked from `main.rs` (see `ProcessorPool::start`, which is
+/// the live entry point and does dispatch webhooks). Passes `None` for the
+/// webhook dispatcher, so transactions completed through this path do not
+/// enqueue outbound webhook deliveries.
 pub async fn run_processor(pool: PgPool, horizon_client: HorizonClient) {
     info!("Async transaction processor started (legacy single-worker)");
+    let feature_flags = crate::services::feature_flags::FeatureFlagService::new(pool.clone());
     loop {
-        if let Err(e) = process_batch(&pool, &horizon_client, 10).await {
+        if let Err(e) = process_batch(&pool, &horizon_client, 10, None, None, &feature_flags).await
+        {
             error!("Processor batch error: {}", e);
         }
         sleep(Duration::from_secs(5)).await;
@@ -280,6 +393,7 @@ pub async fn run_processor_with_leader_election(
         "Processor started with leader election"
     );
 
+    let feature_flags = crate::services::feature_flags::FeatureFlagService::new(pool.clone());
     let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(LEADER_HEARTBEAT_SECS));
     let mut process_tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
 
@@ -298,8 +412,10 @@ pub async fn run_processor_with_leader_election(
                 }
             }
             _ = process_tick.tick() => {
-                // All instances process transactions (SKIP LOCKED handles concurrency)
-                if let Err(e) = process_batch(&pool, &horizon_client, 10).await {
+                // All instances process transactions (SKIP LOCKED handles concurrency).
+                // No webhook dispatcher wired here — this function is not currently
+                // invoked from main.rs (ProcessorPool::start is the live path).
+                if let Err(e) = process_batch(&pool, &horizon_client, 10, None, None, &feature_flags).await {
                     error!("Processor batch error: {e}");
                 }
             }

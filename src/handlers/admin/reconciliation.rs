@@ -402,15 +402,23 @@ pub async fn run_reconciliation(
         }
     };
 
-    if let Err(e) = ReconciliationService::store_report(&pool, &report).await {
-        tracing::error!("Failed to store reconciliation report: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": "Failed to store reconciliation report"
-            })),
-        )
-            .into_response();
+    match ReconciliationService::store_report(&pool, &report).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                "Reconciliation report for this exact period already existed; not duplicated"
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to store reconciliation report: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to store reconciliation report"
+                })),
+            )
+                .into_response();
+        }
     }
 
     let summary = ReconciliationReportSummary::from((

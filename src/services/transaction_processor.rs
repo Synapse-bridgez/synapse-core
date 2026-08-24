@@ -1,3 +1,4 @@
+use crate::services::query_cache::QueryCache;
 use crate::services::webhook_dispatcher::WebhookDispatcher;
 use sqlx::PgPool;
 use tracing::instrument;
@@ -60,37 +61,61 @@ impl ProcessingStage for VerifyStage {
 
 pub struct CompleteStage {
     pool: PgPool,
+    query_cache: Option<QueryCache>,
 }
 
 impl CompleteStage {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, query_cache: Option<QueryCache>) -> Self {
+        Self { pool, query_cache }
     }
 }
 
 #[async_trait::async_trait]
 impl ProcessingStage for CompleteStage {
     async fn execute(&self, tx: &crate::db::models::Transaction) -> Result<(), anyhow::Error> {
-        // Get asset_code before update for cache invalidation
+        // Hold the row lock across the read-decide-write sequence, matching
+        // the discipline processor.rs's live batch path uses (SELECT ...
+        // FOR UPDATE). Without it, two concurrent completions of the same
+        // transaction would both pass validation and both issue an
+        // unconditional UPDATE, the second silently overwriting the first.
+        let mut db_tx = self.pool.begin().await?;
+
         let asset_code: String =
-            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1 FOR UPDATE")
                 .bind(tx.id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *db_tx)
                 .await?;
 
         // Validate status transition: current status → completed
         crate::validation::state_machine::validate_status_transition(&tx.status, "completed")
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        sqlx::query(
-            "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1",
+        // WHERE status = $2 is defense in depth: the row lock above already
+        // serializes concurrent CompleteStage callers, but this also catches
+        // any other write path that changed status without going through it.
+        let result = sqlx::query(
+            "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 AND status = $2",
         )
         .bind(tx.id)
-        .execute(&self.pool)
+        .bind(&tx.status)
+        .execute(&mut *db_tx)
         .await?;
 
-        // Invalidate cache after update
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        if result.rows_affected() == 0 {
+            db_tx.rollback().await.ok();
+            crate::metrics::transaction_processor_completion_conflict_prevented_total().add(1, &[]);
+            anyhow::bail!(
+                "Transaction {} status changed before completion could be applied \
+                 (concurrent writer won the race)",
+                tx.id
+            );
+        }
+
+        db_tx.commit().await?;
+
+        // Invalidate cache after commit
+        crate::db::queries::invalidate_caches_for_asset(self.query_cache.as_ref(), &asset_code)
+            .await;
 
         tracing::info!("Completion stage completed for transaction {}", tx.id);
         Ok(())
@@ -105,6 +130,7 @@ impl ProcessingStage for CompleteStage {
 pub struct TransactionProcessor {
     pool: PgPool,
     webhook_dispatcher: Option<WebhookDispatcher>,
+    query_cache: Option<QueryCache>,
     feature_flags: crate::services::feature_flags::FeatureFlagService,
 }
 
@@ -113,6 +139,7 @@ impl TransactionProcessor {
         Self {
             pool: pool.clone(),
             webhook_dispatcher: None,
+            query_cache: None,
             feature_flags: crate::services::feature_flags::FeatureFlagService::new(pool),
         }
     }
@@ -120,6 +147,14 @@ impl TransactionProcessor {
     /// Attach a WebhookDispatcher so state transitions trigger outgoing webhooks.
     pub fn with_webhook_dispatcher(mut self, dispatcher: WebhookDispatcher) -> Self {
         self.webhook_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach the process's shared `QueryCache` so completion/requeue cache
+    /// invalidation reaches the same instance reads go through instead of
+    /// silently no-oping (see `db::queries::invalidate_transaction_caches`).
+    pub fn with_query_cache(mut self, cache: QueryCache) -> Self {
+        self.query_cache = Some(cache);
         self
     }
 
@@ -138,28 +173,38 @@ impl TransactionProcessor {
         // Validate stage - always enabled
         stages.push(Box::new(ValidateStage));
 
-        // Enrich stage - feature flagged
+        // Enrich stage - feature flagged, gated per stellar_account so an
+        // operator-configured rollout_percentage is actually respected
+        // instead of silently applying to 100% of traffic the moment the
+        // flag is merely enabled=true.
         if self
             .feature_flags
-            .is_enabled("transaction_enrich_stage")
+            .is_enabled_for_key("transaction_enrich_stage", &tx.stellar_account)
             .await
             .unwrap_or(false)
         {
+            crate::metrics::transaction_processor_stage_executions_total()
+                .add(1, &[opentelemetry::KeyValue::new("stage", "enrich")]);
             stages.push(Box::new(EnrichStage));
         }
 
-        // Verify stage - feature flagged
+        // Verify stage - feature flagged (see EnrichStage comment above)
         if self
             .feature_flags
-            .is_enabled("transaction_verify_stage")
+            .is_enabled_for_key("transaction_verify_stage", &tx.stellar_account)
             .await
             .unwrap_or(false)
         {
+            crate::metrics::transaction_processor_stage_executions_total()
+                .add(1, &[opentelemetry::KeyValue::new("stage", "verify")]);
             stages.push(Box::new(VerifyStage));
         }
 
         // Complete stage - always enabled
-        stages.push(Box::new(CompleteStage::new(self.pool.clone())));
+        stages.push(Box::new(CompleteStage::new(
+            self.pool.clone(),
+            self.query_cache.clone(),
+        )));
 
         // Execute the pipeline
         for stage in stages {
@@ -236,7 +281,8 @@ impl TransactionProcessor {
             .await?;
 
         // Invalidate cache after update
-        crate::db::queries::invalidate_caches_for_asset(&asset_code).await;
+        crate::db::queries::invalidate_caches_for_asset(self.query_cache.as_ref(), &asset_code)
+            .await;
 
         Ok(())
     }

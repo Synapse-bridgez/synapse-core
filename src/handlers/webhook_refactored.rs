@@ -166,7 +166,8 @@ pub async fn transaction_callback(
         None, // metadata
     );
 
-    let inserted = queries::insert_transaction(&state.db, &tx).await?;
+    let inserted =
+        queries::insert_transaction(&state.db, &tx, Some(&state.query_cache)).await?;
 
     Ok((
         StatusCode::CREATED,

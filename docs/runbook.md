@@ -422,6 +422,89 @@ grep "partition" /var/log/synapse-core/app.log
 
 **Estimated Recovery Time:** Automatic (60-120s after Horizon recovers)
 
+#### 5a. Triaging a Reported Duplicate Action from a Past Redis Outage
+**Symptoms:** A customer reports an action (e.g. a callback-triggered transaction) that appears to have happened twice, and the timing correlates with a known Redis outage window.
+
+**Why this can happen:** During a Redis outage, `IdempotencyService` falls back to a database-backed record (`idempotency_keys` table). The healthy-path Redis lookup now also consults that table on a Redis miss (fixed in Part B of the accompanying PR — previously it did not, which meant a retry arriving after Redis recovered could double-execute). Check `idempotency_db_fallback_recovered_total` for how often this recovery path is actually engaging.
+
+**Response:**
+1. Check whether the idempotency key in question has a DB-fallback record:
+   ```sql
+   SELECT key, status, response, created_at, expires_at
+   FROM idempotency_keys
+   WHERE key = '<the idempotency key from the customer report>';
+   ```
+2. If a row exists with `status = 'completed'`: the DB fallback worked as designed — a retry with this key should have been (and, after the Part B fix, will be) recognized rather than re-executed. If the duplicate report predates this fix's deployment, that's the expected pre-fix behavior for this exact window; no further action needed beyond confirming the fix is deployed.
+3. If no row exists: the duplicate wasn't caused by this mechanism — look elsewhere (client-side retry without an idempotency key, a different bug).
+4. Cross-reference the Redis outage window against `idempotency_db_fallback_recovered_total`'s timeseries to confirm the outage actually caused fallback activity around the reported time.
+
+**Estimated Recovery Time:** N/A (investigation only).
+
+#### 6. Missing-Partition (23514) Burst on Transaction Insert
+**Symptoms:** A burst of `transaction_insert_missing_partition_total` counter increments, or `23514`/`no partition of relation found for row` errors in logs — typically right after a fresh deploy or a stalled `PartitionManager` maintenance loop, when a burst of transactions lands in a calendar month nobody has created a partition for yet.
+
+**What happens automatically:** `insert_transaction` catches the `23514` error, calls `ensure_partition_for(created_at)` synchronously (which serializes concurrent callers targeting the same partition via `pg_advisory_xact_lock` and tolerates a losing concurrent `CREATE TABLE`), and retries the insert once. This should resolve itself within one request's latency — check `partition_self_heal_duration_ms` for how long the self-heal + lock wait actually took.
+
+**Response:**
+1. Confirm the self-heal is actually resolving it (not looping):
+   ```bash
+   grep "self-healed missing partition\|ensure_partition_for" /var/log/synapse-core/app.log | tail -50
+   ```
+2. Check whether the expected partition now exists:
+   ```sql
+   SELECT relname FROM pg_class WHERE relname LIKE 'transactions_y%' ORDER BY relname DESC LIMIT 5;
+   ```
+3. If `transaction_insert_missing_partition_total` keeps climbing with no corresponding drop in error rate, the advisory lock may be held by a stuck session — check for long-held locks:
+   ```sql
+   SELECT pid, mode, granted, query, now() - query_start AS held_for
+   FROM pg_locks l JOIN pg_stat_activity a ON l.pid = a.pid
+   WHERE l.locktype = 'advisory'
+   ORDER BY held_for DESC;
+   ```
+   A session holding the lock past a few hundred milliseconds under normal DDL is anomalous — consider `SELECT pg_terminate_backend(<pid>)` on a confirmed-stuck session only, after checking it isn't mid-commit.
+4. If partitions are chronically missing (not just a one-off burst), check whether the scheduled `PartitionManager` maintenance loop (24h interval by default, `main.rs`) is actually running — it creates partitions 2 months ahead of need, so a working self-heal masking a broken scheduled loop is itself worth fixing.
+
+**Estimated Recovery Time:** Automatic, sub-second per affected insert; investigate if it recurs across multiple deploys.
+
+#### 7. Duplicate Reconciliation Report Alert
+**Symptoms:** More than one `reconciliation_reports` row for what should be the same daily window, or a spike in `reconciliation_duplicate_report_prevented_total`.
+
+**What this means:** As of the `reconciliation_reports_period_unique` constraint, a genuine duplicate insert for the identical `(period_start, period_end)` is rejected at the database level and counted, not silently stored twice. So:
+- A rising `reconciliation_duplicate_report_prevented_total` is **expected background noise** if `LeaderElection` ever fails open (e.g. a Redis blip) and two instances both ran the job for the same day — the constraint did its job.
+- **An actual duplicate report row existing** (two rows with different `id` but the same `period_start`/`period_end`) would mean a regression — that should be impossible with the constraint in place.
+
+**Response:**
+1. Check whether it's the expected counter (no duplicate row) or an actual duplicate row:
+   ```sql
+   SELECT period_start, period_end, COUNT(*) FROM reconciliation_reports
+   GROUP BY period_start, period_end HAVING COUNT(*) > 1;
+   ```
+2. If that query returns nothing: no regression, just check why `LeaderElection` failed open as often as the counter suggests (Redis health, network partition between instances and Redis).
+3. If that query returns rows: this is a real regression — check that the migration `20260823000001_reconciliation_reports_unique_period.sql` is actually applied (`SELECT conname FROM pg_constraint WHERE conname = 'reconciliation_reports_period_unique';`), and file an incident, since the safety net that should make this impossible did not hold.
+
+**Estimated Recovery Time:** N/A (detection/triage only — no auto-remediation for an actual constraint-bypass regression).
+
+#### 8. Webhook Delivery DLQ Review
+**Symptoms:** Rows appearing in `webhook_delivery_dlq` for the first time (this table has been reachable but never actually populated in production until the `webhook_enqueue_on_completion` flag is enabled — see `docs/webhook-delivery-architecture.md`), or a drop in `webhook_delivery_total{outcome="success"}`.
+
+**What a DLQ row means:** A delivery exhausted `MAX_ATTEMPTS` (5) retries with exponential backoff. The endpoint has been failing consistently — check whether its circuit breaker is open too (`webhook_circuit_breaker_transitions_total{transition="opened"}`).
+
+**Response:**
+1. Review pending DLQ entries and why they failed:
+   ```sql
+   SELECT id, delivery_id, endpoint_id, transaction_id, event_type,
+          attempt_count, last_response_status, last_response_body, created_at
+   FROM webhook_delivery_dlq
+   ORDER BY created_at DESC
+   LIMIT 50;
+   ```
+2. Check whether the failure is endpoint-side (4xx/5xx from `last_response_status`, endpoint URL unreachable) or ours (payload/signature issue — compare `last_response_body` against the expected error format for that tenant's integration).
+3. If the endpoint has since been fixed and should receive the missed event, replay it. **There is currently no admin HTTP endpoint for this** — `WebhookDispatcher::replay_from_dlq(dlq_id)` exists in code (`src/services/webhook_dispatcher.rs`) but must be invoked from a Rust context against the running database (e.g. a one-off binary, or a REPL-style task), not via `curl`. This is a known gap; adding an admin route is a reasonable follow-up.
+4. If the endpoint is broken and won't be fixed soon, no action needed beyond notifying the tenant — the DLQ row is a durable record; it doesn't need manual cleanup.
+5. If DLQ rows are appearing across *many* endpoints at once rather than one bad endpoint, suspect an us-side regression (payload shape change, signature bug) rather than N simultaneous endpoint outages — check `webhook_delivery_total{outcome="failure"}` broken down by endpoint_id to confirm it's broad, not concentrated.
+
+**Estimated Recovery Time:** Investigation only; replay is manual (see step 3) until an admin endpoint exists.
+
 ### Escalation Procedures
 
 #### Tier 1 (Automated)

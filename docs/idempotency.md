@@ -36,6 +36,22 @@ This implementation provides webhook idempotency using Redis to prevent duplicat
 - **Processing Lock**: 5 minutes (prevents stuck locks from failed requests)
 - **Completed Response**: 24 hours (prevents duplicate processing within reasonable window)
 
+### 4. Database Fallback (Redis-primary, DB-fallback-during-outage, DB-consulted-on-recovery)
+
+Redis is the primary store, but it isn't the only one — `check_idempotency` (`src/middleware/idempotency.rs`) has three paths, not one:
+
+1. **Healthy Redis, cache hit** → return the cached response from Redis.
+2. **Healthy Redis, cache miss** → before issuing a fresh Redis lock, consult the `idempotency_keys` Postgres table. If a row exists there (written during a prior Redis outage — see path 3), recognize it as `Completed`/`Processing` instead of treating the key as brand new. This is what makes a retry *after* Redis recovers, for a request that was originally recorded *during* an outage, come back as a duplicate instead of executing twice. Emits `idempotency_db_fallback_recovered_total` when this path finds a row.
+3. **Redis unreachable** → fall back entirely to the `idempotency_keys` table: check for an existing row, or insert one with `status = 'processing'` (`lock_token: None`). `store_response` correspondingly writes to Postgres whenever `lock_token` is `None`.
+
+Path 2 is the fix for the gap that used to exist here: before it was added, the healthy-path lookup only ever checked Redis, so a request recorded via path 3 during an outage was invisible once Redis recovered, and a caller's well-intentioned retry (the entire point of an idempotency key) would double-execute. See `tests/idempotency_recovery_test.rs` for the regression test driving this exact degraded→healthy→retry sequence.
+
+Note the DB fallback path (`check_idempotency_key`/`insert_idempotency_key`) is keyed only by `key`, not `tenant_id` — the Redis path scopes by tenant (`idempotency:<tenant_id>:<key>`) but the `idempotency_keys` table has no tenant column. Two different tenants using the same literal key string during an outage would collide in the DB fallback where they wouldn't in Redis. This is a pre-existing narrower gap, not introduced or fixed by the DB-fallback-recovery change — worth knowing about, not addressed here.
+
+### 5. Manually checking a key's DB-fallback record
+
+For on-call triage of a reported duplicate action from a past Redis outage window, see the runbook's "Triaging a Reported Duplicate Action from a Past Redis Outage" section — short version: `SELECT * FROM idempotency_keys WHERE key = '<key>'`.
+
 ## Configuration
 
 ### Environment Variables

@@ -75,6 +75,8 @@ impl TestApp {
             query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
                 .await
                 .unwrap(),
+            allowed_ips: synapse_core::config::AllowedIps::Any,
+            trusted_proxy_depth: 1,
             profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
             tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
