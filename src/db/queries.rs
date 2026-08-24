@@ -158,14 +158,21 @@ where
 
 // --- Tenant Queries --------------------------------------------------------
 
-/// Look up whether an API key exists and belongs to an active tenant.
-/// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
-pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
-    let row = sqlx::query("SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.is_some())
+/// Look up which tenant an API key belongs to.
+/// Returns `Ok(Some(tenant_id))` if valid and active, `Ok(None)` otherwise.
+///
+/// This used to return a plain `bool`, which was enough for `api_key_auth`'s
+/// yes/no gate but left `/ws` resync with no way to know *whose* data a
+/// caller was entitled to see once it started checking keys at all — see
+/// `handlers::ws::authenticate_ws_token`.
+pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<Option<Uuid>> {
+    let row = sqlx::query(
+        "SELECT tenant_id FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1",
+    )
+    .bind(api_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.get::<Uuid, _>("tenant_id")))
 }
 
 /// Load active tenant configuration used by request authentication and
@@ -563,6 +570,31 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     .await
 }
 
+/// Tenant-scoped equivalent of [`get_transaction`] used by GET
+/// /transactions/:id. `tenant_id IS NULL` rows are legacy/pre-migration data
+/// and remain visible to every tenant, matching the RLS policy in
+/// migrations/20260501000000_tenant_rls.sql — this is an application-level
+/// mirror of that policy (defense in depth), not a substitute for it: RLS
+/// still applies underneath regardless of whether this WHERE clause is
+/// present, since the connected role no longer bypasses it.
+pub async fn get_transaction_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Transaction> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        sqlx::query_as::<_, Transaction>(
+            "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_one(pool),
+    )
+    .await
+}
+
 pub async fn list_transactions(
     pool: &PgPool,
     limit: i64,
@@ -688,6 +720,91 @@ pub async fn list_transactions_filtered(
             if let Some(to) = to_date {
                 q = q.bind(to);
             }
+            q = q.bind(limit);
+
+            let mut rows = q.fetch_all(pool).await?;
+            if backward {
+                rows.reverse();
+            }
+            Ok(rows)
+        },
+    )
+    .await
+}
+
+/// Tenant-scoped equivalent of [`list_transactions_filtered`] used by GET
+/// /transactions. See [`get_transaction_for_tenant`] for the NULL-tenant and
+/// defense-in-depth notes — identical rules apply here.
+pub async fn list_transactions_filtered_for_tenant(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+    tenant_id: Uuid,
+) -> Result<Vec<Transaction>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions [tenant-scoped filtered cursor-paginated]",
+        async {
+            let mut conditions: Vec<String> = Vec::new();
+            let mut bind_idx = 1i32;
+
+            if cursor.is_some() {
+                if !backward {
+                    conditions.push(format!(
+                        "(created_at, id) < (${}, ${})",
+                        bind_idx,
+                        bind_idx + 1
+                    ));
+                } else {
+                    conditions.push(format!(
+                        "(created_at, id) > (${}, ${})",
+                        bind_idx,
+                        bind_idx + 1
+                    ));
+                }
+                bind_idx += 2;
+            }
+
+            if from_date.is_some() {
+                conditions.push(format!("created_at >= ${}", bind_idx));
+                bind_idx += 1;
+            }
+            if to_date.is_some() {
+                conditions.push(format!("created_at <= ${}", bind_idx));
+                bind_idx += 1;
+            }
+
+            conditions.push(format!("(tenant_id = ${} OR tenant_id IS NULL)", bind_idx));
+            bind_idx += 1;
+
+            let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+            let order = if !backward {
+                "ORDER BY created_at DESC, id DESC"
+            } else {
+                "ORDER BY created_at ASC, id ASC"
+            };
+
+            let sql = format!(
+                "SELECT * FROM transactions {} {} LIMIT ${}",
+                where_clause, order, bind_idx
+            );
+
+            let mut q = sqlx::query_as::<_, Transaction>(&sql);
+
+            if let Some((ts, id)) = cursor {
+                q = q.bind(ts).bind(id);
+            }
+            if let Some(from) = from_date {
+                q = q.bind(from);
+            }
+            if let Some(to) = to_date {
+                q = q.bind(to);
+            }
+            q = q.bind(tenant_id);
             q = q.bind(limit);
 
             let mut rows = q.fetch_all(pool).await?;
@@ -838,6 +955,43 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
     .await
 }
 
+/// Tenant-scoped settlement lookup used by GET /settlements/:id.
+///
+/// Settlements have no `tenant_id` column of their own — a single settlement
+/// can legitimately batch transactions from many tenants, since
+/// `SettlementService::settle_asset` groups unsettled transactions by
+/// `asset_code` only (see migrations/20260824000001_settlement_rls.sql for
+/// the full reasoning). A settlement is visible to `tenant_id` if at least
+/// one of its transactions belongs to that tenant (or is a legacy row with
+/// no tenant_id) — this mirrors the RLS policy's own EXISTS check so
+/// behavior is identical whether or not RLS is what actually enforces it on
+/// a given connection.
+pub async fn get_settlement_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Settlement> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT settlements.* FROM settlements WHERE id = $1 AND EXISTS(tenant-scoped transactions)",
+        sqlx::query_as::<_, Settlement>(
+            r#"
+            SELECT settlements.* FROM settlements
+            WHERE settlements.id = $1
+              AND EXISTS (
+                  SELECT 1 FROM transactions t
+                  WHERE t.settlement_id = settlements.id
+                    AND (t.tenant_id IS NULL OR t.tenant_id = $2)
+              )
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_one(pool),
+    )
+    .await
+}
+
 pub async fn list_settlements(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Settlement>> {
     with_timeout(
         QueryTier::Read,
@@ -891,6 +1045,90 @@ pub async fn list_settlements_cursor(
                 )
                 .bind(limit)
                 .fetch_all(pool).await?;
+                rows.reverse();
+                Ok(rows)
+            }
+        },
+    )
+    .await
+}
+
+/// Tenant-scoped equivalent of [`list_settlements_cursor`] used by GET
+/// /settlements. See [`get_settlement_for_tenant`] for why this is a JOIN
+/// against `transactions.tenant_id` rather than a column on `settlements`.
+pub async fn list_settlements_cursor_for_tenant(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+    tenant_id: Uuid,
+) -> Result<Vec<Settlement>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT settlements.* FROM settlements [tenant-scoped cursor-paginated]",
+        async {
+            const TENANT_EXISTS: &str = r#"
+                EXISTS (
+                    SELECT 1 FROM transactions t
+                    WHERE t.settlement_id = settlements.id
+                      AND (t.tenant_id IS NULL OR t.tenant_id = $TENANT_PARAM)
+                )
+            "#;
+
+            if let Some((ts, id)) = cursor {
+                if !backward {
+                    let sql = format!(
+                        "SELECT settlements.* FROM settlements \
+                         WHERE (created_at, id) < ($1, $2) AND {} \
+                         ORDER BY created_at DESC, id DESC LIMIT $4",
+                        TENANT_EXISTS.replace("$TENANT_PARAM", "$3")
+                    );
+                    sqlx::query_as::<_, Settlement>(&sql)
+                        .bind(ts)
+                        .bind(id)
+                        .bind(tenant_id)
+                        .bind(limit)
+                        .fetch_all(pool)
+                        .await
+                } else {
+                    let sql = format!(
+                        "SELECT settlements.* FROM settlements \
+                         WHERE (created_at, id) > ($1, $2) AND {} \
+                         ORDER BY created_at ASC, id ASC LIMIT $4",
+                        TENANT_EXISTS.replace("$TENANT_PARAM", "$3")
+                    );
+                    let mut rows = sqlx::query_as::<_, Settlement>(&sql)
+                        .bind(ts)
+                        .bind(id)
+                        .bind(tenant_id)
+                        .bind(limit)
+                        .fetch_all(pool)
+                        .await?;
+                    rows.reverse();
+                    Ok(rows)
+                }
+            } else if !backward {
+                let sql = format!(
+                    "SELECT settlements.* FROM settlements WHERE {} \
+                     ORDER BY created_at DESC, id DESC LIMIT $2",
+                    TENANT_EXISTS.replace("$TENANT_PARAM", "$1")
+                );
+                sqlx::query_as::<_, Settlement>(&sql)
+                    .bind(tenant_id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await
+            } else {
+                let sql = format!(
+                    "SELECT settlements.* FROM settlements WHERE {} \
+                     ORDER BY created_at ASC, id ASC LIMIT $2",
+                    TENANT_EXISTS.replace("$TENANT_PARAM", "$1")
+                );
+                let mut rows = sqlx::query_as::<_, Settlement>(&sql)
+                    .bind(tenant_id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?;
                 rows.reverse();
                 Ok(rows)
             }
@@ -1152,6 +1390,163 @@ pub async fn search_transactions(
             if let Some((ts, id)) = cursor {
                 data_query_builder = data_query_builder.bind(ts).bind(id);
             }
+            data_query_builder = data_query_builder.bind(limit);
+
+            let transactions = data_query_builder.fetch_all(pool).await?;
+
+            Ok((total, transactions))
+        },
+    )
+    .await
+}
+
+/// Tenant-scoped equivalent of [`search_transactions`] used by GET
+/// /transactions/search. See [`get_transaction_for_tenant`] for the
+/// NULL-tenant and defense-in-depth notes — identical rules apply here.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_transactions_for_tenant(
+    pool: &PgPool,
+    status: Option<&str>,
+    asset_code: Option<&str>,
+    min_amount: Option<&BigDecimal>,
+    max_amount: Option<&BigDecimal>,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+    stellar_account: Option<&str>,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    tenant_id: Uuid,
+) -> Result<(i64, Vec<Transaction>)> {
+    with_timeout(
+        QueryTier::Read,
+        "search_transactions [tenant-scoped dynamic WHERE clause]",
+        async {
+            let mut conditions = Vec::new();
+            let mut param_count = 1;
+
+            if status.is_some() {
+                conditions.push(format!("status = ${}", param_count));
+                param_count += 1;
+            }
+
+            if asset_code.is_some() {
+                conditions.push(format!("asset_code = ${}", param_count));
+                param_count += 1;
+            }
+
+            if min_amount.is_some() {
+                conditions.push(format!("amount >= ${}", param_count));
+                param_count += 1;
+            }
+
+            if max_amount.is_some() {
+                conditions.push(format!("amount <= ${}", param_count));
+                param_count += 1;
+            }
+
+            if from_date.is_some() {
+                conditions.push(format!("created_at >= ${}", param_count));
+                param_count += 1;
+            }
+
+            if to_date.is_some() {
+                conditions.push(format!("created_at <= ${}", param_count));
+                param_count += 1;
+            }
+
+            if stellar_account.is_some() {
+                conditions.push(format!("stellar_account = ${}", param_count));
+                param_count += 1;
+            }
+
+            // Add cursor condition
+            if cursor.is_some() {
+                conditions.push(format!(
+                    "(created_at, id) < (${}, ${})",
+                    param_count,
+                    param_count + 1
+                ));
+                param_count += 2;
+            }
+
+            // Unconditional tenant scope — always present, unlike the filters above.
+            let tenant_param = param_count;
+            conditions.push(format!(
+                "(tenant_id = ${} OR tenant_id IS NULL)",
+                tenant_param
+            ));
+            param_count += 1;
+
+            let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+            let count_query = format!(
+                "SELECT COUNT(*) as count FROM transactions {}",
+                where_clause
+            );
+
+            let data_query = format!(
+                "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
+                where_clause, param_count
+            );
+
+            let mut count_query_builder = sqlx::query(&count_query);
+
+            if let Some(s) = status {
+                count_query_builder = count_query_builder.bind(s);
+            }
+            if let Some(a) = asset_code {
+                count_query_builder = count_query_builder.bind(a);
+            }
+            if let Some(min) = min_amount {
+                count_query_builder = count_query_builder.bind(min);
+            }
+            if let Some(max) = max_amount {
+                count_query_builder = count_query_builder.bind(max);
+            }
+            if let Some(from) = from_date {
+                count_query_builder = count_query_builder.bind(from);
+            }
+            if let Some(to) = to_date {
+                count_query_builder = count_query_builder.bind(to);
+            }
+            if let Some(acc) = stellar_account {
+                count_query_builder = count_query_builder.bind(acc);
+            }
+            if let Some((ts, id)) = cursor {
+                count_query_builder = count_query_builder.bind(ts).bind(id);
+            }
+            count_query_builder = count_query_builder.bind(tenant_id);
+
+            let count_row = count_query_builder.fetch_one(pool).await?;
+            let total: i64 = count_row.try_get("count")?;
+
+            let mut data_query_builder = sqlx::query_as::<_, Transaction>(&data_query);
+
+            if let Some(s) = status {
+                data_query_builder = data_query_builder.bind(s);
+            }
+            if let Some(a) = asset_code {
+                data_query_builder = data_query_builder.bind(a);
+            }
+            if let Some(min) = min_amount {
+                data_query_builder = data_query_builder.bind(min);
+            }
+            if let Some(max) = max_amount {
+                data_query_builder = data_query_builder.bind(max);
+            }
+            if let Some(from) = from_date {
+                data_query_builder = data_query_builder.bind(from);
+            }
+            if let Some(to) = to_date {
+                data_query_builder = data_query_builder.bind(to);
+            }
+            if let Some(acc) = stellar_account {
+                data_query_builder = data_query_builder.bind(acc);
+            }
+            if let Some((ts, id)) = cursor {
+                data_query_builder = data_query_builder.bind(ts).bind(id);
+            }
+            data_query_builder = data_query_builder.bind(tenant_id);
             data_query_builder = data_query_builder.bind(limit);
 
             let transactions = data_query_builder.fetch_all(pool).await?;

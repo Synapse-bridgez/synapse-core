@@ -87,7 +87,21 @@ impl AppState {
     }
 
     pub async fn test_new(database_url: &str) -> Self {
-        let pool = sqlx::PgPool::connect(database_url).await.unwrap();
+        // Uses PgPoolOptions (not the plain PgPool::connect one-liner this
+        // used to call) so every connection gets the same
+        // set_session_admin_context after_connect hook db::create_pool uses
+        // in production — without it, every test that inserts/reads
+        // transactions/settlements directly through AppState.db (rather
+        // than through the tenant-scoped HTTP routes) would hit RLS with no
+        // context at all and fail closed, now that the schema's owning role
+        // no longer bypasses RLS.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(|conn, _meta| {
+                Box::pin(async move { crate::db::set_session_admin_context(conn).await })
+            })
+            .connect(database_url)
+            .await
+            .unwrap();
         let (tx, _) = broadcast::channel(100);
         let _asset_cache =
             AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
@@ -130,6 +144,17 @@ impl std::fmt::Debug for ApiState {
     }
 }
 
+/// Lets extractors written against `AppState` (e.g. `TenantContext`) be used
+/// directly in handlers whose router state is `ApiState` — axum's substate
+/// pattern. Without this, `TenantContext` could only be used in routers
+/// keyed on bare `AppState` (like /ws), not the `ApiState`-keyed data routes
+/// where it's actually needed.
+impl axum::extract::FromRef<ApiState> for AppState {
+    fn from_ref(input: &ApiState) -> AppState {
+        input.app_state.clone()
+    }
+}
+
 pub fn create_app(app_state: AppState) -> Router {
     let graphql_schema = crate::graphql::schema::build_schema(app_state.clone());
     let api_state = ApiState {
@@ -167,8 +192,19 @@ pub fn create_app(app_state: AppState) -> Router {
             crate::middleware::validate::validate_webhook,
         ));
 
-    // Core API routes (shared between versioned and unversioned)
-    let core_routes = Router::new()
+    // Tenant-scoped data routes. These previously had zero auth of any kind —
+    // core_routes was built on a bare `Router::new()` with no `.layer()` of
+    // its own, so the version-header middleware applied at each mount point
+    // (below) was the *only* middleware ever wrapping them.
+    //
+    // Auth here is enforced per-handler via the `TenantContext` extractor
+    // (src/tenant/mod.rs) rather than a blanket `api_key_auth` middleware
+    // layer: these handlers need the *resolved tenant_id* to scope each
+    // query by, not just a yes/no auth decision, and a boolean middleware
+    // can't hand a resolved value to the handler it wraps. Applying both
+    // would also be wrong here for a second reason — see the note on
+    // `core_routes` below.
+    let data_routes = Router::new()
         .route("/transactions/:id", get(handlers::webhook::get_transaction))
         .route(
             "/transactions",
@@ -182,7 +218,15 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
-        )
+        );
+
+    // core_routes intentionally does NOT layer api_key_auth across the board:
+    // callback_routes/webhook_routes authenticate inbound anchor calls via
+    // HMAC signature validation (validate_callback/validate_webhook), not a
+    // tenant API key — a blanket api_key_auth layer here would reject every
+    // legitimate webhook delivery. Only data_routes needs tenant-key auth,
+    // and it gets it from the TenantContext extractor above.
+    let core_routes = data_routes
         .merge(callback_routes.clone())
         .merge(webhook_routes.clone());
 
@@ -196,25 +240,22 @@ pub fn create_app(app_state: AppState) -> Router {
         middleware::versioning::v2_version_middleware,
     ));
 
-    // Admin routes — quota skipped, SecretsStore injected for rotation-aware auth
-    let mut admin_router = Router::new()
+    // Health/liveness routes — intentionally public (infra probes have no
+    // credentials to send) and never in scope for admin_auth.
+    let public_health_routes = Router::new()
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))
         .route("/errors", get(handlers::error_catalog));
 
-    if let Some(store) = &app_state.secrets_store {
-        admin_router = admin_router.layer(axum::Extension(store.clone()));
-    }
-
-    admin_router
-        // Unversioned routes default to V2 behaviour
-        .merge(core_routes.layer(axum_middleware::from_fn(
-            middleware::versioning::v2_version_middleware,
-        )))
-        // Versioned route groups
-        .nest("/api/v1", v1_routes)
-        .nest("/api/v2", v2_routes)
+    // Admin-only routes. `admin_auth` exists in src/middleware/auth.rs but,
+    // before this fix, had zero callers anywhere in the router — every route
+    // below (quota overrides, webhook health, distributed locks, settlement
+    // status changes, reconciliation reports, bulk status updates, GraphQL,
+    // export, stats) was reachable with no credentials at all. This is worse
+    // than what the tracked issue described (it assumed admin_auth already
+    // covered these) — see "Also fixes" in the PR description.
+    let mut admin_only_routes = Router::new()
         .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
@@ -267,18 +308,43 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
         )
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
+
+    // SecretsStore must be the outermost layer here (axum applies the *last*
+    // `.layer()` call as outermost) so admin_auth's rotation-aware check can
+    // read the extension `req.extensions().get::<SecretsStore>()` expects —
+    // if this were applied before the admin_auth layer instead, admin_auth
+    // would run first and never see it.
+    if let Some(store) = &app_state.secrets_store {
+        admin_only_routes = admin_only_routes.layer(axum::Extension(store.clone()));
+    }
+
+    public_health_routes
+        // Unversioned routes default to V2 behaviour
+        .merge(core_routes.layer(axum_middleware::from_fn(
+            middleware::versioning::v2_version_middleware,
+        )))
+        // Versioned route groups
+        .nest("/api/v1", v1_routes)
+        .nest("/api/v2", v2_routes)
+        .merge(admin_only_routes)
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
         ))
         .with_state(api_state)
+        // /reconnect/status and /reconnect were removed here — see "Also
+        // fixes" in the PR description (Part D). They were unauthenticated,
+        // grew an in-memory session map without bound (the one function that
+        // evicted stale entries was never called from anywhere), and — most
+        // importantly — were never actually consulted by ws_handler at all.
+        // A client calling /reconnect/status got a session_id and backoff
+        // recommendation with zero bearing on its real WebSocket connection.
+        // Patching auth and a cleanup schedule onto that would have made it
+        // secure but still misleading; removing it is the smaller, more
+        // honest change.
         .merge(
             Router::new()
                 .route("/ws", get(handlers::ws::ws_handler))
-                .route(
-                    "/reconnect/status",
-                    get(handlers::reconnection::reconnect_status),
-                )
-                .route("/reconnect", post(handlers::reconnection::reconnect))
                 .with_state(app_state),
         )
         // NOTE: axum applies the *last* `.layer()` call as the *outermost* wrapper,
