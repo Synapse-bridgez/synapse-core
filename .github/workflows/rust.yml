@@ -145,6 +145,37 @@ jobs:
       with:
         tool: sqlx-cli@0.7.4
 
+    # Creates the restricted, non-superuser role the app actually connects as
+    # (all steps below use it instead of the bootstrap `synapse` superuser).
+    # `synapse` is used only here, to provision the role once per job — see
+    # scripts/db-init/01-create-app-role.sql for the docker-compose equivalent.
+    - name: Create restricted app DB role (NOBYPASSRLS)
+      run: |
+        PGPASSWORD=synapse psql -h localhost -U synapse -d synapse_test -v ON_ERROR_STOP=1 <<'SQL'
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'synapse_app') THEN
+                CREATE ROLE synapse_app WITH LOGIN PASSWORD 'synapse_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        GRANT ALL PRIVILEGES ON DATABASE synapse_test TO synapse_app;
+        GRANT ALL ON SCHEMA public TO synapse_app;
+        ALTER ROLE synapse_app SET app.is_admin = 'true';
+        SQL
+
+    # Regression guard for the exact gap this workflow was fixed to catch:
+    # a correctly-written RLS policy running under a role that ignores it.
+    - name: Verify app role cannot bypass RLS
+      run: |
+        bypass=$(PGPASSWORD=synapse_app psql -h localhost -U synapse_app -d synapse_test -tA -c \
+          "SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        echo "synapse_app rolbypassrls=$bypass"
+        if [ "$bypass" != "f" ]; then
+          echo "::error::synapse_app has BYPASSRLS set — RLS policies would be silently ignored. See tests/rls_superuser_bypass_audit_test.rs."
+          exit 1
+        fi
+
     # Validates that no migration breaks existing pagination indexes.
     # The script checks for destructive operations (DROP INDEX, ALTER TABLE)
     # on columns used by cursor queries (created_at, id).
@@ -162,7 +193,7 @@ jobs:
           [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
         done
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
       continue-on-error: false
 
     - name: Handle migration failure
@@ -184,7 +215,7 @@ jobs:
         fi
         echo "Clippy checks passed"
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
       continue-on-error: false
 
     - name: Handle clippy failure
@@ -204,7 +235,7 @@ jobs:
         fi
         echo "Build completed successfully"
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
       continue-on-error: false
 
     - name: Handle build failure
@@ -230,7 +261,7 @@ jobs:
         fi
         echo "Unit tests passed"
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
       continue-on-error: false
 
     - name: Handle unit test failure
@@ -315,6 +346,21 @@ jobs:
       with:
         tool: sqlx-cli@0.7.4
 
+    - name: Create restricted app DB role (NOBYPASSRLS)
+      run: |
+        PGPASSWORD=synapse psql -h localhost -U synapse -d synapse_test -v ON_ERROR_STOP=1 <<'SQL'
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'synapse_app') THEN
+                CREATE ROLE synapse_app WITH LOGIN PASSWORD 'synapse_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        GRANT ALL PRIVILEGES ON DATABASE synapse_test TO synapse_app;
+        GRANT ALL ON SCHEMA public TO synapse_app;
+        ALTER ROLE synapse_app SET app.is_admin = 'true';
+        SQL
+
     - name: Run migrations
       run: |
         for i in 1 2 3; do
@@ -324,7 +370,7 @@ jobs:
           [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
         done
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
 
     # Runs all tests marked `#[ignore]` — these are the integration tests that
     # require live services.
@@ -350,7 +396,11 @@ jobs:
         fi
         echo "Integration tests passed"
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+        # pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables under a
+        # NOBYPASSRLS role (see Config::backup_database_url) — backup_test.rs
+        # needs its own, separately-privileged connection.
+        BACKUP_DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
       continue-on-error: false
 
@@ -439,6 +489,21 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
+    - name: Create restricted app DB role (NOBYPASSRLS)
+      run: |
+        PGPASSWORD=synapse psql -h localhost -U synapse -d synapse_test -v ON_ERROR_STOP=1 <<'SQL'
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'synapse_app') THEN
+                CREATE ROLE synapse_app WITH LOGIN PASSWORD 'synapse_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+            END IF;
+        END
+        $$;
+        GRANT ALL PRIVILEGES ON DATABASE synapse_test TO synapse_app;
+        GRANT ALL ON SCHEMA public TO synapse_app;
+        ALTER ROLE synapse_app SET app.is_admin = 'true';
+        SQL
+
     - name: Run migrations
       run: |
         for i in 1 2 3; do
@@ -448,7 +513,7 @@ jobs:
           [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
         done
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
 
     # Two-pass coverage collection:
     #   Pass 1 (--lib --bins): unit tests — fast, no Redis needed.
@@ -498,7 +563,10 @@ jobs:
         
         echo "Coverage data collection completed successfully"
       env:
-        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+        # See the same variable in the integration-tests job — pg_dump needs
+        # an RLS-bypassing connection distinct from the app's own role.
+        BACKUP_DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
         REDIS_URL: redis://localhost:6379
       continue-on-error: false
 

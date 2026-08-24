@@ -143,7 +143,12 @@ async fn test_full_transaction_lifecycle() {
         let client = client.clone();
         let url = format!("{}/transactions/{}", app.base_url, tx_id);
         async move {
-            let res = client.get(&url).send().await.ok()?;
+            let res = client
+                .get(&url)
+                .header("X-API-Key", common::TEST_API_KEY)
+                .send()
+                .await
+                .ok()?;
             let body: Value = res.json().await.ok()?;
             if body["status"].as_str() == Some("completed") {
                 Some(body)

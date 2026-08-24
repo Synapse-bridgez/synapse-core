@@ -1,3 +1,12 @@
+// NOTE: every "should connect" test below uses `token=admin-secret-key`
+// (the ADMIN_API_KEY fallback used when no SecretsStore is configured, which
+// these test AppStates never set). Before the Part A fix, ws_handler only
+// format-validated the token (non-empty, under 1024 bytes, no null bytes)
+// and never checked it against anything real, so arbitrary strings like
+// "valid-token-123" used to work here. They no longer do — see
+// handlers::ws::authenticate_ws_token. These tests aren't exercising tenant
+// scoping specifically, so the admin identity is the minimal real credential
+// that keeps them passing without provisioning a tenant fixture per test.
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use sqlx::{migrate::Migrator, PgPool};
@@ -174,7 +183,7 @@ async fn test_ws_connection_with_valid_token() {
     let (base_url, _pool, _tx, _container) = setup_test_app().await;
 
     // Connect with valid token
-    let ws_url = format!("{}/ws?token=valid-token-123", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let result = connect_async(&ws_url).await;
 
     assert!(result.is_ok(), "Should connect with valid token");
@@ -221,7 +230,7 @@ async fn test_ws_receives_transaction_updates() {
     let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
 
     // Connect WebSocket client
-    let ws_url = format!("{}/ws?token=test-token", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let (mut ws_stream, _) = connect_async(&ws_url).await.unwrap();
 
     // Give the connection time to establish
@@ -276,9 +285,9 @@ async fn test_ws_multiple_clients_receive_broadcast() {
     let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
 
     // Connect multiple WebSocket clients
-    let ws_url1 = format!("{}/ws?token=client1", base_url);
-    let ws_url2 = format!("{}/ws?token=client2", base_url);
-    let ws_url3 = format!("{}/ws?token=client3", base_url);
+    let ws_url1 = format!("{}/ws?token=admin-secret-key", base_url);
+    let ws_url2 = format!("{}/ws?token=admin-secret-key", base_url);
+    let ws_url3 = format!("{}/ws?token=admin-secret-key", base_url);
 
     let (mut ws_stream1, _) = connect_async(&ws_url1).await.unwrap();
     let (mut ws_stream2, _) = connect_async(&ws_url2).await.unwrap();
@@ -340,7 +349,7 @@ async fn test_ws_connection_cleanup_on_disconnect() {
     let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
 
     // Connect a client
-    let ws_url = format!("{}/ws?token=test-client", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let (ws_stream, _) = connect_async(&ws_url).await.unwrap();
 
     // Give connection time to establish
@@ -386,7 +395,7 @@ async fn test_ws_heartbeat_keeps_connection_alive() {
     let (base_url, _pool, _tx, _container) = setup_test_app().await;
 
     // Connect WebSocket client
-    let ws_url = format!("{}/ws?token=heartbeat-test", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let (mut ws_stream, _) = connect_async(&ws_url).await.unwrap();
 
     // Wait for heartbeat ping (server sends every 30 seconds, but we'll wait a bit)
@@ -413,7 +422,7 @@ async fn test_ws_client_can_send_messages() {
     let (base_url, _pool, _tx, _container) = setup_test_app().await;
 
     // Connect WebSocket client
-    let ws_url = format!("{}/ws?token=send-test", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let (mut ws_stream, _) = connect_async(&ws_url).await.unwrap();
 
     // Send a text message to server
@@ -439,7 +448,7 @@ async fn test_ws_handles_rapid_broadcasts() {
     let (base_url, _pool, tx_broadcast, _container) = setup_test_app().await;
 
     // Connect WebSocket client
-    let ws_url = format!("{}/ws?token=rapid-test", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let (mut ws_stream, _) = connect_async(&ws_url).await.unwrap();
 
     // Give connection time to establish
@@ -509,7 +518,7 @@ async fn test_ws_upgrade_rejected_when_pool_at_capacity() {
     // rejected with 503 rather than admitted unbounded (Part E of issue #1060).
     let (base_url, _readiness, _container) = setup_test_app_with(1).await;
 
-    let ws_url = format!("{}/ws?token=valid-token-123", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let (first_stream, _) = connect_async(&ws_url)
         .await
         .expect("first connection should be admitted");
@@ -538,7 +547,7 @@ async fn test_ws_upgrade_rejected_when_draining() {
     let (base_url, readiness, _container) = setup_test_app_with(100).await;
     readiness.start_drain();
 
-    let ws_url = format!("{}/ws?token=valid-token-123", base_url);
+    let ws_url = format!("{}/ws?token=admin-secret-key", base_url);
     let result = connect_async(&ws_url).await;
 
     match result {
