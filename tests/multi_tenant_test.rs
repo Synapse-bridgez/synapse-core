@@ -52,11 +52,12 @@ async fn make_app_state() -> AppState {
 
 async fn insert_tenant(pool: &PgPool, tenant_id: Uuid, name: &str, api_key: &str) {
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, '', '', 60, true)"
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt('', $4), '', 60, true)"
     )
     .bind(tenant_id)
     .bind(name)
-    .bind(api_key)
+    .bind(synapse_core::db::queries::hash_api_key(api_key))
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .execute(pool)
     .await
     .expect("Failed to insert tenant");

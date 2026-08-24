@@ -113,12 +113,13 @@ async fn setup() -> (String, PgPool, impl std::any::Any) {
 async fn insert_tenant_with_transaction(pool: &PgPool, name: &str, api_key: &str) -> Uuid {
     let tenant_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
-         VALUES ($1,$2,$3,'','',600,true)",
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+         VALUES ($1,$2,$3,pgp_sym_encrypt('', $4),'',600,true)",
     )
     .bind(tenant_id)
     .bind(name)
-    .bind(api_key)
+    .bind(synapse_core::db::queries::hash_api_key(api_key))
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .execute(pool)
     .await
     .unwrap();

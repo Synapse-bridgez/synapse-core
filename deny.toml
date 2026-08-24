@@ -1,6 +1,48 @@
 [advisories]
 version = 2
-ignore = []
+# Every entry here is a *known, reviewed* exception, not a blanket suppression.
+# See docs/supply-chain-policy.md for how to add/remove/review these.
+ignore = [
+    # sqlx 0.7.4 -> RUSTSEC-2024-0363 (protocol-level truncating cast).
+    # Fix requires sqlx 0.8, a semver-major bump; sqlx::query is called at
+    # ~117 sites across ~48 files in this codebase, any of which could hit
+    # a 0.7->0.8 API change. Tracked for a dedicated upgrade PR; not a
+    # drive-by fix here. Reviewed 2026-08-24.
+    "RUSTSEC-2024-0363",
+    # proc-macro-error (transitive, via structopt/similar derive macros) is
+    # unmaintained with no replacement upgrade path upstream.
+    # Reviewed 2026-08-24.
+    "RUSTSEC-2024-0370",
+    # paste (transitive proc-macro helper) is unmaintained with no safe
+    # upgrade; low risk as a compile-time-only macro crate.
+    # Reviewed 2026-08-24.
+    "RUSTSEC-2024-0436",
+    # protobuf 2.28.0, pulled in transitively by `prometheus` 0.13 (metrics
+    # export). RUSTSEC-2024-0437 (uncontrolled recursion) fixes in protobuf
+    # 3.7.2, which requires a `prometheus` major-version bump. Tracked
+    # separately. Reviewed 2026-08-24.
+    "RUSTSEC-2024-0437",
+    # tokio-tar (dev-dependency only, via testcontainers/bollard for
+    # integration-test Docker fixtures). RUSTSEC-2025-0111 has no safe
+    # upgrade; not present in the production binary. Reviewed 2026-08-24.
+    "RUSTSEC-2025-0111",
+    # rustls-pemfile 1.x/2.x (transitive, via reqwest/testcontainers) is
+    # unmaintained with no safe upgrade upstream. Reviewed 2026-08-24.
+    "RUSTSEC-2025-0134",
+    # quick-xml 0.26, pinned by inferno (pprof's flamegraph feature).
+    # RUSTSEC-2026-0194/0195 are DoS-shaped parsing issues in XML we only
+    # feed our own generated flamegraph SVGs to, not untrusted input.
+    # No safe upgrade without a newer inferno release. Reviewed 2026-08-24.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # h2 0.3.27, pinned by axum 0.6 (hyper 0.14 stack). RUSTSEC-2026-0204/0258
+    # fix in h2 0.4.16 (already applied for the axum/tonic 0.4.x h2 instance
+    # in this tree), but the 0.3.x branch has no further compatible release;
+    # fixing this instance requires an axum 0.6 -> 0.7+/0.8 major upgrade.
+    # Tracked separately. Reviewed 2026-08-24.
+    "RUSTSEC-2026-0204",
+    "RUSTSEC-2026-0258",
+]
 
 [licenses]
 version = 2
@@ -12,9 +54,13 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",       # successor to Unicode-DFS-2016; used by icu_* (idna/url transitive deps)
     "CC0-1.0",
     "OpenSSL",
     "Zlib",
+    "MPL-2.0",           # weak/file-level copyleft; used by ascii_utils/fast_chemail (async-graphql transitive deps)
+    "CDDL-1.0",          # weak/file-level copyleft; used by inferno (pprof flamegraph transitive dep)
+    "CDLA-Permissive-2.0", # permissive data license; used by webpki-roots
 ]
 
 [bans]

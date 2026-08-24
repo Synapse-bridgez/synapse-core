@@ -153,6 +153,52 @@ ALTER TABLE transactions
 DROP COLUMN IF EXISTS amount;
 ```
 
+### ✅ Security-Sensitive Column Migrations (Precondition Guards)
+
+A migration that reinterprets or renames a column holding credentials, keys,
+or other secrets (e.g. hashing a plaintext API key in place, or converting a
+signing secret to an encrypted `BYTEA`) is often written against an assumed
+precondition — "this table is empty," "no tenant has provisioned yet." That
+assumption is easy to state in a comment and easy to leave unenforced. If
+it's wrong, the migration doesn't fail: it succeeds, silently, having turned
+every existing row's credential into something the application can no
+longer read back correctly (a hash that no plaintext will ever match again,
+or bytes that aren't valid ciphertext).
+
+**Never leave this precondition as a comment alone.** Enforce it:
+
+```sql
+-- ✅ SAFE: precondition enforced, not just documented
+DO $$
+DECLARE
+    row_count INTEGER;
+BEGIN
+    SELECT count(*) INTO row_count FROM tenants;
+    IF row_count > 0 THEN
+        RAISE EXCEPTION 'tenants has % existing row(s); this migration assumes it is empty', row_count;
+    END IF;
+END
+$$;
+
+ALTER TABLE tenants RENAME COLUMN api_key TO api_key_hash;
+```
+
+See `migrations/20260824000003_hash_tenant_secrets.sql` for the full
+pattern, including the down migration. `scripts/check-migration-safety.sh`
+flags any `ALTER COLUMN ... TYPE` on a column whose name looks
+security-sensitive (`secret`, `password`, `token`, `api_key`, `credential`,
+`private_key`) — as a blocking error if no `RAISE EXCEPTION` + `count(*)`
+guard is present in the same file, or as a notice (informational only) if
+one is. This is deliberately narrower than a full data-flow analysis; it
+exists to force a deliberate, informed decision instead of a silent one, not
+to replace review.
+
+If the table genuinely can have pre-existing rows in some environment, the
+guard is telling you the truth: this migration needs a real data-migration
+step (rotate/re-encrypt existing values through the new code path) instead
+of an empty-table assumption — do not just delete the guard to make CI
+green.
+
 ### ✅ Adding Indexes Safely
 
 Use `CONCURRENTLY` to avoid locking tables:

@@ -39,6 +39,11 @@ on:
     branches: [ "main", "develop" ]
   pull_request:
     branches: [ "develop" ]
+  schedule:
+    # Advisories are published against dependency versions that are already
+    # merged, with no code change to trigger a push/PR run. Catch those here.
+    - cron: '17 6 * * *'
+  workflow_dispatch: {}
 
 # Cancel any in-progress run for the same branch/PR so stale sessions never
 # block fresh commits.
@@ -182,6 +187,14 @@ jobs:
     - name: Check migration safety
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
+
+    # Regression guard for the safety script's own rules — see
+    # scripts/test-migration-safety.sh. Runs against fixtures, not the real
+    # migrations/ directory, so it exercises the script's logic independent
+    # of whatever the current migration history looks like.
+    - name: Test migration safety script against fixtures
+      if: matrix.rust == 'stable'
+      run: ./scripts/test-migration-safety.sh
 
     - name: Check GraphQL handler is actually wired to the schema
       if: matrix.rust == 'stable'
@@ -415,6 +428,44 @@ jobs:
         echo "::error::Run 'cargo test -- --ignored' locally to debug."
         exit 1
 
+    # `cargo test --lib --bins` (the unit-tests job) never builds tests/*.rs
+    # at all, and `cargo test -- --ignored` (the step above) only *runs*
+    # tests marked #[ignore] within whatever it builds — a non-ignored test
+    # living only in a tests/*.rs file was invisible to both: built by
+    # neither restriction, or built-but-skipped by the other. This plain,
+    # unrestricted `cargo test` closes that gap by construction — it builds
+    # and runs every target (lib, bins, every tests/*.rs file) with no
+    # `--ignored` filter, so it exercises every non-ignored integration test
+    # this repo has, including ones added after this comment was written,
+    # with no per-file allowlist to keep in sync. See
+    # docs/ci-test-file-coverage.md and
+    # scripts/check-test-file-ci-coverage.sh (next step), which fails the
+    # build if this invocation is ever narrowed back into blind spots.
+    - name: Run non-ignored tests across all test binaries
+      id: run_plain_tests
+      run: |
+        set -e
+        echo "Running non-ignored tests across lib, bins, and every tests/*.rs file..."
+        if ! cargo test --verbose; then
+          echo "::error::Tests failed. Check test output for failures."
+          exit 1
+        fi
+        echo "Plain test run passed"
+      env:
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+        BACKUP_DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        REDIS_URL: redis://localhost:6379
+      continue-on-error: false
+
+    - name: Handle plain test failure
+      if: failure() && steps.run_plain_tests.outcome == 'failure'
+      run: |
+        echo "::error::Plain (non-ignored) test run failed. Run 'cargo test' locally to debug."
+        exit 1
+
+    - name: Check every tests/ file is reachable by some CI cargo test invocation
+      run: ./scripts/check-test-file-ci-coverage.sh
+
 
   coverage:
     runs-on: ubuntu-latest
@@ -519,13 +570,23 @@ jobs:
       env:
         DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
 
-    # Two-pass coverage collection:
+    # Three-pass coverage collection:
     #   Pass 1 (--lib --bins): unit tests — fast, no Redis needed.
-    #   Pass 2 (--ignored):    integration tests — requires Postgres + Redis.
+    #   Pass 2 (--ignored):    integration tests requiring Postgres + Redis.
+    #   Pass 3 (no filter):    non-ignored tests that live only in tests/*.rs
+    #                          files — passes 1 and 2 between them miss these
+    #                          the same way the unit-tests/integration-tests
+    #                          jobs did (see docs/ci-test-file-coverage.md):
+    #                          --lib --bins never builds tests/*.rs at all,
+    #                          and --ignored skips anything not #[ignore]d
+    #                          within it. Without this pass, coverage from
+    #                          e.g. tests/auth_and_signature_integration_test.rs
+    #                          or tests/resource_limits_active_tasks_test.rs
+    #                          was silently never counted.
     #
-    # Both passes contribute to the same coverage report so that pagination
-    # code exercised only by integration tests (e.g. the actual SQL queries)
-    # is still counted.
+    # All three passes contribute to the same coverage report so that
+    # pagination code exercised only by integration tests (e.g. the actual
+    # SQL queries) is still counted.
     #
     # The COVERAGE_IGNORE_REGEX excludes test helpers and generated files so
     # that only production pagination code affects the threshold.
@@ -534,22 +595,27 @@ jobs:
       run: |
         set -e
         echo "Collecting code coverage data..."
-        
+
         if ! cargo llvm-cov clean --workspace; then
           echo "::error::Failed to clean coverage data"
           exit 1
         fi
-        
+
         if ! cargo llvm-cov --workspace --lib --bins --no-report; then
           echo "::error::Failed to collect unit test coverage"
           exit 1
         fi
-        
+
         if ! cargo llvm-cov --workspace --no-report -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
           echo "::error::Failed to collect integration test coverage"
           exit 1
         fi
-        
+
+        if ! cargo llvm-cov --workspace --no-report; then
+          echo "::error::Failed to collect non-ignored tests/*.rs coverage"
+          exit 1
+        fi
+
         if ! cargo llvm-cov report --html --output-dir target/llvm-cov/html --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"; then
           echo "::error::Failed to generate HTML coverage report"
           exit 1
@@ -644,3 +710,131 @@ jobs:
       run: |
         echo "::error::Coverage threshold enforcement failed. Increase test coverage to meet minimum requirements."
         exit 1
+
+  # ── Job: supply-chain-audit ─────────────────────────────────────────────
+  # Enforces deny.toml's [advisories]/[licenses]/[bans]/[sources] policy.
+  # deny.toml existed in the repo before this job did but was never wired
+  # into any workflow, so a dependency with an incompatible license or a
+  # published security advisory could merge with no CI signal at all.
+  #
+  # Runs on every push/PR (matrix with the other jobs) *and* once daily on
+  # `schedule`, because a new advisory can be published against a version
+  # that is already merged, with no code change to trigger a normal run.
+  # See docs/supply-chain-policy.md for how to interpret or override a
+  # failure, and for what the scheduled-failure issue step below does.
+  supply-chain-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # only used by the scheduled-run failure step below
+    # The workflow-level `env.RUSTC_WRAPPER: sccache` (see top of file)
+    # applies to every job by default, but this job never installs sccache
+    # — unlike unit-tests/integration-tests/coverage, it does no compiling,
+    # so there's nothing to cache. `cargo deny check` still shells out to
+    # `cargo metadata`, which invokes `rustc -vV` through whatever
+    # RUSTC_WRAPPER is set, so without this override it fails with
+    # "could not execute process `sccache ... rustc -vV` (never executed):
+    # No such file or directory" — sccache is set as the wrapper but was
+    # never installed in this job's runner. Unsetting it here is simpler
+    # than adding an install step purely to satisfy a cache that would
+    # never be used.
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: cargo deny check
+        id: cargo_deny
+        run: cargo deny check
+
+      # A push/PR failure is already visible as a red check on the commit/PR.
+      # A scheduled-run failure has no commit or PR to surface on, so without
+      # this step a newly-published advisory against an already-merged
+      # dependency would fail silently until someone happened to open the
+      # Actions tab.
+      - name: File or update tracking issue for scheduled-run failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "cargo-deny: scheduled supply-chain audit failed";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              "The scheduled `cargo deny check` run failed, meaning a new",
+              "advisory, license violation, or banned dependency was detected",
+              "against an already-merged `Cargo.lock` with no associated code",
+              "change.",
+              "",
+              `Run: ${runUrl}`,
+              "",
+              "See docs/supply-chain-policy.md for how to triage and, if it's",
+              "a legitimate exception, how to record it in `deny.toml`.",
+            ].join("\n");
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "supply-chain",
+            });
+            const open = existing.data.find((i) => i.title === title);
+
+            if (open) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.number,
+                body: `New failure:\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ["supply-chain"],
+              });
+            }
+
+  # ── Job: docker-image-security ──────────────────────────────────────────
+  # Builds the production image from `dockerfile` and fails if it doesn't
+  # drop root. This is a regression guard for the USER directive added in
+  # `dockerfile` — see docs/deployment-notes.md — not a general image
+  # scanner; it only checks the default runtime user.
+  docker-image-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: dockerfile
+          tags: synapse-core:ci
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image does not run as root
+        run: |
+          user=$(docker inspect --format '{{.Config.User}}' synapse-core:ci)
+          echo "Image default user: '${user:-<empty>}'"
+          case "$user" in
+            "" | "root" | "0" | "0:0" | root:* | *:0)
+              echo "::error::Production image has no non-root USER directive (or is explicitly root/UID 0). See docs/deployment-notes.md."
+              exit 1
+              ;;
+          esac
+          echo "OK: image runs as '$user', not root."

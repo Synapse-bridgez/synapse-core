@@ -106,6 +106,132 @@ fn down_migrations_are_non_empty() {
     );
 }
 
+// ── tenant secret hashing precondition guard ──────────────────────────────────
+
+/// Copy every migration file that sorts strictly before `before_stem` into a
+/// fresh temp dir, so a Migrator pointed at it applies only that prefix of
+/// history. Used to get a real Postgres database into "every migration up to
+/// (but not including) the one under test has run" without hardcoding a
+/// second copy of the schema.
+fn migrations_dir_up_to(before_stem: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("failed to create temp migrations dir");
+    let src_dir = migrations_dir();
+    for stem in up_migration_stems() {
+        if stem.as_str() >= before_stem {
+            continue;
+        }
+        for ext in [".sql", ".down.sql"] {
+            let name = format!("{stem}{ext}");
+            let src = src_dir.join(&name);
+            if src.exists() {
+                fs::copy(&src, tmp.path().join(&name)).unwrap_or_else(|e| {
+                    panic!("failed to copy {name} into temp migrations dir: {e}")
+                });
+            }
+        }
+    }
+    tmp
+}
+
+/// `migrations/20260824000003_hash_tenant_secrets.sql` documents that
+/// `tenants` is expected to be empty at migration time, and enforces that
+/// with a `RAISE EXCEPTION` guard rather than leaving it as an unenforced
+/// comment (see the migration file and Part C of the issue this closes).
+/// This test proves the guard actually does its job in both directions:
+/// it must fail loudly (not silently corrupt data) against a pre-existing
+/// tenant row, and must succeed against an empty table.
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn hash_tenant_secrets_migration_fails_loudly_on_pre_existing_tenant() {
+    const MIGRATION_STEM: &str = "20260824000003_hash_tenant_secrets";
+
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPool::connect(&db_url).await.unwrap();
+
+    // Apply every migration up to (not including) the one under test.
+    let prefix_dir = migrations_dir_up_to(MIGRATION_STEM);
+    Migrator::new(prefix_dir.path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .expect("prefix migrations failed");
+
+    // Seed a tenant the way a pre-existing deployment would have one, using
+    // the pre-migration plaintext `api_key`/`webhook_secret` columns.
+    sqlx::query(
+        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+         VALUES (gen_random_uuid(), 'pre-existing-tenant', 'plaintext-key', 'plaintext-secret', 'GTEST', 60, true)",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to seed pre-existing tenant");
+
+    // Running the full migration set (which now includes the migration
+    // under test) must fail, not silently succeed.
+    let full_migrator = Migrator::new(migrations_dir().as_path()).await.unwrap();
+    let result = full_migrator.run(&pool).await;
+    let err = result.expect_err(
+        "hash_tenant_secrets migration must fail against a non-empty tenants table, \
+         not silently corrupt every existing tenant's credentials",
+    );
+    assert!(
+        err.to_string().contains("existing row"),
+        "expected the migration's own precondition error, got: {err}"
+    );
+
+    // The failure must be transactional: no partial rename/type-change.
+    let column_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = 'tenants' AND column_name = 'api_key')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        column_exists,
+        "migration failure left tenants.api_key partially renamed instead of rolling back"
+    );
+}
+
+/// Same migration, empty `tenants` table: must apply cleanly and leave the
+/// renamed/retyped columns in place.
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn hash_tenant_secrets_migration_succeeds_on_empty_tenants() {
+    const MIGRATION_STEM: &str = "20260824000003_hash_tenant_secrets";
+
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPool::connect(&db_url).await.unwrap();
+
+    let prefix_dir = migrations_dir_up_to(MIGRATION_STEM);
+    Migrator::new(prefix_dir.path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .expect("prefix migrations failed");
+
+    let full_migrator = Migrator::new(migrations_dir().as_path()).await.unwrap();
+    full_migrator
+        .run(&pool)
+        .await
+        .expect("hash_tenant_secrets migration should succeed against an empty tenants table");
+
+    let row: (String,) = sqlx::query_as(
+        "SELECT data_type FROM information_schema.columns \
+         WHERE table_name = 'tenants' AND column_name = 'webhook_secret'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, "bytea");
+}
+
 // ── round-trip test ───────────────────────────────────────────────────────────
 
 /// Spin up a real Postgres container and verify:
