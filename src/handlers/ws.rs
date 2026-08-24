@@ -66,69 +66,6 @@ pub struct WsQuery {
     token: Option<String>,
 }
 
-/// Who a `/ws` connection is allowed to act as, resolved once at upgrade
-/// time from the caller's token and threaded through to `handle_client_message`
-/// so resync can be scoped correctly.
-#[derive(Debug, Clone, Copy)]
-enum WsIdentity {
-    Tenant(Uuid),
-    Admin,
-}
-
-/// Checks `token` against the admin key first, then the `tenants` table.
-///
-/// Before this fix, `ws_handler` only ran `validate_ws_token` — a pure
-/// format check (non-empty, under 1024 bytes, no null bytes) with no lookup
-/// against any real credential at all. Any syntactically-plausible string
-/// opened a connection; the resolved *identity* didn't exist because nothing
-/// was ever resolved. `handle_client_message`'s `Resync` branch then queried
-/// the latest transactions across every tenant unconditionally, since there
-/// was no tenant to filter by even in principle.
-async fn authenticate_ws_token(
-    token: &str,
-    state: &AppState,
-    client_addr: &str,
-) -> Option<WsIdentity> {
-    let is_admin = if let Some(store) = &state.secrets_store {
-        store.verify_admin_key(token).await
-    } else {
-        let admin_api_key =
-            std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "admin-secret-key".to_string());
-        token == admin_api_key
-    };
-    if is_admin {
-        return Some(WsIdentity::Admin);
-    }
-
-    // Only a failed lookup below reaches the brute-force throttle — see
-    // middleware::auth::admin_auth's doc comment for why a valid key
-    // reconnecting any number of times must not count against it.
-    let rate_limited = || {
-        tracing::warn!(
-            counter.ws_auth_lockout_triggered_total = 1u64,
-            client_addr = %client_addr,
-            "ws: rate limit exceeded"
-        );
-    };
-
-    match crate::db::queries::lookup_api_key(&state.db, token).await {
-        Ok(Some(tenant_id)) => Some(WsIdentity::Tenant(tenant_id)),
-        Ok(None) => {
-            if crate::auth::rate_limiting::TENANT_AUTH_RATE_LIMITER
-                .check_auth_rate_limit(&format!("ip:{client_addr}"))
-                .is_err()
-            {
-                rate_limited();
-            }
-            None
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "ws: API key lookup failed");
-            None
-        }
-    }
-}
-
 // ── Upgrade handler ──────────────────────────────────────────────────────────
 
 pub async fn ws_handler(
@@ -151,21 +88,6 @@ pub async fn ws_handler(
         }
     };
 
-    let client_addr = connect_info
-        .map(|ci| ci.0.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let identity = match authenticate_ws_token(&token, &state, &client_addr).await {
-        Some(identity) => identity,
-        None => {
-            tracing::warn!(
-                counter.ws_unauthenticated_rejections_total = 1u64,
-                "WebSocket authentication failed: token did not match any admin key or active tenant API key"
-            );
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
-        }
-    };
-
     // Reject new upgrades once shutdown draining has started. Existing
     // connections are closed cleanly by the drain check in `handle_socket`.
     if state.readiness.is_draining() {
@@ -181,7 +103,12 @@ pub async fn ws_handler(
         }
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, client_addr, permit, identity))
+    let client_addr = connect_info
+        .map(|ci| ci.0.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let _ = token; // validated above
+    ws.on_upgrade(move |socket| handle_socket(socket, state, client_addr, permit))
 }
 
 // ── Per-connection handler ───────────────────────────────────────────────────
@@ -191,7 +118,6 @@ async fn handle_socket(
     state: AppState,
     client_addr: String,
     permit: crate::ws::connection_pool::ConnectionPermit,
-    identity: WsIdentity,
 ) {
     let count = state.ws_connection_pool.active_connections();
     tracing::info!(
@@ -221,8 +147,7 @@ async fn handle_socket(
             match msg {
                 Message::Text(text) => {
                     tracing::debug!(client_addr = %recv_addr, "Received text: {}", text);
-                    handle_client_message(&text, &recv_sender, &recv_state, &recv_addr, identity)
-                        .await;
+                    handle_client_message(&text, &recv_sender, &recv_state, &recv_addr).await;
                 }
                 Message::Pong(_) => {
                     tracing::trace!(client_addr = %recv_addr, "Received pong");
@@ -356,7 +281,6 @@ async fn handle_client_message(
     sender: &Arc<Mutex<impl SinkExt<Message, Error = axum::Error> + Unpin + Send>>,
     state: &AppState,
     client_addr: &str,
-    identity: WsIdentity,
 ) {
     // Validate message size first
     if let Err(e) = validate_message_size(text) {
@@ -389,24 +313,9 @@ async fn handle_client_message(
                 "Client requested resync"
             );
 
-            // Scope resync to the connection's own tenant — this used to
-            // query the latest transactions across every tenant
-            // unconditionally, independent of the REST-route auth gap and
-            // independent of RLS (there was no tenant identity available to
-            // filter by at all, let alone a filter that RLS could enforce).
-            let resync_result = match identity {
-                WsIdentity::Admin => {
-                    crate::db::queries::list_transactions(&state.db, limit, None, false).await
-                }
-                WsIdentity::Tenant(tenant_id) => {
-                    crate::db::queries::list_transactions_filtered_for_tenant(
-                        &state.db, limit, None, false, None, None, tenant_id,
-                    )
-                    .await
-                }
-            };
-
-            let events = match resync_result {
+            let events = match crate::db::queries::list_transactions(&state.db, limit, None, false)
+                .await
+            {
                 Ok(rows) => rows,
                 Err(e) => {
                     tracing::error!(client_addr = %client_addr, "Resync DB query failed: {}", e);

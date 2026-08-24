@@ -7,13 +7,7 @@ async fn test_backup_creation() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let backup_dir = temp_dir.path().to_path_buf();
 
-    // pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
-    // settlements) under a NOBYPASSRLS role — see Config::backup_database_url.
-    // BACKUP_DATABASE_URL must point to a role that bypasses RLS (the
-    // bootstrap superuser is fine here, matching this test's original
-    // default) even though the app's own DATABASE_URL no longer does.
-    let database_url = std::env::var("BACKUP_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
 
     let service = synapse_core::services::backup::BackupService::new(
@@ -49,13 +43,7 @@ async fn test_backup_list() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let backup_dir = temp_dir.path().to_path_buf();
 
-    // pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
-    // settlements) under a NOBYPASSRLS role — see Config::backup_database_url.
-    // BACKUP_DATABASE_URL must point to a role that bypasses RLS (the
-    // bootstrap superuser is fine here, matching this test's original
-    // default) even though the app's own DATABASE_URL no longer does.
-    let database_url = std::env::var("BACKUP_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
 
     let service =
@@ -87,13 +75,7 @@ async fn test_backup_restore() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let backup_dir = temp_dir.path().to_path_buf();
 
-    // pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
-    // settlements) under a NOBYPASSRLS role — see Config::backup_database_url.
-    // BACKUP_DATABASE_URL must point to a role that bypasses RLS (the
-    // bootstrap superuser is fine here, matching this test's original
-    // default) even though the app's own DATABASE_URL no longer does.
-    let database_url = std::env::var("BACKUP_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
 
     let service = synapse_core::services::backup::BackupService::new(
@@ -131,13 +113,7 @@ async fn test_backup_without_encryption() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let backup_dir = temp_dir.path().to_path_buf();
 
-    // pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
-    // settlements) under a NOBYPASSRLS role — see Config::backup_database_url.
-    // BACKUP_DATABASE_URL must point to a role that bypasses RLS (the
-    // bootstrap superuser is fine here, matching this test's original
-    // default) even though the app's own DATABASE_URL no longer does.
-    let database_url = std::env::var("BACKUP_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
 
     let service = synapse_core::services::backup::BackupService::new(
@@ -163,13 +139,7 @@ async fn test_backup_checksum_verification() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let backup_dir = temp_dir.path().to_path_buf();
 
-    // pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
-    // settlements) under a NOBYPASSRLS role — see Config::backup_database_url.
-    // BACKUP_DATABASE_URL must point to a role that bypasses RLS (the
-    // bootstrap superuser is fine here, matching this test's original
-    // default) even though the app's own DATABASE_URL no longer does.
-    let database_url = std::env::var("BACKUP_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
 
     let service =

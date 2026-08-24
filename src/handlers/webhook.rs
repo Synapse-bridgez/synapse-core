@@ -450,28 +450,14 @@ pub async fn handle_webhook(
 #[instrument(name = "webhook.get_transaction", skip(state), fields(transaction.id = %id))]
 pub async fn get_transaction(
     State(state): State<ApiState>,
-    tenant: crate::tenant::TenantContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
 
-    let transaction = queries::get_transaction_for_tenant(pool, id, tenant.tenant_id)
+    let transaction = queries::get_transaction(pool, id)
         .await
         .map_err(|e| match e {
-            sqlx::Error::RowNotFound => {
-                // Deliberately indistinguishable from "no such transaction at all" in the
-                // response (returning a different error for "exists but isn't yours" would
-                // itself leak which IDs exist to an unauthorized caller) — but still worth
-                // counting internally, since a legitimate client requesting its own IDs
-                // shouldn't be generating this path.
-                tracing::info!(
-                    counter.cross_tenant_denial_total = 1u64,
-                    tenant_id = %tenant.tenant_id,
-                    transaction_id = %id,
-                    "get_transaction: not found or not visible to this tenant"
-                );
-                AppError::NotFound(format!("Transaction {} not found", id))
-            }
+            sqlx::Error::RowNotFound => AppError::NotFound(format!("Transaction {} not found", id)),
             _ => AppError::DatabaseError(e.to_string()),
         })?;
 
@@ -616,7 +602,6 @@ pub async fn list_transactions(
 /// keeping the router's state type consistent without duplicating handler code.
 pub async fn list_transactions_api(
     State(api_state): State<crate::ApiState>,
-    tenant: crate::tenant::TenantContext,
     Query(params): Query<ListQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     // forward to the AppState-based handler
@@ -665,14 +650,13 @@ pub async fn list_transactions_api(
 
     let fetch_limit = limit + 1;
     let (pool, replica_used) = app_state.pool_manager.read_pool().await;
-    let mut rows = queries::list_transactions_filtered_for_tenant(
+    let mut rows = queries::list_transactions_filtered(
         pool,
         fetch_limit,
         decoded_cursor,
         backward,
         from_date,
         to_date,
-        tenant.tenant_id,
     )
     .await?;
 

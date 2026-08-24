@@ -19,14 +19,6 @@ use synapse_core::{create_app, AppState};
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
 
-/// GET /transactions, /transactions/:id, /transactions/search, /settlements,
-/// and /settlements/:id now require a resolvable tenant API key (Part A fix
-/// — see synapse_core::tenant::TenantContext). `TestApp::new` provisions a
-/// single tenant with this key so existing callers of these routes keep
-/// working without each test provisioning its own tenant fixture.
-#[allow(dead_code)]
-pub const TEST_API_KEY: &str = "common-test-app-api-key";
-
 /// Test application with automatic database and HTTP server setup.
 pub struct TestApp {
     pub base_url: String,
@@ -62,16 +54,6 @@ impl TestApp {
 
         // Create partition for current month
         Self::create_current_partition(&pool).await;
-
-        sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
-             VALUES ($1, 'CommonTestAppTenant', $2, '', '', 6000, true)",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .bind(TEST_API_KEY)
-        .execute(&pool)
-        .await
-        .unwrap();
 
         // Build AppState
         let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
@@ -112,7 +94,6 @@ impl TestApp {
 
         // Clone readiness before app_state is moved into create_app
         let readiness = app_state.readiness.clone();
-        app_state.load_tenant_configs().await.unwrap();
 
         let app = create_app(app_state);
 

@@ -124,19 +124,6 @@ pub struct Config {
     pub server_port: u16,
     pub database_url: String,
     pub database_replica_url: Option<String>,
-    /// Connection string for `pg_dump`/`pg_restore` (BackupService). Postgres
-    /// refuses to `pg_dump` a table with `FORCE ROW LEVEL SECURITY` (both
-    /// `transactions` and, since this fix, `settlements`) unless the
-    /// connecting role bypasses RLS — `pg_dump`'s COPY would otherwise
-    /// silently produce a filtered, incomplete backup, so Postgres errors
-    /// instead. `database_url` is deliberately a NOBYPASSRLS role (see
-    /// scripts/db-init/01-create-app-role.sql), so backups need a separate,
-    /// explicitly RLS-bypassing connection — standard practice for backup
-    /// tooling to use different credentials than the request-serving app.
-    /// Defaults to `database_url` when unset, which will fail loudly (not
-    /// silently under-back-up) the first time a backup actually runs against
-    /// a NOBYPASSRLS role, per the `pg_dump` behavior described above.
-    pub backup_database_url: Option<String>,
     pub stellar_horizon_url: String,
     pub anchor_webhook_secret: String,
     pub redis_url: String,
@@ -231,7 +218,6 @@ impl Config {
                 .parse()?,
             database_url,
             database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
-            backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
             anchor_webhook_secret,
             redis_url: env::var("REDIS_URL")

@@ -22,7 +22,6 @@ async fn test_error_response_body_request_id_matches_header() {
     let missing_id = Uuid::new_v4();
     let res = client
         .get(format!("{}/transactions/{}", app.base_url, missing_id))
-        .header("X-API-Key", common::TEST_API_KEY)
         .send()
         .await
         .unwrap();

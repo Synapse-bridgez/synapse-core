@@ -142,39 +142,6 @@ async fn validate_redis(redis_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fails loudly at startup if the role the app is connected as can bypass
-/// Row-Level Security. A correctly-written RLS policy (see
-/// `migrations/20260501000000_tenant_rls.sql`) is silently ignored by any
-/// role with `rolbypassrls = true` — which every Postgres superuser has
-/// unconditionally, including the `initdb` bootstrap role every
-/// docker-compose file and CI workflow in this repo connected the app
-/// itself as before this fix. (It is not inherited by roles that role
-/// subsequently creates — a freshly `CREATE ROLE`'d role defaults to
-/// `rolbypassrls = false` regardless of who creates it; the exposure here
-/// was specifically that the app connected *as* the bootstrap superuser,
-/// not as some other role descended from it.) Catching this at connection
-/// time rather than relying on infra config staying correct is deliberate:
-/// a misconfigured `DATABASE_URL` should refuse to start the process, not
-/// silently leak every tenant's data to every other tenant.
-pub async fn assert_no_bypassrls(pool: &PgPool) -> Result<()> {
-    let bypasses_rls: bool =
-        sqlx::query_scalar("SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user")
-            .fetch_one(pool)
-            .await
-            .context("failed to check rolbypassrls for the connected database role")?;
-
-    if bypasses_rls {
-        anyhow::bail!(
-            "refusing to start: the connected database role has BYPASSRLS set, which \
-             silently disables every Row-Level Security policy in this codebase \
-             (tenant isolation on transactions/settlements). Connect as a restricted \
-             role instead — see scripts/db-init/01-create-app-role.sql."
-        );
-    }
-
-    Ok(())
-}
-
 async fn validate_horizon(horizon_url: &str) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -203,7 +170,6 @@ mod tests {
             server_port: 3000,
             database_url: "postgres://localhost:5432/test".to_string(),
             database_replica_url: None,
-            backup_database_url: None,
             stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
             anchor_webhook_secret: "test".to_string(),
             redis_url: "redis://localhost:6379".to_string(),

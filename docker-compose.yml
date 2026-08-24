@@ -12,11 +12,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - postgres_wal:/var/lib/postgresql/wal_archive
-      # Provisions the restricted synapse_app role (NOBYPASSRLS) the app
-      # connects as below. Only runs on first init of an empty data volume —
-      # `docker compose down -v` before `up` if the role needs (re)creating
-      # on an existing volume.
-      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U synapse"]
       interval: 5s
@@ -58,16 +53,8 @@ services:
         condition: service_healthy
     environment:
       SERVER_PORT: 3000
-      # Restricted, non-superuser role — see scripts/db-init/01-create-app-role.sql.
-      # Do not point this at the bootstrap `synapse` superuser: that role has
-      # BYPASSRLS and silently defeats every RLS policy in migrations/.
-      DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
-      DATABASE_URL_TEMPLATE: postgres://synapse_app:{password}@postgres:5432/synapse
-      # pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
-      # settlements) under synapse_app's NOBYPASSRLS role — BackupService
-      # needs its own, separately-privileged connection. See
-      # Config::backup_database_url and docs/postmortem-cross-tenant-leak.md.
-      BACKUP_DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      DATABASE_URL_TEMPLATE: postgres://synapse:{password}@postgres:5432/synapse
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
       VAULT_ADDR: http://vault:8200
       VAULT_ROLE_ID: ""

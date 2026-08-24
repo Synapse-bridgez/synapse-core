@@ -373,21 +373,7 @@ mod tests {
     use super::*;
 
     async fn get_pool() -> PgPool {
-        // Needs the same app.is_admin = true session default db::create_pool
-        // sets in production (see db::set_session_admin_context) — these
-        // tests INSERT/UPDATE transactions directly with no tenant context,
-        // which the RLS policy now enforced against a NOBYPASSRLS role would
-        // otherwise reject.
-        sqlx::postgres::PgPoolOptions::new()
-            .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query("SELECT set_config('app.is_admin', 'true', false)")
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL not set"))
+        sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL not set"))
             .await
             .expect("Failed to connect to test database")
     }
