@@ -173,6 +173,11 @@ async fn serve(
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Hard startup gate: refuse to serve traffic if the connected role can
+    // bypass Row-Level Security. See startup::assert_no_bypassrls for why.
+    synapse_core::startup::assert_no_bypassrls(&pool).await?;
+    tracing::info!("Verified database role cannot bypass Row-Level Security");
+
     // Initialize query cache. This must happen before the partition manager
     // is constructed below: PartitionManager::create_partition only warms the
     // cache `if let Some(cache) = &self.cache`, so constructing the manager
@@ -413,6 +418,45 @@ async fn serve(
         pool_monitor_task(monitor_pool).await;
     });
 
+    // Background task: alert if the dead quota:config:* Redis key space
+    // (see handlers::admin::quota::set_tenant_quota and
+    // middleware::quota::QuotaManager::scan_stale_quota_configs) is
+    // non-empty. Nothing should write to it anymore — any hits mean stale
+    // pre-fix data or a regression reintroducing the split-brain.
+    let quota_consistency_redis_url = config.redis_url.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            let manager = match synapse_core::middleware::quota::QuotaManager::new(
+                &quota_consistency_redis_url,
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        "quota consistency check: failed to construct QuotaManager: {e}"
+                    );
+                    continue;
+                }
+            };
+            match manager.scan_stale_quota_configs(10).await {
+                Ok(keys) if !keys.is_empty() => {
+                    tracing::warn!(
+                        counter.quota_config_split_brain_detected_total = 1u64,
+                        stale_key_count = keys.len(),
+                        sample_keys = ?keys,
+                        "quota:config:* keys still present in Redis — these are no longer read \
+                         by rate_limit_middleware; tenants.rate_limit_per_minute is authoritative"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("quota consistency check: scan failed: {e}");
+                }
+            }
+        }
+    });
+
     // Back-pressure: refresh pending queue depth every 5s
     let depth_pool = pool.clone();
     let depth_counter = pending_queue_depth.clone();
@@ -468,8 +512,14 @@ async fn serve(
         tracing::info!("RECONCILIATION_ACCOUNT not set — daily reconciliation job not scheduled");
     }
 
+    // pg_dump refuses to dump FORCE ROW LEVEL SECURITY tables (transactions,
+    // settlements) under a NOBYPASSRLS role — see Config::backup_database_url.
+    let backup_database_url = config
+        .backup_database_url
+        .clone()
+        .unwrap_or_else(|| config.database_url.clone());
     let backup_service = std::sync::Arc::new(synapse_core::services::BackupService::new(
-        config.database_url.clone(),
+        backup_database_url,
         std::path::PathBuf::from(&config.backup_dir),
         config.backup_encryption_key.clone(),
     ));

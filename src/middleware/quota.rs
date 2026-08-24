@@ -203,6 +203,42 @@ impl QuotaManager {
             .map_err(redis_cb_err)
     }
 
+    /// Consistency guard for the quota-config split-brain this codebase used
+    /// to have (see `handlers::admin::quota::set_tenant_quota`): after that
+    /// fix, `tenants.rate_limit_per_minute` is the single source of truth
+    /// for the limit `rate_limit_middleware` enforces, and nothing should
+    /// write to `quota:config:*` anymore. Any keys still present here are
+    /// either stale pre-fix data or a regression writing to dead config
+    /// again — both worth surfacing rather than letting silently diverge a
+    /// second time. One SCAN iteration is a bounded approximation, not a
+    /// full-keyspace guarantee; that's an acceptable tradeoff for a
+    /// low-frequency background alert rather than a correctness-critical read.
+    pub async fn scan_stale_quota_configs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let client = self.redis_client.clone();
+        self.cb
+            .call(|| async move {
+                let mut conn = client.get_multiplexed_async_connection().await?;
+                let (_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(0)
+                    .arg("MATCH")
+                    .arg("quota:config:*")
+                    .arg("COUNT")
+                    .arg(1000)
+                    .query_async(&mut conn)
+                    .await?;
+                Ok(keys)
+            })
+            .await
+            .map(|mut keys: Vec<String>| {
+                keys.truncate(limit);
+                keys
+            })
+            .map_err(redis_cb_err)
+    }
+
     pub async fn reset_quota(&self, key: &str) -> Result<(), redis::RedisError> {
         let usage_key = format!("quota:usage:{key}");
         let client = self.redis_client.clone();

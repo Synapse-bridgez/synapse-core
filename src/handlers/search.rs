@@ -30,6 +30,7 @@ pub struct SearchQuery {
 pub async fn search_transactions(
     State(pool_manager): State<PoolManager>,
     Query(params): Query<SearchQuery>,
+    tenant_id: uuid::Uuid,
 ) -> Result<impl IntoResponse, AppError> {
     let limit = params.limit.unwrap_or(25).min(100);
 
@@ -79,7 +80,7 @@ pub async fn search_transactions(
     };
 
     let (pool, replica_used) = pool_manager.read_pool().await;
-    let (total, transactions) = crate::db::queries::search_transactions(
+    let (total, transactions) = crate::db::queries::search_transactions_for_tenant(
         pool,
         params.status.as_deref(),
         params.asset_code.as_deref(),
@@ -90,6 +91,7 @@ pub async fn search_transactions(
         params.stellar_account.as_deref(),
         limit,
         decoded_cursor,
+        tenant_id,
     )
     .await?;
 
@@ -123,7 +125,13 @@ pub async fn search_transactions(
 /// Wrapper for use with ApiState in create_app
 pub async fn search_transactions_wrapper(
     State(api_state): State<crate::ApiState>,
+    tenant: crate::tenant::TenantContext,
     Query(params): Query<SearchQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    search_transactions(State(api_state.app_state.pool_manager), Query(params)).await
+    search_transactions(
+        State(api_state.app_state.pool_manager),
+        Query(params),
+        tenant.tenant_id,
+    )
+    .await
 }
