@@ -63,12 +63,15 @@ async fn create_current_month_partition(admin_pool: &PgPool) {
 async fn insert_tenant_with_transaction(admin_pool: &PgPool, name: &str) -> (Uuid, Uuid) {
     let tenant_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
-         VALUES ($1,$2,$3,'','',60,true)",
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+         VALUES ($1,$2,$3,pgp_sym_encrypt('', $4),'',60,true)",
     )
     .bind(tenant_id)
     .bind(name)
-    .bind(Uuid::new_v4().to_string())
+    .bind(synapse_core::db::queries::hash_api_key(
+        &Uuid::new_v4().to_string(),
+    ))
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .execute(admin_pool)
     .await
     .unwrap();

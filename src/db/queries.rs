@@ -35,8 +35,10 @@ use crate::db::models::{Settlement, Transaction};
 use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,6 +160,36 @@ where
 
 // --- Tenant Queries --------------------------------------------------------
 
+type HmacSha256 = Hmac<Sha256>;
+
+/// Server-side secret used to (a) key the HMAC-SHA256 hash of tenant API keys
+/// and (b) as the pgcrypto passphrase for `webhook_secret` encryption at
+/// rest. Never stored in the database, so a stolen `tenants` table alone
+/// cannot be used to forge API keys or recover webhook secrets.
+///
+/// See `migrations/20260824000003_hash_tenant_secrets.sql`, which renamed
+/// `tenants.api_key` to `api_key_hash` and switched `webhook_secret` to a
+/// pgcrypto-encrypted `BYTEA`.
+pub fn tenant_secret_key() -> String {
+    std::env::var("TENANT_SECRET_KEY").unwrap_or_else(|_| {
+        tracing::error!(
+            "TENANT_SECRET_KEY is not set; falling back to an insecure default. \
+             This must be set to a strong random value in any environment that \
+             handles real tenant credentials."
+        );
+        "insecure-dev-only-tenant-secret".to_string()
+    })
+}
+
+/// Hash a tenant API key for storage/lookup. HMAC-SHA256 keyed by
+/// [`tenant_secret_key`], so equality comparisons never touch the raw key.
+pub fn hash_api_key(api_key: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(tenant_secret_key().as_bytes())
+        .expect("HMAC-SHA256 accepts a key of any length");
+    mac.update(api_key.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 /// Look up which tenant an API key belongs to.
 /// Returns `Ok(Some(tenant_id))` if valid and active, `Ok(None)` otherwise.
 ///
@@ -167,9 +199,9 @@ where
 /// `handlers::ws::authenticate_ws_token`.
 pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<Option<Uuid>> {
     let row = sqlx::query(
-        "SELECT tenant_id FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1",
+        "SELECT tenant_id FROM tenants WHERE api_key_hash = $1 AND is_active = true LIMIT 1",
     )
-    .bind(api_key)
+    .bind(hash_api_key(api_key))
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| r.get::<Uuid, _>("tenant_id")))
@@ -180,8 +212,9 @@ pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<Option<Uuid>
 /// callers must not log or persist them in audit records.
 pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
     let configs = sqlx::query_as::<_, TenantConfig>(
-        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+        "SELECT tenant_id, name, pgp_sym_decrypt(webhook_secret, $1) AS webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
     )
+    .bind(tenant_secret_key())
     .fetch_all(pool)
     .await?;
     Ok(configs)
@@ -2175,12 +2208,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT")
         .bind(420)
         .bind(true)
@@ -2202,12 +2236,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant 2")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret2")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT2")
         .bind(50)
         .bind(true)
@@ -2283,12 +2318,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("rl-test-tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT3")
         .bind(60)
         .bind(true)

@@ -64,11 +64,12 @@ impl TestApp {
         Self::create_current_partition(&pool).await;
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
-             VALUES ($1, 'CommonTestAppTenant', $2, '', '', 6000, true)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+             VALUES ($1, 'CommonTestAppTenant', $2, pgp_sym_encrypt('', $3), '', 6000, true)",
         )
         .bind(uuid::Uuid::new_v4())
-        .bind(TEST_API_KEY)
+        .bind(synapse_core::db::queries::hash_api_key(TEST_API_KEY))
+        .bind(synapse_core::db::queries::tenant_secret_key())
         .execute(&pool)
         .await
         .unwrap();

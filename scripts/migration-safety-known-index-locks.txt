@@ -1,0 +1,25 @@
+# Pre-existing non-concurrent CREATE INDEX statements that were already
+# applied to production before scripts/check-migration-safety.sh gained the
+# CREATE INDEX check. Grandfathered so history doesn't turn CI red.
+#
+# This list is closed. Do not add new entries for new migrations — a new
+# hot-table index should be reviewed on its own merits (and documented
+# inline in the migration if accepted) or built out-of-band per
+# docs/hot-table-index-migrations.md, not added here.
+#
+# Format: <migration-filename>:<table-name>
+#
+# Six of these were flagged directly by issue audit evidence; the rest were
+# found by running this check's new rule against the full migrations/
+# directory (see docs/hot-table-index-migrations.md for the
+# incident-correlation audit status of all ten).
+20260220000000_settlements.sql:transactions
+20260222000000_transaction_search_indexes.sql:transactions
+20260426000001_feature_flag_rollout.sql:feature_flags
+20260427000000_optimized_search_indexes.sql:transactions
+20260428000002_feature_flag_dependencies.sql:feature_flags
+20260501000000_tenant_rls.sql:transactions
+20260526000000_add_trace_id.sql:transactions
+20260601000000_webhook_exactly_once_delivery.sql:webhook_deliveries
+20260620000000_add_horizon_payment_id.sql:transactions
+20260823000004_webhook_delivery_dlq_unique_delivery_id.sql:webhook_delivery_dlq

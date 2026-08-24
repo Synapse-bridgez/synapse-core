@@ -52,12 +52,15 @@ async fn make_api_state() -> ApiState {
 
 async fn insert_tenant(pool: &PgPool, tenant_id: Uuid, rate_limit_per_minute: i32) {
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
-         VALUES ($1, $2, $3, '', '', $4, true)",
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+         VALUES ($1, $2, $3, pgp_sym_encrypt('', $4), '', $5, true)",
     )
     .bind(tenant_id)
     .bind(format!("QuotaEnforcementTenant-{tenant_id}"))
-    .bind(format!("key-{tenant_id}"))
+    .bind(synapse_core::db::queries::hash_api_key(&format!(
+        "key-{tenant_id}"
+    )))
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .bind(rate_limit_per_minute)
     .execute(pool)
     .await
