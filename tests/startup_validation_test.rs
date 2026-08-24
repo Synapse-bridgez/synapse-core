@@ -12,7 +12,6 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
         server_port: 3000,
         database_url,
         database_replica_url: None,
-        backup_database_url: None,
         stellar_horizon_url: horizon_url,
         anchor_webhook_secret: "test-secret".to_string(),
         redis_url,

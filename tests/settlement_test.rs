@@ -195,11 +195,8 @@ async fn test_settle_error_handling() {
     let (pool, _container) = setup_test_db().await;
     let service = SettlementService::new(pool.clone());
 
-    // cause a database error by dropping the table before the call.
-    // CASCADE is required since migrations/20260824000001_settlement_rls.sql
-    // added an RLS policy on settlements whose EXISTS clause references
-    // transactions, which Postgres now tracks as a dependency.
-    sqlx::query("DROP TABLE transactions CASCADE")
+    // cause a database error by dropping the table before the call
+    sqlx::query("DROP TABLE transactions")
         .execute(&pool)
         .await
         .unwrap();

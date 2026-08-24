@@ -140,33 +140,6 @@ pub async fn graceful_shutdown(pool: &PgPool) {
 /// let config = Config::from_env();
 /// let pool = create_pool(&config).await?;
 /// ```
-/// Sets the session-level (not transaction-local) default RLS context on a
-/// freshly-opened connection: `app.is_admin = true`.
-///
-/// This is the baseline every pooled connection gets. Once the app's
-/// database role stopped bypassing RLS (see
-/// `scripts/db-init/01-create-app-role.sql`), every existing read/write
-/// against `transactions`/`settlements` — webhook ingestion, settlement
-/// batch jobs, partition management, reconciliation, admin bulk operations —
-/// would otherwise have started being silently filtered down to
-/// `tenant_id IS NULL` rows only (reads) or rejected outright (the INSERT
-/// policy's `WITH CHECK` clause), because none of those call sites set any
-/// RLS session variable at all. Defaulting the *pool* to admin context
-/// preserves their existing full-visibility behavior; the handful of
-/// customer-facing endpoints that must scope by tenant instead narrow this
-/// per-request via `queries::with_tenant`, which uses `SET LOCAL` — scoped to
-/// a single transaction and automatically cleared on commit/rollback — to
-/// override this session default without affecting the next request to reuse
-/// the same pooled connection.
-pub(crate) async fn set_session_admin_context(
-    conn: &mut sqlx::PgConnection,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('app.is_admin', 'true', false)")
-        .execute(conn)
-        .await?;
-    Ok(())
-}
-
 pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
     let statement_timeout_ms = config.db_statement_timeout_ms;
     let idle_timeout_secs = config.db_idle_timeout_secs;
@@ -179,9 +152,8 @@ pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
             let statement_timeout_ms = statement_timeout_ms;
             Box::pin(async move {
                 sqlx::query(&format!("SET statement_timeout = {statement_timeout_ms}"))
-                    .execute(&mut *conn)
+                    .execute(conn)
                     .await?;
-                set_session_admin_context(conn).await?;
                 Ok(())
             })
         })
@@ -233,9 +205,8 @@ async fn build_pool(
                 let statement_timeout_sql = Arc::clone(&statement_timeout_sql);
                 Box::pin(async move {
                     sqlx::query(statement_timeout_sql.as_ref())
-                        .execute(&mut *conn)
+                        .execute(conn)
                         .await?;
-                    set_session_admin_context(conn).await?;
                     Ok(())
                 })
             }

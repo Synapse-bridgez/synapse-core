@@ -282,29 +282,6 @@ impl std::fmt::Debug for AuthRateLimiter {
 }
 
 // ---------------------------------------------------------------------------
-// Shared, process-wide instances
-// ---------------------------------------------------------------------------
-
-lazy_static::lazy_static! {
-    /// Brute-force throttle for `middleware::auth::admin_auth` — the only
-    /// thing guarding every `/admin/*` route. Before this fix, admin_auth
-    /// had no rate limiting of any kind despite this exact mechanism
-    /// existing, fully built and unit-tested, unused in the same codebase
-    /// (it was constructed once, in `secrets.rs`, for Vault-probe limiting
-    /// only). Kept separate from `TENANT_AUTH_RATE_LIMITER` so a flood of
-    /// guessed admin keys and a flood of guessed tenant API keys don't share
-    /// (and drain) the same bucket budget for a given source IP.
-    pub static ref ADMIN_AUTH_RATE_LIMITER: AuthRateLimiter = AuthRateLimiter::new();
-
-    /// Brute-force throttle for tenant API-key resolution — covers both the
-    /// `TenantContext` extractor (the REST data routes fixed in this same
-    /// change) and `/ws` token authentication, which check credentials the
-    /// same way (lookup against `tenants.api_key`) and share the same
-    /// threat model.
-    pub static ref TENANT_AUTH_RATE_LIMITER: AuthRateLimiter = AuthRateLimiter::new();
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -89,12 +89,6 @@ fn build_pool(
         .max_connections(max_connections)
         // Fail fast instead of hanging when the pool is exhausted.
         .acquire_timeout(Duration::from_secs(5))
-        // Defaults every pooled connection to RLS admin context — see
-        // crate::db::set_session_admin_context for why this is required now
-        // that the app's role no longer bypasses RLS.
-        .after_connect(|conn, _meta| {
-            Box::pin(async move { crate::db::set_session_admin_context(conn).await })
-        })
         .connect(url)
 }
 

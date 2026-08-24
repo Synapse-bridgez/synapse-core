@@ -43,7 +43,6 @@ pub struct SettlementListResponse {
 )]
 pub async fn list_settlements(
     State(state): State<ApiState>,
-    tenant: crate::tenant::TenantContext,
     Query(params): Query<SettlementListQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let limit = params.limit.unwrap_or(10).clamp(1, 100);
@@ -60,14 +59,9 @@ pub async fn list_settlements(
 
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    let mut settlements = crate::db::queries::list_settlements_cursor_for_tenant(
-        pool,
-        fetch_limit,
-        decoded_cursor,
-        backward,
-        tenant.tenant_id,
-    )
-    .await?;
+    let mut settlements =
+        crate::db::queries::list_settlements_cursor(pool, fetch_limit, decoded_cursor, backward)
+            .await?;
 
     let has_more = settlements.len() as i64 > limit;
     if has_more {
@@ -109,22 +103,13 @@ pub async fn list_settlements(
 )]
 pub async fn get_settlement(
     State(state): State<ApiState>,
-    tenant: crate::tenant::TenantContext,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    let settlement = crate::db::queries::get_settlement_for_tenant(pool, id, tenant.tenant_id)
+    let settlement = crate::db::queries::get_settlement(pool, id)
         .await
         .map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) {
-                // See webhook::get_transaction for why this stays indistinguishable
-                // from "no such settlement" in the response but is still counted.
-                tracing::info!(
-                    counter.cross_tenant_denial_total = 1u64,
-                    tenant_id = %tenant.tenant_id,
-                    settlement_id = %id,
-                    "get_settlement: not found or not visible to this tenant"
-                );
                 AppError::NotFound(format!("Settlement {} not found", id))
             } else {
                 AppError::from(e)

@@ -141,7 +141,6 @@ async fn test_export_csv_with_filters() {
 
     let res = client
         .get(format!("{}/export?format=csv&status=pending", base_url))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();
@@ -174,7 +173,6 @@ async fn test_export_json_with_filters() {
 
     let res = client
         .get(format!("{}/export?format=json&asset_code=USDC", base_url))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();
@@ -240,7 +238,6 @@ async fn test_export_date_range() {
             "{}/export?format=csv&from={}&to={}",
             base_url, from_date, to_date
         ))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();
@@ -270,7 +267,6 @@ async fn test_export_large_dataset_streaming() {
 
     let res = client
         .get(format!("{}/export?format=csv", base_url))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();
@@ -289,7 +285,6 @@ async fn test_export_empty_results() {
 
     let res = client
         .get(format!("{}/export?format=csv&status=nonexistent", base_url))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();
@@ -310,7 +305,6 @@ async fn test_export_headers_and_filename() {
 
     let res = client
         .get(format!("{}/export?format=csv", base_url))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();
@@ -329,7 +323,6 @@ async fn test_export_headers_and_filename() {
 
     let res = client
         .get(format!("{}/export?format=json", base_url))
-        .header("Authorization", "Bearer admin-secret-key")
         .send()
         .await
         .unwrap();

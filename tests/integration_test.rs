@@ -6,12 +6,6 @@ use synapse_core::{create_app, AppState};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
-/// GET /transactions/:id now requires a resolvable tenant API key (Part A
-/// fix — see TenantContext). Transactions inserted via the callback flow
-/// below keep the default NULL tenant_id, which the tenant-scoped queries
-/// treat as a legacy row visible to any authenticated tenant.
-const TEST_API_KEY: &str = "integration-test-api-key";
-
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     setup_test_app_with_ip_filter(synapse_core::config::AllowedIps::Any, 1).await
 }
@@ -63,16 +57,6 @@ async fn setup_test_app_with_ip_filter(
     .execute(&pool)
     .await;
 
-    sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
-         VALUES ($1, 'IntegrationTestTenant', $2, '', '', 6000, true)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(TEST_API_KEY)
-    .execute(&pool)
-    .await
-    .unwrap();
-
     let (tx, _rx) = tokio::sync::broadcast::channel(100);
     let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379")
         .await
@@ -110,7 +94,6 @@ async fn setup_test_app_with_ip_filter(
             ),
         ),
     };
-    app_state.load_tenant_configs().await.unwrap();
     let app = create_app(app_state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
@@ -153,7 +136,6 @@ async fn test_valid_deposit_flow() {
 
     let res = client
         .get(format!("{}/transactions/{}", base_url, tx_id))
-        .header("X-API-Key", TEST_API_KEY)
         .send()
         .await
         .unwrap();
@@ -210,7 +192,6 @@ async fn test_callback_with_memo_and_metadata() {
 
     let res = client
         .get(format!("{}/transactions/{}", base_url, tx_id))
-        .header("X-API-Key", TEST_API_KEY)
         .send()
         .await
         .unwrap();

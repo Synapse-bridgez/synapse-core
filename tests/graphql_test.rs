@@ -111,13 +111,7 @@ async fn test_graphql_queries() {
     let query = json!({
         "query": "{ transactions { id status } }"
     });
-    let res = client
-        .post(&graphql_url)
-        .header("Authorization", "Bearer admin-secret-key")
-        .json(&query)
-        .send()
-        .await
-        .unwrap();
+    let res = client.post(&graphql_url).json(&query).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
     let callback_url = format!("http://{}/callback", addr);
@@ -141,13 +135,7 @@ async fn test_graphql_queries() {
     let query = json!({
         "query": format!("{{ transaction(id: \"{}\") {{ id status amount assetCode }} }}", tx_id)
     });
-    let res = client
-        .post(&graphql_url)
-        .header("Authorization", "Bearer admin-secret-key")
-        .json(&query)
-        .send()
-        .await
-        .unwrap();
+    let res = client.post(&graphql_url).json(&query).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["data"]["transaction"]["id"], tx_id);
