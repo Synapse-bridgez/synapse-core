@@ -183,6 +183,10 @@ jobs:
       if: matrix.rust == 'stable'
       run: ./scripts/check-migration-safety.sh migrations
 
+    - name: Check GraphQL handler is actually wired to the schema
+      if: matrix.rust == 'stable'
+      run: ./scripts/check-graphql-handler-wired.sh
+
     - name: Run migrations
       id: run_migrations
       run: |

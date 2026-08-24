@@ -43,6 +43,7 @@ fn report_for_period(
         missing_on_chain: vec![],
         orphaned_payments: vec![],
         amount_mismatches: vec![],
+        late_payments: vec![],
     }
 }
 
