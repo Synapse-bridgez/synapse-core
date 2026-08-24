@@ -1,3 +1,4 @@
+use chrono::Utc;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::db::models::Transaction;
 use crate::services::lock_manager::LeaderElection;
 use crate::services::webhook_dispatcher::WebhookDispatcher;
-use crate::stellar::HorizonClient;
+use crate::stellar::{HorizonClient, HorizonError};
 
 const LEADER_HEARTBEAT_SECS: u64 = 15;
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -208,9 +209,125 @@ impl ProcessorPool {
 /// PR merges.
 const WEBHOOK_ENQUEUE_FLAG: &str = "webhook_enqueue_on_completion";
 
+/// Real payment verification (see `find_matching_payment` below) is gated
+/// behind this flag, mirroring `WEBHOOK_ENQUEUE_FLAG` above — see migration
+/// `20260824000002_payment_verification_rollout_flag.sql`. Cutover is a
+/// gradual, explicit per-`stellar_account` operator action (ramp
+/// `rollout_percentage` up) rather than an instant behavior change for
+/// 100% of traffic the moment this PR merges. While disabled for a given
+/// account, `process_batch` still evaluates the verification logic in
+/// shadow mode (see `payment_verification_no_match_completed_total`) so
+/// operators can review divergence data before ramping up.
+const PAYMENT_VERIFICATION_FLAG: &str = "payment_verification_enabled";
+
+/// How long a pending transaction may wait for its expected Horizon payment
+/// to show up (including the case where its destination account does not
+/// exist on-chain yet) before `process_batch` gives up and marks it
+/// `failed`. Bounded rather than unbounded so a transaction always reaches
+/// a terminal state and stays visible to operators; 30 minutes is generous
+/// relative to Stellar ledger close times (~5s) and typical anchor payout
+/// latency.
+const PAYMENT_VERIFICATION_RETRY_WINDOW_SECS: i64 = 30 * 60;
+
+/// Outcome of checking Horizon for the payment a pending transaction is
+/// expecting. Only `Matched` is safe evidence to complete a transaction —
+/// every other variant means "not yet verified," which is *not* the same
+/// as "will never be verified": see `process_batch`'s retry-window handling.
+enum PaymentLookup {
+    /// A payment matching this transaction's account, amount, asset, and
+    /// (if present) memo was found. Carries Horizon's payment id so the
+    /// completion write can record it for idempotency
+    /// (`idx_transactions_horizon_payment_id`).
+    Matched(String),
+    /// The destination account does not exist on-chain (yet). Per
+    /// `HorizonError::AccountNotFound`'s doc comment, this is a normal,
+    /// expected business outcome for a first-time deposit, not evidence of
+    /// failure.
+    AccountNotFound,
+    /// The account exists and Horizon returned payments for it, but none
+    /// matched this transaction's expected amount/asset/memo.
+    NoMatchingPayment,
+    /// The Horizon lookup itself failed (network error, non-200/404
+    /// response, or the circuit breaker is open). Treated the same as "not
+    /// yet verified" rather than as grounds to fail the transaction —
+    /// infrastructure trouble should never be the reason a legitimate
+    /// deposit gets marked failed.
+    LookupFailed,
+}
+
+/// Checks Horizon for evidence that `transaction`'s expected payment has
+/// actually arrived. See the module-level verification contract documented
+/// above `process_batch`.
+async fn find_matching_payment(
+    horizon_client: &HorizonClient,
+    transaction: &Transaction,
+) -> PaymentLookup {
+    let payments = match horizon_client
+        .list_payments_for_account(&transaction.stellar_account, 50)
+        .await
+    {
+        Ok(payments) => payments,
+        Err(HorizonError::AccountNotFound(_)) => return PaymentLookup::AccountNotFound,
+        Err(e) => {
+            warn!(
+                transaction_id = %transaction.id,
+                error = %e,
+                "Horizon payment lookup failed; treating as not-yet-verified"
+            );
+            return PaymentLookup::LookupFailed;
+        }
+    };
+
+    let matched = payments.into_iter().find(|p| {
+        p.to == transaction.stellar_account
+            && p.asset_code == transaction.asset_code
+            && payment_amount_matches(&p.amount, &transaction.amount)
+            && match transaction.memo.as_deref() {
+                Some(memo) => p.memo.as_deref() == Some(memo),
+                None => true,
+            }
+    });
+
+    match matched {
+        Some(p) => PaymentLookup::Matched(p.id),
+        None => PaymentLookup::NoMatchingPayment,
+    }
+}
+
+fn payment_amount_matches(horizon_amount: &str, expected: &sqlx::types::BigDecimal) -> bool {
+    horizon_amount
+        .parse::<sqlx::types::BigDecimal>()
+        .map(|amount| &amount == expected)
+        .unwrap_or(false)
+}
+
+/// Postgres 23505 = unique_violation. Used to detect a concurrent claim of
+/// the same Horizon payment by another transaction
+/// (`idx_transactions_horizon_payment_id`).
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("23505"))
+}
+
+/// Completes a batch of pending transactions.
+///
+/// # Verification contract
+///
+/// A transaction is only completed when Horizon reports a payment that
+/// actually matches it (destination account, amount, asset code, and memo
+/// when present) — see `find_matching_payment`. Confirming that the
+/// destination account merely *exists* on Stellar is **not** sufficient
+/// evidence: an account can exist for reasons unrelated to this specific
+/// deposit (funded earlier, funded by someone else, funded for an
+/// unrelated transaction), and a brand-new deposit destination normally
+/// does not exist yet even though the deposit itself is legitimate and in
+/// flight (`HorizonError::AccountNotFound`'s doc comment). Conflating the
+/// two either completes transactions with no evidence money moved, or
+/// terminally fails deposits that would have arrived seconds later. Do not
+/// reintroduce an account-existence-only check here — see git history for
+/// this exact class of regression.
 pub async fn process_batch(
     pool: &PgPool,
-    _horizon_client: &HorizonClient,
+    horizon_client: &HorizonClient,
     batch_size: u32,
     webhook_dispatcher: Option<&WebhookDispatcher>,
     query_cache: Option<&crate::services::query_cache::QueryCache>,
@@ -270,16 +387,95 @@ pub async fn process_batch(
             continue;
         }
 
+        let verification_enabled = feature_flags
+            .is_enabled_for_key(PAYMENT_VERIFICATION_FLAG, &transaction.stellar_account)
+            .await
+            .unwrap_or(false);
+
+        let lookup = find_matching_payment(horizon_client, transaction).await;
+        let matched_payment_id = match &lookup {
+            PaymentLookup::Matched(id) => Some(id.clone()),
+            _ => None,
+        };
+
+        if verification_enabled && matched_payment_id.is_none() {
+            let age_secs = (Utc::now() - transaction.created_at).num_seconds();
+            if age_secs < PAYMENT_VERIFICATION_RETRY_WINDOW_SECS {
+                debug!(
+                    transaction_id = %transaction.id,
+                    age_secs,
+                    reason = match lookup {
+                        PaymentLookup::AccountNotFound => "account_not_found",
+                        PaymentLookup::NoMatchingPayment => "no_matching_payment",
+                        PaymentLookup::LookupFailed => "lookup_failed",
+                        PaymentLookup::Matched(_) => unreachable!(),
+                    },
+                    "No verified payment yet; leaving pending for retry"
+                );
+                crate::metrics::payment_verification_retry_deferred_total().add(1, &[]);
+                continue;
+            }
+
+            // Retry window exceeded with no matching payment ever found:
+            // this transaction is genuinely failed.
+            if let Err(e) = crate::validation::state_machine::validate_status_transition(
+                &transaction.status,
+                "failed",
+            ) {
+                warn!(transaction_id = %transaction.id, error = %e, "Cannot transition to failed");
+                continue;
+            }
+            sqlx::query(
+                "UPDATE transactions SET status = 'failed', updated_at = NOW() WHERE id = $1 AND status = $2",
+            )
+            .bind(transaction.id)
+            .bind(&transaction.status)
+            .execute(&mut *tx)
+            .await?;
+            continue;
+        }
+
+        if !verification_enabled && matched_payment_id.is_none() {
+            // Shadow mode: the flag is off for this account, so the
+            // pre-verification (unconditional) completion behavior below
+            // still applies, but log the divergence — this transaction
+            // would NOT have been completed under the new verification
+            // logic — so operators can review it before ramping
+            // rollout_percentage up.
+            warn!(
+                transaction_id = %transaction.id,
+                "Completing transaction with no matching Horizon payment found \
+                 (payment_verification_enabled is off for this account — shadow mode only)"
+            );
+            crate::metrics::payment_verification_no_match_completed_total().add(1, &[]);
+        }
+
         // The FOR UPDATE SKIP LOCKED claim above already holds this row's
         // lock; WHERE status = $2 is defense in depth against any other
         // write path changing it without going through that lock.
         let result = sqlx::query(
-            "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 AND status = $2",
+            "UPDATE transactions SET status = 'completed', updated_at = NOW(), horizon_payment_id = $3 WHERE id = $1 AND status = $2",
         )
         .bind(transaction.id)
         .bind(&transaction.status)
+        .bind(&matched_payment_id)
         .execute(&mut *tx)
-        .await?;
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(e) if is_unique_violation(&e) => {
+                // Another transaction already claimed this exact Horizon
+                // payment (idx_transactions_horizon_payment_id). Skip this
+                // one for this tick rather than failing the whole batch.
+                warn!(
+                    transaction_id = %transaction.id,
+                    "horizon_payment_id already claimed by another transaction this tick"
+                );
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if result.rows_affected() > 0 {
             completed.push(transaction.clone());

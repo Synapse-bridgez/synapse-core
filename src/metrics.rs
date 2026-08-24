@@ -243,6 +243,55 @@ pub fn transaction_processor_stage_executions_total() -> Counter<u64> {
         .init()
 }
 
+/// Counter for `process_batch` completions that had no matching Horizon
+/// payment found (see `services::processor::find_matching_payment`). While
+/// `payment_verification_enabled` is off for an account, this fires in
+/// shadow mode on every such completion so operators can see the exact
+/// blast radius before ramping the flag's `rollout_percentage` up. Once the
+/// flag is fully on, this should be structurally zero — completion is
+/// gated on a match — so any nonzero rate here after full rollout means a
+/// residual gap in the verification logic itself.
+pub fn payment_verification_no_match_completed_total() -> Counter<u64> {
+    meter()
+        .u64_counter("payment_verification_no_match_completed_total")
+        .with_description(
+            "process_batch completions with no matching Horizon payment found. Nonzero \
+             while payment_verification_enabled is off (shadow mode) is expected; nonzero \
+             after full rollout indicates a verification-logic gap.",
+        )
+        .init()
+}
+
+/// Counter for pending transactions left pending (rather than immediately
+/// failed) because `process_batch` could not yet verify their expected
+/// payment but the retry window has not elapsed — covers the
+/// account-not-found case as well as "account exists, no matching payment
+/// yet" and transient Horizon lookup failures.
+pub fn payment_verification_retry_deferred_total() -> Counter<u64> {
+    meter()
+        .u64_counter("payment_verification_retry_deferred_total")
+        .with_description(
+            "Pending transactions left pending for retry instead of being immediately \
+             failed, because their expected Horizon payment could not yet be verified",
+        )
+        .init()
+}
+
+/// `HorizonClient::stream_payments` reconnect counter, labeled by `reason`
+/// ("clean_close" | "error"). Prior to the Part B fix, only "clean_close"
+/// was ever reconnected — any transport/response error terminated the
+/// stream permanently. Nonzero "error" counts now show the fix is actually
+/// engaging, once `AccountMonitor` (currently dead code) is wired live.
+pub fn stream_reconnect_total() -> Counter<u64> {
+    meter()
+        .u64_counter("stream_reconnect_total")
+        .with_description(
+            "HorizonClient::stream_payments reconnect attempts, labeled by reason \
+             (clean_close | error)",
+        )
+        .init()
+}
+
 /// Webhook delivery outcome counter, labeled by `outcome` ("success" |
 /// "failure") and `endpoint_id`.
 pub fn webhook_delivery_total() -> Counter<u64> {
