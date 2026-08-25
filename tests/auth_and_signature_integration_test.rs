@@ -11,29 +11,27 @@
 //! # Scope note: no webhook-signature-verification tests here
 //!
 //! This file was originally going to also cover a `middleware::signature_verification`
-//! layer for the `/callback` route, following an HMAC + timestamp + rotation
-//! scheme (`X-Webhook-Timestamp` / `X-Webhook-Signature` headers, a signed
-//! payload of `"{timestamp}.{body_hex}"`). That module does not exist on
-//! this branch. What actually exists instead:
+//! layer for the `/callback` route. **That gap has since been closed** —
+//! see `src/middleware/webhook_signature.rs`, which implements exactly the
+//! HMAC + timestamp scheme this comment used to describe as hypothetical
+//! (`X-Webhook-Timestamp` / `X-Webhook-Signature` headers, a signed payload
+//! of `"{timestamp}.{body}"`), and is layered onto both `callback_routes`
+//! and `webhook_routes` in `create_app`. Its own test module covers the
+//! signature-verification behavior directly (including a replay-with-
+//! updated-timestamp regression test); `tests/integration_test.rs`'s
+//! callback-flow tests now sign their requests and
+//! `test_invalid_signature_flow` exercises the real rejection path — its
+//! `#[ignore = "Signature validation not implemented"]` reason (accurate at
+//! the time this comment was written) is gone.
 //!
-//! - `handlers::auth::VerifiedWebhook` — a `FromRequest` extractor that
-//!   verifies a single `X-Stellar-Signature` header (hex HMAC-SHA256 of the
-//!   raw body, no timestamp/replay window, no rotation support) — but it has
-//!   zero call sites anywhere in `src/`. It is not used by any route.
-//! - The actual `/callback` and `/callback/transaction` routes (see
-//!   `create_app` in `src/lib.rs`) are wrapped only in an IP allowlist,
-//!   quota, and payload-validation middleware — no signature verification
-//!   at all. `tests/integration_test.rs::test_invalid_signature_flow` is
-//!   marked `#[ignore = "Signature validation not implemented"]`, which is
-//!   accurate, not stale.
-//!
-//! Writing tests against the originally-assumed `signature_verification`
-//! middleware would test code that doesn't exist. That gap (unauthenticated
-//! webhook callback ingestion, protected only by IP allowlisting) is real
-//! and worth its own issue, but wiring `VerifiedWebhook` into the callback
-//! route — deciding header/scheme compatibility with whatever the anchor
-//! actually sends today — is a separate, larger change than restoring this
-//! test file. Out of scope here; see the PR description's "Known gaps".
+//! What was previously true, for the historical record: `handlers::auth::
+//! VerifiedWebhook` (a `FromRequest` extractor verifying a single
+//! `X-Stellar-Signature` header, no timestamp/replay window, no rotation
+//! support, zero call sites anywhere) has been **deleted** rather than
+//! wired in — it duplicated a broken version of what `cache::webhook`
+//! (used correctly by `webhook_signature.rs` now) already did right. This
+//! file still doesn't need its own signature-verification tests: that
+//! coverage lives with the middleware it belongs to.
 //!
 //! # Design
 //!

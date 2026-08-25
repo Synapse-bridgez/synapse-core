@@ -1,4 +1,6 @@
+pub mod audit;
 pub mod bulk_status;
+pub mod compliance;
 pub mod locks;
 pub mod quota;
 pub mod reconciliation;

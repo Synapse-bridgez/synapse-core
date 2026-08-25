@@ -105,12 +105,9 @@ fn rows_to_csv(rows: &[AuditLogRow]) -> Result<String, csv::Error> {
         ])?;
     }
     wtr.flush()?;
-    let inner = wtr.into_inner().map_err(|e| {
-        csv::Error::from(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
-    })?;
+    let inner = wtr
+        .into_inner()
+        .map_err(|e| csv::Error::from(std::io::Error::other(e.to_string())))?;
     Ok(String::from_utf8_lossy(&inner).into_owned())
 }
 
@@ -128,15 +125,17 @@ pub async fn search_audit_logs_handler(
     State(state): State<ApiState>,
     Query(q): Query<AuditSearchQuery>,
 ) -> Result<Response, AppError> {
+    crate::metrics::admin_audit_search_requests_total().add(1, &[]);
+
     let limit = q.limit.clamp(1, 500);
 
-    let cursor = q
-        .cursor
-        .as_deref()
-        .map(decode_cursor)
-        .transpose()
-        .ok()
-        .flatten();
+    // `decode_cursor` returns `Option<(DateTime<Utc>, Uuid)>` (an invalid
+    // cursor is simply treated as "no cursor"), not a `Result` — `.map(...)`
+    // therefore produces `Option<Option<_>>`, which `.flatten()` collapses.
+    // The previous `.transpose().ok()` here never compiled (this file was
+    // never mod-declared, so it never ran through the compiler) — `.transpose()`
+    // only exists on `Option<Result<_, _>>`.
+    let cursor = q.cursor.as_deref().and_then(decode_cursor);
 
     let params = AuditSearchParams {
         actor: q.actor.as_deref(),

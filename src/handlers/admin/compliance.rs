@@ -30,6 +30,9 @@ pub async fn generate_report(
     State(state): State<ApiState>,
     Query(params): Query<GenerateQuery>,
 ) -> impl IntoResponse {
+    crate::metrics::admin_compliance_report_requests_total()
+        .add(1, &[opentelemetry::KeyValue::new("operation", "generate")]);
+
     let service = ComplianceService::new(state.app_state.db);
     match service.generate_report(&params.period).await {
         Ok(report) => (StatusCode::CREATED, Json(serde_json::json!(report))).into_response(),
@@ -45,6 +48,9 @@ pub async fn list_reports(
     State(state): State<ApiState>,
     Query(params): Query<ListQuery>,
 ) -> impl IntoResponse {
+    crate::metrics::admin_compliance_report_requests_total()
+        .add(1, &[opentelemetry::KeyValue::new("operation", "list")]);
+
     let service = ComplianceService::new(state.app_state.db);
     match service
         .list_reports(params.period.as_deref(), params.limit, params.offset)

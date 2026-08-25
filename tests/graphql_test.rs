@@ -13,7 +13,34 @@ use tokio::net::TcpListener;
 /// pool)` — the shared setup every test in this file needs to exercise the
 /// real `/graphql` HTTP route end to end. Returns `None` if `DATABASE_URL`
 /// isn't set, so callers can skip cleanly.
+/// `POST /callback` now requires a valid HMAC signature (see
+/// `middleware::webhook_signature::verify_anchor_signature`) — the app built
+/// here has no `SecretsStore`, so the middleware falls back to this env var.
+const TEST_WEBHOOK_SECRET: &str = "graphql-test-webhook-secret";
+
+/// Signs `body` the same way `cache::webhook::verify_signature` expects:
+/// HMAC-SHA256 over `{timestamp}.{body}`. Returns `(timestamp, signature)`.
+fn sign_webhook_body(body: &[u8]) -> (String, String) {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(TEST_WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    (timestamp, signature)
+}
+
 async fn spawn_test_app() -> Option<(reqwest::Client, String, String, PgPool)> {
+    std::env::set_var("ANCHOR_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET);
     let database_url = std::env::var("DATABASE_URL").ok()?;
 
     let pool = PgPool::connect(&database_url).await.unwrap();
@@ -136,8 +163,12 @@ async fn test_graphql_queries() {
         "callback_type": "deposit",
         "callback_status": "completed"
     });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(&callback_url)
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await

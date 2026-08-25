@@ -8,7 +8,6 @@ pub mod handlers;
 pub mod health;
 pub mod metrics;
 pub mod middleware;
-pub mod payments;
 pub mod readiness;
 pub mod schemas;
 pub mod secrets;
@@ -176,12 +175,16 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_callback,
         ))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::webhook_signature::verify_anchor_signature,
+        ))
         .layer(crate::middleware::ip_filter::IpFilterLayer::new(
             app_state.allowed_ips.clone(),
             app_state.trusted_proxy_depth,
         ));
 
-    // Webhook route with validation + quota middleware
+    // Webhook route with signature verification + validation + quota middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(handlers::webhook::handle_webhook))
         .layer(axum_middleware::from_fn_with_state(
@@ -190,6 +193,10 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             crate::middleware::validate::validate_webhook,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::webhook_signature::verify_anchor_signature,
         ));
 
     // Tenant-scoped data routes. These previously had zero auth of any kind —
@@ -222,10 +229,16 @@ pub fn create_app(app_state: AppState) -> Router {
 
     // core_routes intentionally does NOT layer api_key_auth across the board:
     // callback_routes/webhook_routes authenticate inbound anchor calls via
-    // HMAC signature validation (validate_callback/validate_webhook), not a
-    // tenant API key — a blanket api_key_auth layer here would reject every
-    // legitimate webhook delivery. Only data_routes needs tenant-key auth,
-    // and it gets it from the TenantContext extractor above.
+    // HMAC signature validation (middleware::webhook_signature::verify_anchor_signature),
+    // not a tenant API key — a blanket api_key_auth layer here would reject
+    // every legitimate webhook delivery. validate_callback/validate_webhook
+    // (also layered on these routes) check payload *shape* only — despite
+    // the similar names, they perform no cryptographic verification; before
+    // webhook_signature::verify_anchor_signature was added, this comment
+    // incorrectly described validate_callback/validate_webhook themselves as
+    // the HMAC check, and no HMAC check actually ran anywhere on this path.
+    // Only data_routes needs tenant-key auth, and it gets it from the
+    // TenantContext extractor above.
     let core_routes = data_routes
         .merge(callback_routes.clone())
         .merge(webhook_routes.clone());
@@ -297,6 +310,20 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/admin/locks",
             get(handlers::admin::locks::list_active_locks),
+        )
+        // Admin: audit log search — fully implemented and unit-tested since
+        // before this fix, but never mounted anywhere; see
+        // docs/audit-compliance-admin-endpoints.md.
+        .route(
+            "/admin/audit/search",
+            get(handlers::admin::audit::search_audit_logs_handler),
+        )
+        // Admin: compliance report generation/listing — same gap as audit
+        // search above.
+        .route(
+            "/admin/compliance/reports",
+            post(handlers::admin::compliance::generate_report)
+                .get(handlers::admin::compliance::list_reports),
         )
         // Admin: settlement dispute workflow
         .route(
