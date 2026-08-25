@@ -26,6 +26,8 @@
 //! | `webhook_delivery_total`          | Counter    | Webhook delivery attempts, labeled by outcome and endpoint_id |
 //! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type |
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
+//! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
+//! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
 //!
 //! ## Configuration
 //!
@@ -434,6 +436,26 @@ pub fn lock_hold_duration_ms() -> Histogram<f64> {
         .f64_histogram("lock_hold_duration_ms")
         .with_description("Duration a distributed lock was held in milliseconds")
         .with_unit(opentelemetry::metrics::Unit::new("ms"))
+        .init()
+}
+
+/// Requests to `GET /admin/audit/search`. Exists specifically to give
+/// operators a way to confirm the endpoint has real traffic now that it's
+/// mounted — see docs/audit-compliance-admin-endpoints.md for how to use
+/// this to distinguish "no incidents" from "nobody's used this yet."
+pub fn admin_audit_search_requests_total() -> Counter<u64> {
+    meter()
+        .u64_counter("admin_audit_search_requests_total")
+        .with_description("Requests to the admin audit-log search endpoint")
+        .init()
+}
+
+/// Requests to the compliance report endpoints, labeled by `operation`
+/// ("generate" | "list").
+pub fn admin_compliance_report_requests_total() -> Counter<u64> {
+    meter()
+        .u64_counter("admin_compliance_report_requests_total")
+        .with_description("Requests to the admin compliance report endpoints, labeled by operation")
         .init()
 }
 

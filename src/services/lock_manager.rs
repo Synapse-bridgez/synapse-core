@@ -692,6 +692,22 @@ impl LeaderElection {
     }
 
     /// Try to acquire or renew the leader lease. Returns true if this instance is leader.
+    ///
+    /// Also registers/deregisters this instance in `lock_registry` — the same
+    /// registry `GET /admin/locks` reads — so leadership shows up there like
+    /// any other active distributed lock. `LeaderElection` previously used an
+    /// entirely separate Redis key (`processor:leader`, above) and never
+    /// touched the registry at all, so the admin endpoint had no visibility
+    /// into leadership state regardless of whether `LockManager`/
+    /// `FairLockManager` had any live callers.
+    ///
+    /// `acquired_at` is reset to "now" on every successful call (fresh
+    /// acquire or successful renewal) rather than only on first acquisition,
+    /// so `held_secs` in the registry snapshot reads as "time since last
+    /// confirmed leadership check," not total leadership tenure — leadership
+    /// legitimately held for hours/days via repeated renewal should not trip
+    /// the registry's `overdue` heuristic (`held_secs > 2x expected`) just
+    /// because it's long-lived; only a *stopped* renewal cadence should.
     pub async fn try_acquire_leadership(&self) -> Result<bool, redis::RedisError> {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
 
@@ -706,6 +722,7 @@ impl LeaderElection {
             .await?;
 
         if result.is_some() {
+            self.register_leadership().await;
             return Ok(true);
         }
 
@@ -725,7 +742,43 @@ impl LeaderElection {
             .invoke_async(&mut conn)
             .await?;
 
-        Ok(renewed == 1)
+        if renewed == 1 {
+            self.register_leadership().await;
+            Ok(true)
+        } else {
+            // Not (or no longer) leader — make sure a stale entry from a
+            // previous successful cycle doesn't linger in the registry.
+            lock_registry().deregister(&self.instance_id).await;
+            Ok(false)
+        }
+    }
+
+    async fn register_leadership(&self) {
+        let acquired_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        lock_registry()
+            .register(ActiveLockInfo {
+                resource: "processor:leader".to_string(),
+                token: self.instance_id.clone(),
+                acquired_at: acquired_unix,
+                ttl_secs: LEADER_LEASE_SECS,
+                expected_duration_secs: LEADER_LEASE_SECS,
+                overdue: false,
+            })
+            .await;
+    }
+
+    /// Removes this instance's leadership entry from `lock_registry`, if
+    /// present. Call when this instance is done acting on its leader status
+    /// for the current cycle (e.g. a leader-gated scheduled job finishing),
+    /// so `/admin/locks` doesn't keep reporting an instance as actively
+    /// leading for a full cycle after its lease-holding job has already
+    /// finished — the underlying Redis lease (`LEADER_LEASE_SECS`) is much
+    /// shorter than, e.g., the daily reconciliation job's schedule.
+    pub async fn release_leadership_registration(&self) {
+        lock_registry().deregister(&self.instance_id).await;
     }
 
     /// Publish a heartbeat key with TTL so other instances can discover this one.
@@ -752,6 +805,15 @@ impl LeaderElection {
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
         let leader: Option<String> = conn.get(LEADER_KEY).await?;
         Ok(leader)
+    }
+
+    /// Test-only: clears this instance's leader key from Redis so repeated
+    /// test runs don't contend with a lease left over from a previous run.
+    #[cfg(test)]
+    async fn clear_leader_key_for_test(&self) {
+        if let Ok(mut conn) = self.redis_client.get_multiplexed_async_connection().await {
+            let _: Result<(), _> = conn.del(LEADER_KEY).await;
+        }
     }
 }
 
@@ -895,6 +957,58 @@ mod tests {
             acquired.load(std::sync::atomic::Ordering::SeqCst),
             n_workers
         );
+    }
+
+    /// Regression test for Part E: the live coordination mechanism
+    /// (`LeaderElection`) must actually populate the same registry
+    /// `GET /admin/locks` reads (`crate::handlers::admin::locks::list_active_locks`
+    /// calls `lock_registry().snapshot()` directly, so asserting against the
+    /// registry here is equivalent to asserting against the endpoint's JSON
+    /// body — there's no other logic between them). Before this fix,
+    /// `LeaderElection` used a separate Redis key and never called
+    /// `lock_registry()` at all, so this would have failed with an empty
+    /// snapshot regardless of real leadership state.
+    #[ignore = "Requires Redis"]
+    #[tokio::test]
+    async fn test_leader_election_registers_and_releases_in_lock_registry() {
+        let election = LeaderElection::new("redis://localhost:6379").unwrap();
+        election.clear_leader_key_for_test().await;
+
+        let acquired = election.try_acquire_leadership().await.unwrap();
+        assert!(acquired, "should win an uncontended leadership lease");
+
+        let snap = lock_registry().snapshot().await;
+        let entry = snap
+            .iter()
+            .find(|l| l.token == election.instance_id())
+            .expect("leadership must be visible in lock_registry after acquiring");
+        assert_eq!(entry.resource, "processor:leader");
+        assert!(
+            !entry.overdue,
+            "freshly acquired leadership must not be overdue"
+        );
+
+        // Renewing again must keep the entry present (and not duplicate it).
+        let renewed = election.try_acquire_leadership().await.unwrap();
+        assert!(renewed);
+        let snap = lock_registry().snapshot().await;
+        let count = snap
+            .iter()
+            .filter(|l| l.token == election.instance_id())
+            .count();
+        assert_eq!(
+            count, 1,
+            "renewal must not create a duplicate registry entry"
+        );
+
+        election.release_leadership_registration().await;
+        let snap = lock_registry().snapshot().await;
+        assert!(
+            !snap.iter().any(|l| l.token == election.instance_id()),
+            "releasing must remove the entry from the registry the endpoint reads"
+        );
+
+        election.clear_leader_key_for_test().await;
     }
 
     /// A crashed waiter (no heartbeat) should be pruned from the queue.

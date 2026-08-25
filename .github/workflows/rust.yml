@@ -200,6 +200,14 @@ jobs:
       if: matrix.rust == 'stable'
       run: ./scripts/check-graphql-handler-wired.sh
 
+    # Regression guard for the class of bug documented in
+    # docs/adr/007-remove-orphaned-hexagonal-and-payments-modules.md: a file
+    # under src/ that was never `mod`-declared, so it silently never compiles
+    # into the crate at all despite looking like finished, tested code.
+    - name: Check for unreachable (never mod-declared) src/ modules
+      if: matrix.rust == 'stable'
+      run: ./scripts/check-unreachable-modules.sh
+
     - name: Run migrations
       id: run_migrations
       run: |

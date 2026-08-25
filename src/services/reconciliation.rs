@@ -396,9 +396,11 @@ impl crate::services::scheduler::Job for ReconciliationJob {
     }
 
     async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut registered_as_leader = false;
+
         if let Some(election) = &self.leader_election {
             match election.try_acquire_leadership().await {
-                Ok(true) => {}
+                Ok(true) => registered_as_leader = true,
                 Ok(false) => {
                     info!(
                         instance_id = election.instance_id(),
@@ -421,6 +423,25 @@ impl crate::services::scheduler::Job for ReconciliationJob {
             }
         }
 
+        let result = self.run_reconciliation().await;
+
+        // Release the lock_registry entry now that this cycle's use of
+        // leadership is done — the underlying Redis lease is much shorter
+        // than this job's 24h schedule, so without this the admin /admin/locks
+        // view would keep reporting this instance as actively leading (and,
+        // after 2x the lease TTL, falsely "overdue") for the rest of the day.
+        if registered_as_leader {
+            if let Some(election) = &self.leader_election {
+                election.release_leadership_registration().await;
+            }
+        }
+
+        result
+    }
+}
+
+impl ReconciliationJob {
+    async fn run_reconciliation(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Truncate to the UTC day boundary so that if this does run
         // concurrently on more than one instance (leader election disabled,
         // failed open, or a lease handed off mid-check), every instance

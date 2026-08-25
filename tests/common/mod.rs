@@ -27,6 +27,41 @@ use testcontainers_modules::postgres::Postgres;
 #[allow(dead_code)]
 pub const TEST_API_KEY: &str = "common-test-app-api-key";
 
+/// `POST /callback` and `POST /webhook` now require a valid HMAC signature
+/// (`middleware::webhook_signature::verify_anchor_signature`) — see
+/// docs/adr/007-remove-orphaned-hexagonal-and-payments-modules.md's sibling
+/// fix wiring `cache::webhook`'s signature check into the live path.
+/// `TestApp::new` sets `ANCHOR_WEBHOOK_SECRET` to this value (the app has no
+/// `SecretsStore` in tests, so the middleware falls back to the plain env
+/// var, same as `middleware::auth::is_valid_admin_request`'s `ADMIN_API_KEY`
+/// fallback) so callers can sign requests with [`sign_webhook_body`].
+#[allow(dead_code)]
+pub const TEST_WEBHOOK_SECRET: &str = "common-test-app-webhook-secret";
+
+/// Signs `body` the same way `cache::webhook::verify_signature` expects:
+/// HMAC-SHA256 over `{timestamp}.{body}`, keyed by [`TEST_WEBHOOK_SECRET`].
+/// Returns `(timestamp, signature)` — set as the `X-Webhook-Timestamp` /
+/// `X-Webhook-Signature` request headers.
+#[allow(dead_code)]
+pub fn sign_webhook_body(body: &[u8]) -> (String, String) {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(TEST_WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    (timestamp, signature)
+}
+
 /// Test application with automatic database and HTTP server setup.
 pub struct TestApp {
     pub base_url: String,
@@ -38,6 +73,8 @@ pub struct TestApp {
 impl TestApp {
     /// Create a new test app with isolated Postgres database, migrations, and HTTP server.
     pub async fn new() -> Self {
+        std::env::set_var("ANCHOR_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET);
+
         let container = Postgres::default()
             .with_tag("14-alpine")
             .start()
