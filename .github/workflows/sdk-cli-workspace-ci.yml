@@ -168,12 +168,12 @@ jobs:
       - name: Smoke test — core class (no credential, public route)
         run: ./target/debug/synapse --base-url http://127.0.0.1:3000 health check
 
-      - name: Smoke test — admin class (Authorization: Bearer)
+      - name: "Smoke test — admin class (Authorization: Bearer)"
         run: >
           ./target/debug/synapse --base-url http://127.0.0.1:3000
           --api-key ci-smoke-admin-token admin locks list
 
-      - name: Smoke test — stats class (Authorization: Bearer)
+      - name: "Smoke test — stats class (Authorization: Bearer)"
         run: >
           ./target/debug/synapse --base-url http://127.0.0.1:3000
           --api-key ci-smoke-admin-token stats status
