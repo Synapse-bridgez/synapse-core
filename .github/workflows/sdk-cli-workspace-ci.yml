@@ -1,0 +1,194 @@
+name: Workspace CI (sdk + cli)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'sdks/rust/**'
+      - 'cli/synapse-cli/**'
+      - 'src/**'
+      - '.github/workflows/sdk-cli-workspace-ci.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'sdks/rust/**'
+      - 'cli/synapse-cli/**'
+      - 'src/**'
+      - '.github/workflows/sdk-cli-workspace-ci.yml'
+
+jobs:
+  workspace-check:
+    name: cargo build + test (workspace)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-workspace-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-workspace-
+
+      - name: Build entire workspace
+        run: cargo build --workspace
+
+      - name: Run workspace lib tests
+        run: cargo test --workspace --lib
+
+  # Exercises the CLI against a real running `synapse-core` server (not the
+  # hand-rolled `mock-server` binary every other CLI test uses) — added for
+  # issue #1065, which found that every `admin`/`stats`/`admin webhooks
+  # health*` command had never worked against a real server because they
+  # sent the wrong auth header, and the CLI's own mock server never
+  # validated auth at all so nothing in CI could have caught it. This job
+  # is the "not just mocks" check: it boots the actual server binary the
+  # same way `cli/synapse-cli/tests/events_watch_real_server_test.rs`'s
+  # `#[ignore]`d real-server tests do, and drives the compiled `synapse`
+  # binary against it over a real TCP connection.
+  cli-smoke-test-real-server:
+    name: CLI smoke test (real server)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: synapse
+          POSTGRES_PASSWORD: synapse
+          POSTGRES_DB: synapse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 10s
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 5s
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+      REDIS_URL: redis://localhost:6379
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      ANCHOR_WEBHOOK_SECRET: ci-smoke-webhook-secret
+      TENANT_SECRET_KEY: ci-smoke-tenant-secret
+      ADMIN_API_KEY: ci-smoke-admin-token
+      SERVER_PORT: 3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-workspace-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-workspace-
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.7.4
+
+      - name: Create restricted app DB role (NOBYPASSRLS)
+        run: |
+          PGPASSWORD=synapse psql -h localhost -U synapse -d synapse_test -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'synapse_app') THEN
+                  CREATE ROLE synapse_app WITH LOGIN PASSWORD 'synapse_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+              END IF;
+          END
+          $$;
+          GRANT ALL PRIVILEGES ON DATABASE synapse_test TO synapse_app;
+          GRANT ALL ON SCHEMA public TO synapse_app;
+          ALTER ROLE synapse_app SET app.is_admin = 'true';
+          SQL
+
+      - name: Run migrations
+        run: |
+          for i in 1 2 3; do
+            sqlx migrate run && break
+            echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+            sleep 5
+            [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+          done
+
+      - name: Build server and CLI binaries
+        run: cargo build --bin synapse-core -p synapse-core --bin synapse -p synapse-cli
+
+      - name: Start the real server
+        run: |
+          ./target/debug/synapse-core > server.log 2>&1 &
+          echo $! > server.pid
+
+      - name: Wait for the server to become ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/ready > /dev/null; then
+              echo "Server is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Server never became ready"
+          cat server.log
+          exit 1
+
+      - name: Smoke test — core class (no credential, public route)
+        run: ./target/debug/synapse --base-url http://127.0.0.1:3000 health check
+
+      - name: "Smoke test — admin class (Authorization: Bearer)"
+        run: >
+          ./target/debug/synapse --base-url http://127.0.0.1:3000
+          --api-key ci-smoke-admin-token admin locks list
+
+      - name: "Smoke test — stats class (Authorization: Bearer)"
+        run: >
+          ./target/debug/synapse --base-url http://127.0.0.1:3000
+          --api-key ci-smoke-admin-token stats status
+
+      - name: Smoke test — admin class rejects a missing credential (regression guard)
+        run: |
+          if ./target/debug/synapse --base-url http://127.0.0.1:3000 admin locks list; then
+            echo "::error::admin locks list succeeded with no --api-key against a real server — admin_auth regression"
+            exit 1
+          fi
+
+      - name: Show server log on failure
+        if: failure()
+        run: cat server.log || true
+
+      - name: Stop the server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
