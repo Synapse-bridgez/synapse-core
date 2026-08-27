@@ -273,6 +273,10 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
         )
+        .route(
+            "/admin/transactions/bulk-status/jobs/:id",
+            get(handlers::admin::bulk_status::get_job_status),
+        )
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
         // Stats endpoints
