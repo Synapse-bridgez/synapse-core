@@ -50,6 +50,24 @@ check_case "unsafe fixture (unguarded TYPE change on sensitive column) is flagge
 check_case "safe fixture (guarded TYPE change on sensitive column) passes" \
   "$FIXTURES_DIR/safe-guarded-sensitive-type-change" "pass"
 
+check_case "unsafe fixture (ADD COLUMN NOT NULL without DEFAULT) is flagged" \
+  "$FIXTURES_DIR/unsafe-not-null-no-default" "fail"
+
+check_case "safe fixture (ADD COLUMN NOT NULL with DEFAULT) passes" \
+  "$FIXTURES_DIR/safe-not-null-with-default" "pass"
+
+check_case "unsafe fixture (RENAME COLUMN) is flagged" \
+  "$FIXTURES_DIR/unsafe-rename-column" "fail"
+
+check_case "safe fixture (expand/contract instead of RENAME COLUMN) passes" \
+  "$FIXTURES_DIR/safe-rename-column-expand-contract" "pass"
+
+check_case "unsafe fixture (RENAME TABLE) is flagged" \
+  "$FIXTURES_DIR/unsafe-rename-table" "fail"
+
+check_case "safe fixture (view shim instead of RENAME TABLE) passes" \
+  "$FIXTURES_DIR/safe-rename-table-view-shim" "pass"
+
 if [[ "$FAILURES" -gt 0 ]]; then
   echo "$FAILURES fixture test(s) failed."
   exit 1

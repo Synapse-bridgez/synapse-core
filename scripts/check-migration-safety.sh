@@ -121,7 +121,7 @@ for file in "$MIGRATIONS_DIR"/*.sql; do
       fi
 
       file_base="$(basename "$file")"
-      if [[ -f "$BASELINE_FILE" ]] && grep -qxF "${file_base}:${table}" "$BASELINE_FILE"; then
+      if [[ -f "$BASELINE_FILE" ]] && tr -d '\r' < "$BASELINE_FILE" | grep -qxF "${file_base}:${table}"; then
         echo "::notice file=$file::Pre-existing non-concurrent CREATE INDEX on table \"$table\" — grandfathered via scripts/migration-safety-known-index-locks.txt (already applied in production; not counted as a new violation)."
         continue
       fi
@@ -130,6 +130,47 @@ for file in "$MIGRATIONS_DIR"/*.sql; do
       ERRORS=$((ERRORS + 1))
     fi
   done <<< "$statements"
+
+  # Rule: ADD COLUMN NOT NULL without DEFAULT
+  # Causes INSERT failures on old app instances that omit the column.
+  # Only applies to ALTER TABLE ADD COLUMN, not CREATE TABLE column definitions.
+  while IFS= read -r add_col_line; do
+    [[ -z "${add_col_line// }" ]] && continue
+    if echo "$add_col_line" | grep -qiE '\bDEFAULT\b'; then
+      continue
+    fi
+    if echo "$add_col_line" | grep -qiE '\bGENERATED\b|\bAS\b'; then
+      continue
+    fi
+    echo "::warning file=$file::ADD COLUMN ... NOT NULL without DEFAULT detected. Old app instances that INSERT without this column will fail. Add a DEFAULT or add the column nullable and backfill separately."
+    ERRORS=$((ERRORS + 1))
+  done < <(grep -v '^[[:space:]]*--' "$file" | grep -iE '\bALTER\s+TABLE\b' | grep -iE 'ADD COLUMN[[:space:]]' | grep -iE '\bNOT[[:space:]]+NULL\b')
+
+  # Rule: RENAME COLUMN
+  # Immediately breaks app code referencing the old column name.
+  _fb="$(basename "$file")"
+  _rename_col_hits=$(grep -iE '\bRENAME\s+COLUMN\b' "$file" | grep -cvE '^\s*--' || true)
+  if [[ "$_rename_col_hits" -gt 0 ]]; then
+    if [[ -f "$BASELINE_FILE" ]] && tr -d '\r' < "$BASELINE_FILE" | grep -qxF "${_fb}:RENAME_COLUMN"; then
+      echo "::notice file=$file::RENAME COLUMN detected — grandfathered via scripts/migration-safety-known-index-locks.txt."
+    else
+      echo "::warning file=$file::RENAME COLUMN detected. Breaks any running app instance referencing the old column name. Use the expand/contract pattern instead."
+      ERRORS=$((ERRORS + 1))
+    fi
+  fi
+
+  # Rule: RENAME TABLE (ALTER TABLE ... RENAME TO)
+  # Immediately breaks app code, views, or triggers referencing the old name.
+  _rename_to_hits=$(grep -iE '\bRENAME\s+TO\b' "$file" | grep -cvE '^\s*--' || true)
+  if [[ "$_rename_to_hits" -gt 0 ]]; then
+    if [[ -f "$BASELINE_FILE" ]] && tr -d '\r' < "$BASELINE_FILE" | grep -qxF "${_fb}:RENAME_TO"; then
+      echo "::notice file=$file::ALTER TABLE ... RENAME TO detected — grandfathered via scripts/migration-safety-known-index-locks.txt."
+    else
+      echo "::warning file=$file::ALTER TABLE ... RENAME TO detected. Breaks any running app instance referencing the old table name. Use a view shim or phased add/migrate/drop pattern instead."
+      ERRORS=$((ERRORS + 1))
+    fi
+  fi
+
 done
 
 if [[ $ERRORS -gt 0 ]]; then

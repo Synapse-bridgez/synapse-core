@@ -23,3 +23,18 @@
 20260601000000_webhook_exactly_once_delivery.sql:webhook_deliveries
 20260620000000_add_horizon_payment_id.sql:transactions
 20260823000004_webhook_delivery_dlq_unique_delivery_id.sql:webhook_delivery_dlq
+
+# Pre-existing RENAME TO operations grandfathered for the same reason as the
+# index entries above: already applied to production before this check existed.
+# Format: <migration-filename>:RENAME_TO
+#
+# This migration renames the original transactions table as part of a
+# coordinated table-swap to convert it to a partitioned table. The rename and
+# the new table creation happen atomically in the same migration; no running
+# app version was exposed to a missing table.
+20250217000000_partition_transactions.sql:RENAME_TO
+# This migration renames api_key to api_key_hash as part of a coordinated
+# credential-hashing migration with an explicit precondition guard (RAISE
+# EXCEPTION) — the rename and the application cutover are deployed together.
+20260824000003_hash_tenant_secrets.sql:RENAME_COLUMN
+
