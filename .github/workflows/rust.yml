@@ -415,7 +415,10 @@ jobs:
       run: |
         set -e
         echo "Running integration tests..."
-        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
+        # exactly_once_* live in tests/webhook_concurrent_delivery_test.rs and
+        # get their own dedicated step below, so skip them here to avoid
+        # running the (container-heavy) harness twice in one job.
+        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow --skip exactly_once_; then
           echo "::error::Integration tests failed. Check test output for failures."
           exit 1
         fi
@@ -473,6 +476,30 @@ jobs:
 
     - name: Check every tests/ file is reachable by some CI cargo test invocation
       run: ./scripts/check-test-file-ci-coverage.sh
+
+    # Standing proof of the exactly-once delivery guarantee
+    # (migrations/20260601000000_webhook_exactly_once_delivery.sql +
+    # src/services/webhook_dispatcher.rs). Run as its own step so a
+    # regression here is attributable at a glance rather than buried in the
+    # broad --ignored run above. See docs/webhook-exactly-once-harness.md.
+    - name: Run webhook exactly-once delivery harness
+      id: run_webhook_exactly_once
+      run: |
+        set -e
+        if ! cargo test --verbose --test webhook_concurrent_delivery_test -- --ignored --nocapture; then
+          echo "::error::Webhook exactly-once delivery harness failed - the exactly-once guarantee may have regressed."
+          exit 1
+        fi
+      env:
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+        REDIS_URL: redis://localhost:6379
+      continue-on-error: false
+
+    - name: Handle webhook exactly-once harness failure
+      if: failure() && steps.run_webhook_exactly_once.outcome == 'failure'
+      run: |
+        echo "::error::Run 'cargo test --test webhook_concurrent_delivery_test -- --ignored' locally to debug."
+        exit 1
 
 
   coverage:
