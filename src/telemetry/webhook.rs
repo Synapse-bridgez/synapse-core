@@ -96,6 +96,8 @@ impl WebhookResult {
 ///
 /// Validates signatures, enforces size limits, checks timestamps for replay
 /// protection, and validates all payload fields before recording spans.
+pub const TELEMETRY_WEBHOOK_ROUTE: &str = "/telemetry/webhook";
+
 #[derive(Debug, Clone)]
 pub struct TelemetryWebhookHandler {
     /// HMAC secret used to verify incoming webhook signatures.
