@@ -1,0 +1,37 @@
+# migration-safety-known-index-locks.txt
+#
+# Allowlist for justified exceptions to migration safety rules.
+#
+# Format (one entry per line):
+#   <migration-filename>:<rule-id>
+#
+# Rule IDs:
+#   sensitive-type-change          — ALTER COLUMN … TYPE without USING
+#   not-null-without-default       — ADD COLUMN NOT NULL without DEFAULT
+#   non-concurrent-index           — CREATE INDEX without CONCURRENTLY
+#   constraint-without-not-valid   — ADD CONSTRAINT without NOT VALID
+#   rename-column                  — RENAME COLUMN
+#   rename-table                   — RENAME TO
+#
+# Examples (uncomment and edit to use):
+#   20250216000000_init.sql:non-concurrent-index          # initial schema — table is empty at creation time
+#   20260222000000_transaction_search_indexes.sql:non-concurrent-index  # added during low-traffic window
+
+# ── Bootstrap migrations run on an empty database (tables are new, no lock risk) ──
+20250216000000_init.sql:non-concurrent-index
+# Partition conversion — runs as a full schema migration on a new/empty table; RENAME is
+# part of a coordinated table-swap (old → new partitioned table), not a rename in isolation.
+20250217000000_partition_transactions.sql:non-concurrent-index
+20250217000000_partition_transactions.sql:rename-table
+# feature_flags is a new table created in this same migration — no live rows, no lock risk
+20250218000000_feature_flags.sql:non-concurrent-index
+20260219000000_add_assets_table.sql:non-concurrent-index
+20260220000000_settlements.sql:non-concurrent-index
+20260220000001_audit_logs.sql:non-concurrent-index
+20260220143500_transaction_dlq.sql:non-concurrent-index
+20260222000000_transaction_search_indexes.sql:non-concurrent-index
+20260223000000_webhook_replay_tracking.sql:non-concurrent-index
+20260226000000_account_monitor_cursors.sql:non-concurrent-index
+20260226000001_api_quotas.sql:non-concurrent-index
+20260325000000_webhook_endpoints.sql:non-concurrent-index
+20260422000000_ensure_current_partitions.sql:non-concurrent-index
