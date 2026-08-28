@@ -1,4 +1,4 @@
-use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
+use crate::db::audit::{AuditLog, ENTITY_TENANT, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
@@ -10,14 +10,150 @@ use uuid::Uuid;
 
 // --- Tenant Queries --------------------------------------------------------
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRotationResult {
+    pub tenant_id: Uuid,
+    pub new_secret: String,
+    pub grace_period_seconds: u64,
+    pub previous_secret_expires_at: DateTime<Utc>,
+}
+
 pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
     let configs = sqlx::query_as::<_, TenantConfig>(
-        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+        r#"
+        SELECT tenant_id, name, webhook_secret, previous_webhook_secret,
+               previous_secret_expires_at, secret_updated_at, stellar_account,
+               rate_limit_per_minute, is_active
+        FROM tenants WHERE is_active = true
+        "#,
     )
     .fetch_all(pool)
     .await?;
     Ok(configs)
 }
+
+pub async fn get_tenant_config_by_id(pool: &PgPool, tenant_id: Uuid) -> Result<TenantConfig> {
+    sqlx::query_as::<_, TenantConfig>(
+        r#"
+        SELECT tenant_id, name, webhook_secret, previous_webhook_secret,
+               previous_secret_expires_at, secret_updated_at, stellar_account,
+               rate_limit_per_minute, is_active
+        FROM tenants WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn rotate_tenant_secret(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    new_secret: Option<String>,
+    grace_period_seconds: u64,
+    actor: &str,
+) -> Result<SecretRotationResult> {
+    let mut db_tx = pool.begin().await?;
+
+    let tenant = get_tenant_config_by_id(pool, tenant_id).await?;
+
+    let secret_to_set = new_secret.unwrap_or_else(|| {
+        format!("sec_{}", hex::encode(Uuid::new_v4().as_bytes()))
+    });
+
+    let expires_at = Utc::now() + chrono::Duration::seconds(grace_period_seconds as i64);
+
+    sqlx::query(
+        r#"
+        UPDATE tenants
+        SET previous_webhook_secret = webhook_secret,
+            previous_secret_expires_at = $1,
+            webhook_secret = $2,
+            secret_updated_at = NOW()
+        WHERE tenant_id = $3
+        "#,
+    )
+    .bind(expires_at)
+    .bind(&secret_to_set)
+    .bind(tenant_id)
+    .execute(&mut *db_tx)
+    .await?;
+
+    // Log audit trail for secret rotation issuance
+    AuditLog::log(
+        &mut db_tx,
+        tenant_id,
+        ENTITY_TENANT,
+        "secret_rotation_issued",
+        Some(json!({
+            "previous_secret_hash": tenant.webhook_secret,
+            "previous_secret_expires_at": expires_at
+        })),
+        Some(json!({
+            "new_secret_issued": true,
+            "grace_period_seconds": grace_period_seconds,
+            "expires_at": expires_at
+        })),
+        actor,
+    )
+    .await?;
+
+    db_tx.commit().await?;
+
+    Ok(SecretRotationResult {
+        tenant_id,
+        new_secret: secret_to_set,
+        grace_period_seconds,
+        previous_secret_expires_at: expires_at,
+    })
+}
+
+pub async fn revoke_expired_tenant_secrets(pool: &PgPool) -> Result<usize> {
+    let mut db_tx = pool.begin().await?;
+
+    let expired_rows = sqlx::query_as::<_, (Uuid,)>(
+        r#"
+        SELECT tenant_id FROM tenants
+        WHERE previous_secret_expires_at IS NOT NULL
+          AND previous_secret_expires_at <= NOW()
+        "#,
+    )
+    .fetch_all(&mut *db_tx)
+    .await?;
+
+    let count = expired_rows.len();
+
+    for (tenant_id,) in expired_rows {
+        sqlx::query(
+            r#"
+            UPDATE tenants
+            SET previous_webhook_secret = NULL,
+                previous_secret_expires_at = NULL
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .execute(&mut *db_tx)
+        .await?;
+
+        // Audit log entry for secret revocation
+        AuditLog::log(
+            &mut db_tx,
+            tenant_id,
+            ENTITY_TENANT,
+            "secret_rotation_revoked",
+            Some(json!({ "previous_secret_active": true })),
+            Some(json!({ "previous_secret_revoked": true })),
+            "system_janitor",
+        )
+        .await?;
+    }
+
+    db_tx.commit().await?;
+
+    Ok(count)
+}
+
 
 // --- Transaction Queries ---
 

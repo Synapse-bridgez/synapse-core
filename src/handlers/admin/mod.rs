@@ -1,3 +1,4 @@
+pub mod tenant_rotation;
 pub mod webhook_replay;
 
 use crate::AppState;
@@ -15,9 +16,14 @@ pub struct UpdateFlagRequest {
     pub enabled: bool,
 }
 
-/// Create admin routes for queue management
-pub fn admin_routes() -> Router<sqlx::PgPool> {
-    Router::new().route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
+/// Create admin routes for queue management and tenant rotation
+pub fn admin_routes() -> Router<crate::AppState> {
+    Router::new()
+        .route("/flags", get(|| async { StatusCode::NOT_IMPLEMENTED }))
+        .route(
+            "/admin/tenants/:id/rotate-secret",
+            post(tenant_rotation::rotate_tenant_secret_handler),
+        )
 }
 
 /// Create webhook replay admin routes

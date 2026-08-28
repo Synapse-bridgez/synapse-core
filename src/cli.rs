@@ -28,6 +28,10 @@ pub enum Commands {
     #[command(subcommand)]
     Backup(BackupCommands),
 
+    /// Tenant management commands
+    #[command(subcommand)]
+    Tenant(TenantCommands),
+
     /// Configuration validation
     Config,
 }
@@ -88,6 +92,31 @@ pub enum BackupCommands {
 
     /// Apply retention policy to clean old backups
     Cleanup,
+}
+
+#[derive(Subcommand)]
+pub enum TenantCommands {
+    /// Rotate a tenant's secret with a configurable grace period
+    RotateSecret {
+        /// Tenant UUID
+        #[arg(long)]
+        tenant_id: Uuid,
+
+        /// Grace period in seconds (default: 86400 / 24h)
+        #[arg(long, default_value_t = 86400)]
+        grace_period: u64,
+
+        /// Optional explicit new secret
+        #[arg(long)]
+        new_secret: Option<String>,
+
+        /// Elevated admin actor ID for audit logging
+        #[arg(long, default_value = "superadmin")]
+        admin_actor: String,
+    },
+
+    /// Revoke expired previous tenant secrets whose grace period has ended
+    RevokeExpiredSecrets,
 }
 
 pub async fn handle_tx_force_complete(pool: &PgPool, tx_id: Uuid) -> anyhow::Result<()> {
@@ -166,6 +195,50 @@ fn mask_password(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+pub async fn handle_tenant_rotate_secret(
+    config: &Config,
+    tenant_id: Uuid,
+    grace_period: u64,
+    new_secret: Option<String>,
+    admin_actor: &str,
+) -> anyhow::Result<()> {
+    let pool = crate::db::create_pool(config).await?;
+
+    tracing::info!(
+        "Rotating secret for tenant {} with grace period {}s by actor {}",
+        tenant_id,
+        grace_period,
+        admin_actor
+    );
+
+    let res = crate::db::queries::rotate_tenant_secret(
+        &pool,
+        tenant_id,
+        new_secret,
+        grace_period,
+        admin_actor,
+    )
+    .await?;
+
+    println!("\n=== Tenant Secret Rotated Successfully ===");
+    println!("Tenant ID: {}", res.tenant_id);
+    println!("New Secret: {}", res.new_secret);
+    println!("Grace Period: {} seconds", res.grace_period_seconds);
+    println!("Previous Secret Expires At: {}", res.previous_secret_expires_at);
+    println!("\nBoth old and new secrets will validate until the expiration timestamp.");
+
+    Ok(())
+}
+
+pub async fn handle_tenant_revoke_expired_secrets(config: &Config) -> anyhow::Result<()> {
+    let pool = crate::db::create_pool(config).await?;
+
+    let count = crate::db::queries::revoke_expired_tenant_secrets(&pool).await?;
+    println!("✓ Revoked {} expired tenant secret(s)", count);
+
+    Ok(())
 }
 
 pub async fn handle_backup_run(_config: &Config, _backup_type_str: &str) -> anyhow::Result<()> {

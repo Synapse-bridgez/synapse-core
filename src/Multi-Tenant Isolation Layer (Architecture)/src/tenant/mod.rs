@@ -4,6 +4,7 @@ use axum::{
     http::{request::Parts, HeaderMap},
     RequestPartsExt,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,9 +15,36 @@ pub struct TenantConfig {
     pub tenant_id: Uuid,
     pub name: String,
     pub webhook_secret: String,
+    pub previous_webhook_secret: Option<String>,
+    pub previous_secret_expires_at: Option<DateTime<Utc>>,
+    pub secret_updated_at: Option<DateTime<Utc>>,
     pub stellar_account: String,
     pub rate_limit_per_minute: i32,
     pub is_active: bool,
+}
+
+impl TenantConfig {
+    /// Validate candidate secret against current secret or unexpired previous secret.
+    pub fn validate_webhook_secret(&self, candidate_secret: &str) -> bool {
+        let now = Utc::now();
+
+        // 1. Check current active secret
+        if self.webhook_secret == candidate_secret {
+            return true;
+        }
+
+        // 2. Check previous secret if grace period is unexpired
+        if let (Some(prev_secret), Some(expires_at)) = (
+            &self.previous_webhook_secret,
+            self.previous_secret_expires_at,
+        ) {
+            if prev_secret == candidate_secret && now < expires_at {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 #[derive(Debug, Clone)]

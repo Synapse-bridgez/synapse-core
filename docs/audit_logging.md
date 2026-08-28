@@ -146,8 +146,21 @@ If either the entity insertion or audit log fails, **both are rolled back**.
 Currently tracked entities:
 - `ENTITY_TRANSACTION`: Transaction entities
 - `ENTITY_SETTLEMENT`: Settlement entities
+- `ENTITY_TENANT`: Tenant configuration entities (added in Issue #22 secret rotation)
 
 These are defined as constants in `src/db/audit.rs` for type safety.
+
+#### 4. Tenant Secret Rotation Actions
+
+Secret rotation events use two dedicated action strings recorded against `ENTITY_TENANT`:
+
+| Action | When | Recorded By |
+| :--- | :--- | :--- |
+| `secret_rotation_issued` | New secret generated and grace period set | `rotate_tenant_secret()` in `queries.rs` |
+| `secret_rotation_revoked` | Grace period expired, old secret cleared | `revoke_expired_tenant_secrets()` janitor sweep |
+
+See [tenant_secret_rotation.md](tenant_secret_rotation.md) for the full operator guide and SQL query examples.
+
 
 ### Audit Logging Points
 
