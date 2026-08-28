@@ -182,6 +182,39 @@ DATABASE_REPLICA_URL=postgres://user:pass@synapse.cluster-ro-xxx.us-east-1.rds.a
 - Total connections: 20 (10 primary + 10 replica)
 - Adjust `max_connections` based on workload
 
+### Replication-lag tolerance
+
+Not every endpoint is safe to route to a replica. The table below documents
+the routing decision for every explicitly-converted call site and whether it
+can tolerate replication lag.
+
+| Endpoint / call site | Pool used | Lag-tolerant? | Rationale |
+|---|---|---|---|
+| `GET /transactions/search` (`handlers/search.rs`) | `read_pool()` | ✅ Yes | Analytics/search; stale-by-seconds is acceptable |
+| `GET /admin/reconciliation` (`services/reconciliation.rs`) | Primary¹ | ⚠️  Future | Currently uses primary PgPool; replica conversion tracked separately |
+| `GET /admin/compliance` (`services/compliance.rs`) | Primary¹ | ⚠️  Future | INSERT … RETURNING after reading; must stay on write pool |
+| `POST /webhook` (`handlers/webhook.rs`) | `get_write_pool()` | ❌ No | Creates a transaction row; must be immediately consistent |
+| `POST /settlements` (`handlers/settlements.rs`) | `get_write_pool()` | ❌ No | Settlement INSERT requires seeing the latest transaction rows |
+| `INSERT INTO compliance_reports …` | `get_write_pool()` | ❌ No | Writes report and returns it via RETURNING; replica lag would hide row |
+| All admin write paths | `get_write_pool()` | ❌ No | Mutations must always land on the primary |
+
+¹ These services receive a `PgPool` directly at construction time from the
+caller.  The handlers that call them (`handlers/admin/reconciliation.rs`,
+`handlers/admin/compliance.rs`) are responsible for passing
+`pool_manager.get_write_pool()` so the service stays on the primary.
+
+#### What X-Read-Consistency means
+
+Responses from replica-routed endpoints include the header:
+
+```
+X-Read-Consistency: eventual
+```
+
+Clients that need immediate consistency (e.g. read-your-own-writes after a
+deposit webhook) should treat this header as a signal to re-query or switch
+to a primary-pinned endpoint.
+
 ## Monitoring
 
 ### Logs
