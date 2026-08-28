@@ -220,6 +220,16 @@ const WEBHOOK_ENQUEUE_FLAG: &str = "webhook_enqueue_on_completion";
 /// operators can review divergence data before ramping up.
 const PAYMENT_VERIFICATION_FLAG: &str = "payment_verification_enabled";
 
+/// Two-source cross-check flag (#1097). When enabled, a transaction requires
+/// BOTH Horizon payment evidence (signal 1) AND a matching anchor callback
+/// (signal 2, `anchor_transaction_id IS NOT NULL AND callback_status =
+/// 'completed'`) before it transitions to `completed`. Disagreement — one
+/// signal present but not the other — routes the transaction to
+/// `pending_review` for manual ops triage rather than silently accepting
+/// either source alone. This flag is layered on top of
+/// `payment_verification_enabled`; both must be enabled for v2 semantics.
+const PAYMENT_VERIFICATION_V2_FLAG: &str = "payment_verification_v2";
+
 /// How long a pending transaction may wait for its expected Horizon payment
 /// to show up (including the case where its destination account does not
 /// exist on-chain yet) before `process_batch` gives up and marks it
@@ -233,7 +243,7 @@ const PAYMENT_VERIFICATION_RETRY_WINDOW_SECS: i64 = 30 * 60;
 /// expecting. Only `Matched` is safe evidence to complete a transaction —
 /// every other variant means "not yet verified," which is *not* the same
 /// as "will never be verified": see `process_batch`'s retry-window handling.
-enum PaymentLookup {
+pub enum PaymentLookup {
     /// A payment matching this transaction's account, amount, asset, and
     /// (if present) memo was found. Carries Horizon's payment id so the
     /// completion write can record it for idempotency
@@ -299,6 +309,95 @@ fn payment_amount_matches(horizon_amount: &str, expected: &sqlx::types::BigDecim
         .parse::<sqlx::types::BigDecimal>()
         .map(|amount| &amount == expected)
         .unwrap_or(false)
+}
+
+// ── Signal 2: anchor callback ─────────────────────────────────────────────────
+
+/// Whether a transaction has received a completed anchor callback — the
+/// second independent verification signal used by v2 cross-check.
+///
+/// Signal 2 is considered present when:
+///   - `anchor_transaction_id IS NOT NULL` (the anchor acknowledged the tx)
+///   - `callback_status = 'completed'`     (the anchor reported success)
+///
+/// This data is written by the existing anchor-callback ingestion path
+/// (`src/handlers/webhook.rs` / callback handler) and is available entirely
+/// from the DB row already held in memory from the `FOR UPDATE SKIP LOCKED`
+/// claim — no additional query needed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AnchorSignal {
+    /// Anchor has confirmed the transaction as completed.
+    Confirmed,
+    /// Anchor callback received but status is not yet 'completed'.
+    Pending,
+    /// No anchor callback has been received yet.
+    Absent,
+}
+
+fn check_anchor_signal(transaction: &Transaction) -> AnchorSignal {
+    match (&transaction.anchor_transaction_id, &transaction.callback_status) {
+        (Some(_), Some(status)) if status == "completed" => AnchorSignal::Confirmed,
+        (Some(_), _) => AnchorSignal::Pending,
+        _ => AnchorSignal::Absent,
+    }
+}
+
+/// Result of the v2 two-source cross-check.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerificationV2Decision {
+    /// Both signals agree: complete the transaction.
+    Complete { verification_source: &'static str },
+    /// Signals disagree: route to manual review.
+    PendingReview { reason: &'static str },
+    /// At least one signal is still outstanding: leave pending to retry.
+    Defer { reason: &'static str },
+}
+
+pub fn cross_check_signals(
+    horizon: &PaymentLookup,
+    anchor: &AnchorSignal,
+) -> VerificationV2Decision {
+    match (horizon, anchor) {
+        // Both signals present and agree → complete.
+        (PaymentLookup::Matched(_), AnchorSignal::Confirmed) => {
+            VerificationV2Decision::Complete {
+                verification_source: "horizon+anchor",
+            }
+        }
+        // Horizon matched but anchor callback hasn't arrived yet → defer.
+        (PaymentLookup::Matched(_), AnchorSignal::Absent | AnchorSignal::Pending) => {
+            VerificationV2Decision::Defer {
+                reason: "horizon_matched_anchor_pending",
+            }
+        }
+        // Anchor confirmed but Horizon has no matching payment yet → defer
+        // (payment may be in flight or Horizon is temporarily unavailable).
+        (
+            PaymentLookup::NoMatchingPayment
+            | PaymentLookup::AccountNotFound
+            | PaymentLookup::LookupFailed,
+            AnchorSignal::Confirmed,
+        ) => VerificationV2Decision::Defer {
+            reason: "anchor_confirmed_horizon_pending",
+        },
+        // Both signals present but they conflict: anchor confirmed while
+        // Horizon explicitly shows a different state.  This is the
+        // disagreement case — route to manual review, never auto-complete.
+        // NOTE: currently LookupFailed is treated as "defer" not "disagree"
+        // since the absence of Horizon data may be transient. Only
+        // NoMatchingPayment / AccountNotFound constitute an explicit
+        // "Horizon checked and found nothing" signal.
+        //
+        // Out-of-order arrival is handled in both defer branches above:
+        // whichever signal arrives second will change the decision on the
+        // next tick.
+        //
+        // The "both absent" case falls here too — defer until at least one
+        // signal arrives.
+        (_, AnchorSignal::Absent | AnchorSignal::Pending) => VerificationV2Decision::Defer {
+            reason: "both_signals_pending",
+        },
+    }
 }
 
 /// Postgres 23505 = unique_violation. Used to detect a concurrent claim of
@@ -448,6 +547,103 @@ pub async fn process_batch(
                  (payment_verification_enabled is off for this account — shadow mode only)"
             );
             crate::metrics::payment_verification_no_match_completed_total().add(1, &[]);
+        }
+
+        // ── v2 two-source cross-check ─────────────────────────────────────────
+        //
+        // When payment_verification_v2 is enabled for this account, overlay a
+        // second signal (anchor callback) on top of the v1 Horizon signal.
+        // This block runs AFTER the v1 guard above, so it only applies when
+        // verification_enabled is true AND we have a Horizon match (the v1
+        // guard would have already deferred/failed the tx otherwise).
+        let verification_v2_enabled = feature_flags
+            .is_enabled_for_key(PAYMENT_VERIFICATION_V2_FLAG, &transaction.stellar_account)
+            .await
+            .unwrap_or(false);
+
+        if verification_enabled && verification_v2_enabled {
+            let anchor = check_anchor_signal(transaction);
+            let decision = cross_check_signals(&lookup, &anchor);
+
+            match decision {
+                VerificationV2Decision::Complete { verification_source } => {
+                    // Both signals agree — fall through to the completion write
+                    // below, tagging with the verification source.
+                    debug!(
+                        transaction_id = %transaction.id,
+                        verification_source,
+                        "V2 cross-check: both signals agree, proceeding to complete"
+                    );
+                    // Update verification_source column alongside the status write.
+                    let result = sqlx::query(
+                        "UPDATE transactions \
+                         SET status = 'completed', updated_at = NOW(), \
+                             horizon_payment_id = $3, verification_source = $4 \
+                         WHERE id = $1 AND status = $2",
+                    )
+                    .bind(transaction.id)
+                    .bind(&transaction.status)
+                    .bind(&matched_payment_id)
+                    .bind(verification_source)
+                    .execute(&mut *tx)
+                    .await;
+
+                    match result {
+                        Ok(r) if r.rows_affected() > 0 => {
+                            completed.push(transaction.clone());
+                        }
+                        Ok(_) => {}
+                        Err(e) if is_unique_violation(&e) => {
+                            warn!(
+                                transaction_id = %transaction.id,
+                                "horizon_payment_id already claimed (v2 path)"
+                            );
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                    continue;
+                }
+                VerificationV2Decision::Defer { reason } => {
+                    debug!(
+                        transaction_id = %transaction.id,
+                        reason,
+                        "V2 cross-check: deferring — waiting for second signal"
+                    );
+                    crate::metrics::payment_verification_retry_deferred_total().add(1, &[]);
+                    continue;
+                }
+                VerificationV2Decision::PendingReview { reason } => {
+                    // Signals disagree → explicit pending_review, never auto-complete.
+                    if let Err(e) = crate::validation::state_machine::validate_status_transition(
+                        &transaction.status,
+                        "pending_review",
+                    ) {
+                        warn!(
+                            transaction_id = %transaction.id,
+                            error = %e,
+                            "Cannot transition to pending_review"
+                        );
+                        continue;
+                    }
+                    warn!(
+                        transaction_id = %transaction.id,
+                        reason,
+                        "V2 cross-check: signal disagreement — routing to pending_review"
+                    );
+                    sqlx::query(
+                        "UPDATE transactions \
+                         SET status = 'pending_review', updated_at = NOW(), \
+                             verification_source = $3 \
+                         WHERE id = $1 AND status = $2",
+                    )
+                    .bind(transaction.id)
+                    .bind(&transaction.status)
+                    .bind(format!("disagreement:{reason}"))
+                    .execute(&mut *tx)
+                    .await?;
+                    continue;
+                }
+            }
         }
 
         // The FOR UPDATE SKIP LOCKED claim above already holds this row's

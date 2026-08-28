@@ -2123,6 +2123,7 @@ pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct IdempotencyKey {
+    pub tenant_id: String,
     pub key: String,
     pub status: String,
     pub response: Option<serde_json::Value>,
@@ -2130,17 +2131,53 @@ pub struct IdempotencyKey {
     pub expires_at: DateTime<Utc>,
 }
 
-pub async fn check_idempotency_key(pool: &PgPool, key: &str) -> Result<Option<IdempotencyKey>> {
-    sqlx::query_as::<_, IdempotencyKey>(
-        "SELECT key, status, response, created_at, expires_at FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+/// Look up an idempotency record by composite (tenant_id, key).
+/// Falls back to the 'default' tenant when the namespacing flag is off so
+/// records written by the old single-tenant path are still found during the
+/// migration cutover window.
+pub async fn check_idempotency_key(
+    pool: &PgPool,
+    tenant_id: &str,
+    key: &str,
+) -> Result<Option<IdempotencyKey>> {
+    // Primary lookup: composite (tenant_id, key) — always attempted.
+    let found = sqlx::query_as::<_, IdempotencyKey>(
+        "SELECT tenant_id, key, status, response, created_at, expires_at \
+         FROM idempotency_keys \
+         WHERE tenant_id = $1 AND key = $2 AND expires_at > NOW()",
     )
+    .bind(tenant_id)
     .bind(key)
     .fetch_optional(pool)
-    .await
+    .await?;
+
+    if found.is_some() {
+        return Ok(found);
+    }
+
+    // Cutover-window fallback: if the caller is a real tenant (not 'default')
+    // also check the legacy 'default' bucket. This handles the transition where
+    // old records were written without a tenant namespace. Once
+    // rollout_percentage reaches 100 and all pre-migration records have expired
+    // this path becomes a fast no-op (the WHERE tenant_id = 'default' row will
+    // not exist for the new-namespace keys).
+    if tenant_id != "default" {
+        return sqlx::query_as::<_, IdempotencyKey>(
+            "SELECT tenant_id, key, status, response, created_at, expires_at \
+             FROM idempotency_keys \
+             WHERE tenant_id = 'default' AND key = $1 AND expires_at > NOW()",
+        )
+        .bind(key)
+        .fetch_optional(pool)
+        .await;
+    }
+
+    Ok(None)
 }
 
 pub async fn insert_idempotency_key(
     pool: &PgPool,
+    tenant_id: &str,
     key: &str,
     status: &str,
     response: Option<&serde_json::Value>,
@@ -2148,11 +2185,12 @@ pub async fn insert_idempotency_key(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO idempotency_keys (key, status, response, expires_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (key) DO NOTHING
+        INSERT INTO idempotency_keys (tenant_id, key, status, response, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (tenant_id, key) DO NOTHING
         "#,
     )
+    .bind(tenant_id)
     .bind(key)
     .bind(status)
     .bind(response)
@@ -2164,14 +2202,19 @@ pub async fn insert_idempotency_key(
 
 pub async fn update_idempotency_key_response(
     pool: &PgPool,
+    tenant_id: &str,
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
-        .bind(key)
-        .bind(response)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE idempotency_keys SET response = $3, status = 'completed' \
+         WHERE tenant_id = $1 AND key = $2",
+    )
+    .bind(tenant_id)
+    .bind(key)
+    .bind(response)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
