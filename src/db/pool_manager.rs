@@ -1,5 +1,6 @@
 use crate::db::chaos::{ChaosConfig, FaultInjector};
 use crate::db::session::{DbSession, InvariantViolation};
+use crate::db::slow_query::{SlowQueryConfig, SlowQueryLogger};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -10,6 +11,7 @@ pub struct PoolManager {
     replica: Option<PgPool>,
     failover_state: Arc<RwLock<FailoverState>>,
     injector: Option<FaultInjector>,
+    slow_query_logger: SlowQueryLogger,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,8 @@ impl PoolManager {
             None
         };
 
+        let slow_query_logger = SlowQueryLogger::new(SlowQueryConfig::default());
+
         Ok(Self {
             primary,
             replica,
@@ -45,6 +49,7 @@ impl PoolManager {
                 replica_healthy: true,
             })),
             injector: None,
+            slow_query_logger,
         })
     }
 
@@ -69,6 +74,10 @@ impl PoolManager {
 
     pub fn injector(&self) -> Option<&FaultInjector> {
         self.injector.as_ref()
+    }
+
+    pub fn slow_query_logger(&self) -> &SlowQueryLogger {
+        &self.slow_query_logger
     }
 
     pub async fn get_read_pool(&self) -> &PgPool {
