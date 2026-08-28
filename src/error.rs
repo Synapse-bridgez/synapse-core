@@ -102,6 +102,12 @@ pub mod codes {
     pub const WEBHOOK_002: (&str, u16, &str) =
         ("ERR_WEBHOOK_002", 400, "Malformed webhook payload");
 
+    pub const TRANSACTION_006: (&str, u16, &str) = (
+        "ERR_TRANSACTION_006",
+        409,
+        "Concurrent modification: transaction state changed during processing",
+    );
+
     // Settlement specific errors
     pub const SETTLEMENT_001: (&str, u16, &str) =
         ("ERR_SETTLEMENT_001", 400, "Invalid settlement amount");
@@ -119,6 +125,13 @@ pub mod codes {
 
     // Redis errors
     pub const REDIS_001: (&str, u16, &str) = ("ERR_REDIS_001", 500, "Redis operation failed");
+
+    // GraphQL query-shape errors
+    pub const QUERY_COMPLEXITY_001: (&str, u16, &str) = (
+        "ERR_QUERY_COMPLEXITY_001",
+        400,
+        "Query exceeds depth, complexity, or alias limits",
+    );
 }
 
 /// Get all error codes as a vector for catalog generation
@@ -195,6 +208,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::TRANSACTION_005.2,
         },
         ErrorCode {
+            code: codes::TRANSACTION_006.0,
+            http_status: codes::TRANSACTION_006.1,
+            description: codes::TRANSACTION_006.2,
+        },
+        ErrorCode {
             code: codes::WEBHOOK_001.0,
             http_status: codes::WEBHOOK_001.1,
             description: codes::WEBHOOK_001.2,
@@ -228,6 +246,11 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             code: codes::REDIS_001.0,
             http_status: codes::REDIS_001.1,
             description: codes::REDIS_001.2,
+        },
+        ErrorCode {
+            code: codes::QUERY_COMPLEXITY_001.0,
+            http_status: codes::QUERY_COMPLEXITY_001.1,
+            description: codes::QUERY_COMPLEXITY_001.2,
         },
     ]
 }
@@ -277,6 +300,9 @@ pub enum AppError {
     #[error("Invalid status transition: {0}")]
     InvalidStatusTransition(String),
 
+    #[error("Concurrent modification: {0}")]
+    ConcurrentModification(String),
+
     #[error("Stale transition: settlement state changed during processing")]
     StaleTransition,
 
@@ -325,6 +351,7 @@ impl AppError {
             AppError::InvalidStellarAddress(_) => StatusCode::BAD_REQUEST,
             AppError::TransactionAlreadyProcessed(_) => StatusCode::CONFLICT,
             AppError::InvalidStatusTransition(_) => StatusCode::BAD_REQUEST,
+            AppError::ConcurrentModification(_) => StatusCode::CONFLICT,
             AppError::StaleTransition => StatusCode::CONFLICT,
             AppError::InvalidWebhookSignature => StatusCode::UNAUTHORIZED,
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
@@ -356,6 +383,7 @@ impl AppError {
             AppError::InvalidStellarAddress(_) => codes::TRANSACTION_003.0,
             AppError::TransactionAlreadyProcessed(_) => codes::TRANSACTION_004.0,
             AppError::InvalidStatusTransition(_) => codes::TRANSACTION_005.0,
+            AppError::ConcurrentModification(_) => codes::TRANSACTION_006.0,
             AppError::StaleTransition => codes::SETTLEMENT_003.0,
             AppError::InvalidWebhookSignature => codes::WEBHOOK_001.0,
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
@@ -366,6 +394,53 @@ impl AppError {
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
             AppError::Redis(_) => codes::REDIS_001.0,
             AppError::Anyhow(_) => codes::INTERNAL_001.0,
+        }
+    }
+
+    /// The message that is safe to return to a client for this error.
+    ///
+    /// Variants that wrap or were built from a raw external-library error
+    /// (`sqlx`, `redis`, `anyhow`) never forward that error's `Display` text:
+    /// it can carry table/column/constraint names or connection detail. Those
+    /// variants return a fixed generic string; the caller is responsible for
+    /// logging the raw cause first (`IntoResponse for AppError` and the
+    /// GraphQL `IntoGraphQlError` impl both do). Every other variant is
+    /// derived purely from caller-controlled input and is returned as-is.
+    ///
+    /// This is the single redaction point shared by the REST (`IntoResponse`)
+    /// and GraphQL (`graphql::error`) error paths.
+    pub fn client_facing_message(&self) -> String {
+        match self {
+            AppError::Database(_) | AppError::DatabaseError(_) => {
+                "A database error occurred".to_string()
+            }
+            AppError::Redis(_) => "A backend service error occurred".to_string(),
+            AppError::Anyhow(_) => "An internal error occurred".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Logs the raw cause of a wrapping variant at `error` level so it is
+    /// available server-side before [`client_facing_message`] redacts it out
+    /// of the client response. A no-op for variants that carry no sensitive
+    /// cause.
+    ///
+    /// [`client_facing_message`]: AppError::client_facing_message
+    pub fn log_redacted_cause(&self, context: &str) {
+        match self {
+            AppError::Database(e) => {
+                tracing::error!(context, cause = %e, "redacting raw error cause from client response")
+            }
+            AppError::DatabaseError(raw) => {
+                tracing::error!(context, cause = %raw, "redacting raw error cause from client response")
+            }
+            AppError::Redis(e) => {
+                tracing::error!(context, cause = %e, "redacting raw error cause from client response")
+            }
+            AppError::Anyhow(e) => {
+                tracing::error!(context, cause = %e, "redacting raw error cause from client response")
+            }
+            _ => {}
         }
     }
 }
@@ -402,30 +477,11 @@ impl IntoResponse for AppError {
         // error (sqlx, redis, anyhow) must never forward that error's
         // `Display` text to the client — it can include table/column names,
         // constraint names, connection strings, or other internal detail.
-        // `graphql/error.rs`'s `database_error()`/`internal_error()` already
-        // apply this discipline (log server-side, generic message to the
-        // client); this type was simply never updated to match. Log the raw
-        // cause here and substitute a generic public message for both the
-        // `error` and `detail` fields below.
-        let redacted_public_message: Option<String> = match &self {
-            AppError::Database(e) => {
-                tracing::error!(cause = %e, "AppError::Database: redacting raw cause from client response");
-                Some("A database error occurred".to_string())
-            }
-            AppError::DatabaseError(raw) => {
-                tracing::error!(cause = %raw, "AppError::DatabaseError: redacting raw cause from client response");
-                Some("A database error occurred".to_string())
-            }
-            AppError::Redis(e) => {
-                tracing::error!(cause = %e, "AppError::Redis: redacting raw cause from client response");
-                Some("A backend service error occurred".to_string())
-            }
-            AppError::Anyhow(e) => {
-                tracing::error!(cause = %e, "AppError::Anyhow: redacting raw cause from client response");
-                Some("An internal error occurred".to_string())
-            }
-            _ => None,
-        };
+        // The redaction itself now lives in `AppError::client_facing_message`
+        // so the REST and GraphQL error paths share one implementation; here
+        // we only log the raw cause before it is dropped.
+        self.log_redacted_cause("AppError::into_response");
+        let error_message = self.client_facing_message();
 
         // Generate actionable detail message
         let detail = match &self {
@@ -444,12 +500,8 @@ impl IntoResponse for AppError {
             AppError::Validation(msg) => {
                 format!("Validation failed. {msg}")
             }
-            _ => redacted_public_message
-                .clone()
-                .unwrap_or_else(|| self.to_string()),
+            _ => error_message.clone(),
         };
-
-        let error_message = redacted_public_message.unwrap_or_else(|| self.to_string());
 
         let body = serde_json::json!({
             "error": error_message,
@@ -613,6 +665,10 @@ mod tests {
             AppError::SettlementAlreadyExists("test".to_string()).code(),
             codes::SETTLEMENT_002.0
         );
+        assert_eq!(
+            AppError::ConcurrentModification("test".to_string()).code(),
+            codes::TRANSACTION_006.0
+        );
         assert_eq!(AppError::RateLimitExceeded.code(), codes::RATE_LIMIT_001.0);
         assert_eq!(
             AppError::AuthenticationFailed("test".to_string()).code(),
@@ -692,5 +748,53 @@ mod tests {
             catalog.len() >= 19,
             "Error catalog should have at least 19 codes"
         );
+    }
+
+    #[test]
+    fn test_concurrent_modification_maps_to_conflict() {
+        let error = AppError::ConcurrentModification("state changed".to_string());
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), codes::TRANSACTION_006.0);
+    }
+
+    /// Every code returned by `get_all_error_codes` must be documented in
+    /// `docs/error-catalog.md`, and every `ERR_*` code appearing in that doc
+    /// must be a real code. This keeps the catalog, the REST layer, and the
+    /// GraphQL layer (which reuses these codes in `extensions.code`) in sync.
+    #[test]
+    fn test_catalog_doc_matches_code_registry() {
+        let doc = include_str!("../docs/error-catalog.md");
+        let registry: std::collections::HashSet<&str> =
+            get_all_error_codes().into_iter().map(|c| c.code).collect();
+
+        for code in &registry {
+            assert!(
+                doc.contains(*code),
+                "code {code} is in get_all_error_codes() but missing from docs/error-catalog.md"
+            );
+        }
+
+        let code_pattern = regex::Regex::new(r"ERR_[A-Z0-9_]*[0-9]{3}").unwrap();
+        for m in code_pattern.find_iter(doc) {
+            let token = m.as_str();
+            assert!(
+                registry.contains(token),
+                "docs/error-catalog.md documents {token}, which is not in get_all_error_codes()"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_modification_response_is_not_redacted() {
+        let error = AppError::ConcurrentModification(
+            "transaction was completed by a concurrent request".to_string(),
+        );
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body_str.contains("concurrent request"));
+        assert!(body_str.contains(codes::TRANSACTION_006.0));
     }
 }

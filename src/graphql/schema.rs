@@ -4,13 +4,15 @@
 //! See [error_handling.md](./error_handling.md) for comprehensive error handling documentation.
 //! See [../docs/graphql-health-checks.md](../docs/graphql-health-checks.md) for health check details.
 
+use crate::error::codes;
+use crate::graphql::error::ensure_error_code;
 use crate::graphql::rate_limiting::{GraphQlRateLimitConfig, GraphQlRateLimiter};
 use crate::graphql::resolvers::{Mutation, Query, Subscription};
 use crate::AppState;
 use async_graphql::{
-    extensions::{Extension, ExtensionContext, ExtensionFactory, NextParseQuery},
+    extensions::{Extension, ExtensionContext, ExtensionFactory, NextParseQuery, NextRequest},
     parser::types::{ExecutableDocument, Selection},
-    ServerError, ServerResult, Variables,
+    Response, ServerError, ServerResult, Variables,
 };
 use std::sync::Arc;
 
@@ -126,16 +128,49 @@ impl Extension for AliasLimitExtensionImpl {
                 max = MAX_QUERY_ALIASES,
                 "GraphQL query rejected: too many aliases"
             );
-            return Err(ServerError::new(
+            let mut err = ServerError::new(
                 format!(
                     "Query contains {} aliases, which exceeds the maximum of {}",
                     alias_count, MAX_QUERY_ALIASES
                 ),
                 None,
-            ));
+            );
+            err.extensions
+                .get_or_insert_with(Default::default)
+                .set("code", codes::QUERY_COMPLEXITY_001.0);
+            return Err(err);
         }
 
         Ok(doc)
+    }
+}
+
+/// Extension that guarantees every error on an outgoing GraphQL response
+/// carries a stable `extensions.code`.
+///
+/// Resolver errors already carry one (they go through
+/// [`crate::graphql::error::IntoGraphQlError`]). This backstop covers errors
+/// raised by async-graphql itself, which never set a code: query parse and
+/// field-validation failures, and the depth / complexity / recursion limits
+/// configured on the schema. See [`ensure_error_code`] for the classification.
+struct ErrorTaxonomyExtension;
+
+impl ExtensionFactory for ErrorTaxonomyExtension {
+    fn create(&self) -> Arc<dyn Extension> {
+        Arc::new(ErrorTaxonomyExtensionImpl)
+    }
+}
+
+struct ErrorTaxonomyExtensionImpl;
+
+#[async_graphql::async_trait::async_trait]
+impl Extension for ErrorTaxonomyExtensionImpl {
+    async fn request(&self, ctx: &ExtensionContext<'_>, next: NextRequest<'_>) -> Response {
+        let mut response = next.run(ctx).await;
+        for err in &mut response.errors {
+            ensure_error_code(err);
+        }
+        response
     }
 }
 
@@ -173,6 +208,7 @@ pub fn build_schema(state: AppState) -> AppSchema {
     .limit_depth(MAX_QUERY_DEPTH)
     .limit_complexity(MAX_QUERY_COMPLEXITY)
     .limit_recursive_depth(MAX_QUERY_DEPTH)
+    .extension(ErrorTaxonomyExtension)
     .extension(AliasLimitExtension)
     .extension(GraphQlRateLimiter::new(GraphQlRateLimitConfig::default()))
     .finish()

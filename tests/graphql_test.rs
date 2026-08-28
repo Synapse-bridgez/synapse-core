@@ -385,3 +385,164 @@ async fn test_force_complete_transaction_concurrent_calls_only_one_succeeds() {
         .unwrap();
     assert_eq!(status, "completed");
 }
+
+// ---------------------------------------------------------------------------
+// Error taxonomy: every resolver error must carry a stable
+// `extensions.code` drawn from docs/error-catalog.md, and must not leak
+// internal detail. Exercised through the live HTTP `/graphql` route.
+// ---------------------------------------------------------------------------
+
+/// Returns the `extensions.code` of the first error in a GraphQL response body.
+fn first_error_code(body: &serde_json::Value) -> Option<String> {
+    body["errors"][0]["extensions"]["code"]
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+async fn post_graphql(
+    client: &reqwest::Client,
+    graphql_url: &str,
+    query: serde_json::Value,
+) -> serde_json::Value {
+    let res = client
+        .post(graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    res.json().await.unwrap()
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_transaction_not_found_has_catalog_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let missing_id = uuid::Uuid::new_v4();
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({
+            "query": format!("{{ transaction(id: \"{missing_id}\") {{ id }} }}")
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_NOT_FOUND_001"),
+        "expected ERR_NOT_FOUND_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_invalid_limit_has_validation_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({ "query": "{ transactions(limit: 5000) { id } }" }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_VALIDATION_001"),
+        "expected ERR_VALIDATION_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_invalid_status_filter_has_validation_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({
+            "query": "{ transactions(filter: { status: \"not-a-real-status\" }) { id } }"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_VALIDATION_001"),
+        "expected ERR_VALIDATION_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_over_complex_query_has_complexity_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let aliased_fields: String = (0..20)
+        .map(|i| format!("a{i}: transactions(limit: 1000) {{ id }}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({ "query": format!("{{ {aliased_fields} }}") }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_QUERY_COMPLEXITY_001"),
+        "expected ERR_QUERY_COMPLEXITY_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_force_complete_invalid_state_has_transition_code() {
+    let Some((client, graphql_url, _callback_url, pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let tx_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at) \
+         VALUES (gen_random_uuid(), 'GTAXONOMYTEST000000000000000000000000000000000000000', 10.00, 'USD', 'failed', NOW(), NOW()) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({
+            "query": format!(
+                "mutation {{ forceCompleteTransaction(id: \"{tx_id}\") {{ id status }} }}"
+            )
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_TRANSACTION_005"),
+        "expected ERR_TRANSACTION_005, got: {body:?}"
+    );
+}
