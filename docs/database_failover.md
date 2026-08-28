@@ -264,8 +264,41 @@ cargo test
 
 See `tests/integration_test.rs` for examples of testing with PoolManager.
 
+## Chaos Testing Harness
+
+The Chaos Testing Harness (`src/db/chaos.rs`, `src/db/session.rs`, `tests/chaos_test.rs`) extends static failover tests by injecting randomized faults at arbitrary points in the request lifecycle.
+
+### Fault Injection Modes
+
+1. **ConnectionDrop**: Simulates sudden TCP stream termination or connection reset mid-transaction.
+2. **LatencySpike**: Injects configurable delay (50ms - 300ms) before or during query execution.
+3. **PoolExhaustion**: Simulates connection pool saturation and connection acquire delays.
+
+### Representative Request Flows Covered
+
+- **Flow 1: Webhook Processing (`WebhookDispatcher`)**: Validates delivery state transitions (`pending` -> `delivered`/`failed`) and prevents duplicate or corrupted delivery attempts under mid-flight connection drops.
+- **Flow 2: Settlement Processing (`SettlementService`)**: Validates transaction atomicity during `FOR UPDATE` lock acquisition and settlement creation. Asserts that failed settlements roll back completely without partial writes.
+- **Flow 3: Reconciliation Processing (`ReconciliationService`)**: Validates ledger comparison against Horizon under query latency and connection pool exhaustion.
+
+### Data Consistency Invariant Assertions
+
+After each chaos test run, `DbSession::assert_data_invariants()` automatically asserts:
+- **No Partial Writes**: Sum of transactions linked to a settlement equals `total_amount`.
+- **No Stuck Locks**: Advisory and row locks are completely released; orphaned locks are cleaned up via `cleanup_orphaned_locks()`.
+- **Consistent Webhook States**: Webhook delivery attempts are recorded with valid statuses and timestamps.
+
+### Seed Reproducibility & CI Integration
+
+All chaos runs use a deterministic pseudo-random seed. Any failure can be 100% reproduced:
+
+```bash
+# Run chaos harness with specific seed
+CHAOS_SEED=42 cargo test --test chaos_test
+```
+
 ## References
 
 - [PostgreSQL Replication](https://www.postgresql.org/docs/current/high-availability.html)
 - [AWS RDS Read Replicas](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html)
 - [sqlx Connection Pooling](https://docs.rs/sqlx/latest/sqlx/pool/index.html)
+

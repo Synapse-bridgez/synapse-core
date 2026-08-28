@@ -49,3 +49,10 @@ jobs:
       run: cargo test --verbose
       env:
         DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+
+    - name: Run Chaos Harness tests
+      run: cargo test --test chaos_test --verbose
+      env:
+        DATABASE_URL: postgres://synapse:synapse@localhost:5432/synapse_test
+        CHAOS_SEED: 42
+
