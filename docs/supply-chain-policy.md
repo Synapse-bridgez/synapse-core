@@ -96,3 +96,7 @@ None of these are ignored blindly — each is a real, reviewed trade-off
 between the fix's blast radius and the risk it defers. The sqlx and axum
 upgrades in particular should be tracked as their own follow-up issues
 rather than attempted as part of routine dependency maintenance.
+
+As of August 28, 2026, this check should remain a required branch-protection
+gate rather than an informational-only workflow, otherwise dependency policy
+failures can still merge through an unrelated green path.
