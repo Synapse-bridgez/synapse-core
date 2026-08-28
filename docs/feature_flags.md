@@ -97,3 +97,7 @@ Or via the database migration when deploying new features.
 - [ ] Gradual rollout (percentage-based flags)
 - [ ] Flag expiration dates
 - [ ] Metrics on flag usage
+
+## Rollout note
+
+Percentage-based targeting should stay deterministic per tenant or account key so repeated evaluations on August 28, 2026 and later do not oscillate users between flag states.
