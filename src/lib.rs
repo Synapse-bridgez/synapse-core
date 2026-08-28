@@ -306,6 +306,15 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/quotas/:tenant_id/reset",
             axum::routing::delete(handlers::admin::quota::reset_tenant_quota),
         )
+        // Admin: tenant secret rotation and revocation
+        .route(
+            "/admin/tenants/:tenant_id/rotate-secret",
+            post(handlers::admin::tenant_secret::rotate_tenant_secret),
+        )
+        .route(
+            "/admin/tenants/:tenant_id/revoke-secret",
+            post(handlers::admin::tenant_secret::revoke_tenant_secret),
+        )
         // Admin: active distributed locks
         .route(
             "/admin/locks",

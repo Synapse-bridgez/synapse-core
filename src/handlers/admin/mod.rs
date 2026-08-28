@@ -4,6 +4,7 @@ pub mod compliance;
 pub mod locks;
 pub mod quota;
 pub mod reconciliation;
+pub mod tenant_secret;
 pub mod webhook_replay;
 
 use crate::error::AppError;
