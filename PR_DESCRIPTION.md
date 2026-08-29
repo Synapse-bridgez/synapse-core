@@ -1,155 +1,111 @@
-# PR: Unified Settlement Transition State Machine & TOCTOU Fix
-
-**Branch**: `feature/settlement-transition-toctou`
+# Async Bulk Status Jobs
 
 ## Summary
 
-Eliminates duplicate hardcoded transition tables and fixes a time-of-check/time-of-use (TOCTOU) race condition in settlement status updates. Both transaction and settlement domains now consume a single declarative state machine definition. Settlement updates are now atomic and self-consistent with re-validation inside the lock and a conditional UPDATE guard.
+`PATCH /admin/transactions/bulk-status` previously processed every batch
+synchronously, regardless of size. Under high transaction volume, large batches
+exceeded reasonable HTTP timeouts and gave operators no way to retrieve partial
+results after a mid-flight failure.
 
-## Problem
+This PR adds threshold-based routing: small batches keep the existing
+synchronous behaviour (backward-compatible), while large batches are queued as
+background jobs and immediately return `202 Accepted` with a `job_id`.
 
-### Issue 1: Duplicated Transition Tables
-- `src/validation/state_machine.rs::validate_status_transition` (transaction rules)
-- `src/services/settlement.rs::valid_transition` (settlement rules)
-- Separate implementations → risk of silent drift
-- No single source of truth
-
-### Issue 2: TOCTOU Race in Settlement Updates
-```
-READ current status (unlocked)
-  ↓ (can race here - another task changes status)
-VALIDATE transition
-  ↓
-LOCK row
-  ↓
-UPDATE unconditionally (WHERE id = $x, no status guard)
-```
-Result: Two concurrent tasks can both validate, then one clobbers the other's state.
-
-**Example**: Both reviewers validate pending_review→disputed and pending_review→voided, then serially apply both updates. The second overwrites the first, creating an invalid disputed→voided transition.
-
-## Solution
-
-### Unified State Machine (new file)
-
-**`src/validation/state_transitions.rs`**
-```rust
-pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
-    Transition { from: "pending", to: "processing" },
-    Transition { from: "pending", to: "completed" },
-    // ... 5 more
-];
-
-pub const SETTLEMENT_TRANSITIONS: &[Transition] = &[
-    Transition { from: "completed", to: "pending_review" },
-    Transition { from: "pending_review", to: "disputed" },
-    // ... 5 more
-];
-
-pub fn is_valid_transition(from: &str, to: &str, allowed: &[Transition]) -> bool {
-    if from == to { return true; }  // idempotent
-    allowed.iter().any(|t| t.from == from && t.to == to)
-}
-```
-
-### Atomic Settlement Updates
-
-**Before (vulnerable)**:
-```
-Lock row
-UPDATE settlements SET status = $1 WHERE id = $6  // No status guard!
-```
-
-**After (safe)**:
-```
-Lock row (FOR UPDATE)
-Re-validate: if current.status != expected_from_status { Err(StaleTransition) }
-UPDATE settlements SET ... WHERE id = $6 AND status = $7  // Status guard!
-```
-
-If another task changed the status after the pre-lock read:
-- Re-validation inside lock catches it
-- UPDATE with status guard affects 0 rows
-- Returns `RowNotFound` → mapped to `StaleTransition` (409 Conflict)
+---
 
 ## Changes
 
-### Created Files
-- ✅ `src/validation/state_transitions.rs` – Unified transition definitions
-- ✅ `tests/settlement_toctou_race_test.rs` – Comprehensive state machine tests
-- ✅ `docs/settlement-transition-unification.md` – Architecture + diagrams
-- ✅ `IMPLEMENTATION_SUMMARY.md` – Detailed change documentation
-- ✅ `CHECKLIST.md` – Requirements verification
+### `migrations/20260827000000_bulk_status_jobs.sql`
+New `bulk_status_jobs` table tracking job state (`pending → running →
+completed | failed`), the full `transaction_ids[]`, per-item `result_summary`
+JSONB, and timing columns (`started_at`, `completed_at`).
 
-### Modified Files
+### `src/handlers/admin/bulk_status.rs`
+- **Threshold routing** — configurable via `BULK_STATUS_ASYNC_THRESHOLD` env var
+  (default 50). Batches at or below the threshold use the existing sync path;
+  batches above it are enqueued.
+- **`enqueue_job`** — inserts a `pending` row into `bulk_status_jobs` and returns
+  the UUID.
+- **`run_job`** — tokio background task that processes the batch in 200-item
+  chunks through the same `bulk_update_transaction_status` query the sync path
+  uses, so per-tenant quota limits remain in effect. Marks the job `running` on
+  start, `completed` with a per-item JSONB summary on success, or `failed` with
+  an `error_message` on any chunk error.
+- **`GET /admin/transactions/bulk-status/jobs/:id`** — new polling endpoint
+  returning job state, counts, result summary, and timing.
+- Hard cap raised from 500 → 10,000 items (large batches go async anyway).
+- Existing unit tests preserved; four new unit tests cover validation
+  edge-cases and the sync/async threshold boundary.
 
-| File | Changes |
-|------|---------|
-| `src/validation/mod.rs` | Export `state_transitions` module |
-| `src/validation/state_machine.rs` | Use unified definition; remove duplicate logic |
-| `src/services/settlement.rs` | Use unified definition; pass `expected_from_status` to queries |
-| `src/db/queries.rs` | **Atomic update**: re-validate in lock + status guard + conflict detection |
-| `src/error.rs` | Add `StaleTransition` error (409 Conflict) + error code ERR_SETTLEMENT_003 |
+### `src/lib.rs`
+Registers the new `GET /admin/transactions/bulk-status/jobs/:id` route under
+the existing `admin_only_routes` block (same auth gate as the PATCH route).
+
+---
+
+## API
+
+### Sync response (batch ≤ threshold)
+```
+HTTP 200 OK
+{
+  "updated": 12,
+  "failed": 0,
+  "errors": []
+}
+```
+
+### Async response (batch > threshold)
+```
+HTTP 202 Accepted
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "message": "Batch of 1500 transactions queued as async job. Poll GET /admin/transactions/bulk-status/jobs/550e8400-... for results."
+}
+```
+
+### Poll job status
+```
+GET /admin/transactions/bulk-status/jobs/:id
+
+HTTP 200 OK
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",          // pending | running | completed | failed
+  "transaction_count": 1500,
+  "target_status": "failed",
+  "result_summary": {
+    "updated": 1498,
+    "failed": 2,
+    "errors": [
+      { "transaction_id": "...", "error": "invalid status transition" }
+    ]
+  },
+  "error_message": null,
+  "created_at": "2026-08-27T19:30:00Z",
+  "started_at": "2026-08-27T19:30:01Z",
+  "completed_at": "2026-08-27T19:30:04Z"
+}
+```
+
+---
+
+## Out of scope (per issue)
+- Generalising this into a framework for other admin endpoints
+- Changes to quota middleware or retry backoff
+
+---
 
 ## Testing
+Unit tests in `bulk_status.rs` cover:
+- Request deserialisation
+- Empty `transaction_ids` rejected
+- Invalid `status` value rejected
+- Exceeding 10,000-item cap rejected
+- Valid request accepted
+- Threshold boundary: exactly-at-threshold → sync path
+- Threshold boundary: one-over-threshold → async path
 
-### Unit Tests (10+ tests)
-```bash
-cargo test settlement_toctou_race_test
-```
-- Verifies unified transitions match original behavior (both domains)
-- Tests idempotent same-state transitions
-- Confirms no duplicate transitions
-- Validates error types
-
-### Integration Tests (requires database)
-```bash
-DATABASE_URL=postgres://... cargo test --test settlement_dispute_test
-```
-- Concurrent update scenarios
-- Audit log consistency
-- Settlement void/dispute/adjustment paths
-
-## Backward Compatibility
-
-✅ **No breaking changes**
-- Public APIs unchanged: `validate_status_transition()`, `update_status()`
-- All valid/invalid transitions preserved exactly
-- Audit logging unchanged
-- All existing tests pass without modification
-
-⚠️ **New behavior** (clients should handle)
-- Settlement updates can now return 409 Conflict with error code `ERR_SETTLEMENT_003`
-- Clients should retry on `StaleTransition` with exponential backoff
-
-## State Machines
-
-### Transaction Status
-```
-dlq ──→ pending ──→ processing ──→ completed
-         ↑_____________↑________________↓
-                       │              failed
-                       └────────────────┘
-```
-
-### Settlement Status
-```
-completed ──→ pending_review ──┬──→ disputed ──→ adjusted ──→ completed
-              ↑_________________│_________________________________↓
-              └────────voided────┘
-```
-
-## Acceptance Criteria Met
-
-✅ One declarative source of truth (consumed by both domains)
-✅ Concurrent conflicting transitions: exactly one wins, other gets `StaleTransition` (409)
-✅ All pre-existing valid/invalid transitions preserved
-✅ Audit rows still written on success
-✅ Transition validation now atomic and self-consistent
-
-## Code Review Notes
-
-- Minimal implementation: only changes necessary for correctness
-- TOCTOU fix uses standard database locking patterns (FOR UPDATE + WHERE guard)
-- Error handling is deterministic and testable
-- No changes to business logic, only safety improvements
+Integration tests (DB required) are left for follow-up in
+`tests/load/` per the issue's acceptance criteria for load testing.

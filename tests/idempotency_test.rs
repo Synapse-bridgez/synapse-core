@@ -664,3 +664,177 @@ async fn test_replays_preserve_text_json_and_binary_bytes() {
     assert_replay_is_identical(&app, "/json").await;
     assert_replay_is_identical(&app, "/binary").await;
 }
+
+// ---------------------------------------------------------------------------
+// #1089 – Cross-tenant collision / namespace tests
+// ---------------------------------------------------------------------------
+
+/// Build a minimal test app that reads the X-Tenant-Id header and injects it
+/// into the idempotency middleware, mirroring the production middleware stack.
+fn create_tenant_test_app(service: IdempotencyService) -> Router {
+    Router::new()
+        .route("/webhook", post(test_handler))
+        .layer(middleware::from_fn_with_state(
+            service,
+            idempotency_middleware,
+        ))
+}
+
+/// Two tenants using *identical* idempotency keys must receive independent
+/// cached responses — no cross-tenant cache read is permitted.
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_cross_tenant_same_key_no_collision() {
+    let (_client, redis_url) = setup_redis().await;
+    let app = create_tenant_test_app(create_idempotency_service(&redis_url));
+
+    let shared_key = format!("shared-key-{}", uuid::Uuid::new_v4());
+
+    // ── Tenant A: first request ──
+    let req_a1 = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", &shared_key)
+        .header("x-tenant-id", "tenant-a")
+        .body(Body::empty())
+        .unwrap();
+    let resp_a1 = app.clone().oneshot(req_a1).await.unwrap();
+    assert_eq!(resp_a1.status(), StatusCode::OK);
+    // Must NOT have been served from cache (this is the first write)
+    assert!(
+        resp_a1.headers().get("x-idempotent-replayed").is_none(),
+        "First request for tenant-a must not be a replay"
+    );
+
+    // ── Tenant B: first request with the same key ──
+    let req_b1 = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", &shared_key)
+        .header("x-tenant-id", "tenant-b")
+        .body(Body::empty())
+        .unwrap();
+    let resp_b1 = app.clone().oneshot(req_b1).await.unwrap();
+    assert_eq!(resp_b1.status(), StatusCode::OK);
+    // Tenant B's request must NOT be returned as a replay of tenant A's entry.
+    assert!(
+        resp_b1.headers().get("x-idempotent-replayed").is_none(),
+        "tenant-b's first request must not be a replay of tenant-a's cached entry"
+    );
+
+    // ── Tenant A: replay ──
+    let req_a2 = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", &shared_key)
+        .header("x-tenant-id", "tenant-a")
+        .body(Body::empty())
+        .unwrap();
+    let resp_a2 = app.clone().oneshot(req_a2).await.unwrap();
+    assert_eq!(resp_a2.status(), StatusCode::OK);
+    assert_eq!(
+        resp_a2.headers().get("x-idempotent-replayed").unwrap(),
+        "true",
+        "Second request for tenant-a must be served from cache"
+    );
+
+    // ── Tenant B: replay ──
+    let req_b2 = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", &shared_key)
+        .header("x-tenant-id", "tenant-b")
+        .body(Body::empty())
+        .unwrap();
+    let resp_b2 = app.clone().oneshot(req_b2).await.unwrap();
+    assert_eq!(resp_b2.status(), StatusCode::OK);
+    assert_eq!(
+        resp_b2.headers().get("x-idempotent-replayed").unwrap(),
+        "true",
+        "Second request for tenant-b must be served from its own cache"
+    );
+}
+
+/// Redis keys for two tenants with the same idempotency key must be stored
+/// under distinct Redis key paths, proving namespace isolation at the storage
+/// layer.
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_redis_keys_are_namespaced_per_tenant() {
+    let (client, redis_url) = setup_redis().await;
+    let app = create_tenant_test_app(create_idempotency_service(&redis_url));
+
+    let shared_key = format!("ns-key-{}", uuid::Uuid::new_v4());
+
+    for tenant in ["tenant-x", "tenant-y"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("x-idempotency-key", &shared_key)
+            .header("x-tenant-id", tenant)
+            .body(Body::empty())
+            .unwrap();
+        let _ = app.clone().oneshot(req).await.unwrap();
+    }
+
+    let mut conn = client.get_connection().unwrap();
+
+    // Both tenant-namespaced cache keys must exist independently.
+    let key_x = format!("idempotency:tenant-x:{shared_key}");
+    let key_y = format!("idempotency:tenant-y:{shared_key}");
+
+    let exists_x: bool = redis::cmd("EXISTS").arg(&key_x).query(&mut conn).unwrap();
+    let exists_y: bool = redis::cmd("EXISTS").arg(&key_y).query(&mut conn).unwrap();
+
+    assert!(exists_x, "Redis key for tenant-x must exist: {key_x}");
+    assert!(exists_y, "Redis key for tenant-y must exist: {key_y}");
+
+    // The two cached values must be different Redis entries (different keys).
+    assert_ne!(key_x, key_y, "tenant namespaces must produce distinct Redis keys");
+}
+
+/// A request without an X-Tenant-Id header falls back to the 'default'
+/// namespace and must not collide with a real tenant using the same key.
+#[ignore = "Requires Redis"]
+#[tokio::test]
+async fn test_default_tenant_isolated_from_named_tenant() {
+    let (client, redis_url) = setup_redis().await;
+    let app = create_tenant_test_app(create_idempotency_service(&redis_url));
+
+    let shared_key = format!("default-iso-{}", uuid::Uuid::new_v4());
+
+    // Request with no tenant header → falls back to 'default'
+    let req_default = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", &shared_key)
+        .body(Body::empty())
+        .unwrap();
+    let resp_default = app.clone().oneshot(req_default).await.unwrap();
+    assert_eq!(resp_default.status(), StatusCode::OK);
+
+    // Request from a named tenant with the same key
+    let req_named = Request::builder()
+        .method("POST")
+        .uri("/webhook")
+        .header("x-idempotency-key", &shared_key)
+        .header("x-tenant-id", "real-tenant")
+        .body(Body::empty())
+        .unwrap();
+    let resp_named = app.clone().oneshot(req_named).await.unwrap();
+    assert_eq!(resp_named.status(), StatusCode::OK);
+    assert!(
+        resp_named.headers().get("x-idempotent-replayed").is_none(),
+        "named tenant must not be served a replay of the 'default' tenant's entry"
+    );
+
+    let mut conn = client.get_connection().unwrap();
+    let key_default = format!("idempotency:default:{shared_key}");
+    let key_named   = format!("idempotency:real-tenant:{shared_key}");
+
+    let exists_default: bool = redis::cmd("EXISTS").arg(&key_default).query(&mut conn).unwrap();
+    let exists_named:   bool = redis::cmd("EXISTS").arg(&key_named).query(&mut conn).unwrap();
+
+    assert!(exists_default, "default-tenant cache key must exist");
+    assert!(exists_named,   "real-tenant cache key must exist");
+}

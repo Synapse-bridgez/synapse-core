@@ -273,6 +273,10 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
         )
+        .route(
+            "/admin/transactions/bulk-status/jobs/:id",
+            get(handlers::admin::bulk_status::get_job_status),
+        )
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
         // Stats endpoints
@@ -343,6 +347,11 @@ pub fn create_app(app_state: AppState) -> Router {
         .nest(
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
+        )
+        // Admin: webhook filter rules CRUD (#1090)
+        .nest(
+            "/admin",
+            handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
         )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
