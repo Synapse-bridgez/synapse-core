@@ -136,6 +136,10 @@ mod tests {
             from: "dlq",
             to: "pending"
         }));
+        assert!(transitions.contains(&Transition {
+            from: "completed",
+            to: "swap_ready"
+        }));
     }
 
     #[test]

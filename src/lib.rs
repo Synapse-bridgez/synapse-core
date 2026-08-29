@@ -15,6 +15,7 @@ pub mod security;
 pub mod services;
 pub mod startup;
 pub mod stellar;
+pub mod swap;
 pub mod telemetry;
 pub mod tenant;
 pub mod utils;
