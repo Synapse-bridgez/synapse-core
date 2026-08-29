@@ -27,7 +27,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKFLOWS_DIR="$REPO_ROOT/.github/workflows"
 TESTS_DIR="$REPO_ROOT/tests"
-ALLOWLIST_FILE="$REPO_ROOT/docs/ci-test-file-coverage.md"
+ALLOWLIST_FILE="${CI_TEST_COVERAGE_ALLOWLIST_FILE:-$REPO_ROOT/docs/ci-test-file-coverage.md}"
 
 # Every `cargo test ...` invocation line across every workflow file,
 # collapsed to one line each so multi-line `if ! cargo test ... ; then`
