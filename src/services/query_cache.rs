@@ -334,6 +334,70 @@ impl QueryCache {
         conn.del::<_, ()>(key).await
     }
 
+    /// Invalidate only the cache keys that reflect transaction-aggregate data.
+    ///
+    /// Called by partition lifecycle events (creation and detachment) so that
+    /// cached query results that span partition boundaries are not served
+    /// stale after a rotation. The invalidation is deliberately scoped to
+    /// transaction-related keys (`query:status_counts`, `query:daily_totals:*`,
+    /// `query:asset_stats`, `query:asset_total:*`) rather than clearing the
+    /// entire cache, to avoid dropping unrelated cached results (e.g.
+    /// settlement or compliance caches) on every routine partition rollover.
+    ///
+    /// # Correctness proof
+    ///
+    /// A partition rotation event (creating a new partition or detaching an
+    /// old one) changes which underlying child table a query against
+    /// `transactions` reads from. Any cache key whose value was derived from
+    /// a `SELECT … FROM transactions …` must therefore be invalidated to
+    /// avoid serving a stale result that no longer reflects the post-rotation
+    /// state.  Keys derived from other tables (settlements, compliance
+    /// reports, etc.) are unaffected and must not be flushed.
+    pub async fn invalidate_partition_affected_keys(&self) -> Result<(), redis::RedisError> {
+        // Targeted patterns — only transaction aggregate keys.
+        // Must not match settlement, compliance, or any non-transaction key.
+        let patterns = [
+            "query:status_counts",
+            "query:daily_totals:*",
+            "query:asset_stats",
+            "query:asset_total:*",
+        ];
+
+        // Remove matching entries from the in-memory LRU without clearing it entirely.
+        {
+            let mut lru = self.lru.lock().unwrap();
+            let keys_to_drop: Vec<String> = lru
+                .iter()
+                .filter_map(|(k, _)| {
+                    let k: &str = k.as_ref();
+                    let affected = k == "query:status_counts"
+                        || k == "query:asset_stats"
+                        || k.starts_with("query:daily_totals:")
+                        || k.starts_with("query:asset_total:");
+                    if affected { Some(k.to_string()) } else { None }
+                })
+                .collect();
+            for k in keys_to_drop {
+                lru.pop(&k);
+            }
+        }
+
+        // Remove from Redis.
+        let mut conn = self.get_connection().await?;
+        for pattern in &patterns {
+            let keys: Vec<String> = conn.keys(*pattern).await?;
+            if !keys.is_empty() {
+                conn.del::<_, ()>(&keys).await?;
+            }
+        }
+
+        tracing::info!(
+            "Partition rotation: invalidated transaction-aggregate cache keys \
+             (status_counts, daily_totals:*, asset_stats, asset_total:*)"
+        );
+        Ok(())
+    }
+
     /// Verifies the Redis connection pool is healthy by pinging the server.
     ///
     /// OPT: Sends a PING command to verify all pooled connections are responsive.

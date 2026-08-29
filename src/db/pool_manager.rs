@@ -69,6 +69,43 @@ impl PoolManager {
         &self.primary
     }
 
+    /// Mark the replica as unhealthy so subsequent `read_pool()` calls fall
+    /// back to the primary until the process restarts or the replica is
+    /// re-validated out-of-band.
+    ///
+    /// This is called by error-handling code that detects a replica
+    /// connection failure at the call site (e.g. a query returns a transport
+    /// error on the read pool). It never takes the service down — the primary
+    /// is always used as a fallback — so a transient replica outage is fully
+    /// tolerated without a restart.
+    pub async fn mark_replica_unhealthy(&self) {
+        let mut state = self.failover_state.write().await;
+        if state.replica_healthy {
+            tracing::warn!(
+                "Replica marked unhealthy; read traffic will fall back to primary until replica \
+                 recovers"
+            );
+            state.replica_healthy = false;
+        }
+    }
+
+    /// Mark the replica healthy again (e.g. after a successful health-probe
+    /// query confirms the replica is reachable). Calling this when the
+    /// replica is already healthy is a no-op.
+    pub async fn mark_replica_healthy(&self) {
+        let mut state = self.failover_state.write().await;
+        if !state.replica_healthy {
+            tracing::info!("Replica marked healthy; read traffic will resume routing to replica");
+            state.replica_healthy = true;
+        }
+    }
+
+    /// Returns whether the replica is currently considered healthy. Used by
+    /// health-check probes and tests.
+    pub async fn is_replica_healthy(&self) -> bool {
+        self.failover_state.read().await.replica_healthy
+    }
+
     /// Gracefully drain and close the primary pool and, if configured, the
     /// replica pool. Mirrors [`crate::db::graceful_shutdown`] so that
     /// `PoolManager`'s pools are drained on process shutdown alongside the

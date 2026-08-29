@@ -190,8 +190,23 @@ pub fn hash_api_key(api_key: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Maximum allowed grace period duration for tenant secret rotation (7 days).
+pub const MAX_ROTATION_GRACE_SECONDS: u64 = 7 * 24 * 3600;
+/// Default grace period duration (1 hour).
+pub const DEFAULT_ROTATION_GRACE_SECONDS: u64 = 3600;
+
+/// Result of rotating a tenant's API key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RotateTenantSecretResult {
+    pub tenant_id: Uuid,
+    pub new_api_key: String,
+    pub new_api_key_hash: String,
+    pub previous_api_key_hash: Option<String>,
+    pub grace_period_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Look up which tenant an API key belongs to.
-/// Returns `Ok(Some(tenant_id))` if valid and active, `Ok(None)` otherwise.
+/// Returns `Ok(Some(tenant_id))` if valid (matching current hash or previous hash within grace period) and active, `Ok(None)` otherwise.
 ///
 /// This used to return a plain `bool`, which was enough for `api_key_auth`'s
 /// yes/no gate but left `/ws` resync with no way to know *whose* data a
@@ -199,12 +214,234 @@ pub fn hash_api_key(api_key: &str) -> String {
 /// `handlers::ws::authenticate_ws_token`.
 pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<Option<Uuid>> {
     let row = sqlx::query(
-        "SELECT tenant_id FROM tenants WHERE api_key_hash = $1 AND is_active = true LIMIT 1",
+        "SELECT tenant_id FROM tenants WHERE (api_key_hash = $1 OR (previous_api_key_hash = $1 AND grace_period_expires_at > NOW())) AND is_active = true LIMIT 1",
     )
     .bind(hash_api_key(api_key))
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| r.get::<Uuid, _>("tenant_id")))
+}
+
+/// Rotate a tenant's API key with a configurable grace period.
+///
+/// Sets `api_key_hash` to the new key's HMAC hash and moves the current hash to
+/// `previous_api_key_hash` with expiry `grace_period_expires_at` (NOW() + grace_seconds).
+/// If `grace_seconds` is 0, the previous secret is immediately revoked.
+/// Inserts an audit log entry for the secret issuance/rotation.
+pub async fn rotate_tenant_api_key(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    new_api_key: Option<String>,
+    grace_seconds: u64,
+    actor: &str,
+) -> Result<RotateTenantSecretResult> {
+    if grace_seconds > MAX_ROTATION_GRACE_SECONDS {
+        return Err(sqlx::Error::Decode(
+            format!(
+                "grace_seconds exceeds maximum of {MAX_ROTATION_GRACE_SECONDS} (7 days), got {grace_seconds}"
+            )
+            .into(),
+        ));
+    }
+
+    let raw_key = match new_api_key {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => {
+            use rand::Rng;
+            let mut bytes = [0u8; 24];
+            rand::thread_rng().fill(&mut bytes);
+            format!("syn_{}", hex::encode(bytes))
+        }
+    };
+
+    let new_hash = hash_api_key(&raw_key);
+    let expires_at = if grace_seconds > 0 {
+        Some(chrono::Utc::now() + chrono::Duration::seconds(grace_seconds as i64))
+    } else {
+        None
+    };
+
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE tenants SET api_key_hash = $1, previous_api_key_hash = $2, grace_period_expires_at = $3 WHERE tenant_id = $4",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let current_hash: Option<String> = sqlx::query_scalar(
+                "SELECT api_key_hash FROM tenants WHERE tenant_id = $1 AND is_active = true FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_optional(&mut *db_tx)
+            .await?;
+
+            let current_hash = current_hash.ok_or(sqlx::Error::RowNotFound)?;
+
+            let prev_hash = if grace_seconds > 0 {
+                Some(current_hash.clone())
+            } else {
+                None
+            };
+
+            sqlx::query(
+                "UPDATE tenants SET api_key_hash = $1, previous_api_key_hash = $2, grace_period_expires_at = $3, updated_at = NOW() WHERE tenant_id = $4 AND is_active = true",
+            )
+            .bind(&new_hash)
+            .bind(&prev_hash)
+            .bind(expires_at)
+            .bind(tenant_id)
+            .execute(&mut *db_tx)
+            .await?;
+
+            AuditLog::log(
+                &mut db_tx,
+                tenant_id,
+                "tenant",
+                "secret_issued",
+                Some(serde_json::json!({
+                    "api_key_hash": current_hash,
+                })),
+                Some(serde_json::json!({
+                    "api_key_hash": new_hash,
+                    "previous_api_key_hash": prev_hash,
+                    "grace_period_expires_at": expires_at,
+                    "grace_seconds": grace_seconds,
+                })),
+                actor,
+            )
+            .await?;
+
+            // If grace_seconds == 0, old key was revoked immediately
+            if grace_seconds == 0 {
+                AuditLog::log(
+                    &mut db_tx,
+                    tenant_id,
+                    "tenant",
+                    "secret_revoked",
+                    Some(serde_json::json!({
+                        "revoked_api_key_hash": current_hash,
+                        "reason": "immediate_rotation",
+                    })),
+                    None,
+                    actor,
+                )
+                .await?;
+            }
+
+            db_tx.commit().await?;
+
+            Ok(RotateTenantSecretResult {
+                tenant_id,
+                new_api_key: raw_key,
+                new_api_key_hash: new_hash,
+                previous_api_key_hash: prev_hash,
+                grace_period_expires_at: expires_at,
+            })
+        },
+    )
+    .await
+}
+
+/// Revoke a tenant's previous API key hash immediately, terminating any active grace period.
+/// Logs an audit log entry for the secret revocation if a previous secret was active.
+pub async fn revoke_tenant_previous_secret(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    actor: &str,
+) -> Result<bool> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE tenants SET previous_api_key_hash = NULL, grace_period_expires_at = NULL WHERE tenant_id = $1",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let prev_hash: Option<Option<String>> = sqlx::query_scalar(
+                "SELECT previous_api_key_hash FROM tenants WHERE tenant_id = $1 AND is_active = true FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_optional(&mut *db_tx)
+            .await?;
+
+            let prev_hash = prev_hash.ok_or(sqlx::Error::RowNotFound)?;
+
+            if let Some(old_hash) = prev_hash {
+                sqlx::query(
+                    "UPDATE tenants SET previous_api_key_hash = NULL, grace_period_expires_at = NULL, updated_at = NOW() WHERE tenant_id = $1 AND is_active = true",
+                )
+                .bind(tenant_id)
+                .execute(&mut *db_tx)
+                .await?;
+
+                AuditLog::log(
+                    &mut db_tx,
+                    tenant_id,
+                    "tenant",
+                    "secret_revoked",
+                    Some(serde_json::json!({
+                        "revoked_api_key_hash": old_hash,
+                    })),
+                    None,
+                    actor,
+                )
+                .await?;
+
+                db_tx.commit().await?;
+                Ok(true)
+            } else {
+                db_tx.commit().await?;
+                Ok(false)
+            }
+        },
+    )
+    .await
+}
+
+/// Revoke all expired previous API keys across tenants, creating audit log entries for each revoked secret.
+pub async fn revoke_expired_tenant_secrets(
+    pool: &PgPool,
+    actor: &str,
+) -> Result<u64> {
+    with_timeout(
+        QueryTier::Write,
+        "SELECT tenant_id, previous_api_key_hash FROM tenants WHERE previous_api_key_hash IS NOT NULL AND grace_period_expires_at <= NOW()",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let expired_rows: Vec<(Uuid, String)> = sqlx::query_as(
+                "SELECT tenant_id, previous_api_key_hash FROM tenants WHERE previous_api_key_hash IS NOT NULL AND grace_period_expires_at <= NOW() FOR UPDATE",
+            )
+            .fetch_all(&mut *db_tx)
+            .await?;
+
+            let count = expired_rows.len() as u64;
+
+            for (tid, old_hash) in &expired_rows {
+                sqlx::query(
+                    "UPDATE tenants SET previous_api_key_hash = NULL, grace_period_expires_at = NULL, updated_at = NOW() WHERE tenant_id = $1",
+                )
+                .bind(tid)
+                .execute(&mut *db_tx)
+                .await?;
+
+                AuditLog::log(
+                    &mut db_tx,
+                    *tid,
+                    "tenant",
+                    "secret_revoked",
+                    Some(serde_json::json!({
+                        "revoked_api_key_hash": old_hash,
+                        "reason": "grace_period_expired",
+                    })),
+                    None,
+                    actor,
+                )
+                .await?;
+            }
+
+            db_tx.commit().await?;
+            Ok(count)
+        },
+    )
+    .await
 }
 
 /// Load active tenant configuration used by request authentication and
@@ -2123,6 +2360,7 @@ pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct IdempotencyKey {
+    pub tenant_id: String,
     pub key: String,
     pub status: String,
     pub response: Option<serde_json::Value>,
@@ -2130,17 +2368,53 @@ pub struct IdempotencyKey {
     pub expires_at: DateTime<Utc>,
 }
 
-pub async fn check_idempotency_key(pool: &PgPool, key: &str) -> Result<Option<IdempotencyKey>> {
-    sqlx::query_as::<_, IdempotencyKey>(
-        "SELECT key, status, response, created_at, expires_at FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+/// Look up an idempotency record by composite (tenant_id, key).
+/// Falls back to the 'default' tenant when the namespacing flag is off so
+/// records written by the old single-tenant path are still found during the
+/// migration cutover window.
+pub async fn check_idempotency_key(
+    pool: &PgPool,
+    tenant_id: &str,
+    key: &str,
+) -> Result<Option<IdempotencyKey>> {
+    // Primary lookup: composite (tenant_id, key) — always attempted.
+    let found = sqlx::query_as::<_, IdempotencyKey>(
+        "SELECT tenant_id, key, status, response, created_at, expires_at \
+         FROM idempotency_keys \
+         WHERE tenant_id = $1 AND key = $2 AND expires_at > NOW()",
     )
+    .bind(tenant_id)
     .bind(key)
     .fetch_optional(pool)
-    .await
+    .await?;
+
+    if found.is_some() {
+        return Ok(found);
+    }
+
+    // Cutover-window fallback: if the caller is a real tenant (not 'default')
+    // also check the legacy 'default' bucket. This handles the transition where
+    // old records were written without a tenant namespace. Once
+    // rollout_percentage reaches 100 and all pre-migration records have expired
+    // this path becomes a fast no-op (the WHERE tenant_id = 'default' row will
+    // not exist for the new-namespace keys).
+    if tenant_id != "default" {
+        return sqlx::query_as::<_, IdempotencyKey>(
+            "SELECT tenant_id, key, status, response, created_at, expires_at \
+             FROM idempotency_keys \
+             WHERE tenant_id = 'default' AND key = $1 AND expires_at > NOW()",
+        )
+        .bind(key)
+        .fetch_optional(pool)
+        .await;
+    }
+
+    Ok(None)
 }
 
 pub async fn insert_idempotency_key(
     pool: &PgPool,
+    tenant_id: &str,
     key: &str,
     status: &str,
     response: Option<&serde_json::Value>,
@@ -2148,11 +2422,12 @@ pub async fn insert_idempotency_key(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO idempotency_keys (key, status, response, expires_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (key) DO NOTHING
+        INSERT INTO idempotency_keys (tenant_id, key, status, response, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (tenant_id, key) DO NOTHING
         "#,
     )
+    .bind(tenant_id)
     .bind(key)
     .bind(status)
     .bind(response)
@@ -2164,14 +2439,19 @@ pub async fn insert_idempotency_key(
 
 pub async fn update_idempotency_key_response(
     pool: &PgPool,
+    tenant_id: &str,
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
-        .bind(key)
-        .bind(response)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE idempotency_keys SET response = $3, status = 'completed' \
+         WHERE tenant_id = $1 AND key = $2",
+    )
+    .bind(tenant_id)
+    .bind(key)
+    .bind(response)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

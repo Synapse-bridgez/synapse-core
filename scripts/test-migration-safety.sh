@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# Regression test for scripts/check-migration-safety.sh's own coverage.
-#
-# The safety script's checks are pattern-based and easy to accidentally
-# weaken (an over-eager exclusion, a regex typo) without anything else
-# noticing, since there's no other signal that "this check still actually
-# flags what it claims to flag". This runs it against fixtures known to be
-# unsafe and safe, and fails if either result flips.
-#
+# Regression test for scripts/check-migration-safety.sh coverage.
 # Usage: ./scripts/test-migration-safety.sh
 set -euo pipefail
 
@@ -16,7 +9,7 @@ FIXTURES_DIR="$SCRIPT_DIR/fixtures/migration-safety"
 FAILURES=0
 
 check_case() {
-  local name="$1" dir="$2" expect="$3" # expect: "pass" or "fail"
+  local name="$1" dir="$2" expect="$3"
 
   set +e
   output=$("$CHECK_SCRIPT" "$dir" 2>&1)
@@ -24,12 +17,12 @@ check_case() {
   set -e
 
   if [[ "$expect" == "fail" && "$status" -eq 0 ]]; then
-    echo "FAIL: $name — expected check-migration-safety.sh to flag $dir, but it exited 0"
+    echo "FAIL: $name -- expected check to flag $dir, but it exited 0"
     echo "--- output ---"
     echo "$output"
     FAILURES=$((FAILURES + 1))
   elif [[ "$expect" == "pass" && "$status" -ne 0 ]]; then
-    echo "FAIL: $name — expected check-migration-safety.sh to pass $dir, but it exited $status"
+    echo "FAIL: $name -- expected check to pass $dir, but it exited $status"
     echo "--- output ---"
     echo "$output"
     FAILURES=$((FAILURES + 1))
@@ -38,6 +31,7 @@ check_case() {
   fi
 }
 
+# Existing fixtures
 check_case "unsafe fixture (CREATE INDEX on pre-existing table) is flagged" \
   "$FIXTURES_DIR/unsafe" "fail"
 

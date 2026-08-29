@@ -1022,7 +1022,9 @@ impl WebhookDispatcher {
         .fetch_all(&self.pool)
         .await?;
 
-        // Apply filter rules
+        // Apply filter rules — fail safe: if matches_filters encounters any
+        // evaluation error (None rules, malformed values) it returns true
+        // (deliver), so a bad rule can never cause silent event drops.
         let mut filtered_endpoints = Vec::new();
         for endpoint in all_endpoints {
             if self.matches_filters(&endpoint, transaction_data) {
@@ -1031,6 +1033,33 @@ impl WebhookDispatcher {
         }
 
         Ok(filtered_endpoints)
+    }
+
+    /// Invalidate the per-endpoint filter-rules cache entry so the next
+    /// `enqueue` call picks up updated rules from Postgres.  Called by the
+    /// admin API after any mutation to `webhook_endpoints.filter_rules`.
+    /// Fails silently on Redis errors — a cache miss is safe: the dispatcher
+    /// will re-read from Postgres on the next delivery cycle.
+    pub async fn invalidate_endpoint_filter_cache(&self, endpoint_id: Uuid) {
+        let key = format!("webhook:filter_rules:{endpoint_id}");
+        match self.redis.get_multiplexed_async_connection().await {
+            Ok(mut conn) => {
+                let _: Result<(), _> = redis::cmd("DEL")
+                    .arg(&key)
+                    .query_async::<_, ()>(&mut conn)
+                    .await;
+                tracing::debug!(
+                    endpoint_id = %endpoint_id,
+                    "Invalidated webhook filter-rules cache"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    endpoint_id = %endpoint_id,
+                    "Redis unavailable for filter-rules cache invalidation: {e}"
+                );
+            }
+        }
     }
 
     pub fn matches_filters(
