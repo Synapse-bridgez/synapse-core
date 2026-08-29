@@ -43,6 +43,17 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "dlq",
         to: "pending",
     },
+    // Phase 2 hand-off: a completed transaction whose tenant has opted into swap
+    // moves to `swap_ready` (see `crate::swap` and `docs/state-machine.md`).
+    // No Phase 1 code performs this transition yet.
+    Transition {
+        from: "completed",
+        to: "swap_ready",
+    },
+    Transition {
+        from: "swap_ready",
+        to: "failed",
+    },
 ];
 
 /// Settlement status state machine.
@@ -113,6 +124,10 @@ mod tests {
         assert!(transitions.contains(&Transition {
             from: "dlq",
             to: "pending"
+        }));
+        assert!(transitions.contains(&Transition {
+            from: "completed",
+            to: "swap_ready"
         }));
     }
 
