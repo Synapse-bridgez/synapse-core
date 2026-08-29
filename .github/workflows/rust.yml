@@ -55,6 +55,8 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
+  LOAD_TEST_P95_THRESHOLD_MS: "500"
+  LOAD_TEST_ERROR_RATE_THRESHOLD_PERCENT: "5"
   # Regex used by cargo-llvm-cov to exclude generated/test files from coverage
   # reports. Pagination test helpers in tests/ are excluded here so that only
   # production pagination code (src/) counts toward the threshold.
