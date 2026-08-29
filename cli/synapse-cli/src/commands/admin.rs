@@ -51,6 +51,10 @@ pub enum AdminCommands {
     /// Event stream commands.
     #[command(subcommand)]
     Events(AdminEventsCommands),
+
+    /// Tenant administration and secret rotation.
+    #[command(subcommand)]
+    Tenants(TenantAdminCommands),
 }
 
 pub async fn run(cmd: AdminCommands, base_url: &str, api_key: &str) -> Result<()> {
@@ -68,6 +72,7 @@ pub async fn run(cmd: AdminCommands, base_url: &str, api_key: &str) -> Result<()
         }
         AdminCommands::Webhooks(command) => webhooks::run(command, base_url, api_key).await,
         AdminCommands::Events(command) => handle_events(base_url, api_key, command).await,
+        AdminCommands::Tenants(command) => handle_tenants(base_url, api_key, command).await,
     }
 }
 
@@ -894,6 +899,136 @@ fn format_reconnect_table(response: &ReconnectResponse) -> String {
         format!("BACKOFF (s)      {backoff}"),
         format!("REQUIRES RESYNC  {resync}"),
         format!("MESSAGE          {msg}"),
+    ]
+    .join("\n")
+}
+
+// ── Tenant Administration & Secret Rotation ─────────────────────────────────
+
+#[derive(Subcommand)]
+pub enum TenantAdminCommands {
+    #[command(
+        about = "Rotate a tenant API secret",
+        long_about = "Rotate a tenant API key with a configurable grace period for zero-downtime transition.\n\nRequired flags:\n  <TENANT_ID>       UUID of the tenant to rotate.\nOptional flags:\n  --grace <SECONDS>  Grace period in seconds (default: 3600).\n  --new-key <KEY>    Explicit new API key (generated automatically if omitted).\n  --json             Print the raw API response as JSON."
+    )]
+    RotateSecret {
+        #[arg(value_name = "TENANT_ID")]
+        tenant_id: Uuid,
+
+        #[arg(long, value_name = "SECONDS", default_value_t = 3600)]
+        grace: u64,
+
+        #[arg(long, value_name = "KEY")]
+        new_key: Option<String>,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
+        about = "Revoke a tenant's previous secret immediately",
+        long_about = "Revoke the previous API key hash for a tenant, terminating any active grace period.\n\nRequired flags:\n  <TENANT_ID>       UUID of the tenant.\nOptional flags:\n  --json            Print the raw API response as JSON."
+    )]
+    RevokeSecret {
+        #[arg(value_name = "TENANT_ID")]
+        tenant_id: Uuid,
+
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RotateSecretResponse {
+    pub tenant_id: Uuid,
+    pub api_key: String,
+    pub grace_seconds: u64,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RevokeSecretResponse {
+    pub tenant_id: Uuid,
+    pub revoked: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RotateRequestBody {
+    new_api_key: Option<String>,
+    grace_seconds: u64,
+}
+
+async fn handle_tenants(
+    base_url: &str,
+    api_key: &str,
+    command: TenantAdminCommands,
+) -> Result<()> {
+    let client = AdminClient::new(base_url, api_key);
+
+    match command {
+        TenantAdminCommands::RotateSecret {
+            tenant_id,
+            grace,
+            new_key,
+            json,
+        } => {
+            let body = RotateRequestBody {
+                new_api_key: new_key,
+                grace_seconds: grace,
+            };
+            let response: RotateSecretResponse = client
+                .post_json(
+                    &format!("/admin/tenants/{tenant_id}/rotate-secret"),
+                    &body,
+                )
+                .await?;
+
+            println!(
+                "{}",
+                output::render(&response, json, format_rotate_secret_table)?
+            );
+        }
+        TenantAdminCommands::RevokeSecret { tenant_id, json } => {
+            let response: RevokeSecretResponse = client
+                .post_json(
+                    &format!("/admin/tenants/{tenant_id}/revoke-secret"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+
+            println!(
+                "{}",
+                output::render(&response, json, format_revoke_secret_table)?
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn format_rotate_secret_table(response: &RotateSecretResponse) -> String {
+    let expires = response
+        .expires_at
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "Immediate (0s)".to_string());
+
+    [
+        format!("TENANT ID      {}", response.tenant_id),
+        format!("NEW API KEY    {}", response.api_key),
+        format!("GRACE PERIOD   {}s", response.grace_seconds),
+        format!("EXPIRES AT     {}", expires),
+        format!("STATUS         {}", response.message),
+    ]
+    .join("\n")
+}
+
+fn format_revoke_secret_table(response: &RevokeSecretResponse) -> String {
+    [
+        format!("TENANT ID      {}", response.tenant_id),
+        format!("REVOKED        {}", if response.revoked { "yes" } else { "no" }),
+        format!("STATUS         {}", response.message),
     ]
     .join("\n")
 }
