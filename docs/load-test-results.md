@@ -2,6 +2,8 @@
 
 This document covers the load testing infrastructure for Synapse Core and how to run the three k6 test scenarios.
 
+As of August 28, 2026, spike and soak results should be recorded beside callback and mixed-load runs so regression review is not limited to the fastest scenario only.
+
 ## Prerequisites
 
 - Docker and Docker Compose installed
