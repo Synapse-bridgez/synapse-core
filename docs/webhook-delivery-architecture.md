@@ -71,6 +71,10 @@ Per-endpoint, `max_delivery_rate` requests per 60s window, tracked via `webhook_
 
 See the runbook's "Webhook Delivery DLQ Review" section for the operational procedure.
 
+## Exactly-once verification
+
+The exactly-once delivery guarantee (this document's "exactly-once enqueue per (endpoint, transaction, event)" plus the `FOR UPDATE SKIP LOCKED` claim, the DLQ `ON CONFLICT` dedup, and idempotent `replay_from_dlq`) is re-proven on every CI run by the harness in `tests/webhook_concurrent_delivery_test.rs`. It runs a set of duplicate-triggering scenarios (replica race, retry after transient fault, crashed-worker reclaim, double DLQ replay, overlapping processing cycle) against a real Postgres + Redis and a counting HTTP receiver, and asserts each logical event is acknowledged exactly once. See `docs/webhook-exactly-once-harness.md` for the scenario list and how to add one.
+
 ## Known gaps
 
 - `replay_from_dlq()` exists but has no HTTP admin endpoint — today it's only callable from a Rust context (e.g. a one-off binary or REPL against the running pool). Adding an admin route is a reasonable follow-up, out of scope for this PR.
