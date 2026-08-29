@@ -24,6 +24,11 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "pending",
         to: "failed",
     },
+    // v2: verification disagreement routes to manual review
+    Transition {
+        from: "pending",
+        to: "pending_review",
+    },
     // From processing
     Transition {
         from: "processing",
@@ -33,6 +38,10 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "processing",
         to: "failed",
     },
+    Transition {
+        from: "processing",
+        to: "pending_review",
+    },
     // From failed (reprocess)
     Transition {
         from: "failed",
@@ -41,6 +50,19 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
     // From dlq (requeue)
     Transition {
         from: "dlq",
+        to: "pending",
+    },
+    // From pending_review: ops can resolve to completed, failed, or requeue
+    Transition {
+        from: "pending_review",
+        to: "completed",
+    },
+    Transition {
+        from: "pending_review",
+        to: "failed",
+    },
+    Transition {
+        from: "pending_review",
         to: "pending",
     },
 ];

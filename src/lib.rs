@@ -339,6 +339,11 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
         )
+        // Admin: webhook filter rules CRUD (#1090)
+        .nest(
+            "/admin",
+            handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
+        )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     // SecretsStore must be the outermost layer here (axum applies the *last*
