@@ -64,6 +64,9 @@ bytes as written, for verifying the archive hasn't been altered since.
 - Alert on any `failure` — since deletion is always skipped on failure,
   there's no data-loss risk from an alert firing late, but a `failure` does
   mean `audit_logs` keeps growing until the next successful run.
+- `audit_archive_rows_total` and archive metadata checks should be reviewed
+  alongside any cold-storage rollout so archive completeness can be verified
+  before local-disk retention is reduced.
 
 ## Known gap
 

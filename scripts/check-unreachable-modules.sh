@@ -43,7 +43,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-ALLOWLIST_FILE="docs/known-unreachable-modules.md"
+ALLOWLIST_FILE="${UNREACHABLE_MODULES_ALLOWLIST_FILE:-docs/known-unreachable-modules.md}"
 
 is_reachable_from() {
   local root_file="$1"

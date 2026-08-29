@@ -24,6 +24,11 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "pending",
         to: "failed",
     },
+    // v2: verification disagreement routes to manual review
+    Transition {
+        from: "pending",
+        to: "pending_review",
+    },
     // From processing
     Transition {
         from: "processing",
@@ -32,6 +37,10 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
     Transition {
         from: "processing",
         to: "failed",
+    },
+    Transition {
+        from: "processing",
+        to: "pending_review",
     },
     // From failed (reprocess)
     Transition {
@@ -43,16 +52,18 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "dlq",
         to: "pending",
     },
-    // Phase 2 hand-off: a completed transaction whose tenant has opted into swap
-    // moves to `swap_ready` (see `crate::swap` and `docs/state-machine.md`).
-    // No Phase 1 code performs this transition yet.
+    // From pending_review: ops can resolve to completed, failed, or requeue
     Transition {
-        from: "completed",
-        to: "swap_ready",
+        from: "pending_review",
+        to: "completed",
     },
     Transition {
-        from: "swap_ready",
+        from: "pending_review",
         to: "failed",
+    },
+    Transition {
+        from: "pending_review",
+        to: "pending",
     },
 ];
 

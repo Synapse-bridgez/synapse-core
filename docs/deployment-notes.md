@@ -1,5 +1,11 @@
 # Deployment Notes
 
+## Canary migration note
+
+Apply new schema changes to one canary environment first, verify migrations
+and webhook processing stay healthy, then continue rollout to the rest of the
+fleet.
+
 ## The production image now runs as a non-root user
 
 As of this change, `dockerfile`'s runtime stage creates a fixed-UID user

@@ -10,7 +10,7 @@
 # Usage: ./scripts/check-graphql-handler-wired.sh
 set -euo pipefail
 
-HANDLER_FILE="src/handlers/graphql.rs"
+HANDLER_FILE="${GRAPHQL_HANDLER_FILE:-src/handlers/graphql.rs}"
 
 if [[ ! -f "$HANDLER_FILE" ]]; then
   echo "::error file=$HANDLER_FILE::GraphQL handler file not found"

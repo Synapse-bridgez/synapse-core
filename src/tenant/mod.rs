@@ -152,10 +152,13 @@ async fn resolve_tenant_by_api_key(
     api_key: &str,
 ) -> std::result::Result<Uuid, AppError> {
     use sqlx::Row;
-    let row = sqlx::query("SELECT tenant_id FROM tenants WHERE api_key_hash = $1")
-        .bind(crate::db::queries::hash_api_key(api_key))
-        .fetch_optional(pool)
-        .await?;
+    let hash = crate::db::queries::hash_api_key(api_key);
+    let row = sqlx::query(
+        "SELECT tenant_id FROM tenants WHERE (api_key_hash = $1 OR (previous_api_key_hash = $1 AND grace_period_expires_at > NOW()))",
+    )
+    .bind(hash)
+    .fetch_optional(pool)
+    .await?;
 
     if let Some(r) = row {
         let tenant_id: Uuid = r.try_get("tenant_id")?;
