@@ -205,3 +205,72 @@ async fn test_partition_retention_boundary() {
     let partition_name = format!("transactions_y{}m{:02}", current_year, current_month);
     assert!(partition_exists(&pool, &partition_name).await);
 }
+
+// ── #1115: cache-aware partition lifecycle wrappers ───────────────────────────
+
+/// `create_month_partition_and_invalidate_cache` succeeds even when no cache
+/// is provided (None). The partition must still be created correctly.
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn test_create_partition_with_cache_none() {
+    let (pool, _container) = setup_test_db().await;
+
+    let result = synapse_core::db::cron::create_month_partition_and_invalidate_cache(
+        &pool, 2098, 6, None,
+    )
+    .await;
+    assert!(result.is_ok(), "cache-aware wrapper must succeed with no cache");
+
+    let partition_name = "transactions_y2098m06";
+    assert!(partition_exists(&pool, partition_name).await, "partition must exist after creation");
+}
+
+/// `create_month_partition_and_invalidate_cache` is idempotent: creating the
+/// same partition twice does not fail (IF NOT EXISTS semantics).
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn test_create_partition_idempotent_with_cache() {
+    let (pool, _container) = setup_test_db().await;
+
+    synapse_core::db::cron::create_month_partition_and_invalidate_cache(
+        &pool, 2098, 7, None,
+    )
+    .await
+    .expect("first creation must succeed");
+
+    let result = synapse_core::db::cron::create_month_partition_and_invalidate_cache(
+        &pool, 2098, 7, None,
+    )
+    .await;
+    assert!(result.is_ok(), "second creation of same partition must be idempotent");
+}
+
+/// `detach_and_archive_old_partitions_and_invalidate_cache` completes without
+/// error and moves old partitions to the archive schema (no cache provided).
+#[ignore = "Requires Docker"]
+#[tokio::test]
+async fn test_detach_with_cache_none() {
+    let (pool, _container) = setup_test_db().await;
+
+    // Plant a very old partition so the detach has something to act on.
+    create_month_partition(&pool, 2019, 3).await.unwrap();
+
+    let result =
+        synapse_core::db::cron::detach_and_archive_old_partitions_and_invalidate_cache(
+            &pool, 12, None,
+        )
+        .await;
+    assert!(result.is_ok(), "cache-aware detach wrapper must succeed with no cache");
+
+    // The 2019-03 partition must now be in the archive schema, not the public schema.
+    let archived = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM pg_class c \
+         JOIN pg_namespace n ON c.relnamespace = n.oid \
+         WHERE n.nspname = 'archive' AND c.relname = 'transactions_y2019m03'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let cnt: i64 = archived.get("cnt");
+    assert_eq!(cnt, 1, "old partition must be archived after detach");
+}
