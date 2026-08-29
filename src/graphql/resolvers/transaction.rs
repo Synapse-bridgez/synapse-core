@@ -1,4 +1,6 @@
 use crate::db::{models::Transaction, queries};
+use crate::error::AppError;
+use crate::graphql::error::{GqlResultExt, IntoGraphQlError};
 use crate::graphql::input_validation::{
     validate_asset_code, validate_limit, validate_status, validate_stellar_account,
 };
@@ -56,9 +58,7 @@ impl TransactionQuery {
     /// The transaction object or an error if not found.
     async fn transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
-        queries::get_transaction(&state.db, id)
-            .await
-            .map_err(|e| e.into())
+        queries::get_transaction(&state.db, id).await.into_gql()
     }
 
     /// List transactions with optional filtering.
@@ -90,25 +90,26 @@ impl TransactionQuery {
         offset: Option<i64>,
     ) -> Result<Vec<Transaction>> {
         let effective_limit = limit.unwrap_or(20);
-        validate_limit(effective_limit).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        validate_limit(effective_limit).into_gql()?;
 
         if let Some(ref f) = filter {
             if let Some(ref s) = f.status {
-                validate_status(s).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                validate_status(s).into_gql()?;
             }
             if let Some(ref a) = f.asset_code {
-                validate_asset_code(a).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                validate_asset_code(a).into_gql()?;
             }
             if let Some(ref acc) = f.stellar_account {
-                validate_stellar_account(acc)
-                    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                validate_stellar_account(acc).into_gql()?;
             }
         }
 
         let _ = offset;
         let state = ctx.data::<AppState>()?;
 
-        let txs = queries::list_transactions(&state.db, effective_limit, None, false).await?;
+        let txs = queries::list_transactions(&state.db, effective_limit, None, false)
+            .await
+            .into_gql()?;
 
         if let Some(f) = filter {
             let filtered = txs
@@ -194,13 +195,14 @@ impl TransactionMutation {
     async fn force_complete_transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
 
-        let mut db_tx = state.db.begin().await?;
+        let mut db_tx = state.db.begin().await.into_gql()?;
 
         let current_status: String =
             sqlx::query_scalar("SELECT status FROM transactions WHERE id = $1 FOR UPDATE")
                 .bind(id)
                 .fetch_one(&mut *db_tx)
-                .await?;
+                .await
+                .into_gql()?;
 
         // validate_status_transition treats same-state transitions as
         // idempotently valid (by design, for callers that want retries to
@@ -211,13 +213,14 @@ impl TransactionMutation {
         // racing calls both return as if they'd completed it, which is
         // exactly the double-success this CAS guard exists to prevent.
         if current_status == "completed" {
-            return Err(async_graphql::Error::new(
-                "Transaction is already completed (a concurrent request completed it first)",
-            ));
+            return Err(AppError::ConcurrentModification(
+                "transaction was already completed by a concurrent request".to_string(),
+            )
+            .into_graphql_error());
         }
 
         crate::validation::state_machine::validate_status_transition(&current_status, "completed")
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            .into_gql()?;
 
         let result = sqlx::query_as::<_, Transaction>(
             "UPDATE transactions SET status = 'completed', updated_at = NOW() \
@@ -226,15 +229,16 @@ impl TransactionMutation {
         .bind(id)
         .bind(&current_status)
         .fetch_optional(&mut *db_tx)
-        .await?;
+        .await
+        .into_gql()?;
 
         let result = match result {
             Some(t) => t,
             None => {
-                return Err(async_graphql::Error::new(
-                    "Transaction status changed before completion could be applied \
-                     (concurrent writer won the race)",
-                ));
+                return Err(AppError::ConcurrentModification(
+                    "transaction status changed before completion could be applied".to_string(),
+                )
+                .into_graphql_error());
             }
         };
 
@@ -249,9 +253,10 @@ impl TransactionMutation {
             "completed",
             "admin",
         )
-        .await?;
+        .await
+        .into_gql()?;
 
-        db_tx.commit().await?;
+        db_tx.commit().await.into_gql()?;
 
         crate::db::queries::invalidate_caches_for_asset(
             Some(&state.query_cache),

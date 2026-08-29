@@ -27,8 +27,9 @@
 //! - Anonymous callers share a single bucket so a single unauthenticated
 //!   client cannot exhaust per-identity state.
 //! - The extension returns a structured [`async_graphql::ServerError`] with
-//!   a stable `extensions.code` field (`RATE_LIMITED`) so clients can
-//!   distinguish rate-limit errors from other errors programmatically.
+//!   a stable `extensions.code` field (`ERR_RATE_LIMIT_001`, the same code the
+//!   REST layer uses) plus a `retryAfter` hint, so clients can distinguish
+//!   rate-limit errors from other errors programmatically.
 //!
 //! # Usage
 //!
@@ -72,7 +73,10 @@ const MAX_API_KEY_LEN: usize = 256;
 const MIN_API_KEY_LEN: usize = 32;
 
 /// Stable GraphQL error code returned when a caller is rate-limited.
-pub const RATE_LIMITED_CODE: &str = "RATE_LIMITED";
+///
+/// Shares the REST error catalog code so a client can branch on one value
+/// regardless of transport (see `docs/error-catalog.md`).
+pub const RATE_LIMITED_CODE: &str = crate::error::codes::RATE_LIMIT_001.0;
 
 // ---------------------------------------------------------------------------
 // Configuration
