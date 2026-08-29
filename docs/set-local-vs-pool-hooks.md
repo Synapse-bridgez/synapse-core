@@ -186,3 +186,7 @@ The `?` operator in Rust ensures ROLLBACK happens on error.
 - [PostgreSQL SET command](https://www.postgresql.org/docs/current/sql-set.html)
 - [PostgreSQL Transaction semantics](https://www.postgresql.org/docs/current/tutorial-transactions.html)
 - [sqlx pool documentation](https://docs.rs/sqlx/latest/sqlx/pool/struct.PoolOptions.html)
+
+## Operational note
+
+As of August 28, 2026, any future pool-level reset experiment should be documented as an explicit alternative path rather than silently replacing the `SET LOCAL` contract used by the live request path.
