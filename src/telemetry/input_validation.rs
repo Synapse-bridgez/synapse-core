@@ -4,6 +4,7 @@
 //! and ensure data integrity.
 
 use std::collections::HashMap;
+use once_cell::sync::Lazy;
 
 /// Maximum allowed length for string fields
 const MAX_STRING_LENGTH: usize = 1024;
@@ -11,6 +12,8 @@ const MAX_STRING_LENGTH: usize = 1024;
 const MAX_ATTRIBUTES: usize = 128;
 /// Allowed characters in identifiers (alphanumeric, underscore, hyphen, dot)
 const IDENTIFIER_PATTERN: &str = r"^[a-zA-Z0-9_\-\.]+$";
+static IDENTIFIER_REGEX: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(IDENTIFIER_PATTERN).expect("valid identifier regex"));
 
 /// Validates telemetry input data to prevent injection and format attacks.
 ///
@@ -46,10 +49,7 @@ impl InputValidator {
             )));
         }
 
-        if !regex::Regex::new(IDENTIFIER_PATTERN)
-            .unwrap()
-            .is_match(name)
-        {
+        if !IDENTIFIER_REGEX.is_match(name) {
             return Err(ValidationError::InvalidFormat(
                 "span name contains invalid characters".into(),
             ));

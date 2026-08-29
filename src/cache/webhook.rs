@@ -34,6 +34,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// Timestamps older or newer than this many seconds relative to `now` are
 /// rejected to prevent replay attacks.
 const MAX_TIMESTAMP_SKEW_SECS: u64 = 300;
+/// Recommended Redis TTL for replay-protection nonce keys.
+pub const DEFAULT_REPLAY_TTL_SECS: u64 = 86_400;
 
 /// Maximum length of a webhook event ID used as a cache key component.
 const MAX_EVENT_ID_LEN: usize = 128;
