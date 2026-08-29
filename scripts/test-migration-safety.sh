@@ -44,7 +44,6 @@ check_case "unsafe fixture (unguarded TYPE change on sensitive column) is flagge
 check_case "safe fixture (guarded TYPE change on sensitive column) passes" \
   "$FIXTURES_DIR/safe-guarded-sensitive-type-change" "pass"
 
-# New fixtures
 check_case "unsafe fixture (ADD COLUMN NOT NULL without DEFAULT) is flagged" \
   "$FIXTURES_DIR/unsafe-not-null-no-default" "fail"
 

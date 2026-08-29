@@ -1,6 +1,3 @@
--- Fixture: ADD COLUMN with NOT NULL and a DEFAULT value.
--- Existing rows receive the default; new INSERTs that omit the column also
--- get the default, so old app instances continue to work.
--- This must NOT be flagged — see scripts/test-migration-safety.sh which
--- asserts this fixture passes.
-ALTER TABLE transactions ADD COLUMN region VARCHAR(50) NOT NULL DEFAULT 'us-east-1';
+-- Fixture: ADD COLUMN ... NOT NULL with a DEFAULT on an existing table.
+-- Safe because running instances omitting the column will have the default populated.
+ALTER TABLE transactions ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'pending';

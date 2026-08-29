@@ -37,3 +37,4 @@
 # credential-hashing migration with an explicit precondition guard (RAISE
 # EXCEPTION) — the rename and the application cutover are deployed together.
 20260824000003_hash_tenant_secrets.sql:RENAME_COLUMN
+
