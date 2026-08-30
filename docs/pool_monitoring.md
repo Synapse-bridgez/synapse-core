@@ -45,6 +45,42 @@ The following pool statistics are available:
 - `max_connections`: Maximum pool size (configured in `src/db/mod.rs`)
 - `usage_percent`: Percentage of pool capacity in use
 
+### 4. Trend-Based Early-Warning (Telemetry Connection Pool)
+
+`src/telemetry/connection_pool.rs`'s `ConnectionPool` (used for telemetry
+exporter connections) additionally tracks a **leading indicator**, not just
+current utilization: `ExhaustionForecaster` fits a linear trend over a
+sliding window of recent utilization samples and projects it forward. This
+fires *before* the pool is actually exhausted, giving operators time to
+react — unlike a "pool is at 100%" alert, which only fires after requests
+are already queuing or failing.
+
+Call `ConnectionPool::forecast_exhaustion()` from a periodic health check
+(alongside `total_count()`/`idle_count()`); it returns `Some(projected_utilization)`
+when a *sustained* growth trend forecasts the pool crossing the warning
+threshold within the forecast window, or `None` otherwise.
+
+A spike-then-recover traffic burst nets out to a near-zero slope over the
+sliding window (utilization rises, then falls back), so it does not trigger
+a false positive — only a trend that holds across the whole window does.
+
+**Default thresholds** (`EarlyWarningConfig::default()`), calibrated against
+`tests/load/` steady-ramp runs:
+
+| Setting | Default | Rationale |
+|---------|---------|-----------|
+| `window` | 120s | Long enough to average out a brief request-burst spike (which recovers within seconds), short enough to react to a real trend within a couple of minutes. |
+| `forecast_window` | 60s | How far ahead to project; gives operators roughly a minute of lead time before actual exhaustion. |
+| `warning_threshold` | 0.9 (90%) | Matches the existing "Critical" threshold in the alert table above, but as a *projected* value. |
+| `min_samples` | 4 | Avoids evaluating a trend from too little data early in the pool's lifetime. |
+
+**Calibrating per-deployment:** widen `window` if your traffic has frequent,
+brief bursts that shouldn't count as a trend (fewer false positives, slower
+reaction); narrow it if you need faster detection and can tolerate more
+noise. Increase `forecast_window` if your on-call response time is longer
+than the default's ~1 minute of lead time. Validate any change against a
+`tests/load/` run reproducing your real traffic shape before deploying it.
+
 ## Configuration
 
 Pool size is configured in `src/db/mod.rs`:

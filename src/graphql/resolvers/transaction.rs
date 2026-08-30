@@ -197,12 +197,13 @@ impl TransactionMutation {
 
         let mut db_tx = state.db.begin().await.into_gql()?;
 
-        let current_status: String =
-            sqlx::query_scalar("SELECT status FROM transactions WHERE id = $1 FOR UPDATE")
-                .bind(id)
-                .fetch_one(&mut *db_tx)
-                .await
-                .into_gql()?;
+        let (current_status, trace_id): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, trace_id FROM transactions WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_one(&mut *db_tx)
+        .await
+        .into_gql()?;
 
         // validate_status_transition treats same-state transitions as
         // idempotently valid (by design, for callers that want retries to
@@ -245,13 +246,14 @@ impl TransactionMutation {
         // admin_auth is a single shared platform-admin secret today, not a
         // per-operator identity (see middleware/auth.rs::is_valid_admin_request)
         // — "admin" is the most specific actor available until that changes.
-        crate::db::audit::AuditLog::log_status_change(
+        crate::db::audit::AuditLog::log_status_change_traced(
             &mut db_tx,
             id,
             crate::db::audit::ENTITY_TRANSACTION,
             &current_status,
             "completed",
             "admin",
+            trace_id.as_deref(),
         )
         .await
         .into_gql()?;

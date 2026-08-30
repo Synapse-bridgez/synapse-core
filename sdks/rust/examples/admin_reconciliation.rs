@@ -158,7 +158,9 @@ async fn main() {
             eprintln!("Reconciliation failed: {}", e);
             // Handle errors like invalid account or server issues
             match e {
-                synapse_sdk::SynapseError::Api { status, message } => {
+                synapse_sdk::SynapseError::Api {
+                    status, message, ..
+                } => {
                     if status == 400 {
                         eprintln!("Invalid account format or parameters: {}", message);
                     } else {

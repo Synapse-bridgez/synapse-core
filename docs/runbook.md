@@ -279,7 +279,34 @@ grep "partition" /var/log/synapse-core/app.log
 | P2 - Medium | Partial impact | 1 hour | Single component failure |
 | P3 - Low | Minor issue | 4 hours | Non-critical feature broken |
 
-### Common Incidents
+### Investigating an Incident with a Trace ID
+
+Every transaction created from an inbound webhook carries a `trace_id`
+(`transactions.trace_id`, propagated from the request's `traceparent`
+header — see `src/handlers/webhook.rs`). Use it to follow one logical
+transaction across the pipeline instead of correlating records by
+timestamp:
+
+1. **Find the transaction:**
+   ```sql
+   SELECT * FROM transactions WHERE trace_id = '<trace-id>';
+   ```
+2. **Find every status change and who/what made it:**
+   ```sql
+   SELECT * FROM audit_logs WHERE trace_id = '<trace-id>' ORDER BY created_at;
+   ```
+   (Populated by `AuditLog::log_status_change_traced` — currently wired up
+   at the admin `force_complete_transaction` mutation; not every audit call
+   site in the codebase sets `trace_id` yet.)
+3. **Find related reconciliation discrepancies:** a reconciliation report's
+   `missing_on_chain`, `amount_mismatches`, and `late_payments` entries each
+   carry the `trace_id` of the transaction they reference, so a report's
+   `report_json` can be grepped for the trace ID directly.
+4. **Correlate with structured logs:** `TransactionProcessor::process_transaction`
+   records `trace_id` on its `processor.process_transaction` tracing span,
+   so every `validate`/`enrich`/`verify`/`complete` stage log line for that
+   run includes it in structured log output — filter your log aggregator by
+   `trace_id="<trace-id>"`.
 
 #### 1. Application Crash
 **Symptoms:** Health check fails, no response from service

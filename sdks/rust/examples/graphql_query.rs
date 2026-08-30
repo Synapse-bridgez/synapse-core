@@ -10,7 +10,9 @@
 //! GraphQL errors (HTTP 200 + `"errors"` array) are surfaced as
 //! `SynapseError::GraphQL` and are distinct from transport failures.
 
-use synapse_sdk::{SynapseClient, SynapseError};
+use synapse_sdk::{
+    SynapseClient, SynapseError, TransactionField, TransactionQueryBuilder, TransactionQueryFilter,
+};
 
 #[tokio::main]
 async fn main() {
@@ -20,6 +22,7 @@ async fn main() {
 
     let client = SynapseClient::new(base_url, api_key);
 
+    // Hand-written query string.
     let query = r#"{ transactions { id status } }"#;
 
     match client.graphql().query(query, None).await {
@@ -39,5 +42,26 @@ async fn main() {
             eprintln!("transport error: {}", e);
             std::process::exit(1);
         }
+    }
+
+    // Equivalent query via the typed builder: field names and the overall
+    // query shape are built from `TransactionField`/`TransactionQueryFilter`
+    // instead of being hand-typed into a raw string. The builder only
+    // produces the query string — send it the same way as any other query.
+    let filter = TransactionQueryFilter {
+        status: Some("completed".to_string()),
+        ..Default::default()
+    };
+    let builder =
+        TransactionQueryBuilder::new().select(&[TransactionField::Id, TransactionField::Status]);
+    let built_query = builder.list_query(Some(&filter), Some(20), None);
+
+    match client.graphql().query(built_query, None).await {
+        Ok(resp) => println!(
+            "builder result: {}",
+            serde_json::to_string_pretty(&resp.data).unwrap()
+        ),
+        Err(SynapseError::GraphQL(msg)) => eprintln!("GraphQL errors: {}", msg),
+        Err(e) => eprintln!("transport error: {}", e),
     }
 }

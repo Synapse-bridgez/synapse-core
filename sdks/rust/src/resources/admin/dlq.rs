@@ -117,6 +117,7 @@ impl<'a> AdminDlq<'a> {
             Err(SynapseError::Api {
                 status: 404,
                 message,
+                ..
             }) => Err(SynapseError::NotFound(message)),
             other => other,
         }

@@ -77,7 +77,7 @@ impl AdminClient {
         let status = response.status().as_u16();
         if status >= 400 {
             let body = response.text().await.unwrap_or_default();
-            return Err(map_status_to_error(status, extract_error_message(&body)));
+            return Err(map_status_to_error(status, extract_error_message(&body), None));
         }
         response
             .bytes()
@@ -127,7 +127,7 @@ impl AdminClient {
         let body = response.text().await.map_err(SynapseError::Network)?;
 
         if status >= 400 {
-            return Err(map_status_to_error(status, extract_error_message(&body)));
+            return Err(map_status_to_error(status, extract_error_message(&body), None));
         }
 
         serde_json::from_str(&body).map_err(|e| SynapseError::Decode(e.to_string()))
