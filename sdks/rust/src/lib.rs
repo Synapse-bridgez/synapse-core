@@ -17,4 +17,4 @@ pub mod retry;
 pub use client::{AdminSynapseClient, SynapseClient};
 pub use error::SynapseError;
 pub use models::*;
-pub use pagination::PageIter;
+pub use pagination::{auto_follow, PageIter};

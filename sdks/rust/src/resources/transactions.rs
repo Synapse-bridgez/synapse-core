@@ -140,6 +140,70 @@ impl<'a> Transactions<'a> {
         }
     }
 
+    /// Auto-following stream over every transaction matching `params`,
+    /// fetching subsequent pages transparently as the caller consumes items.
+    ///
+    /// `params.cursor` is ignored — pagination always starts from the first
+    /// page. See [`crate::pagination::auto_follow`] for iteration semantics.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use futures_util::StreamExt;
+    /// use synapse_sdk::{ListParams, SynapseClient};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let client = SynapseClient::new("https://api.example.com", "your-api-key");
+    /// let mut stream = Box::pin(client.transactions().list_all(ListParams {
+    ///     limit: Some(50),
+    ///     ..Default::default()
+    /// }));
+    ///
+    /// while let Some(tx) = stream.next().await {
+    ///     match tx {
+    ///         Ok(tx) => println!("{} {}", tx.id, tx.status),
+    ///         Err(e) => {
+    ///             eprintln!("stopped: {}", e);
+    ///             break;
+    ///         }
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn list_all(
+        &self,
+        params: ListParams,
+    ) -> impl futures_core::Stream<Item = Result<Transaction, SynapseError>> + '_ {
+        let ListParams {
+            limit,
+            from_date,
+            to_date,
+            ..
+        } = params;
+
+        crate::pagination::auto_follow(move |cursor| {
+            let from_date = from_date.clone();
+            let to_date = to_date.clone();
+            async move {
+                let page = self
+                    .list(ListParams {
+                        cursor,
+                        limit,
+                        from_date,
+                        to_date,
+                    })
+                    .await?;
+                let next_cursor = if page.meta.has_more {
+                    page.meta.next_cursor
+                } else {
+                    None
+                };
+                Ok((page.data, next_cursor))
+            }
+        })
+    }
+
     /// Search transactions by filter, returning a single page of matches.
     ///
     /// Calls `GET /transactions/search` with any of the [`SearchParams`]

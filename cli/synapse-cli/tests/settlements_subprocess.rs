@@ -357,6 +357,99 @@ fn settlements_get_invalid_uuid_rejected() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// settlements batch
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn write_ids_file(ids: &[&str]) -> tempfile::NamedTempFile {
+    use std::io::Write;
+    let mut file = tempfile::NamedTempFile::new().expect("create temp file");
+    writeln!(file, "{}", ids.join("\n")).expect("write ids");
+    file
+}
+
+/// All IDs valid and found: every row reports success.
+#[test]
+fn settlements_batch_status_check_all_succeed() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+    let ids_file = write_ids_file(&[KNOWN_SETTLEMENT_ID]);
+
+    let output = synapse_cmd(&base_url)
+        .args([
+            "settlements",
+            "batch",
+            "--file",
+            ids_file.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("command output");
+
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {:?}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("1 succeeded, 0 failed"), "stdout: {stdout}");
+    assert!(stdout.contains(KNOWN_SETTLEMENT_ID));
+}
+
+/// A mix of a found ID, a missing (404) ID, and an invalid UUID: the batch
+/// still exits 0 and reports each row's outcome individually.
+#[test]
+fn settlements_batch_status_check_partial_failure() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+    let ids_file = write_ids_file(&[KNOWN_SETTLEMENT_ID, MISSING_SETTLEMENT_ID, "not-a-uuid"]);
+
+    let output = synapse_cmd(&base_url)
+        .args([
+            "settlements",
+            "batch",
+            "--file",
+            ids_file.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("command output");
+
+    assert!(
+        output.status.success(),
+        "batch should exit 0 even with per-item failures\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("1 succeeded, 2 failed"), "stdout: {stdout}");
+    assert!(stdout.contains("not-a-uuid"));
+    assert!(stdout.to_lowercase().contains("invalid settlement id"));
+}
+
+/// An input file containing only an invalid ID: reported as a failure, not
+/// a hard error.
+#[test]
+fn settlements_batch_invalid_id_reported_not_fatal() {
+    let server = MockServer::spawn("happy");
+    let base_url = server.base_url();
+    let ids_file = write_ids_file(&["totally-not-a-uuid"]);
+
+    let output = synapse_cmd(&base_url)
+        .args([
+            "settlements",
+            "batch",
+            "--file",
+            ids_file.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("command output");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("valid utf-8");
+    assert!(stdout.contains("\"success\": false"));
+    assert!(stdout.contains("totally-not-a-uuid"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MockServer helper (mirrors cli.rs)
 // ─────────────────────────────────────────────────────────────────────────────
 

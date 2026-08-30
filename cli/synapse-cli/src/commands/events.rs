@@ -499,8 +499,12 @@ pub enum EventsSubcommand {
     /// Stream real-time transaction status events from the server.
     ///
     /// Connects to the server WebSocket endpoint (GET /ws?token=<TOKEN>) and
-    /// prints each incoming TransactionStatusUpdate. Runs until the server
-    /// closes the connection or Ctrl-C is pressed.
+    /// prints each incoming TransactionStatusUpdate. If the connection drops
+    /// for any reason (server close, network error), it automatically
+    /// reconnects with exponential backoff and jitter rather than exiting —
+    /// run until Ctrl-C is pressed. Connection state changes (connected /
+    /// reconnecting / resyncing) are printed to stderr so they never
+    /// interleave with event data on stdout.
     ///
     /// Connection lifecycle: a WebSocket Close frame is sent on exit — no
     /// background task or thread is left running.
@@ -604,11 +608,55 @@ pub enum EventsSubcommand {
     },
 }
 
+/// Current state of the `events watch` connection, announced to stderr so it
+/// never interleaves with event data on stdout (important in `--json` mode,
+/// where stdout must stay a clean stream of one JSON object per line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionState {
+    /// A WebSocket connection is established and events are flowing.
+    Connected,
+    /// The connection dropped; waiting on a backoff timer before retrying.
+    Reconnecting,
+    /// A new connection just succeeded after a prior disconnect; the client
+    /// may have missed events while it was down and is catching up before
+    /// resuming normal output.
+    Resyncing,
+}
+
+impl ConnectionState {
+    fn label(&self) -> &'static str {
+        match self {
+            ConnectionState::Connected => "connected",
+            ConnectionState::Reconnecting => "reconnecting",
+            ConnectionState::Resyncing => "resyncing",
+        }
+    }
+}
+
+fn announce_state(state: ConnectionState, detail: impl std::fmt::Display) {
+    eprintln!("[synapse events watch] {} — {}", state.label(), detail);
+}
+
+/// Why [`subscribe`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchOutcome {
+    /// The server sent an explicit WebSocket Close frame: a clean,
+    /// intentional end of the session. The caller should not reconnect.
+    ClosedByServer,
+    /// The connection ended without an explicit Close frame (e.g. socket
+    /// EOF, possibly after connection errors) — this looks like an
+    /// unintentional disconnect, so the caller should reconnect.
+    Disconnected,
+    /// `on_event` or `on_error` returned `false`, asking to stop.
+    StoppedByCaller,
+}
+
 /// Subscribe to real-time events by driving the WebSocket inline.
 ///
 /// Calls `on_event` for each parsed [`TransactionStatusUpdate`] and `on_error`
 /// for any parse / connection error. Returns when the server closes the
-/// connection, `on_event` returns `false`, or `on_error` returns `false`.
+/// connection, the stream ends, `on_event` returns `false`, or `on_error`
+/// returns `false` — see [`WatchOutcome`] for how to tell these apart.
 ///
 /// **Connection lifecycle**: a Close frame is sent before returning; no
 /// background task is left running.
@@ -617,7 +665,7 @@ pub async fn subscribe<FE, FErr>(
     token: &str,
     mut on_event: FE,
     mut on_error: FErr,
-) -> Result<()>
+) -> Result<WatchOutcome>
 where
     FE: FnMut(TransactionStatusUpdate) -> bool,
     FErr: FnMut(anyhow::Error) -> bool,
@@ -634,38 +682,118 @@ where
 
     let (mut write, mut read) = ws_stream.split();
 
-    loop {
+    let outcome = loop {
         match read.next().await {
             Some(Ok(Message::Text(text))) => {
                 match serde_json::from_str::<TransactionStatusUpdate>(&text) {
                     Ok(event) => {
                         if !on_event(event) {
-                            break;
+                            break WatchOutcome::StoppedByCaller;
                         }
                     }
                     Err(e) => {
                         if !on_error(anyhow::anyhow!("parse error: {}", e)) {
-                            break;
+                            break WatchOutcome::StoppedByCaller;
                         }
                     }
                 }
             }
-            Some(Ok(Message::Close(_))) | None => break,
+            Some(Ok(Message::Close(_))) => break WatchOutcome::ClosedByServer,
+            None => break WatchOutcome::Disconnected,
             Some(Ok(_)) => {} // ignore ping/pong/binary frames
             Some(Err(e)) => {
                 if !on_error(anyhow::anyhow!("connection error: {}", e)) {
-                    break;
+                    break WatchOutcome::StoppedByCaller;
                 }
             }
         }
-    }
+    };
 
     // Send close frame — ensures the socket is shut down cleanly and no
     // background task is left running.
     let _ = write.send(Message::Close(None)).await;
     let _ = write.close().await;
 
-    Ok(())
+    Ok(outcome)
+}
+
+/// Drive `events watch` with automatic reconnection.
+///
+/// Each time the WebSocket connection drops (server close, handshake
+/// failure, or a connection error), a fresh connection is opened after an
+/// exponential backoff-with-jitter delay — reusing the exact delay
+/// calculation `synapse_sdk::retry::retry_with_backoff` uses internally
+/// (via [`synapse_sdk::retry::next_backoff_delay_ms`]), capped at
+/// [`synapse_sdk::retry::MAX_DELAY_MS`]. Connection state transitions
+/// (`connected` / `reconnecting` / `resyncing`) are announced to stderr so
+/// stdout stays a clean event stream. The backoff delay resets once a
+/// connection has stayed up long enough to be considered stable, so a brief
+/// blip after a long healthy run doesn't inherit a stale, long delay.
+///
+/// A clean, server-initiated close (`WatchOutcome::ClosedByServer`) or a
+/// caller-requested stop (`WatchOutcome::StoppedByCaller`) end the loop
+/// immediately instead of reconnecting — only an unintentional-looking
+/// disconnect (`WatchOutcome::Disconnected`) or a handshake failure
+/// triggers a reconnect attempt.
+async fn watch_with_reconnect(base_url: &str, token: &str, fmt: OutputFormat) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use synapse_sdk::retry::{next_backoff_delay_ms, DEFAULT_BASE_DELAY_MS};
+
+    const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(30);
+
+    let mut attempt: u32 = 0;
+    let mut prev_delay_ms = DEFAULT_BASE_DELAY_MS;
+
+    loop {
+        if attempt > 0 {
+            announce_state(
+                ConnectionState::Resyncing,
+                "reconnected; resuming the event stream (events missed while disconnected are not replayed)",
+            );
+        } else {
+            announce_state(ConnectionState::Connected, "streaming events");
+        }
+
+        let connected_at = Instant::now();
+        let outcome = subscribe(
+            base_url,
+            token,
+            |event| {
+                match Formatter::format_json_output(&event, fmt) {
+                    Ok(output) => println!("{}", output),
+                    Err(e) => eprintln!("format error: {}", e),
+                }
+                true // keep streaming
+            },
+            |err| {
+                eprintln!("[synapse events watch] {}", err);
+                true // keep streaming on transient errors within a connection
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(WatchOutcome::ClosedByServer) | Ok(WatchOutcome::StoppedByCaller) => {
+                return Ok(());
+            }
+            Ok(WatchOutcome::Disconnected) => {}
+            Err(e) => {
+                eprintln!("[synapse events watch] {}", e);
+            }
+        }
+
+        if connected_at.elapsed() >= STABLE_CONNECTION_THRESHOLD {
+            prev_delay_ms = DEFAULT_BASE_DELAY_MS;
+        }
+        attempt += 1;
+        let delay_ms = next_backoff_delay_ms(prev_delay_ms, DEFAULT_BASE_DELAY_MS);
+        prev_delay_ms = delay_ms;
+        announce_state(
+            ConnectionState::Reconnecting,
+            format!("attempt {attempt}, retrying in {delay_ms}ms"),
+        );
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
 }
 
 /// Handle the `events watch` subcommand end-to-end.
@@ -673,23 +801,7 @@ pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
     match cmd.command {
         EventsSubcommand::Watch { token, format } => {
             let fmt = OutputFormat::from_format_str(&format);
-
-            subscribe(
-                base_url,
-                &token,
-                |event| {
-                    match Formatter::format_json_output(&event, fmt) {
-                        Ok(output) => println!("{}", output),
-                        Err(e) => eprintln!("format error: {}", e),
-                    }
-                    true // keep streaming
-                },
-                |err| {
-                    eprintln!("error: {}", err);
-                    true // keep streaming on transient errors
-                },
-            )
-            .await
+            watch_with_reconnect(base_url, &token, fmt).await
         }
 
         EventsSubcommand::Reconnect {
@@ -745,5 +857,43 @@ pub async fn handle_events(cmd: EventsCmd, base_url: &str) -> Result<()> {
             println!("{}", Formatter::format_json_output(&resp, fmt)?);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod watch_reconnect_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn connection_state_labels_are_stable() {
+        assert_eq!(ConnectionState::Connected.label(), "connected");
+        assert_eq!(ConnectionState::Reconnecting.label(), "reconnecting");
+        assert_eq!(ConnectionState::Resyncing.label(), "resyncing");
+    }
+
+    /// An explicit server-sent Close frame must surface as
+    /// `WatchOutcome::ClosedByServer` so `watch_with_reconnect` treats it as
+    /// an intentional end of the session, not something to reconnect from.
+    #[tokio::test]
+    async fn subscribe_reports_closed_by_server_on_explicit_close_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("ws handshake");
+            let _ = ws.send(Message::Close(None)).await;
+            let _ = ws.close(None).await;
+        });
+
+        let base_url = format!("http://{addr}");
+        let outcome = subscribe(&base_url, "test-token", |_event| true, |_err| true)
+            .await
+            .expect("subscribe should not error");
+
+        assert_eq!(outcome, WatchOutcome::ClosedByServer);
     }
 }

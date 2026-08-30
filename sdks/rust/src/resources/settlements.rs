@@ -133,6 +133,39 @@ impl<'a> Settlements<'a> {
             other => other,
         }
     }
+
+    /// Auto-following stream over every settlement matching `params`,
+    /// fetching subsequent pages transparently as the caller consumes items.
+    ///
+    /// `params.cursor` is ignored — pagination always starts from the first
+    /// page. See [`crate::pagination::auto_follow`] for iteration semantics.
+    pub fn list_all(
+        &self,
+        params: SettlementParams,
+    ) -> impl futures_core::Stream<Item = Result<Settlement, SynapseError>> + '_ {
+        let SettlementParams {
+            limit, direction, ..
+        } = params;
+
+        crate::pagination::auto_follow(move |cursor| {
+            let direction = direction.clone();
+            async move {
+                let page = self
+                    .list(SettlementParams {
+                        cursor,
+                        limit,
+                        direction,
+                    })
+                    .await?;
+                let next_cursor = if page.has_more {
+                    page.next_cursor
+                } else {
+                    None
+                };
+                Ok((page.settlements, next_cursor))
+            }
+        })
+    }
 }
 
 #[cfg(test)]

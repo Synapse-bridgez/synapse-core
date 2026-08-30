@@ -7,6 +7,14 @@ Versioning follows the policy described in [VERSIONING.md](./VERSIONING.md).
 
 ## [Unreleased]
 
+### Added
+
+- `pagination::auto_follow` and `Transactions::list_all`/`Settlements::list_all`:
+  a `Stream`-based auto-following pagination helper that transparently
+  fetches subsequent pages as the caller consumes items, removing the need
+  to hand-roll cursor-tracking loops. See `examples/transactions_list.rs
+  -- --stream` for a working example.
+
 ### Fixed
 
 - **Breaking (bug fix):** `AdminSynapseClient` sent admin requests with an
