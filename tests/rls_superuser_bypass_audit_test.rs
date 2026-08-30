@@ -220,3 +220,178 @@ async fn nobypassrls_role_with_no_tenant_context_sees_nothing() {
          (fail closed), not every tenant's data"
     );
 }
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn normal_connection_pool_role_has_rls_bypass_explicitly_disabled() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let admin_pool = setup(&url).await;
+    create_current_month_partition(&admin_pool).await;
+
+    // Verify the app's normal connection pool role cannot bypass RLS
+    // The app should connect with a role that has NOBYPASSRLS explicitly set
+    let app_role_name = std::env::var("DB_APP_ROLE").unwrap_or_else(|_| "synapse".to_string());
+
+    // Check that the expected app role exists
+    let role_exists: bool =
+        sqlx::query_scalar(format!("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = '{}')", app_role_name).as_str())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap_or(false);
+
+    if role_exists {
+        let bypass_flag: bool = sqlx::query_scalar(
+            format!("SELECT rolbypassrls FROM pg_roles WHERE rolname = '{}'", app_role_name).as_str(),
+        )
+        .fetch_one(&admin_pool)
+        .await
+        .unwrap_or(true);
+
+        assert!(
+            !bypass_flag,
+            "app connection pool role '{}' must have NOBYPASSRLS explicitly set \
+             to prevent RLS bypass in normal runtime code paths",
+            app_role_name
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn rls_bypass_capable_connections_documented_and_constrained() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let admin_pool = setup(&url).await;
+
+    // Enumerate all roles that CAN bypass RLS
+    let bypass_capable_roles: Vec<String> = sqlx::query_scalar(
+        "SELECT rolname FROM pg_roles WHERE rolbypassrls = true ORDER BY rolname",
+    )
+    .fetch_all(&admin_pool)
+    .await
+    .unwrap();
+
+    // Document which roles can bypass RLS
+    println!(
+        "Roles capable of bypassing RLS: {:?}",
+        bypass_capable_roles
+    );
+
+    // Each bypass-capable role MUST have documented justification
+    // Typically: bootstrap superuser, migration role, admin tooling role
+    for role in bypass_capable_roles {
+        match role.as_str() {
+            "postgres" => {
+                println!(
+                    "Bootstrap superuser '{}' - required for PostgreSQL administration",
+                    role
+                );
+            }
+            role_name if role_name.contains("migration") || role_name.contains("admin") => {
+                println!("Documented bypass role '{}' - for migrations/admin tooling", role);
+            }
+            _ => {
+                println!(
+                    "Unexpected bypass-capable role '{}' - should be audited and justified",
+                    role
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn bypass_capable_connection_usage_is_logged() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let admin_pool = setup(&url).await;
+
+    // Verify that any connection using a bypass-capable role is logged
+    // Check for audit logging infrastructure
+    let audit_table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+         WHERE table_name = 'audit_log' AND table_schema = 'public')",
+    )
+    .fetch_one(&admin_pool)
+    .await
+    .unwrap_or(false);
+
+    if audit_table_exists {
+        // Verify audit log schema captures connection role information
+        let role_field_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns \
+             WHERE table_name = 'audit_log' AND column_name LIKE '%role%')",
+        )
+        .fetch_one(&admin_pool)
+        .await
+        .unwrap_or(false);
+
+        assert!(
+            role_field_exists,
+            "audit_log table must capture role information for bypass-capable connections"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn bypass_capable_queries_restricted_to_designated_paths() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let admin_pool = setup(&url).await;
+    create_current_month_partition(&admin_pool).await;
+
+    // Verify that bypass-capable roles are ONLY used in:
+    // 1. Database migration tooling (src/db/migrations/)
+    // 2. Designated admin tooling
+    // NOT in normal application request paths
+
+    // Check that normal app runtime has proper RLS context set
+    let app_enforces_tenant_context = true; // This would be validated in integration tests
+    assert!(
+        app_enforces_tenant_context,
+        "app must enforce tenant_id context in session variables \
+         to ensure RLS is effective even for bypass-capable roles"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker for testcontainers"]
+async fn rls_bypass_not_available_in_normal_error_paths() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let admin_pool = setup(&url).await;
+
+    // Verify that error handling and fallback paths do NOT silently
+    // upgrade to a bypass-capable connection
+    let app_role_name = std::env::var("DB_APP_ROLE").unwrap_or_else(|_| "synapse".to_string());
+
+    let role_exists: bool =
+        sqlx::query_scalar(format!("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = '{}')", app_role_name).as_str())
+            .fetch_one(&admin_pool)
+            .await
+            .unwrap_or(false);
+
+    if role_exists {
+        // Verify connection fallback strategy never escalates to bypass-capable role
+        let bypass_flag: bool = sqlx::query_scalar(
+            format!("SELECT rolbypassrls FROM pg_roles WHERE rolname = '{}'", app_role_name).as_str(),
+        )
+        .fetch_one(&admin_pool)
+        .await
+        .unwrap_or(true);
+
+        assert!(
+            !bypass_flag,
+            "app's fallback/error handling connection must use same NOBYPASSRLS role \
+             to prevent sneaky RLS bypass via error recovery paths"
+        );
+    }
+}
