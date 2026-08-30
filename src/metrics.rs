@@ -24,7 +24,8 @@
 //! | `transaction_processor_completion_conflict_prevented_total` | Counter | CompleteStage writes that lost a row-lock race |
 //! | `transaction_processor_stage_executions_total` | Counter | Stage executions, labeled by stage (verifies rollout-percentage gating in prod) |
 //! | `webhook_delivery_total`          | Counter    | Webhook delivery attempts, labeled by outcome and endpoint_id |
-//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type |
+//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type (includes half-open probe_succeeded/probe_failed/flapping_detected) |
+//! | `webhook_circuit_breaker_half_open_duration_ms` | Histogram | Time spent in half-open state per probe |
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
@@ -304,11 +305,29 @@ pub fn webhook_delivery_total() -> Counter<u64> {
 }
 
 /// Circuit breaker state-transition counter, labeled by `transition`
-/// ("opened" | "closed" | "probe_sent" | "probe_blocked").
+/// ("opened" | "closed" | "probe_sent" | "probe_blocked" |
+/// "probe_succeeded" | "probe_failed" | "flapping_detected"). The last three
+/// are half-open-specific: `probe_succeeded`/`probe_failed` record the
+/// outcome of the single delivery let through during a half-open probe, and
+/// `flapping_detected` fires when probe failures repeat within the
+/// configurable flap-detection window (see `WEBHOOK_CB_FLAP_THRESHOLD` /
+/// `WEBHOOK_CB_FLAP_WINDOW_SECS` in `webhook_dispatcher`), signaling a
+/// breaker that keeps bouncing between half-open and open rather than
+/// recovering.
 pub fn webhook_circuit_breaker_transitions_total() -> Counter<u64> {
     meter()
         .u64_counter("webhook_circuit_breaker_transitions_total")
         .with_description("Webhook circuit breaker state transitions, labeled by transition type")
+        .init()
+}
+
+/// Time a half-open probe delivery took to resolve (success or failure),
+/// i.e. time spent in the half-open state for that probe.
+pub fn webhook_circuit_breaker_half_open_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("webhook_circuit_breaker_half_open_duration_ms")
+        .with_description("Time spent in half-open state per circuit breaker probe, in ms")
+        .with_unit(Unit::new("ms"))
         .init()
 }
 

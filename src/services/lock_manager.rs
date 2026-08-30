@@ -344,6 +344,19 @@ impl LockRegistry {
         self.inner.write().await.remove(token);
     }
 
+    /// Remove a lock's registry entry by resource name rather than token —
+    /// used by the admin force-release endpoint, which knows the resource an
+    /// operator wants released but not (and doesn't need to check) which
+    /// token currently holds it.
+    async fn deregister_by_resource(&self, resource: &str) -> Option<ActiveLockInfo> {
+        let mut map = self.inner.write().await;
+        let token = map
+            .values()
+            .find(|info| info.resource == resource)
+            .map(|info| info.token.clone())?;
+        map.remove(&token)
+    }
+
     /// Snapshot of all active locks, with `overdue` flag refreshed.
     pub async fn snapshot(&self) -> Vec<ActiveLockInfo> {
         let now = std::time::SystemTime::now()
@@ -371,6 +384,35 @@ static LOCK_REGISTRY: std::sync::OnceLock<LockRegistry> = std::sync::OnceLock::n
 
 pub fn lock_registry() -> &'static LockRegistry {
     LOCK_REGISTRY.get_or_init(LockRegistry::new)
+}
+
+/// Force-release a distributed lock by resource name, regardless of which
+/// token currently holds it — an admin escape hatch for a lock stuck after a
+/// crash (see `docs/admin-locks-endpoint.md`). Unlike `Lock::release`'s
+/// compare-and-delete (which only releases if the caller's own token still
+/// matches), this deletes the Redis key unconditionally, then clears this
+/// instance's local registry entry if it has one.
+///
+/// Idempotent: if the key was already gone (naturally expired or already
+/// released), returns `Ok(false)` rather than an error.
+pub async fn force_release_lock(
+    redis_url: &str,
+    resource: &str,
+) -> Result<bool, redis::RedisError> {
+    let client = Client::open(redis_url)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+
+    // `LockManager::acquire` stores its key as `lock:{resource}`, but
+    // `LeaderElection` (the only lock type with a live caller today — see
+    // docs/admin-locks-endpoint.md) stores its lease under the raw resource
+    // string ("processor:leader") with no prefix. Delete both key shapes so
+    // this works regardless of which lock type produced the registry entry.
+    let prefixed_key = format!("lock:{resource}");
+    let deleted: i32 = conn.del(vec![resource.to_string(), prefixed_key]).await?;
+
+    lock_registry().deregister_by_resource(resource).await;
+
+    Ok(deleted > 0)
 }
 
 // ---------------------------------------------------------------------------

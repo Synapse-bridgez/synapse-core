@@ -29,6 +29,16 @@ still being established and may change as the Synapse REST API evolves.
 - Internal refactoring with no change to the public API.
 - Dependency version bumps that do not affect the public API.
 
+## Compatibility matrix
+
+Which SDK version pairs with which `synapse-cli` version and server API
+version range is tracked in
+[`COMPATIBILITY.toml`](../../COMPATIBILITY.toml), rendered to
+[`docs/compatibility-matrix.md`](../../docs/compatibility-matrix.md) via
+`cargo xtask compat-matrix render`. Add an entry there (and re-render) when
+cutting a new SDK release — `cargo xtask release` fails the release if the
+version being tagged has no matching entry.
+
 ## Path to 1.0
 
 A 1.0 release will be cut once:

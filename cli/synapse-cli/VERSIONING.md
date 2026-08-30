@@ -35,6 +35,15 @@ and underlying SDK evolve.
 minimum a minor-version bump in `synapse-cli`. The two crates are versioned
 independently; see [sdks/rust/VERSIONING.md](../../sdks/rust/VERSIONING.md).
 
+The authoritative record of which SDK version pairs with which CLI version
+and server API version range is [`COMPATIBILITY.toml`](../../COMPATIBILITY.toml)
+at the repo root, rendered to
+[`docs/compatibility-matrix.md`](../../docs/compatibility-matrix.md) via
+`cargo xtask compat-matrix render`. Add an entry there (and re-render) as
+part of cutting any new `synapse-cli` or `synapse-sdk` release —
+`cargo xtask release` fails the release if the version being tagged has no
+matching entry.
+
 ## Path to 1.0
 
 A 1.0 release will be cut once:
