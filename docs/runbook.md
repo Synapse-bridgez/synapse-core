@@ -266,6 +266,32 @@ grep "moved to DLQ" /var/log/synapse-core/app.log
 grep "partition" /var/log/synapse-core/app.log
 ```
 
+### Scheduled Job Health Alerts
+
+`JobScheduler::check_job_health(grace_period)` (`src/services/scheduler.rs`)
+returns a list of `JobHealthAlert`s for every registered job, one per
+alertable condition. A job can surface neither, either, or both at once —
+they are independent checks:
+
+- **`MissedRun`** — the job has not completed successfully within its own
+  cron schedule's expected interval plus `grace_period` (or has never run at
+  all, if `last_success` is `None`). This usually means the job process
+  crashed, is stuck in a crash loop, or a previous run is holding a lock and
+  never released it. **Response**: check the job's logs for the last
+  attempt, confirm no stale lock is held (see Database Operations →
+  Distributed Locks), and manually trigger a run once the blocker is
+  cleared.
+- **`Failed`** — the job's most recent execution attempt returned an error.
+  This means the job *is* running on schedule but erroring — typically a
+  logic bug or an unavailable dependency (DB, Redis, external API).
+  **Response**: check the error logged at the failed run's timestamp; this
+  does not by itself mean the job stopped running — it will attempt again at
+  its next scheduled time.
+
+This is detection/alerting only — automatic retry or catch-up of a missed
+run is job-type-specific (see, e.g., the compliance report job's own
+catch-up logic) and out of scope here.
+
 ---
 
 ## Incident Response

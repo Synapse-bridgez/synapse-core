@@ -2,7 +2,9 @@
 ///
 /// Validates that active_tasks() correctly returns the number of tasks
 /// currently executing (permits in use), not the number of available permits.
-use synapse_core::services::resource_limits::{ResourceLimiter, TaskLimits};
+use synapse_core::services::resource_limits::{
+    resource_category_snapshots, ResourceLimiter, TaskLimits,
+};
 use tokio::time::Duration;
 
 #[tokio::test]
@@ -188,4 +190,50 @@ async fn test_active_tasks_under_load() {
         0,
         "active_tasks() should return 0 when all tasks complete"
     );
+}
+
+/// Regression test for the dashboard-data API added for the active-task
+/// telemetry issue: `resource_category_snapshots()` must track the same
+/// active-task counts as `active_tasks()` under concurrent load, for the
+/// specific category under test (other tests in this file share the "test"
+/// category name and register their own entries, so this uses a distinct
+/// category to get an isolated read).
+#[tokio::test]
+async fn test_resource_category_snapshots_track_active_tasks_under_concurrent_load() {
+    let limits = TaskLimits::new(5, 10);
+    let limiter = ResourceLimiter::new(limits, "snapshot_test_category");
+
+    let mut handles = vec![];
+    for _ in 0..4 {
+        let limiter_clone = limiter.clone();
+        handles.push(tokio::spawn(async move {
+            limiter_clone
+                .run(async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                })
+                .await
+        }));
+    }
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let snapshot = resource_category_snapshots()
+        .into_iter()
+        .find(|s| s.category == "snapshot_test_category")
+        .expect("snapshot_test_category should be registered");
+    assert_eq!(snapshot.active, 4);
+    assert_eq!(snapshot.limit, 5);
+    assert_eq!(snapshot.active, limiter.active_tasks());
+
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let snapshot = resource_category_snapshots()
+        .into_iter()
+        .find(|s| s.category == "snapshot_test_category")
+        .expect("snapshot_test_category should still be registered");
+    assert_eq!(snapshot.active, 0);
 }

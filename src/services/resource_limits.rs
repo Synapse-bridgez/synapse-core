@@ -3,10 +3,55 @@
 //! Provides semaphore-based concurrency control and timeout management
 //! for background tasks to prevent resource exhaustion.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use tracing::error;
+
+/// Global registry of live [`ResourceLimiter`]s, keyed by resource category
+/// (the limiter's `task_name`), used to expose active/limit metrics for all
+/// categories without a caller having to hold onto every limiter instance.
+/// Holds only a [`Weak`] reference to each limiter's semaphore so a dropped
+/// limiter is not kept alive by the registry and is skipped on the next
+/// snapshot instead of leaking.
+static REGISTRY: OnceLock<Mutex<Vec<RegisteredLimiter>>> = OnceLock::new();
+
+struct RegisteredLimiter {
+    category: String,
+    semaphore: Weak<Semaphore>,
+    max_concurrent: usize,
+}
+
+fn registry() -> &'static Mutex<Vec<RegisteredLimiter>> {
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Current active-task count and configured limit for one resource category,
+/// as of the moment the snapshot was taken.
+#[derive(Debug, Clone)]
+pub struct ResourceCategorySnapshot {
+    pub category: String,
+    pub active: usize,
+    pub limit: usize,
+}
+
+/// Snapshots active/limit for every currently-live registered resource
+/// category. Reads each semaphore's atomic permit counter directly (no lock
+/// held on the hot `run`/`active_tasks` path) — only the registry's own list
+/// lock is taken here, on the metrics-emission path, not on task execution.
+pub fn resource_category_snapshots() -> Vec<ResourceCategorySnapshot> {
+    let mut reg = registry().lock().unwrap();
+    reg.retain(|entry| entry.semaphore.strong_count() > 0);
+    reg.iter()
+        .filter_map(|entry| {
+            entry.semaphore.upgrade().map(|sem| ResourceCategorySnapshot {
+                category: entry.category.clone(),
+                active: entry.max_concurrent - sem.available_permits(),
+                limit: entry.max_concurrent,
+            })
+        })
+        .collect()
+}
 
 /// Configuration for background task resource limits.
 #[derive(Debug, Clone)]
@@ -35,11 +80,20 @@ pub struct ResourceLimiter {
 
 impl ResourceLimiter {
     pub fn new(limits: TaskLimits, task_name: impl Into<String>) -> Self {
+        let semaphore = Arc::new(Semaphore::new(limits.max_concurrent));
+        let task_name = task_name.into();
+
+        registry().lock().unwrap().push(RegisteredLimiter {
+            category: task_name.clone(),
+            semaphore: Arc::downgrade(&semaphore),
+            max_concurrent: limits.max_concurrent,
+        });
+
         Self {
-            semaphore: Arc::new(Semaphore::new(limits.max_concurrent)),
+            semaphore,
             max_concurrent: limits.max_concurrent,
             timeout_duration: Duration::from_secs(limits.timeout_secs),
-            task_name: task_name.into(),
+            task_name,
         }
     }
 
