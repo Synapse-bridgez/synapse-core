@@ -33,9 +33,22 @@ pub async fn generate_report(
     crate::metrics::admin_compliance_report_requests_total()
         .add(1, &[opentelemetry::KeyValue::new("operation", "generate")]);
 
-    let service = ComplianceService::new(state.app_state.db);
+    let service = ComplianceService::new(state.app_state.db.clone());
     match service.generate_report(&params.period).await {
-        Ok(report) => (StatusCode::CREATED, Json(serde_json::json!(report))).into_response(),
+        Ok(report) => {
+            if let Err(e) = crate::telemetry::data_export::record_compliance_export(
+                &state.app_state.db,
+                "compliance_report",
+                report.id,
+                "admin",
+                serde_json::json!({ "period": params.period }),
+            )
+            .await
+            {
+                tracing::error!("Failed to record compliance export telemetry: {e}");
+            }
+            (StatusCode::CREATED, Json(serde_json::json!(report))).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),

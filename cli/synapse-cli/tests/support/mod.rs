@@ -1,5 +1,12 @@
 use wiremock::MockServer;
 
+// This helper's pattern is now also published as a reusable, documented
+// utility for third-party integrators in `synapse-sdk`'s `testing` module
+// (see `sdks/rust/src/testing.rs`, behind the `testing-support` feature).
+// It is kept separate here (rather than delegating to it) because this
+// crate pins an older `wiremock` version than the SDK's optional dependency,
+// and unifying them is out of scope for this change.
+
 pub async fn spawn_mock_server() -> MockServer {
     MockServer::start().await
 }

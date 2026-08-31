@@ -9,6 +9,8 @@ use uuid::Uuid;
 /// Entity type constants for audit logs
 pub const ENTITY_TRANSACTION: &str = "transaction";
 pub const ENTITY_SETTLEMENT: &str = "settlement";
+/// A compliance-classified data export (see `telemetry::data_export::record_compliance_export`).
+pub const ENTITY_COMPLIANCE_EXPORT: &str = "compliance_export";
 
 /// Represents an audit log entry
 #[derive(Debug, Clone)]

@@ -63,6 +63,36 @@ Clients should use bounded exponential backoff with jitter. After reconnecting, 
 - Health checks should continue to mark stale connections unhealthy so dead sockets are closed during drain.
 - Reconnect guidance should include backoff to avoid a client thundering herd when many connections move to healthy instances.
 
+## Drain Metrics
+
+`POST /admin/drain` records three OpenTelemetry instruments (see
+`src/metrics.rs`) so clean vs. forced shutdowns are visible instead of
+inferred:
+
+| Instrument | Kind | Meaning |
+|---|---|---|
+| `ws_drain_connections_open_at_start` | Histogram | WebSocket connections open at the moment drain began |
+| `ws_drain_duration_ms` | Histogram | Wall-clock time from drain start to process exit |
+| `ws_drain_connections_closed_total` | Counter, labeled `outcome=clean\|forced` | Connections that closed themselves before the deadline vs. were still open when the deadline hit |
+
+**Suggested alert:** `ws_drain_connections_closed_total{outcome="forced"} > 0`
+on a routine (non-incident) deployment. Forced closes mean the drain window
+is too short for the current connection/heartbeat mix, or a connection is
+stuck — both worth investigating even though the process exits regardless.
+
+A connection that opens *during* the drain window and is still open at the
+deadline is counted as `forced` only up to the number of connections open at
+drain start; it does not inflate the forced count further (see
+`drain_close_outcome` in `src/readiness.rs`).
+
+**Known limitation:** the process calls `std::process::exit(0)` immediately
+after recording these metrics, which does not wait for the OTLP exporter's
+periodic batch to flush. Under a short export interval this is usually fine
+in practice, but a metrics backend that shows gaps around deploys should
+treat this as the cause before assuming an instrumentation bug. Fixing this
+would mean changing the shutdown exit path itself, which is out of scope
+here (metrics/visibility only).
+
 ## Edge Cases
 
 | Edge case | Expected behavior |

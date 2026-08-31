@@ -7,6 +7,22 @@ Versioning follows the policy described in [VERSIONING.md](./VERSIONING.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `SynapseClient::post` and `AdminSynapseClient::post` no
+  longer auto-retry on transient failures (network errors, 5xx). Retrying a
+  mutating request whose response was lost could silently resend it as a
+  duplicate (e.g. a webhook replay delivered twice, a reconciliation run
+  started twice). If your application relied on the previous auto-retry
+  behavior for POST, wrap the call in your own retry loop with an
+  idempotency key. GET requests are unaffected and continue to retry as
+  before.
+- The retry layer now honors a server-sent `Retry-After` header (seconds)
+  on transient responses, using it instead of client-side jitter when
+  present.
+- `SynapseError::RateLimited` now carries the 429 response body message
+  (previously discarded) as `RateLimited(String)`.
+
 ### Fixed
 
 - **Breaking (bug fix):** `AdminSynapseClient` sent admin requests with an

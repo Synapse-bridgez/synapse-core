@@ -13,6 +13,8 @@ pub mod models;
 pub mod pagination;
 pub mod resources;
 pub mod retry;
+#[cfg(feature = "testing-support")]
+pub mod testing;
 
 pub use client::{AdminSynapseClient, SynapseClient};
 pub use error::SynapseError;

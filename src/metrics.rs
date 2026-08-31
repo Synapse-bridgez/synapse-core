@@ -28,6 +28,10 @@
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
+//! | `ws_drain_connections_open_at_start` | Histogram | WebSocket connections still open when a drain began |
+//! | `ws_drain_duration_ms`             | Histogram  | Wall-clock time from drain start to process exit    |
+//! | `ws_drain_connections_closed_total` | Counter   | WebSocket connections closed during drain, labeled by `outcome` (`clean`/`forced`) |
+//! | `compliance_export_events_total`  | Counter    | Compliance-classified report exports, labeled by `report_type` — distinct from routine `admin_*_report_requests_total` |
 //!
 //! ## Configuration
 //!
@@ -199,6 +203,56 @@ pub fn reconciliation_duplicate_report_prevented_total() -> Counter<u64> {
         .with_description(
             "Reconciliation report inserts skipped due to the (period_start, period_end) \
              unique constraint catching a concurrent duplicate run",
+        )
+        .init()
+}
+
+/// Number of WebSocket connections still open at the moment a drain
+/// (`POST /admin/drain`) began. A single observation is recorded per drain.
+pub fn ws_drain_connections_open_at_start() -> Histogram<f64> {
+    meter()
+        .f64_histogram("ws_drain_connections_open_at_start")
+        .with_description("WebSocket connections still open when a drain began")
+        .init()
+}
+
+/// Wall-clock duration of a drain, from `start_drain` to process exit, in
+/// milliseconds.
+pub fn ws_drain_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("ws_drain_duration_ms")
+        .with_description("Time from drain start to process exit")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// WebSocket connections closed during a drain, labeled by `outcome`:
+/// `"clean"` (closed itself in response to the drain signal before the
+/// deadline) or `"forced"` (still open when the drain timeout elapsed and
+/// the process exited anyway). A `forced` count above zero on a routine
+/// deployment indicates connections are not draining within the configured
+/// window and is worth alerting on.
+pub fn ws_drain_connections_closed_total() -> Counter<u64> {
+    meter()
+        .u64_counter("ws_drain_connections_closed_total")
+        .with_description(
+            "WebSocket connections closed during drain, labeled by outcome \
+             (clean = closed before the deadline, forced = still open when \
+             the drain timeout elapsed)",
+        )
+        .init()
+}
+
+/// Compliance-classified report export events, labeled by `report_type`
+/// (e.g. `"compliance_report"`, `"reconciliation_report"`). Distinct from
+/// the routine `admin_*_report_requests_total` counters so a compliance
+/// export is never conflated with a routine one in dashboards or alerts.
+pub fn compliance_export_events_total() -> Counter<u64> {
+    meter()
+        .u64_counter("compliance_export_events_total")
+        .with_description(
+            "Compliance-classified report exports, labeled by report_type, \
+             kept distinct from routine export telemetry",
         )
         .init()
 }

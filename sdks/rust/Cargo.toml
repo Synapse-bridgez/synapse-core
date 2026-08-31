@@ -1,6 +1,6 @@
 [package]
 name = "synapse-sdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rust client SDK for the Synapse API"
 license = "MIT"
@@ -15,6 +15,12 @@ rand = "0.8"
 url = "2"
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+wiremock = { version = "0.6", optional = true }
+
+[features]
+# Reusable mock-server test utilities for integrators building against this
+# SDK. See `src/testing.rs` for usage.
+testing-support = ["dep:wiremock"]
 
 [dev-dependencies]
 wiremock = "0.6"

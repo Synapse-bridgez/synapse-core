@@ -32,7 +32,9 @@ where
             Ok(v) => return Ok(v),
             Err(e) if attempt + 1 < max_attempts && e.is_transient() => {
                 attempt += 1;
-                let delay_ms = {
+                let delay_ms = if let Some(retry_after_ms) = e.retry_after_ms() {
+                    retry_after_ms.min(MAX_DELAY_MS)
+                } else {
                     let upper = prev_delay_ms.saturating_mul(3).max(base_delay_ms);
                     let d = rand::thread_rng().gen_range(base_delay_ms..=upper);
                     d.min(MAX_DELAY_MS)
@@ -111,6 +113,34 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "retries disabled when max_attempts=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn honors_server_retry_after_over_jitter() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let start = std::time::Instant::now();
+        let result: Result<u32, _> = retry_with_backoff(2, 1, || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(SynapseError::HttpRetryAfter {
+                        status: 503,
+                        body: String::new(),
+                        retry_after_ms: 50,
+                    })
+                } else {
+                    Ok(7)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert!(
+            start.elapsed().as_millis() >= 50,
+            "must wait at least the server-provided Retry-After delay"
         );
     }
 
