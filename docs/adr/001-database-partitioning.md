@@ -218,6 +218,40 @@ When partitions are detached (after 12 months):
 4. Drop the detached table
 5. Store archive in S3 or equivalent
 
+## Addendum: Partition-Horizon Policy and Monitoring
+
+**Current state:** `ensure_future_partitions(pool, months_ahead)` in
+`src/db/cron.rs` supports pre-creating an arbitrary number of months ahead,
+but as of this addendum it is exercised only by
+`tests/partition_cron_test.rs` — there is no production scheduled job
+calling it with a standing `months_ahead` value. In practice, the horizon
+has instead been maintained by ad hoc seed migrations
+(`20260422000000` and `migrations/20260823000003_extend_partition_seed.sql`,
+which pre-created partitions through `2027-12`), extended whenever someone
+notices the runway is running low — most recently because it was
+discovered indirectly, via test failures, rather than via monitoring. This
+is exactly the "no one notices until it's an incident" gap this addendum
+exists to close.
+
+**Documented policy:** The safe minimum horizon is **2 months** of
+pre-created future partitions ahead of the current date at all times (the
+value `ensure_future_partitions` was built to enforce, matching this ADR's
+original "2 months in advance" design intent above). This is the floor;
+the migration-seeded horizon is intentionally kept well above it (through
+`2027-12` as of `20260823000003_extend_partition_seed.sql`) as working
+margin, not as a substitute for an enforced floor.
+
+**Monitoring/alerting (to complement issue 26's retention-side
+automation):** Alert if
+`(furthest pre-created transactions_y*m* partition's start date) - (current date)`
+ever falls below the 2-month safe minimum. This can be computed by
+querying `pg_inherits`/`pg_class` for the max `transactions_y{YYYY}m{MM}`
+child of `transactions` and comparing it against `now()`, on the same
+cadence as the daily `maintain_partitions()` task. Implementing the actual
+gauge/alert is left as follow-up work; this addendum formalizes the policy
+the alert should enforce so that work has an explicit target rather than
+an implicit one.
+
 ## References
 
 - [PostgreSQL Partitioning Documentation](https://www.postgresql.org/docs/current/ddl-partitioning.html)
