@@ -95,6 +95,24 @@ Response:
 }
 ```
 
+### Per-Query-Type Hit-Rate Report
+
+`QueryCache::hit_rate_report()` returns hit/miss/eviction-before-expiry counters
+aggregated per query type (the cache-key prefix before the first extra `:`
+segment, e.g. `status_counts`, `daily_totals`, `asset_stats`, `asset_total`)
+rather than per exact key, keeping cardinality bounded. Each row carries a
+`suggested_action`:
+
+| Condition (with ≥20 samples)                          | Suggested action                                             |
+|--------------------------------------------------------|----------------------------------------------------------------|
+| Hit rate < 25%                                          | Increase TTL, or consider removing caching for that query type |
+| Eviction-before-expiry rate > 25%                       | Increase in-memory cache size (`MEMORY_CACHE_SIZE`)             |
+| Neither                                                 | Healthy — no action needed                                     |
+
+This is a **report only**: no tuning change is applied automatically. Run it
+periodically (e.g. as part of the weekly scheduled reporting job) and read the
+`suggested_action` column to decide what to change for each query type.
+
 ### Manual Cache Warming
 
 Cache warming happens automatically on startup. To manually trigger:

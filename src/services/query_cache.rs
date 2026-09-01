@@ -3,10 +3,84 @@ use crate::middleware::idempotency::RedisCircuitBreaker;
 use lru::LruCache;
 use redis::{aio::ConnectionManager, AsyncCommands, Client};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Per-query-type hit-rate counters, aggregated at the cache-key-prefix level
+/// (e.g. `status_counts`, `daily_totals`, `asset_stats`, `asset_total`)
+/// rather than per exact key, to keep cardinality bounded (consistent with
+/// issue 38's cardinality-awareness pattern).
+#[derive(Default)]
+struct QueryTypeCounters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evicted_before_expiry: AtomicU64,
+}
+
+/// Extracts the query-type label from a cache key, e.g.
+/// `"query:daily_totals:7"` -> `"daily_totals"`, `"query:status_counts"` -> `"status_counts"`.
+fn query_type_from_key(key: &str) -> String {
+    let without_prefix = key.strip_prefix("query:").unwrap_or(key);
+    without_prefix
+        .split(':')
+        .next()
+        .unwrap_or(without_prefix)
+        .to_string()
+}
+
+/// One row of the hit-rate report: a query type's observed performance plus
+/// a suggested tuning action. Applying the suggestion is a human decision —
+/// this only surfaces the data.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryTypeHitRateReport {
+    pub query_type: String,
+    pub hits: u64,
+    pub misses: u64,
+    pub hit_rate: f64,
+    pub evicted_before_expiry: u64,
+    pub eviction_before_expiry_rate: f64,
+    pub suggested_action: String,
+}
+
+/// Below this hit rate (with a non-trivial sample size) a query type is
+/// flagged as a caching candidate for review.
+const LOW_HIT_RATE_THRESHOLD: f64 = 25.0;
+/// Above this eviction-before-expiry rate the in-memory cache is likely
+/// undersized for this query type's working set.
+const HIGH_EVICTION_RATE_THRESHOLD: f64 = 25.0;
+/// Minimum number of observations before a suggestion is made, to avoid
+/// noisy suggestions from a handful of requests.
+const MIN_SAMPLE_SIZE: u64 = 20;
+
+/// If inserting `incoming_key` would evict the LRU tail (cache at capacity
+/// and `incoming_key` is not already present), and that tail entry has not
+/// yet reached its `expires_at`, records an eviction-before-expiry against
+/// the evicted entry's own query type. Must be called with `lru` already
+/// locked, immediately before `put`.
+fn record_eviction_before_expiry(
+    lru: &LruCache<String, CacheEntry>,
+    incoming_key: &str,
+    registry: &Mutex<HashMap<String, Arc<QueryTypeCounters>>>,
+) {
+    if lru.len() < lru.cap().get() || lru.peek(incoming_key).is_some() {
+        return;
+    }
+    if let Some((evicted_key, evicted_entry)) = lru.peek_lru() {
+        if evicted_entry.expires_at > Instant::now() {
+            let query_type = query_type_from_key(evicted_key);
+            registry
+                .lock()
+                .unwrap()
+                .entry(query_type)
+                .or_insert_with(|| Arc::new(QueryTypeCounters::default()))
+                .evicted_before_expiry
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 
 /// An in-memory LRU entry. `expires_at` is enforced in `QueryCache::get` so
 /// entries that outlive the configured memory-cache TTL are treated as
@@ -69,6 +143,7 @@ pub struct QueryCache {
     memory_misses: Arc<AtomicU64>,
     lru: Arc<Mutex<LruCache<String, CacheEntry>>>,
     memory_ttl: Duration,
+    query_type_counters: Arc<Mutex<HashMap<String, Arc<QueryTypeCounters>>>>,
 }
 
 impl std::fmt::Debug for QueryCache {
@@ -153,7 +228,71 @@ impl QueryCache {
                 NonZeroUsize::new(cache_size).unwrap(),
             ))),
             memory_ttl: Duration::from_secs(memory_ttl_secs),
+            query_type_counters: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    fn counters_for(&self, key: &str) -> Arc<QueryTypeCounters> {
+        let query_type = query_type_from_key(key);
+        let mut counters = self.query_type_counters.lock().unwrap();
+        counters
+            .entry(query_type)
+            .or_insert_with(|| Arc::new(QueryTypeCounters::default()))
+            .clone()
+    }
+
+    /// Per-query-type hit-rate report, aggregated at the cache-key-prefix
+    /// level. Ranks entries needing attention (low hit rate or high
+    /// eviction-before-expiry rate) first, with a suggested action. This is
+    /// a report only — no tuning change is applied automatically.
+    pub fn hit_rate_report(&self) -> Vec<QueryTypeHitRateReport> {
+        let counters = self.query_type_counters.lock().unwrap();
+        let mut report: Vec<QueryTypeHitRateReport> = counters
+            .iter()
+            .map(|(query_type, c)| {
+                let hits = c.hits.load(Ordering::Relaxed);
+                let misses = c.misses.load(Ordering::Relaxed);
+                let evicted_before_expiry = c.evicted_before_expiry.load(Ordering::Relaxed);
+                let total = hits + misses;
+                let hit_rate = if total > 0 {
+                    (hits as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let eviction_before_expiry_rate = if hits > 0 {
+                    (evicted_before_expiry as f64 / hits as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                let suggested_action = if total < MIN_SAMPLE_SIZE {
+                    "Not enough samples yet".to_string()
+                } else if hit_rate < LOW_HIT_RATE_THRESHOLD {
+                    "Low hit rate: consider increasing TTL, or removing caching for this query type".to_string()
+                } else if eviction_before_expiry_rate > HIGH_EVICTION_RATE_THRESHOLD {
+                    "High eviction-before-expiry rate: consider increasing cache size".to_string()
+                } else {
+                    "Healthy".to_string()
+                };
+
+                QueryTypeHitRateReport {
+                    query_type: query_type.clone(),
+                    hits,
+                    misses,
+                    hit_rate,
+                    evicted_before_expiry,
+                    eviction_before_expiry_rate,
+                    suggested_action,
+                }
+            })
+            .collect();
+
+        report.sort_by(|a, b| {
+            a.hit_rate
+                .partial_cmp(&b.hit_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        report
     }
 
     /// Acquires a connection from the pool with health verification.
@@ -171,6 +310,7 @@ impl QueryCache {
         key: &str,
     ) -> Result<Option<T>, redis::RedisError> {
         CacheValidator::validate_key(key).map_err(cache_validation_error)?;
+        let query_type_counters = self.counters_for(key);
 
         // Try in-memory cache first. An entry past its `expires_at` is treated
         // as a miss and evicted rather than served — see `CacheEntry` doc.
@@ -180,6 +320,7 @@ impl QueryCache {
                 if entry.expires_at > Instant::now() {
                     self.memory_hits.fetch_add(1, Ordering::Relaxed);
                     if let Ok(value) = serde_json::from_str::<T>(&entry.value) {
+                        query_type_counters.hits.fetch_add(1, Ordering::Relaxed);
                         return Ok(Some(value));
                     }
                 } else {
@@ -198,6 +339,7 @@ impl QueryCache {
         let misses = self.misses.clone();
         let lru = self.lru.clone();
         let memory_ttl = self.memory_ttl;
+        let query_type_registry = self.query_type_counters.clone();
 
         self.cb
             .call(|| async move {
@@ -207,9 +349,11 @@ impl QueryCache {
                 match value {
                     Some(v) => {
                         hits.fetch_add(1, Ordering::Relaxed);
+                        query_type_counters.hits.fetch_add(1, Ordering::Relaxed);
                         // Populate in-memory cache
                         {
                             let mut lru_cache = lru.lock().unwrap();
+                            record_eviction_before_expiry(&lru_cache, &key, &query_type_registry);
                             lru_cache.put(
                                 key.clone(),
                                 CacheEntry {
@@ -228,6 +372,7 @@ impl QueryCache {
                     }
                     None => {
                         misses.fetch_add(1, Ordering::Relaxed);
+                        query_type_counters.misses.fetch_add(1, Ordering::Relaxed);
                         Ok(None)
                     }
                 }
@@ -273,6 +418,7 @@ impl QueryCache {
         // than `memory_ttl`.
         {
             let mut lru = self.lru.lock().unwrap();
+            record_eviction_before_expiry(&lru, key, &self.query_type_counters);
             lru.put(
                 key.to_string(),
                 CacheEntry {
@@ -521,6 +667,48 @@ pub fn cache_key_asset_total(asset_code: &str) -> String {
     format!("query:asset_total:{asset_code}")
 }
 
+/// Weekly scheduled job that logs the per-query-type hit-rate report so
+/// under-performing cache entries are surfaced without requiring an operator
+/// to remember to poll for them. Register with the `JobScheduler` from
+/// `src/services/scheduler.rs`, e.g.
+/// `scheduler.register_job(Box::new(QueryCacheReportJob::new(cache.clone()))).await`.
+pub struct QueryCacheReportJob {
+    cache: QueryCache,
+}
+
+impl QueryCacheReportJob {
+    pub fn new(cache: QueryCache) -> Self {
+        Self { cache }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::services::scheduler::Job for QueryCacheReportJob {
+    fn name(&self) -> &str {
+        "query_cache_hit_rate_report"
+    }
+
+    /// Every Monday at 06:00 UTC.
+    fn schedule(&self) -> &str {
+        "0 0 6 * * MON *"
+    }
+
+    async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for row in self.cache.hit_rate_report() {
+            tracing::info!(
+                query_type = %row.query_type,
+                hits = row.hits,
+                misses = row.misses,
+                hit_rate = row.hit_rate,
+                eviction_before_expiry_rate = row.eviction_before_expiry_rate,
+                suggested_action = %row.suggested_action,
+                "Query cache hit-rate report"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +725,14 @@ mod tests {
         let metrics = cache.metrics();
         assert_eq!(metrics.hits, 0);
         assert_eq!(metrics.misses, 0);
+    }
+
+    #[test]
+    fn test_query_type_from_key() {
+        assert_eq!(query_type_from_key("query:status_counts"), "status_counts");
+        assert_eq!(query_type_from_key("query:daily_totals:7"), "daily_totals");
+        assert_eq!(query_type_from_key("query:asset_total:USD"), "asset_total");
+        assert_eq!(query_type_from_key("no_prefix"), "no_prefix");
     }
 
     #[test]

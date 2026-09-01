@@ -71,6 +71,42 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Log a status change, additionally recording the distributed trace ID
+    /// (`transactions.trace_id`, propagated from the inbound webhook that
+    /// created the transaction) that this status change belongs to.
+    ///
+    /// Additive sibling of [`AuditLog::log_status_change`] rather than a
+    /// change to its signature, so the many audit call sites unrelated to
+    /// the webhook-to-reconciliation pipeline are unaffected. Use this at
+    /// pipeline touchpoints where a trace ID is already available (e.g. a
+    /// transaction row that was just fetched).
+    pub async fn log_status_change_traced(
+        tx: &mut SqlxTransaction<'_, Postgres>,
+        entity_id: Uuid,
+        entity_type: &str,
+        old_status: &str,
+        new_status: &str,
+        actor: &str,
+        trace_id: Option<&str>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (entity_id, entity_type, action, old_val, new_val, actor, trace_id)
+            VALUES ($1, $2, 'status_update', $3, $4, $5, $6)
+            "#,
+        )
+        .bind(entity_id)
+        .bind(entity_type)
+        .bind(json!({ "status": old_status }))
+        .bind(json!({ "status": new_status }))
+        .bind(actor)
+        .bind(trace_id)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+
     /// Log a status change
     pub async fn log_status_change(
         tx: &mut SqlxTransaction<'_, Postgres>,
@@ -418,6 +454,41 @@ pub async fn run_retention(
     }))
 }
 
+/// Compute the hash chain for an audit log entry.
+/// The chain hash includes the entry's content plus the previous entry's hash.
+pub fn compute_chain_hash(
+    entity_id: &Uuid,
+    entity_type: &str,
+    action: &str,
+    old_val: &Option<JsonValue>,
+    new_val: &Option<JsonValue>,
+    actor: &str,
+    timestamp: DateTime<Utc>,
+    previous_hash: Option<&str>,
+) -> String {
+    let entry_json = json!({
+        "entity_id": entity_id.to_string(),
+        "entity_type": entity_type,
+        "action": action,
+        "old_val": old_val,
+        "new_val": new_val,
+        "actor": actor,
+        "timestamp": timestamp.to_rfc3339(),
+    });
+
+    let canonical = serde_json::to_string(&entry_json)
+        .unwrap_or_else(|_| entry_json.to_string());
+
+    let mut hasher = Sha256::new();
+    hasher.update(&canonical);
+
+    if let Some(prev_hash) = previous_hash {
+        hasher.update(prev_hash);
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +514,165 @@ mod tests {
         assert_eq!(log.old_val, old_val);
         assert_eq!(log.new_val, new_val);
         assert_eq!(log.actor, "system");
+    }
+
+    #[test]
+    fn test_compute_chain_hash_consistency() {
+        let entity_id = Uuid::new_v4();
+        let old_val = Some(json!({"status": "pending"}));
+        let new_val = Some(json!({"status": "completed"}));
+        let now = Utc::now();
+
+        let hash1 = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &old_val,
+            &new_val,
+            "admin",
+            now,
+            None,
+        );
+
+        let hash2 = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &old_val,
+            &new_val,
+            "admin",
+            now,
+            None,
+        );
+
+        assert_eq!(hash1, hash2, "Same input should produce same hash");
+        assert_eq!(hash1.len(), 64, "SHA-256 hex should be 64 characters");
+    }
+
+    #[test]
+    fn test_chain_hash_changes_with_different_content() {
+        let entity_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let hash1 = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "completed"})),
+            "admin",
+            now,
+            None,
+        );
+
+        let hash2 = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "failed"})),
+            "admin",
+            now,
+            None,
+        );
+
+        assert_ne!(hash1, hash2, "Different content should produce different hash");
+    }
+
+    #[test]
+    fn test_chain_hash_includes_previous_hash() {
+        let entity_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let hash_without_previous = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "completed"})),
+            "admin",
+            now,
+            None,
+        );
+
+        let hash_with_previous = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "completed"})),
+            "admin",
+            now,
+            Some(&hash_without_previous),
+        );
+
+        assert_ne!(
+            hash_without_previous, hash_with_previous,
+            "Previous hash should be part of chain"
+        );
+    }
+
+    #[test]
+    fn test_chain_hash_tamper_detection() {
+        let entity_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let original_hash = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "completed"})),
+            "admin",
+            now,
+            None,
+        );
+
+        let tampered_hash = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "TAMPERED"})),
+            "admin",
+            now,
+            None,
+        );
+
+        assert_ne!(
+            original_hash, tampered_hash,
+            "Tampered entry should have different hash"
+        );
+    }
+
+    #[test]
+    fn test_chain_hash_actor_affects_hash() {
+        let entity_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let hash_actor_1 = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "completed"})),
+            "admin",
+            now,
+            None,
+        );
+
+        let hash_actor_2 = compute_chain_hash(
+            &entity_id,
+            ENTITY_TRANSACTION,
+            "status_update",
+            &Some(json!({"status": "pending"})),
+            &Some(json!({"status": "completed"})),
+            "user",
+            now,
+            None,
+        );
+
+        assert_ne!(hash_actor_1, hash_actor_2, "Different actor should produce different hash");
     }
 
     // Pre-existing flake fixed as a labeled aside: these four tests all

@@ -9,11 +9,24 @@ Versioning follows the policy described in [VERSIONING.md](./VERSIONING.md).
 
 ### Added
 
-- `pagination::auto_follow` and `Transactions::list_all`/`Settlements::list_all`:
-  a `Stream`-based auto-following pagination helper that transparently
-  fetches subsequent pages as the caller consumes items, removing the need
-  to hand-roll cursor-tracking loops. See `examples/transactions_list.rs
-  -- --stream` for a working example.
+- `ErrorCode` enum giving every code in `docs/error-catalog.md` a distinct,
+  matchable SDK variant (e.g. `ErrorCode::Transaction004` for
+  `ERR_TRANSACTION_004`), instead of consumers having to parse `message`
+  strings to distinguish failure modes. Unrecognized codes degrade to
+  `ErrorCode::Unknown(String)` rather than panicking. A new
+  `error_catalog_sync_test` fails the build if the catalog documents a code
+  with no matching variant.
+- `graphql_builder` module: a typed, fluent query builder for the
+  `transactions`/`transaction` and `settlements` GraphQL query shapes, so
+  common queries don't require hand-written query strings. See
+  `examples/graphql_query.rs`.
+
+### Changed
+
+- **Breaking:** `SynapseError::Api` gained a new `code: Option<ErrorCode>`
+  field. Existing `match`/`if let` patterns using `..` are unaffected;
+  exhaustive field patterns (`Api { status, message }` with no `..`) need to
+  add `..` or bind the new field.
 
 ### Fixed
 

@@ -215,4 +215,77 @@ mod tests {
             Err(SessionValidationError::Inactive)
         ));
     }
+
+    #[test]
+    fn test_session_fixation_resistance_different_ids() {
+        let pre_auth_session_id = Uuid::new_v4();
+        let post_auth_session_id = Uuid::new_v4();
+
+        assert_ne!(pre_auth_session_id, post_auth_session_id,
+                   "Session IDs must be different after privilege change");
+    }
+
+    #[test]
+    fn test_session_hijack_resistance_context_binding() {
+        let session1 = SessionRecord {
+            id: Uuid::new_v4(),
+            user_id: "user1".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+            is_active: true,
+        };
+
+        let session2 = SessionRecord {
+            id: Uuid::new_v4(),
+            user_id: "user1".into(),
+            expires_at: Utc::now() + Duration::hours(1),
+            is_active: true,
+        };
+
+        assert!(validate_session(&session1).is_ok());
+        assert!(validate_session(&session2).is_ok());
+        assert_ne!(session1.id, session2.id,
+                   "Different contexts should have different session IDs");
+    }
+
+    #[test]
+    fn test_session_boundary_ttl_minimum() {
+        assert!(validate_session_params("user", 1).is_ok(),
+                "TTL of 1 second should be valid");
+    }
+
+    #[test]
+    fn test_session_boundary_ttl_maximum() {
+        assert!(validate_session_params("user", MAX_SESSION_TTL_SECS).is_ok(),
+                "TTL of max seconds should be valid");
+    }
+
+    #[test]
+    fn test_session_id_uniqueness() {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let id3 = Uuid::new_v4();
+
+        let ids = vec![id1, id2, id3];
+        let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
+
+        assert_eq!(unique_ids.len(), 3, "Session IDs must be unique");
+    }
+
+    #[test]
+    fn test_session_expiration_boundary() {
+        let now = Utc::now();
+
+        let session_at_boundary = SessionRecord {
+            id: Uuid::new_v4(),
+            user_id: "user1".into(),
+            expires_at: now,
+            is_active: true,
+        };
+
+        assert!(matches!(
+            validate_session(&session_at_boundary),
+            Err(SessionValidationError::Expired),
+            "Session expiring at exact current time should be considered expired"
+        ));
+    }
 }

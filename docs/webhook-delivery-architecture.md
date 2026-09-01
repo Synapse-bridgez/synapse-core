@@ -75,6 +75,20 @@ See the runbook's "Webhook Delivery DLQ Review" section for the operational proc
 
 The exactly-once delivery guarantee (this document's "exactly-once enqueue per (endpoint, transaction, event)" plus the `FOR UPDATE SKIP LOCKED` claim, the DLQ `ON CONFLICT` dedup, and idempotent `replay_from_dlq`) is re-proven on every CI run by the harness in `tests/webhook_concurrent_delivery_test.rs`. It runs a set of duplicate-triggering scenarios (replica race, retry after transient fault, crashed-worker reclaim, double DLQ replay, overlapping processing cycle) against a real Postgres + Redis and a counting HTTP receiver, and asserts each logical event is acknowledged exactly once. See `docs/webhook-exactly-once-harness.md` for the scenario list and how to add one.
 
+## Testing a third-party receiver's idempotency handling
+
+`cli/synapse-cli/src/bin/mock-server.rs` has an opt-in, one-shot testing mode
+that sends a scripted sequence of duplicate/out-of-order webhook `POST`
+requests to a configured receiver URL, reusing the same duplicate/out-of-order
+scenario shape as the internal exactly-once harness above. It is **never**
+the default mock-server behavior — set
+`MOCK_SERVER_WEBHOOK_DUPLICATE_SCENARIO_RECEIVER=http://host:port/path` to run
+it. This is purely a client-side testing tool for integrators building a
+webhook receiver; it simulates a worst-case delivery pattern, not the normal
+in-order at-least-once guarantee this document describes. See the module doc
+comment at the top of that file, and `docs/idempotency.md` for the
+`X-Idempotency-Key` contract a correct receiver checks against.
+
 ## Known gaps
 
 - `replay_from_dlq()` exists but has no HTTP admin endpoint — today it's only callable from a Rust context (e.g. a one-off binary or REPL against the running pool). Adding an admin route is a reasonable follow-up, out of scope for this PR.

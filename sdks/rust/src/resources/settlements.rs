@@ -42,6 +42,7 @@ impl<'a> Settlements<'a> {
             Err(SynapseError::Api {
                 status: 404,
                 message,
+                ..
             }) => Err(SynapseError::NotFound(message)),
             other => other,
         }
@@ -129,6 +130,7 @@ impl<'a> Settlements<'a> {
             Err(SynapseError::Api {
                 status: 400,
                 message,
+                ..
             }) if message.contains("cursor") => Err(SynapseError::InvalidCursor(message)),
             other => other,
         }
