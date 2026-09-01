@@ -1,5 +1,6 @@
 use crate::error::{
-    map_status_to_error, parse_api_error, CatalogEntry, CatalogResponse, SynapseError,
+    build_api_error, map_status_to_error, parse_api_error, CatalogEntry, CatalogResponse,
+    SynapseError,
 };
 use crate::resources::admin::{
     AdminBulkStatus, AdminDlq, AdminLocks, AdminReconciliation, AdminSettlements,
@@ -318,10 +319,7 @@ impl SynapseClient {
                 let status = resp.status().as_u16();
                 if status >= 400 {
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Api {
-                        status,
-                        message: body,
-                    });
+                    return Err(build_api_error(status, body));
                 }
                 resp.bytes()
                     .await
@@ -374,7 +372,7 @@ impl SynapseClient {
             None
         };
         let message = description.unwrap_or(base_msg);
-        map_status_to_error(status, message)
+        map_status_to_error(status, message, code)
     }
 }
 
@@ -471,10 +469,7 @@ impl AdminSynapseClient {
                     return if status >= 500 {
                         Err(SynapseError::Http { status, body })
                     } else {
-                        Err(SynapseError::Api {
-                            status,
-                            message: body,
-                        })
+                        Err(build_api_error(status, body))
                     };
                 }
                 resp.json::<T>().await.map_err(SynapseError::Network)
@@ -512,10 +507,7 @@ impl AdminSynapseClient {
                     return if status >= 500 {
                         Err(SynapseError::Http { status, body })
                     } else {
-                        Err(SynapseError::Api {
-                            status,
-                            message: body,
-                        })
+                        Err(build_api_error(status, body))
                     };
                 }
                 resp.json::<T>().await.map_err(SynapseError::Network)
@@ -560,10 +552,7 @@ impl AdminSynapseClient {
                     return if status >= 500 {
                         Err(SynapseError::Http { status, body })
                     } else {
-                        Err(SynapseError::Api {
-                            status,
-                            message: body,
-                        })
+                        Err(build_api_error(status, body))
                     };
                 }
                 resp.json::<T>().await.map_err(SynapseError::Network)

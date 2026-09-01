@@ -1,4 +1,5 @@
 use crate::error::SynapseError;
+use futures_core::Stream;
 use std::future::Future;
 use std::marker::PhantomData;
 
@@ -78,6 +79,55 @@ where
             Err(e) => {
                 self.done = true;
                 Some(Err(e))
+            }
+        }
+    }
+}
+
+/// Turn a [`PageIter`]-style page-fetch closure into a `Stream` that yields
+/// individual items, transparently fetching the next page once the current
+/// page is exhausted and the caller keeps polling.
+///
+/// Only one page is ever buffered in memory. A page-fetch error is yielded
+/// as a single `Err` item and ends the stream, mirroring [`PageIter`]. Since
+/// `fetch` is expected to be backed by [`crate::client::SynapseClient`]
+/// (which already retries transient failures with backoff via
+/// [`crate::retry::retry_with_backoff`]), callers get rate-limit-aware
+/// pagination for free without adding a second retry layer here.
+///
+/// # Example
+///
+/// ```no_run
+/// # use synapse_sdk::pagination::auto_follow;
+/// # use synapse_sdk::error::SynapseError;
+/// # async fn example() -> Result<(), SynapseError> {
+/// let _stream = auto_follow(|cursor: Option<String>| async move {
+///     let items: Vec<String> = vec![];
+///     let next_cursor: Option<String> = None;
+///     Ok::<_, SynapseError>((items, next_cursor))
+/// });
+/// // Consume with any `Stream` combinator, e.g. `futures_util::StreamExt::next`.
+/// # Ok(())
+/// # }
+/// ```
+pub fn auto_follow<T, F, Fut>(fetch: F) -> impl Stream<Item = Result<T, SynapseError>>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<(Vec<T>, Option<String>), SynapseError>>,
+{
+    async_stream::stream! {
+        let mut iter = PageIter::new(fetch);
+        while let Some(page) = iter.next_page().await {
+            match page {
+                Ok(items) => {
+                    for item in items {
+                        yield Ok(item);
+                    }
+                }
+                Err(err) => {
+                    yield Err(err);
+                    break;
+                }
             }
         }
     }
@@ -168,6 +218,79 @@ mod tests {
         assert!(
             iter.next_page().await.is_none(),
             "iterator must stop after an error"
+        );
+    }
+
+    // ── auto_follow ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn auto_follow_yields_every_item_across_pages_in_order() {
+        use futures_util::StreamExt;
+
+        let pages = Arc::new(Mutex::new(vec![
+            (vec![1u32, 2], Some("c1".to_string())),
+            (vec![3u32, 4], Some("c2".to_string())),
+            (vec![5u32], None::<String>),
+        ]));
+
+        let stream = auto_follow(move |_cursor| {
+            let pages = pages.clone();
+            async move {
+                let entry = {
+                    let mut lock = pages.lock().unwrap();
+                    lock.remove(0)
+                };
+                Ok::<_, SynapseError>(entry)
+            }
+        });
+
+        let items: Vec<Result<u32, SynapseError>> = stream.collect().await;
+        let items: Vec<u32> = items.into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(items, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn auto_follow_terminates_cleanly_on_last_page() {
+        use futures_util::StreamExt;
+
+        let stream =
+            auto_follow(
+                |_cursor| async move { Ok::<_, SynapseError>((vec![1u32], None::<String>)) },
+            );
+
+        let items: Vec<Result<u32, SynapseError>> = stream.collect().await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(*items[0].as_ref().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_follow_propagates_error_mid_stream_and_stops() {
+        use futures_util::StreamExt;
+
+        let pages: Arc<Mutex<Vec<Result<(Vec<u32>, Option<String>), SynapseError>>>> =
+            Arc::new(Mutex::new(vec![
+                Ok((vec![1, 2], Some("c1".to_string()))),
+                Err(SynapseError::Http {
+                    status: 500,
+                    body: "boom".to_string(),
+                }),
+            ]));
+
+        let stream = auto_follow(move |_cursor| {
+            let pages = pages.clone();
+            async move {
+                let mut lock = pages.lock().unwrap();
+                lock.remove(0)
+            }
+        });
+
+        let items: Vec<Result<u32, SynapseError>> = stream.collect().await;
+        assert_eq!(items.len(), 3, "2 items from page 1, then 1 error item");
+        assert!(matches!(items[0], Ok(1)));
+        assert!(matches!(items[1], Ok(2)));
+        assert!(
+            matches!(items[2], Err(SynapseError::Http { status: 500, .. })),
+            "the error must be surfaced as the final stream item"
         );
     }
 }

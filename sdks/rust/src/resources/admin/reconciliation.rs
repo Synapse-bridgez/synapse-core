@@ -217,7 +217,7 @@ impl<'a> AdminReconciliation<'a> {
     ///             println!("✓ No discrepancies found");
     ///         }
     ///     }
-    ///     Err(SynapseError::Api { status: 400, message }) => {
+    ///     Err(SynapseError::Api { status: 400, message, .. }) => {
     ///         eprintln!("Invalid account or parameters: {}", message);
     ///     }
     ///     Err(e) => eprintln!("Reconciliation error: {}", e),

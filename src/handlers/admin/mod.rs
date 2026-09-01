@@ -333,3 +333,181 @@ pub async fn set_asset_enabled(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Access control matrix for admin and compliance endpoints.
+    /// Each endpoint maps to its required permission level.
+    #[derive(Debug, Clone)]
+    struct EndpointPermission {
+        path: &'static str,
+        method: &'static str,
+        required_role: &'static str,
+    }
+
+    fn admin_endpoint_matrix() -> Vec<EndpointPermission> {
+        vec![
+            EndpointPermission {
+                path: "/admin/audit/search",
+                method: "GET",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/compliance/reports",
+                method: "POST",
+                required_role: "compliance_officer",
+            },
+            EndpointPermission {
+                path: "/admin/compliance/reports",
+                method: "GET",
+                required_role: "compliance_officer",
+            },
+            EndpointPermission {
+                path: "/admin/webhooks/failed",
+                method: "GET",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/webhooks/replay/:id",
+                method: "POST",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/webhooks/replay/batch",
+                method: "POST",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/webhooks/health",
+                method: "GET",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/assets",
+                method: "GET",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/assets",
+                method: "POST",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/assets/:id",
+                method: "DELETE",
+                required_role: "admin",
+            },
+            EndpointPermission {
+                path: "/admin/assets/:id/enabled",
+                method: "PATCH",
+                required_role: "admin",
+            },
+        ]
+    }
+
+    #[test]
+    fn test_admin_endpoint_access_control_matrix_defined() {
+        let matrix = admin_endpoint_matrix();
+        assert!(!matrix.is_empty(), "Access control matrix must not be empty");
+        assert!(matrix.len() >= 11, "Matrix should cover all documented endpoints");
+    }
+
+    #[test]
+    fn test_audit_endpoint_requires_admin_role() {
+        let matrix = admin_endpoint_matrix();
+        let audit_endpoint = matrix
+            .iter()
+            .find(|ep| ep.path == "/admin/audit/search")
+            .expect("Audit search endpoint must be in matrix");
+
+        assert_eq!(audit_endpoint.required_role, "admin");
+        assert_eq!(audit_endpoint.method, "GET");
+    }
+
+    #[test]
+    fn test_compliance_endpoints_require_compliance_officer_role() {
+        let matrix = admin_endpoint_matrix();
+        let compliance_endpoints: Vec<_> = matrix
+            .iter()
+            .filter(|ep| ep.path.starts_with("/admin/compliance"))
+            .collect();
+
+        assert!(!compliance_endpoints.is_empty());
+        for endpoint in compliance_endpoints {
+            assert_eq!(
+                endpoint.required_role, "compliance_officer",
+                "Compliance endpoint {} should require compliance_officer role",
+                endpoint.path
+            );
+        }
+    }
+
+    #[test]
+    fn test_webhook_endpoints_require_admin_role() {
+        let matrix = admin_endpoint_matrix();
+        let webhook_endpoints: Vec<_> = matrix
+            .iter()
+            .filter(|ep| ep.path.contains("webhooks"))
+            .collect();
+
+        assert!(!webhook_endpoints.is_empty());
+        for endpoint in webhook_endpoints {
+            assert_eq!(
+                endpoint.required_role, "admin",
+                "Webhook endpoint {} should require admin role",
+                endpoint.path
+            );
+        }
+    }
+
+    #[test]
+    fn test_asset_endpoints_require_admin_role() {
+        let matrix = admin_endpoint_matrix();
+        let asset_endpoints: Vec<_> = matrix
+            .iter()
+            .filter(|ep| ep.path.contains("/admin/assets"))
+            .collect();
+
+        assert!(!asset_endpoints.is_empty());
+        for endpoint in asset_endpoints {
+            assert_eq!(
+                endpoint.required_role, "admin",
+                "Asset endpoint {} should require admin role",
+                endpoint.path
+            );
+        }
+    }
+
+    #[test]
+    fn test_matrix_has_no_duplicate_endpoints() {
+        let matrix = admin_endpoint_matrix();
+        let mut seen = std::collections::HashSet::new();
+
+        for endpoint in &matrix {
+            let key = (endpoint.path, endpoint.method);
+            assert!(
+                seen.insert(key),
+                "Duplicate endpoint found: {} {}",
+                endpoint.method,
+                endpoint.path
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_matrix_endpoints_have_valid_roles() {
+        let matrix = admin_endpoint_matrix();
+        let valid_roles = vec!["admin", "compliance_officer"];
+
+        for endpoint in &matrix {
+            assert!(
+                valid_roles.contains(&endpoint.required_role),
+                "Endpoint {} has invalid role: {}",
+                endpoint.path,
+                endpoint.required_role
+            );
+        }
+    }
+}

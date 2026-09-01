@@ -1,5 +1,26 @@
 # GET /admin/locks: What It Observes
 
+## CLI: age/expiry display and force-release
+
+`synapse admin locks list` now shows human-readable `age` (time since
+`acquired_at`) and `expires_in` (`ttl_secs` minus age) instead of raw
+timestamps, and flags any lock held at least `--suspicious-secs` (default
+900s) as `SUSPICIOUS` in the table — independent of, and typically tighter
+than, the server's own `overdue` flag (2x expected duration).
+
+`synapse admin locks force-release <resource> --yes` calls the new
+`POST /admin/locks/:resource/force-release` endpoint to release a lock
+regardless of its current owner — for a lock stuck after a crash. `--yes` is
+required; omitting it aborts the command without calling the API. The
+endpoint is idempotent: releasing a lock already gone (naturally expired or
+already released) returns `released: false` rather than an error. Since
+`LeaderElection` (the only live lock type — see below) stores its lease
+under the raw resource string with no prefix while `LockManager`-style locks
+use `lock:{resource}`, the server deletes both key shapes so force-release
+works regardless of which produced the entry. The action is logged via
+`tracing::warn!` (same convention as `TenantAdminCommands::RevokeSecret` —
+no dedicated DB audit-log entity exists for locks today).
+
 ## Current status
 
 `GET /admin/locks` reads `lock_manager::lock_registry().snapshot()` and

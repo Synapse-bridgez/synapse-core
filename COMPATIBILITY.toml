@@ -1,0 +1,16 @@
+# SDK/CLI/server API compatibility matrix — structured source of truth.
+#
+# `cargo xtask compat-matrix render` renders this into
+# docs/compatibility-matrix.md; `cargo xtask compat-matrix check` verifies
+# that rendered file is up to date. `cargo xtask release` fails the release
+# if no entry here matches the version being released (see
+# xtask/src/commands/release.rs / xtask/src/commands/compat.rs).
+#
+# Update this file (and re-render) as part of the release checklist whenever
+# `sdks/rust` or `cli/synapse-cli` cuts a new version.
+
+[[entry]]
+sdk_version = "0.1.0"
+cli_version = "0.1.0"
+api_versions = ["v1", "v2"]
+notes = "Initial tracked compatibility entry."

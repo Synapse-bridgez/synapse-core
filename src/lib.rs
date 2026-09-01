@@ -325,6 +325,10 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/locks",
             get(handlers::admin::locks::list_active_locks),
         )
+        .route(
+            "/admin/locks/:resource/force-release",
+            post(handlers::admin::locks::force_release_lock),
+        )
         // Admin: audit log search — fully implemented and unit-tested since
         // before this fix, but never mounted anywhere; see
         // docs/audit-compliance-admin-endpoints.md.

@@ -36,6 +36,13 @@ pub struct MissingTransaction {
     pub asset_code: String,
     pub memo: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Distributed trace ID (`transactions.trace_id`) this transaction was
+    /// created under, if any, so an operator can jump straight from a
+    /// reconciliation discrepancy to the originating webhook's trace.
+    /// `#[serde(default)]` keeps deserialization of reports stored before
+    /// this field existed working.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +62,9 @@ pub struct AmountMismatch {
     pub db_amount: String,
     pub chain_amount: String,
     pub memo: Option<String>,
+    /// See [`MissingTransaction::trace_id`].
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 /// A `failed` transaction whose memo matches an on-chain payment — evidence
@@ -67,6 +77,9 @@ pub struct LatePayment {
     pub failed_amount: String,
     pub chain_amount: String,
     pub memo: Option<String>,
+    /// See [`MissingTransaction::trace_id`].
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -77,6 +90,7 @@ struct DbTransaction {
     asset_code: String,
     memo: Option<String>,
     created_at: DateTime<Utc>,
+    trace_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -154,6 +168,7 @@ impl ReconciliationService {
                             db_amount: tx.amount.clone(),
                             chain_amount: payment.amount.clone(),
                             memo: Some(memo.clone()),
+                            trace_id: tx.trace_id.clone(),
                         });
                     }
                 } else {
@@ -165,6 +180,7 @@ impl ReconciliationService {
                         asset_code: tx.asset_code.clone(),
                         memo: tx.memo.clone(),
                         created_at: tx.created_at,
+                        trace_id: tx.trace_id.clone(),
                     });
                 }
             }
@@ -205,6 +221,7 @@ impl ReconciliationService {
                         failed_amount: tx.amount.clone(),
                         chain_amount: payment.amount.clone(),
                         memo: Some(memo.clone()),
+                        trace_id: tx.trace_id.clone(),
                     });
                 }
             }
@@ -240,33 +257,46 @@ impl ReconciliationService {
         end: DateTime<Utc>,
         status: &str,
     ) -> anyhow::Result<Vec<DbTransaction>> {
-        let rows =
-            sqlx::query_as::<_, (Uuid, String, String, String, Option<String>, DateTime<Utc>)>(
-                "SELECT id, stellar_account, amount::text, asset_code, memo, created_at
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                String,
+                String,
+                Option<String>,
+                DateTime<Utc>,
+                Option<String>,
+            ),
+        >(
+            "SELECT id, stellar_account, amount::text, asset_code, memo, created_at, trace_id
              FROM transactions
              WHERE stellar_account = $1
              AND created_at >= $2
              AND created_at <= $3
              AND status = $4
              ORDER BY created_at",
-            )
-            .bind(account)
-            .bind(start)
-            .bind(end)
-            .bind(status)
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .bind(account)
+        .bind(start)
+        .bind(end)
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .into_iter()
             .map(
-                |(id, stellar_account, amount, asset_code, memo, created_at)| DbTransaction {
-                    id,
-                    stellar_account,
-                    amount,
-                    asset_code,
-                    memo,
-                    created_at,
+                |(id, stellar_account, amount, asset_code, memo, created_at, trace_id)| {
+                    DbTransaction {
+                        id,
+                        stellar_account,
+                        amount,
+                        asset_code,
+                        memo,
+                        created_at,
+                        trace_id,
+                    }
                 },
             )
             .collect())
@@ -577,6 +607,7 @@ mod tests {
             asset_code: "USDC".to_string(),
             memo: Some("memo-xyz".to_string()),
             created_at: now,
+            trace_id: None,
         };
 
         assert_eq!(missing.id, id);
@@ -612,6 +643,7 @@ mod tests {
             db_amount: "100.00".to_string(),
             chain_amount: "99.99".to_string(),
             memo: Some("mismatch-memo".to_string()),
+            trace_id: None,
         };
 
         assert_eq!(mismatch.transaction_id, tx_id);
@@ -637,6 +669,7 @@ mod tests {
                 asset_code: "XLM".to_string(),
                 memo: Some("m1".to_string()),
                 created_at: start,
+                trace_id: None,
             }],
             orphaned_payments: vec![OrphanedPayment {
                 payment_id: "p1".to_string(),
@@ -653,6 +686,7 @@ mod tests {
                 failed_amount: "7.00".to_string(),
                 chain_amount: "7.00".to_string(),
                 memo: Some("m2".to_string()),
+                trace_id: None,
             }],
         };
 

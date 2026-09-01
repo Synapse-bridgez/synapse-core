@@ -15,13 +15,10 @@ rand = "0.8"
 url = "2"
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-wiremock = { version = "0.6", optional = true }
-
-[features]
-# Reusable mock-server test utilities for integrators building against this
-# SDK. See `src/testing.rs` for usage.
-testing-support = ["dep:wiremock"]
+futures-core = "0.3"
+async-stream = "0.3"
 
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"

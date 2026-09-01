@@ -7,21 +7,26 @@ Versioning follows the policy described in [VERSIONING.md](./VERSIONING.md).
 
 ## [Unreleased]
 
+### Added
+
+- `ErrorCode` enum giving every code in `docs/error-catalog.md` a distinct,
+  matchable SDK variant (e.g. `ErrorCode::Transaction004` for
+  `ERR_TRANSACTION_004`), instead of consumers having to parse `message`
+  strings to distinguish failure modes. Unrecognized codes degrade to
+  `ErrorCode::Unknown(String)` rather than panicking. A new
+  `error_catalog_sync_test` fails the build if the catalog documents a code
+  with no matching variant.
+- `graphql_builder` module: a typed, fluent query builder for the
+  `transactions`/`transaction` and `settlements` GraphQL query shapes, so
+  common queries don't require hand-written query strings. See
+  `examples/graphql_query.rs`.
+
 ### Changed
 
-- **Breaking:** `SynapseClient::post` and `AdminSynapseClient::post` no
-  longer auto-retry on transient failures (network errors, 5xx). Retrying a
-  mutating request whose response was lost could silently resend it as a
-  duplicate (e.g. a webhook replay delivered twice, a reconciliation run
-  started twice). If your application relied on the previous auto-retry
-  behavior for POST, wrap the call in your own retry loop with an
-  idempotency key. GET requests are unaffected and continue to retry as
-  before.
-- The retry layer now honors a server-sent `Retry-After` header (seconds)
-  on transient responses, using it instead of client-side jitter when
-  present.
-- `SynapseError::RateLimited` now carries the 429 response body message
-  (previously discarded) as `RateLimited(String)`.
+- **Breaking:** `SynapseError::Api` gained a new `code: Option<ErrorCode>`
+  field. Existing `match`/`if let` patterns using `..` are unaffected;
+  exhaustive field patterns (`Api { status, message }` with no `..`) need to
+  add `..` or bind the new field.
 
 ### Fixed
 

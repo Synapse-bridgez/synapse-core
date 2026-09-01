@@ -24,14 +24,13 @@
 //! | `transaction_processor_completion_conflict_prevented_total` | Counter | CompleteStage writes that lost a row-lock race |
 //! | `transaction_processor_stage_executions_total` | Counter | Stage executions, labeled by stage (verifies rollout-percentage gating in prod) |
 //! | `webhook_delivery_total`          | Counter    | Webhook delivery attempts, labeled by outcome and endpoint_id |
-//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type |
+//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type (includes half-open probe_succeeded/probe_failed/flapping_detected) |
+//! | `webhook_circuit_breaker_half_open_duration_ms` | Histogram | Time spent in half-open state per probe |
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
-//! | `ws_drain_connections_open_at_start` | Histogram | WebSocket connections still open when a drain began |
-//! | `ws_drain_duration_ms`             | Histogram  | Wall-clock time from drain start to process exit    |
-//! | `ws_drain_connections_closed_total` | Counter   | WebSocket connections closed during drain, labeled by `outcome` (`clean`/`forced`) |
-//! | `compliance_export_events_total`  | Counter    | Compliance-classified report exports, labeled by `report_type` — distinct from routine `admin_*_report_requests_total` |
+//! | `readiness_initialization_duration_ms` | Histogram | Time spent in `run_initialization_checks`, labeled by outcome (ready/failed) |
+//! | `settlement_transactions_total`   | Counter    | Transactions settled via settle_asset, labeled by asset_code |
 //!
 //! ## Configuration
 //!
@@ -207,53 +206,19 @@ pub fn reconciliation_duplicate_report_prevented_total() -> Counter<u64> {
         .init()
 }
 
-/// Number of WebSocket connections still open at the moment a drain
-/// (`POST /admin/drain`) began. A single observation is recorded per drain.
-pub fn ws_drain_connections_open_at_start() -> Histogram<f64> {
+/// Duration of `ReadinessState::run_initialization_checks`, labeled by
+/// outcome (`ready` or `failed`). A rising trend on the `ready` outcome
+/// indicates startup dependencies (DB/Redis/Horizon) are slow but still
+/// progressing; a run that never reports at all indicates a stuck/hung
+/// check, distinguishable from "slow" by its absence rather than a large
+/// value. Label cardinality is bounded to the two known outcome values.
+pub fn readiness_initialization_duration_ms() -> Histogram<f64> {
     meter()
-        .f64_histogram("ws_drain_connections_open_at_start")
-        .with_description("WebSocket connections still open when a drain began")
-        .init()
-}
-
-/// Wall-clock duration of a drain, from `start_drain` to process exit, in
-/// milliseconds.
-pub fn ws_drain_duration_ms() -> Histogram<f64> {
-    meter()
-        .f64_histogram("ws_drain_duration_ms")
-        .with_description("Time from drain start to process exit")
+        .f64_histogram("readiness_initialization_duration_ms")
+        .with_description(
+            "Time spent in run_initialization_checks, labeled by outcome (ready/failed)",
+        )
         .with_unit(Unit::new("ms"))
-        .init()
-}
-
-/// WebSocket connections closed during a drain, labeled by `outcome`:
-/// `"clean"` (closed itself in response to the drain signal before the
-/// deadline) or `"forced"` (still open when the drain timeout elapsed and
-/// the process exited anyway). A `forced` count above zero on a routine
-/// deployment indicates connections are not draining within the configured
-/// window and is worth alerting on.
-pub fn ws_drain_connections_closed_total() -> Counter<u64> {
-    meter()
-        .u64_counter("ws_drain_connections_closed_total")
-        .with_description(
-            "WebSocket connections closed during drain, labeled by outcome \
-             (clean = closed before the deadline, forced = still open when \
-             the drain timeout elapsed)",
-        )
-        .init()
-}
-
-/// Compliance-classified report export events, labeled by `report_type`
-/// (e.g. `"compliance_report"`, `"reconciliation_report"`). Distinct from
-/// the routine `admin_*_report_requests_total` counters so a compliance
-/// export is never conflated with a routine one in dashboards or alerts.
-pub fn compliance_export_events_total() -> Counter<u64> {
-    meter()
-        .u64_counter("compliance_export_events_total")
-        .with_description(
-            "Compliance-classified report exports, labeled by report_type, \
-             kept distinct from routine export telemetry",
-        )
         .init()
 }
 
@@ -358,11 +323,29 @@ pub fn webhook_delivery_total() -> Counter<u64> {
 }
 
 /// Circuit breaker state-transition counter, labeled by `transition`
-/// ("opened" | "closed" | "probe_sent" | "probe_blocked").
+/// ("opened" | "closed" | "probe_sent" | "probe_blocked" |
+/// "probe_succeeded" | "probe_failed" | "flapping_detected"). The last three
+/// are half-open-specific: `probe_succeeded`/`probe_failed` record the
+/// outcome of the single delivery let through during a half-open probe, and
+/// `flapping_detected` fires when probe failures repeat within the
+/// configurable flap-detection window (see `WEBHOOK_CB_FLAP_THRESHOLD` /
+/// `WEBHOOK_CB_FLAP_WINDOW_SECS` in `webhook_dispatcher`), signaling a
+/// breaker that keeps bouncing between half-open and open rather than
+/// recovering.
 pub fn webhook_circuit_breaker_transitions_total() -> Counter<u64> {
     meter()
         .u64_counter("webhook_circuit_breaker_transitions_total")
         .with_description("Webhook circuit breaker state transitions, labeled by transition type")
+        .init()
+}
+
+/// Time a half-open probe delivery took to resolve (success or failure),
+/// i.e. time spent in the half-open state for that probe.
+pub fn webhook_circuit_breaker_half_open_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("webhook_circuit_breaker_half_open_duration_ms")
+        .with_description("Time spent in half-open state per circuit breaker probe, in ms")
+        .with_unit(Unit::new("ms"))
         .init()
 }
 
@@ -386,12 +369,63 @@ pub fn pending_queue_depth() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Registers the observable gauges reporting each resource category's
+/// current active-task count and configured limit
+/// (`src/services/resource_limits.rs::resource_category_snapshots`), labeled
+/// by `category`. Call once at startup; the returned gauges must be kept
+/// alive for as long as their callbacks should keep reporting (dropping them
+/// stops the observation).
+///
+/// Reads the already-tracked semaphore permit counts on the export path
+/// only — no additional lock is taken on the task-execution hot path.
+pub fn register_resource_limiter_gauges() -> (ObservableGauge<u64>, ObservableGauge<u64>) {
+    let active_gauge = meter()
+        .u64_observable_gauge("resource_limiter_active_tasks")
+        .with_description("Current active-task count per resource category")
+        .with_callback(|observer| {
+            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
+                observer.observe(
+                    snapshot.active as u64,
+                    &[KeyValue::new("category", snapshot.category)],
+                );
+            }
+        })
+        .init();
+
+    let limit_gauge = meter()
+        .u64_observable_gauge("resource_limiter_limit")
+        .with_description("Configured concurrency limit per resource category")
+        .with_callback(|observer| {
+            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
+                observer.observe(
+                    snapshot.limit as u64,
+                    &[KeyValue::new("category", snapshot.category)],
+                );
+            }
+        })
+        .init();
+
+    (active_gauge, limit_gauge)
+}
+
 /// Settlement operation duration histogram (milliseconds).
 pub fn settlement_duration_ms() -> Histogram<f64> {
     meter()
         .f64_histogram("settlement_duration_ms")
         .with_description("Settlement operation latency in milliseconds")
         .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Total transactions settled, labeled by `asset_code` (bounded — see
+/// `docs/metrics-cardinality-convention.md`). Deliberately a counter added
+/// by batch size rather than a per-call label: a raw per-call transaction
+/// count used as a label value (as opposed to the metric's numeric value)
+/// creates one time series per distinct count seen, which is unbounded.
+pub fn settlement_transactions_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_transactions_total")
+        .with_description("Total transactions settled via settle_asset, labeled by asset_code")
         .init()
 }
 

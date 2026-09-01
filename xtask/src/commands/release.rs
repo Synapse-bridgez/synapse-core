@@ -1,3 +1,4 @@
+use super::compat;
 use super::run_cmd;
 use clap::Args;
 use std::process::Command;
@@ -31,6 +32,7 @@ pub fn run(args: ReleaseArgs) -> anyhow::Result<()> {
     println!("==> synapse-core release v{version}");
 
     ensure_clean_tree()?;
+    compat::ensure_matrix_has_entry_for(version)?;
 
     if !args.skip_tests {
         println!("\n-- Running tests before release --");

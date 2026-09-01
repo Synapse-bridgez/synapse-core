@@ -1,7 +1,9 @@
-use crate::client::ApiClient;
+use crate::client::{AdminClient, ApiClient};
 use crate::formatter::{print, print_one, OutputFormat, TableDisplay};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde::Serialize;
+use std::io::Read;
 pub use synapse_sdk::models::{Settlement, SettlementList};
 use uuid::Uuid;
 
@@ -67,6 +69,10 @@ pub enum SettlementsSubcommand {
         /// Print output as JSON instead of a table
         #[arg(long)]
         json: bool,
+
+        /// Output format: table (default), json, or csv. Overridden by --json.
+        #[arg(long, default_value = "table")]
+        format: String,
     },
 
     /// Get a specific settlement by ID.
@@ -84,7 +90,130 @@ pub enum SettlementsSubcommand {
         /// Print output as JSON instead of a key-value table
         #[arg(long)]
         json: bool,
+
+        /// Output format: table (default), json, or csv. Overridden by --json.
+        #[arg(long, default_value = "table")]
+        format: String,
     },
+
+    /// Run a batch operation over a list of settlement IDs.
+    ///
+    /// Reads one settlement ID per line from --file, or from stdin when
+    /// --file is omitted. Blank lines are ignored. Each ID is processed
+    /// independently: one invalid or failing ID does not abort the batch,
+    /// and the outcome of every ID is reported individually.
+    ///
+    /// Examples:
+    ///   synapse settlements batch --file ids.txt
+    ///   cat ids.txt | synapse settlements batch --operation retry
+    Batch {
+        /// Path to a file with one settlement ID per line (defaults to stdin).
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Batch operation to run: "status-check" (default) or "retry".
+        #[arg(long, default_value = "status-check")]
+        operation: String,
+
+        /// Print output as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+
+        /// Output format: table (default), json, or csv. Overridden by --json.
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
+}
+
+// ── Batch operations ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct BatchResult {
+    id: String,
+    success: bool,
+    message: String,
+}
+
+impl TableDisplay for BatchResult {
+    fn headers() -> Vec<&'static str> {
+        vec!["ID", "SUCCESS", "MESSAGE"]
+    }
+
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.success.to_string(),
+            self.message.clone(),
+        ]
+    }
+}
+
+fn read_ids(file: Option<&str>) -> Result<Vec<String>> {
+    let contents = match file {
+        Some(path) => std::fs::read_to_string(path)?,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin().lock().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+async fn run_batch(
+    ids: Vec<String>,
+    operation: &str,
+    base_url: &str,
+    api_key: &str,
+) -> Vec<BatchResult> {
+    let client = ApiClient::new(base_url, api_key);
+    let admin_client = AdminClient::new(base_url, api_key);
+    let mut results = Vec::with_capacity(ids.len());
+
+    for raw_id in ids {
+        let Ok(settlement_id) = raw_id.parse::<Uuid>() else {
+            results.push(BatchResult {
+                id: raw_id,
+                success: false,
+                message: "invalid settlement ID: not a valid UUID".to_string(),
+            });
+            continue;
+        };
+
+        let outcome = match operation {
+            "retry" => admin_client
+                .patch_json::<Settlement, _>(
+                    &format!("/admin/settlements/{settlement_id}/status"),
+                    &serde_json::json!({ "status": "pending", "actor": "cli-batch" }),
+                )
+                .await
+                .map(|s| format!("retried, status is now '{}'", s.status)),
+            _ => client
+                .get::<Settlement>(&format!("/settlements/{settlement_id}"))
+                .await
+                .map(|s| format!("status: {}", s.status)),
+        };
+
+        results.push(match outcome {
+            Ok(message) => BatchResult {
+                id: settlement_id.to_string(),
+                success: true,
+                message,
+            },
+            Err(err) => BatchResult {
+                id: settlement_id.to_string(),
+                success: false,
+                message: err.to_string(),
+            },
+        });
+    }
+
+    results
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
@@ -98,6 +227,7 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
             limit,
             direction,
             json,
+            format,
         } => {
             let limit_str = limit.to_string();
             let mut params: Vec<(&str, &str)> =
@@ -114,7 +244,7 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
             let fmt = if json {
                 OutputFormat::Json
             } else {
-                OutputFormat::Table
+                OutputFormat::from_format_str(&format)
             };
 
             if fmt == OutputFormat::Json {
@@ -140,6 +270,7 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
         SettlementsSubcommand::Get {
             settlement_id,
             json,
+            format,
         } => {
             let path = format!("/settlements/{}", settlement_id);
             let settlement: Settlement = client.get(&path).await?;
@@ -147,9 +278,37 @@ pub async fn run(cmd: SettlementsSubcommand, base_url: &str, api_key: &str) -> R
             let fmt = if json {
                 OutputFormat::Json
             } else {
-                OutputFormat::Table
+                OutputFormat::from_format_str(&format)
             };
             print_one(&settlement, fmt);
+        }
+
+        SettlementsSubcommand::Batch {
+            file,
+            operation,
+            json,
+            format,
+        } => {
+            let ids = read_ids(file.as_deref())?;
+            let results = run_batch(ids, &operation, base_url, api_key).await;
+
+            let fmt = if json {
+                OutputFormat::Json
+            } else {
+                OutputFormat::from_format_str(&format)
+            };
+
+            if fmt != OutputFormat::Json {
+                let succeeded = results.iter().filter(|r| r.success).count();
+                println!(
+                    "Batch '{}': {} succeeded, {} failed",
+                    operation,
+                    succeeded,
+                    results.len() - succeeded
+                );
+                println!();
+            }
+            print(&results, fmt);
         }
     }
 
