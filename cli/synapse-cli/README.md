@@ -218,7 +218,7 @@ synapse settlements list [OPTIONS]
 - `--cursor <CURSOR>`: Pagination cursor from a previous response. Cursors are opaque - always use the value from `next_cursor` in the API response.
 - `--limit <LIMIT>`: Results per page (1-100, default: 10). Larger limits retrieve more data in fewer requests.
 - `--direction <DIRECTION>`: Order direction - `forward` (default, newest first) or `backward` (oldest first)
-- `--format <FORMAT>`: Output format - `table` (default, human-readable) or `json` (complete JSON)
+- `--format <FORMAT>`: Output format - `table` (default, human-readable), `json` (complete JSON), or `csv` (comma-separated, RFC 4180 quoting)
 
 **Sample Table Output:**
 ```
@@ -287,7 +287,7 @@ synapse settlements get <SETTLEMENT_ID> [OPTIONS]
 - `SETTLEMENT_ID`: The settlement UUID (format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
 
 **Options (optional):**
-- `--format <FORMAT>`: Output format - `table` (default, key-value pairs) or `json` (complete JSON)
+- `--format <FORMAT>`: Output format - `table` (default, key-value pairs), `json` (complete JSON), or `csv` (single-row CSV, RFC 4180 quoting)
 
 **Sample Table Output:**
 ```
@@ -332,6 +332,56 @@ Combine with jq for selective JSON fields:
 synapse settlements get 550e8400-e29b-41d4-a716-446655440000 --format json | jq '.status, .amount, .asset_code'
 ```
 
+### `settlements batch`
+
+Run a status-check or retry operation over a list of settlement IDs, without scripting repeated single-item invocations.
+
+```bash
+synapse settlements batch [OPTIONS]
+```
+
+**Options (optional):**
+- `--file <PATH>`: File containing one settlement ID per line. Omit to read IDs from stdin.
+- `--operation <OP>`: `status-check` (default, fetches current status) or `retry` (re-submits the settlement as `pending` via the admin API).
+- `--json`: Print results as a JSON array instead of a table.
+
+**Input format:** one settlement UUID per line; blank lines are ignored. An invalid UUID is reported as a per-item failure rather than aborting the batch.
+
+**Examples:**
+
+Check status for a list of settlement IDs from a file:
+```bash
+synapse settlements batch --file ids.txt
+```
+
+Retry a list of settlement IDs piped from stdin:
+```bash
+cat ids.txt | synapse settlements batch --operation retry
+```
+
+The command always exits `0` once every ID has been attempted; check the per-row `success` field (or the printed summary line) to detect failures.
+
+### `events watch`
+
+Stream real-time transaction status events from the server over a WebSocket connection.
+
+```bash
+synapse events watch --token <TOKEN> [OPTIONS]
+```
+
+**Options:**
+- `--token <TOKEN>`: API token forwarded as the WebSocket `?token=` query parameter. Falls back to the `SYNAPSE_API_KEY` environment variable.
+- `--format <FORMAT>`: Output format for each event — `table` (default) or `json`.
+
+**Reconnect behavior:** if the connection drops for any reason other than an explicit server-initiated close (network blip, handshake failure, extended server outage), `events watch` automatically reconnects instead of exiting. Each retry waits with exponential backoff and jitter — the same delay calculation `synapse_sdk::retry::retry_with_backoff` uses for HTTP requests, capped at 10 seconds — so a prolonged outage doesn't cause the client to hammer a degraded server. The delay resets to its base value once a connection has stayed up for 30+ seconds, so a brief blip after a long healthy run doesn't inherit a stale, long wait.
+
+Connection state changes are printed to stderr (never stdout, so they never corrupt the event stream in `--format json` mode):
+- `connected` — a WebSocket session is established and events are flowing.
+- `reconnecting` — the connection dropped; waiting on the backoff timer before the next attempt.
+- `resyncing` — a new connection just succeeded after a prior disconnect; events missed while disconnected are not replayed, so downstream consumers should treat this as a possible gap.
+
+The command exits `0` only when the server sends an explicit Close frame, or on Ctrl-C — it does not exit on a bare disconnect.
+
 ## Output Formats
 
 ### Table Format (default)
@@ -339,6 +389,11 @@ Human-readable output with columns for lists and key-value pairs for objects.
 
 ### JSON Format
 Full JSON output with all fields, useful for scripting and integration.
+
+### CSV Format
+Comma-separated output (`--format csv`) for spreadsheets and data pipelines. Fields containing a comma, double quote, or newline are quoted per RFC 4180, with internal quotes doubled. Supported wherever `--format` is accepted, including `settlements list`/`get`/`batch`, `transactions export`, `events export`/`watch`, and `graphql query`.
+
+**Adding a new output format:** every command renders through `formatter::OutputFormat` and the shared `formatter::print`/`print_one` (list/get-style commands) or `Formatter::format_json_output`/`format_bytes_output` (raw-response commands) dispatch functions in `cli/synapse-cli/src/formatter.rs`. To add a format, add a variant to `OutputFormat`, a branch in `OutputFormat::from_format_str`, and a rendering branch in each of those dispatch functions — no per-command changes are needed beyond that.
 
 ## Testing
 

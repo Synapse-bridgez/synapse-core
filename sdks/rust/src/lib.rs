@@ -22,4 +22,4 @@ pub use graphql_builder::{
     TransactionQueryFilter,
 };
 pub use models::*;
-pub use pagination::PageIter;
+pub use pagination::{auto_follow, PageIter};

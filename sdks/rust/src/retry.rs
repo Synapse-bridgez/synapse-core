@@ -6,7 +6,22 @@ use std::time::Duration;
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_BASE_DELAY_MS: u64 = 200;
 
-const MAX_DELAY_MS: u64 = 10_000;
+/// Upper bound on any single backoff delay computed by this module.
+pub const MAX_DELAY_MS: u64 = 10_000;
+
+/// Compute the next decorrelated-jitter backoff delay, in milliseconds,
+/// given the previous delay and the configured base delay: a value drawn
+/// from `[base_delay_ms, prev_delay_ms * 3]`, capped at [`MAX_DELAY_MS`].
+///
+/// This is the exact delay calculation [`retry_with_backoff`] uses between
+/// attempts, extracted so other reconnect-style loops (e.g. a long-lived
+/// WebSocket client) can announce/observe each backoff step instead of
+/// re-implementing a second, divergent backoff algorithm.
+pub fn next_backoff_delay_ms(prev_delay_ms: u64, base_delay_ms: u64) -> u64 {
+    let upper = prev_delay_ms.saturating_mul(3).max(base_delay_ms);
+    let d = rand::thread_rng().gen_range(base_delay_ms..=upper);
+    d.min(MAX_DELAY_MS)
+}
 
 /// Retry a fallible async operation with exponential backoff and decorrelated jitter.
 ///
@@ -32,11 +47,7 @@ where
             Ok(v) => return Ok(v),
             Err(e) if attempt + 1 < max_attempts && e.is_transient() => {
                 attempt += 1;
-                let delay_ms = {
-                    let upper = prev_delay_ms.saturating_mul(3).max(base_delay_ms);
-                    let d = rand::thread_rng().gen_range(base_delay_ms..=upper);
-                    d.min(MAX_DELAY_MS)
-                };
+                let delay_ms = next_backoff_delay_ms(prev_delay_ms, base_delay_ms);
                 prev_delay_ms = delay_ms;
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
@@ -132,5 +143,41 @@ mod tests {
             3,
             "should try exactly max_attempts times"
         );
+    }
+
+    // ── next_backoff_delay_ms ────────────────────────────────────────────
+
+    /// Simulated extended outage: many consecutive backoff steps must never
+    /// fall below the base delay or exceed the cap, and the delay must
+    /// eventually reach the cap rather than growing unbounded.
+    #[test]
+    fn next_backoff_delay_grows_then_caps_over_an_extended_outage() {
+        let base_delay_ms = 200;
+        let mut prev_delay_ms = base_delay_ms;
+        let mut reached_cap = false;
+
+        for _ in 0..50 {
+            let delay_ms = next_backoff_delay_ms(prev_delay_ms, base_delay_ms);
+            assert!(
+                delay_ms >= base_delay_ms,
+                "delay must never fall below the base delay"
+            );
+            assert!(delay_ms <= MAX_DELAY_MS, "delay must never exceed the cap");
+            reached_cap |= delay_ms == MAX_DELAY_MS;
+            prev_delay_ms = delay_ms;
+        }
+
+        assert!(
+            reached_cap,
+            "an extended outage must eventually saturate at MAX_DELAY_MS"
+        );
+    }
+
+    #[test]
+    fn next_backoff_delay_first_step_is_at_least_base_delay() {
+        let base_delay_ms = 200;
+        let delay_ms = next_backoff_delay_ms(base_delay_ms, base_delay_ms);
+        assert!(delay_ms >= base_delay_ms);
+        assert!(delay_ms <= base_delay_ms * 3);
     }
 }
