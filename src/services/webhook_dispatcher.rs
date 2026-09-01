@@ -12,7 +12,7 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 const MAX_ATTEMPTS: i32 = 5;
@@ -46,6 +46,26 @@ return {current, healed}
 /// that a crashed probe holder doesn't wedge the breaker in "no one may
 /// probe" for long.
 const CB_PROBE_LEASE_MS: i64 = 30_000;
+
+/// Number of half-open probe failures within `cb_flap_window_secs()` that
+/// constitutes "flapping" for alerting purposes. What counts as flapping is
+/// deployment/traffic-pattern dependent, so it's tunable via
+/// `WEBHOOK_CB_FLAP_THRESHOLD` rather than a fixed constant.
+fn cb_flap_threshold() -> i32 {
+    std::env::var("WEBHOOK_CB_FLAP_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
+
+/// Sliding window, in seconds, over which half-open probe failures are
+/// counted for flapping detection. Tunable via `WEBHOOK_CB_FLAP_WINDOW_SECS`.
+fn cb_flap_window_secs() -> i64 {
+    std::env::var("WEBHOOK_CB_FLAP_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600)
+}
 
 /// Result of checking an endpoint's circuit breaker state.
 #[derive(Debug, PartialEq, Eq)]
@@ -238,6 +258,12 @@ impl WebhookDispatcher {
         let endpoint_map: HashMap<Uuid, WebhookEndpoint> =
             endpoints.into_iter().map(|ep| (ep.id, ep)).collect();
 
+        // Endpoints whose one surviving delivery this cycle is the
+        // half-open probe — tracked so the outcome can be attributed to the
+        // probe specifically (half-open metrics/flapping detection) rather
+        // than folded into the generic success/failure counters.
+        let mut probe_endpoints: HashSet<Uuid> = HashSet::new();
+
         for ep_id in &endpoint_ids {
             if !endpoint_map.contains_key(ep_id) {
                 continue;
@@ -268,12 +294,20 @@ impl WebhookDispatcher {
                             self.reschedule_after_breaker_block(ep_id, &rest).await?;
                         }
                     }
+                    probe_endpoints.insert(*ep_id);
                 }
             }
         }
 
-        // Flatten remaining (non-blocked) deliveries
-        let remaining: Vec<WebhookDelivery> = by_endpoint.into_values().flatten().collect();
+        // Flatten remaining (non-blocked) deliveries, tagging each with
+        // whether it's the half-open probe for its endpoint.
+        let remaining: Vec<(WebhookDelivery, bool)> = by_endpoint
+            .into_iter()
+            .flat_map(|(ep_id, deliveries)| {
+                let is_probe = probe_endpoints.contains(&ep_id);
+                deliveries.into_iter().map(move |d| (d, is_probe))
+            })
+            .collect();
 
         if remaining.is_empty() {
             return Ok(());
@@ -286,13 +320,13 @@ impl WebhookDispatcher {
         );
 
         stream::iter(remaining)
-            .map(|delivery| {
+            .map(|(delivery, is_probe)| {
                 let dispatcher = self.clone();
                 let endpoint_map = endpoint_map.clone();
                 async move {
                     let start = std::time::Instant::now();
                     if let Err(e) = dispatcher
-                        .attempt_delivery_with_endpoint(&delivery, &endpoint_map)
+                        .attempt_delivery_with_endpoint(&delivery, &endpoint_map, is_probe)
                         .await
                     {
                         tracing::error!(
@@ -356,6 +390,7 @@ impl WebhookDispatcher {
         &self,
         delivery: &WebhookDelivery,
         endpoint_map: &HashMap<Uuid, WebhookEndpoint>,
+        is_probe: bool,
     ) -> anyhow::Result<()> {
         // Check rate limit first
         if !self
@@ -408,6 +443,10 @@ impl WebhookDispatcher {
         let result = self.send_webhook(delivery, endpoint).await;
         crate::metrics::webhook_delivery_duration_ms()
             .record(started.elapsed().as_secs_f64() * 1000.0, &[]);
+        if is_probe {
+            crate::metrics::webhook_circuit_breaker_half_open_duration_ms()
+                .record(started.elapsed().as_secs_f64() * 1000.0, &[]);
+        }
 
         let outcome = if matches!(result, Ok(true)) {
             "success"
@@ -428,10 +467,14 @@ impl WebhookDispatcher {
         // failure that must trip the breaker, previously it didn't).
         match &result {
             Ok(true) => {
-                let _ = self.circuit_breaker_succeeded(&delivery.endpoint_id).await;
+                let _ = self
+                    .circuit_breaker_succeeded(&delivery.endpoint_id, is_probe)
+                    .await;
             }
             Ok(false) => {
-                let _ = self.circuit_breaker_failed(&delivery.endpoint_id).await;
+                let _ = self
+                    .circuit_breaker_failed(&delivery.endpoint_id, is_probe)
+                    .await;
             }
             Err(_) => {
                 // A genuine Rust/DB-level error while recording the attempt
@@ -867,7 +910,11 @@ impl WebhookDispatcher {
     /// Record a successful delivery — reset the circuit breaker and release
     /// the probe lease so a future trip can probe again immediately rather
     /// than waiting out a stale lease.
-    async fn circuit_breaker_succeeded(&self, endpoint_id: &Uuid) -> anyhow::Result<()> {
+    async fn circuit_breaker_succeeded(
+        &self,
+        endpoint_id: &Uuid,
+        is_probe: bool,
+    ) -> anyhow::Result<()> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = format!("webhook_cb:{endpoint_id}");
         let probe_key = format!("webhook_cb_probe:{endpoint_id}");
@@ -880,11 +927,32 @@ impl WebhookDispatcher {
             crate::metrics::webhook_circuit_breaker_transitions_total()
                 .add(1, &[opentelemetry::KeyValue::new("transition", "closed")]);
         }
+        if is_probe {
+            crate::metrics::webhook_circuit_breaker_transitions_total().add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "transition",
+                    "probe_succeeded",
+                )],
+            );
+            // Recovery: a successful probe breaks any in-progress flapping
+            // window for this endpoint.
+            let flap_key = format!("webhook_cb_flap:{endpoint_id}");
+            let _: i32 = redis::cmd("DEL")
+                .arg(&flap_key)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(0);
+        }
         Ok(())
     }
 
     /// Record a failed delivery — may trip the circuit breaker open.
-    async fn circuit_breaker_failed(&self, endpoint_id: &Uuid) -> anyhow::Result<()> {
+    async fn circuit_breaker_failed(
+        &self,
+        endpoint_id: &Uuid,
+        is_probe: bool,
+    ) -> anyhow::Result<()> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = format!("webhook_cb:{endpoint_id}");
 
@@ -923,6 +991,47 @@ impl WebhookDispatcher {
         if new_state == "open" {
             crate::metrics::webhook_circuit_breaker_transitions_total()
                 .add(1, &[opentelemetry::KeyValue::new("transition", "opened")]);
+        }
+
+        if is_probe {
+            crate::metrics::webhook_circuit_breaker_transitions_total()
+                .add(1, &[opentelemetry::KeyValue::new("transition", "probe_failed")]);
+            self.record_half_open_flap(endpoint_id).await?;
+        }
+
+        Ok(())
+    }
+
+    /// A half-open probe just failed, re-opening the breaker. Count probe
+    /// failures for this endpoint within a sliding window (self-healing
+    /// INCR+EXPIRE, same pattern as `check_rate_limit`'s script) and emit an
+    /// alertable "flapping" signal once they exceed the tunable threshold —
+    /// a breaker that keeps bouncing between half-open and open is a
+    /// distinct, worse condition than one that opens once and stays open.
+    async fn record_half_open_flap(&self, endpoint_id: &Uuid) -> anyhow::Result<()> {
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let flap_key = format!("webhook_cb_flap:{endpoint_id}");
+        let (flap_count, _healed): (i32, i32) = Script::new(RATE_LIMIT_INCREMENT_SCRIPT)
+            .key(&flap_key)
+            .arg(cb_flap_window_secs())
+            .invoke_async(&mut conn)
+            .await?;
+
+        if flap_count >= cb_flap_threshold() {
+            crate::metrics::webhook_circuit_breaker_transitions_total().add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "transition",
+                    "flapping_detected",
+                )],
+            );
+            tracing::warn!(
+                endpoint_id = %endpoint_id,
+                flap_count,
+                window_secs = cb_flap_window_secs(),
+                "Webhook circuit breaker flapping: repeated half-open probe failures \
+                 within the detection window, endpoint likely still unhealthy"
+            );
         }
 
         Ok(())

@@ -36,6 +36,10 @@ enum Commands {
     ///
     /// Requires a clean git working tree and the VERSION env var or --version flag.
     Release(commands::release::ReleaseArgs),
+
+    /// Render or check the SDK/CLI/API compatibility matrix
+    /// (COMPATIBILITY.toml -> docs/compatibility-matrix.md).
+    CompatMatrix(commands::compat::CompatMatrixArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -46,5 +50,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Test(args) => commands::test::run(args),
         Commands::Lint(args) => commands::lint::run(args),
         Commands::Release(args) => commands::release::run(args),
+        Commands::CompatMatrix(args) => commands::compat::run(args),
     }
 }
