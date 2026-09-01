@@ -71,6 +71,42 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Log a status change, additionally recording the distributed trace ID
+    /// (`transactions.trace_id`, propagated from the inbound webhook that
+    /// created the transaction) that this status change belongs to.
+    ///
+    /// Additive sibling of [`AuditLog::log_status_change`] rather than a
+    /// change to its signature, so the many audit call sites unrelated to
+    /// the webhook-to-reconciliation pipeline are unaffected. Use this at
+    /// pipeline touchpoints where a trace ID is already available (e.g. a
+    /// transaction row that was just fetched).
+    pub async fn log_status_change_traced(
+        tx: &mut SqlxTransaction<'_, Postgres>,
+        entity_id: Uuid,
+        entity_type: &str,
+        old_status: &str,
+        new_status: &str,
+        actor: &str,
+        trace_id: Option<&str>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO audit_logs (entity_id, entity_type, action, old_val, new_val, actor, trace_id)
+            VALUES ($1, $2, 'status_update', $3, $4, $5, $6)
+            "#,
+        )
+        .bind(entity_id)
+        .bind(entity_type)
+        .bind(json!({ "status": old_status }))
+        .bind(json!({ "status": new_status }))
+        .bind(actor)
+        .bind(trace_id)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
+    }
+
     /// Log a status change
     pub async fn log_status_change(
         tx: &mut SqlxTransaction<'_, Postgres>,

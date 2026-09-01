@@ -9,12 +9,17 @@
 
 pub mod client;
 pub mod error;
+pub mod graphql_builder;
 pub mod models;
 pub mod pagination;
 pub mod resources;
 pub mod retry;
 
 pub use client::{AdminSynapseClient, SynapseClient};
-pub use error::SynapseError;
+pub use error::{ErrorCode, SynapseError};
+pub use graphql_builder::{
+    SettlementField, SettlementQueryBuilder, TransactionField, TransactionQueryBuilder,
+    TransactionQueryFilter,
+};
 pub use models::*;
 pub use pagination::PageIter;
