@@ -837,6 +837,88 @@ jobs:
               });
             }
 
+  # ── Job: benchmark-trend ────────────────────────────────────────────────
+  # Runs the criterion micro-benchmarks in benches/critical_paths.rs and
+  # publishes the results as a build artifact so performance can be tracked
+  # over time by comparing artifacts across runs. Does not gate the build —
+  # criterion timing on shared GitHub-hosted runners is too noisy to hard-
+  # fail on, unlike the load-test P95/error-rate gating in tests/load/.
+  benchmark-trend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: synapse
+          POSTGRES_PASSWORD: synapse
+          POSTGRES_DB: synapse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 10s
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.7.4
+
+      - name: Create restricted app DB role (NOBYPASSRLS)
+        run: |
+          PGPASSWORD=synapse psql -h localhost -U synapse -d synapse_test -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'synapse_app') THEN
+                  CREATE ROLE synapse_app WITH LOGIN PASSWORD 'synapse_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+              END IF;
+          END
+          $$;
+          GRANT ALL PRIVILEGES ON DATABASE synapse_test TO synapse_app;
+          GRANT ALL ON SCHEMA public TO synapse_app;
+          ALTER ROLE synapse_app SET app.is_admin = 'true';
+          SQL
+
+      - name: Run migrations
+        run: |
+          for i in 1 2 3; do
+            sqlx migrate run && break
+            echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
+            sleep 5
+            [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
+          done
+        env:
+          DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+
+      # criterion writes a full HTML/JSON report per run under target/criterion,
+      # including estimates.json per benchmark which is what the artifact
+      # comparison across runs actually tracks over time.
+      - name: Run critical-paths benchmarks
+        run: cargo bench --bench critical_paths
+        env:
+          DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+        continue-on-error: true
+
+      - name: Upload benchmark trend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-benchmark-trend-${{ github.sha }}
+          path: target/criterion/
+          if-no-files-found: warn
+          retention-days: 90
+
   # ── Job: docker-image-security ──────────────────────────────────────────
   # Builds the production image from `dockerfile` and fails if it doesn't
   # drop root. This is a regression guard for the USER directive added in

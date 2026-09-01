@@ -28,8 +28,8 @@
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
-//! | `resource_limiter_active_tasks`   | Gauge      | Active-task count per resource category, labeled by `category` |
-//! | `resource_limiter_limit`          | Gauge      | Configured concurrency limit per resource category, labeled by `category` |
+//! | `readiness_initialization_duration_ms` | Histogram | Time spent in `run_initialization_checks`, labeled by outcome (ready/failed) |
+//! | `settlement_transactions_total`   | Counter    | Transactions settled via settle_asset, labeled by asset_code |
 //!
 //! ## Configuration
 //!
@@ -202,6 +202,22 @@ pub fn reconciliation_duplicate_report_prevented_total() -> Counter<u64> {
             "Reconciliation report inserts skipped due to the (period_start, period_end) \
              unique constraint catching a concurrent duplicate run",
         )
+        .init()
+}
+
+/// Duration of `ReadinessState::run_initialization_checks`, labeled by
+/// outcome (`ready` or `failed`). A rising trend on the `ready` outcome
+/// indicates startup dependencies (DB/Redis/Horizon) are slow but still
+/// progressing; a run that never reports at all indicates a stuck/hung
+/// check, distinguishable from "slow" by its absence rather than a large
+/// value. Label cardinality is bounded to the two known outcome values.
+pub fn readiness_initialization_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("readiness_initialization_duration_ms")
+        .with_description(
+            "Time spent in run_initialization_checks, labeled by outcome (ready/failed)",
+        )
+        .with_unit(Unit::new("ms"))
         .init()
 }
 
@@ -379,6 +395,18 @@ pub fn settlement_duration_ms() -> Histogram<f64> {
         .f64_histogram("settlement_duration_ms")
         .with_description("Settlement operation latency in milliseconds")
         .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Total transactions settled, labeled by `asset_code` (bounded — see
+/// `docs/metrics-cardinality-convention.md`). Deliberately a counter added
+/// by batch size rather than a per-call label: a raw per-call transaction
+/// count used as a label value (as opposed to the metric's numeric value)
+/// creates one time series per distinct count seen, which is unbounded.
+pub fn settlement_transactions_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_transactions_total")
+        .with_description("Total transactions settled via settle_asset, labeled by asset_code")
         .init()
 }
 
