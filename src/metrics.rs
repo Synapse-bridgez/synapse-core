@@ -24,10 +24,13 @@
 //! | `transaction_processor_completion_conflict_prevented_total` | Counter | CompleteStage writes that lost a row-lock race |
 //! | `transaction_processor_stage_executions_total` | Counter | Stage executions, labeled by stage (verifies rollout-percentage gating in prod) |
 //! | `webhook_delivery_total`          | Counter    | Webhook delivery attempts, labeled by outcome and endpoint_id |
-//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type |
+//! | `webhook_circuit_breaker_transitions_total` | Counter | CB state transitions, labeled by transition type (includes half-open probe_succeeded/probe_failed/flapping_detected) |
+//! | `webhook_circuit_breaker_half_open_duration_ms` | Histogram | Time spent in half-open state per probe |
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
+//! | `readiness_initialization_duration_ms` | Histogram | Time spent in `run_initialization_checks`, labeled by outcome (ready/failed) |
+//! | `settlement_transactions_total`   | Counter    | Transactions settled via settle_asset, labeled by asset_code |
 //!
 //! ## Configuration
 //!
@@ -203,6 +206,22 @@ pub fn reconciliation_duplicate_report_prevented_total() -> Counter<u64> {
         .init()
 }
 
+/// Duration of `ReadinessState::run_initialization_checks`, labeled by
+/// outcome (`ready` or `failed`). A rising trend on the `ready` outcome
+/// indicates startup dependencies (DB/Redis/Horizon) are slow but still
+/// progressing; a run that never reports at all indicates a stuck/hung
+/// check, distinguishable from "slow" by its absence rather than a large
+/// value. Label cardinality is bounded to the two known outcome values.
+pub fn readiness_initialization_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("readiness_initialization_duration_ms")
+        .with_description(
+            "Time spent in run_initialization_checks, labeled by outcome (ready/failed)",
+        )
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
 /// Counter for AccountMonitor completion writes that lost the race for a
 /// candidate transaction because `FOR UPDATE` row locking meant a concurrent
 /// `process_payment` call already claimed it (rows_affected == 0 on the
@@ -304,11 +323,29 @@ pub fn webhook_delivery_total() -> Counter<u64> {
 }
 
 /// Circuit breaker state-transition counter, labeled by `transition`
-/// ("opened" | "closed" | "probe_sent" | "probe_blocked").
+/// ("opened" | "closed" | "probe_sent" | "probe_blocked" |
+/// "probe_succeeded" | "probe_failed" | "flapping_detected"). The last three
+/// are half-open-specific: `probe_succeeded`/`probe_failed` record the
+/// outcome of the single delivery let through during a half-open probe, and
+/// `flapping_detected` fires when probe failures repeat within the
+/// configurable flap-detection window (see `WEBHOOK_CB_FLAP_THRESHOLD` /
+/// `WEBHOOK_CB_FLAP_WINDOW_SECS` in `webhook_dispatcher`), signaling a
+/// breaker that keeps bouncing between half-open and open rather than
+/// recovering.
 pub fn webhook_circuit_breaker_transitions_total() -> Counter<u64> {
     meter()
         .u64_counter("webhook_circuit_breaker_transitions_total")
         .with_description("Webhook circuit breaker state transitions, labeled by transition type")
+        .init()
+}
+
+/// Time a half-open probe delivery took to resolve (success or failure),
+/// i.e. time spent in the half-open state for that probe.
+pub fn webhook_circuit_breaker_half_open_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("webhook_circuit_breaker_half_open_duration_ms")
+        .with_description("Time spent in half-open state per circuit breaker probe, in ms")
+        .with_unit(Unit::new("ms"))
         .init()
 }
 
@@ -332,12 +369,63 @@ pub fn pending_queue_depth() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Registers the observable gauges reporting each resource category's
+/// current active-task count and configured limit
+/// (`src/services/resource_limits.rs::resource_category_snapshots`), labeled
+/// by `category`. Call once at startup; the returned gauges must be kept
+/// alive for as long as their callbacks should keep reporting (dropping them
+/// stops the observation).
+///
+/// Reads the already-tracked semaphore permit counts on the export path
+/// only — no additional lock is taken on the task-execution hot path.
+pub fn register_resource_limiter_gauges() -> (ObservableGauge<u64>, ObservableGauge<u64>) {
+    let active_gauge = meter()
+        .u64_observable_gauge("resource_limiter_active_tasks")
+        .with_description("Current active-task count per resource category")
+        .with_callback(|observer| {
+            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
+                observer.observe(
+                    snapshot.active as u64,
+                    &[KeyValue::new("category", snapshot.category)],
+                );
+            }
+        })
+        .init();
+
+    let limit_gauge = meter()
+        .u64_observable_gauge("resource_limiter_limit")
+        .with_description("Configured concurrency limit per resource category")
+        .with_callback(|observer| {
+            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
+                observer.observe(
+                    snapshot.limit as u64,
+                    &[KeyValue::new("category", snapshot.category)],
+                );
+            }
+        })
+        .init();
+
+    (active_gauge, limit_gauge)
+}
+
 /// Settlement operation duration histogram (milliseconds).
 pub fn settlement_duration_ms() -> Histogram<f64> {
     meter()
         .f64_histogram("settlement_duration_ms")
         .with_description("Settlement operation latency in milliseconds")
         .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Total transactions settled, labeled by `asset_code` (bounded — see
+/// `docs/metrics-cardinality-convention.md`). Deliberately a counter added
+/// by batch size rather than a per-call label: a raw per-call transaction
+/// count used as a label value (as opposed to the metric's numeric value)
+/// creates one time series per distinct count seen, which is unbounded.
+pub fn settlement_transactions_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_transactions_total")
+        .with_description("Total transactions settled via settle_asset, labeled by asset_code")
         .init()
 }
 

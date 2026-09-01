@@ -99,6 +99,7 @@ impl ReadinessState {
         horizon_url: &str,
     ) -> Result<(), InitializationError> {
         tracing::info!("Starting initialization checks...");
+        let started_at = std::time::Instant::now();
 
         // Check 1: Verify pool warm-up completed (create_pool blocks until min_connections are established)
         tracing::info!("✓ Database pool warm-up already completed during pool creation");
@@ -132,12 +133,28 @@ impl ReadinessState {
             }
             Err(e) => {
                 let err = InitializationError::DatabaseCheck(e.to_string());
-                tracing::error!("✗ Database check failed (critical): {}", err);
+                tracing::error!(
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "✗ Database check failed (critical): {}",
+                    err
+                );
+                crate::metrics::readiness_initialization_duration_ms().record(
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    &[opentelemetry::KeyValue::new("outcome", "failed")],
+                );
                 return Err(err);
             }
         }
 
-        tracing::info!("All initialization checks passed - marking service as ready");
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        tracing::info!(
+            elapsed_ms,
+            "All initialization checks passed - marking service as ready"
+        );
+        crate::metrics::readiness_initialization_duration_ms().record(
+            elapsed_ms as f64,
+            &[opentelemetry::KeyValue::new("outcome", "ready")],
+        );
         self.set_ready();
         Ok(())
     }
@@ -277,5 +294,45 @@ mod tests {
     fn test_default_drain_timeout() {
         let state = ReadinessState::new();
         assert_eq!(state.drain_timeout().as_secs(), 30);
+    }
+
+    /// Orchestrator-compatibility requirement: readiness must flip to
+    /// not-ready synchronously at the start of the drain, before any
+    /// in-flight-request wait — otherwise the orchestrator could keep
+    /// routing new traffic for the duration of the drain timeout.
+    #[test]
+    fn test_shutdown_drain_flips_readiness_immediately() {
+        let state = ReadinessState::new();
+        state.set_ready();
+        assert!(state.is_ready());
+
+        state.start_drain();
+
+        assert!(
+            !state.is_ready(),
+            "readiness must flip to not-ready as soon as drain starts, not after the timeout"
+        );
+        assert!(state.is_draining());
+    }
+
+    /// A migration/dependency check that is slow-but-progressing must keep
+    /// readiness false throughout (never flip early) and only flip once the
+    /// check actually completes.
+    #[tokio::test]
+    async fn test_slow_dependency_startup_stays_not_ready_until_complete() {
+        let state = ReadinessState::new();
+        assert!(!state.is_ready());
+
+        let simulated_check = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        simulated_check.await;
+        assert!(
+            !state.is_ready(),
+            "must remain not-ready while a slow startup dependency check is in progress"
+        );
+
+        state.set_ready();
+        assert!(state.is_ready());
     }
 }

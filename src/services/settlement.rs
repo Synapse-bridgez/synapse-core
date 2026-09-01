@@ -322,8 +322,17 @@ impl SettlementService {
             &[
                 opentelemetry::KeyValue::new("operation", "settle_asset"),
                 opentelemetry::KeyValue::new("asset_code", asset_code.to_string()),
-                opentelemetry::KeyValue::new("transaction_count", total_tx as i64),
             ],
+        );
+        // total_tx is a per-call count, not a bounded dimension — record it as
+        // a counter increment rather than a label value (see
+        // docs/metrics-cardinality-convention.md).
+        crate::metrics::settlement_transactions_total().add(
+            total_tx as u64,
+            &[opentelemetry::KeyValue::new(
+                "asset_code",
+                asset_code.to_string(),
+            )],
         );
 
         Ok(settlements)

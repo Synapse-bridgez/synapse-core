@@ -111,42 +111,10 @@ impl TestApp {
         .await
         .unwrap();
 
-        // Build AppState
-        let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
-        let app_state = AppState {
-            db: pool.clone(),
-            pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
-                .await
-                .unwrap(),
-            horizon_client: synapse_core::stellar::HorizonClient::new(
-                "https://horizon-testnet.stellar.org".to_string(),
-            ),
-            feature_flags: synapse_core::services::feature_flags::FeatureFlagService::new(
-                pool.clone(),
-            ),
-            redis_url: "redis://localhost:6379".to_string(),
-            start_time: std::time::Instant::now(),
-            readiness: synapse_core::ReadinessState::new(),
-            tx_broadcast,
-            query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
-                .await
-                .unwrap(),
-            allowed_ips: synapse_core::config::AllowedIps::Any,
-            trusted_proxy_depth: 1,
-            profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
-            tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
-            secrets_store: None,
-            metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
-            ws_connection_pool: std::sync::Arc::new(
-                synapse_core::ws::connection_pool::ConnectionPool::new(
-                    synapse_core::ws::connection_pool::PoolConfig::default(),
-                ),
-            ),
-        };
+        // Build AppState via the shared fixture builder (also used by the CLI's
+        // events_watch_real_server_test.rs) instead of duplicating the struct
+        // literal here, so the two suites can't drift out of sync.
+        let app_state = AppState::test_new(&database_url).await;
 
         // Clone readiness before app_state is moved into create_app
         let readiness = app_state.readiness.clone();

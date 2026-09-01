@@ -245,6 +245,33 @@ See [Database Failover](database_failover.md) for detailed procedures.
 | Replication lag | >10 MB | Warning | Check replica health |
 | DLQ entries | >100 | Warning | Investigate failed transactions |
 | Disk usage | >80% | Warning | Archive old partitions |
+| `reconciliation_duplicate_report_prevented_total` rate | >0 | Warning | See "Reconciliation Race Near-Miss" below |
+
+#### Reconciliation Race Near-Miss
+
+`reconciliation_duplicate_report_prevented_total` increments whenever the
+`(period_start, period_end)` unique constraint on `reconciliation_reports`
+catches a concurrent `store_report` insert for the same window — i.e. two
+`ReconciliationJob` runs raced and one was silently discarded instead of
+producing a duplicate report row (see `src/services/reconciliation.rs`,
+`ReconciliationService::store_report`). A non-zero rate is itself the
+alertable signal: the write path is safe (only one report is ever
+persisted), but a concurrent run should not be happening at all if leader
+election is configured correctly.
+
+**Operator response:**
+1. Check whether leader election (`LeaderElection` / Redis-based lease) is
+   configured and healthy for the reconciliation job — a healthy election
+   should make concurrent runs impossible, not just harmless.
+2. If leader election is disabled or the Redis lease store is unavailable,
+   this metric firing is expected during that window (ungated runs fall
+   back on the unique constraint) — restore leader election rather than
+   treating each occurrence as a separate incident.
+3. If leader election is healthy and this still fires, treat it as a bug
+   report: capture the timestamps of both racing runs from the logged
+   `"Reconciliation report for this period already existed"` message and
+   file an issue — this is the near-miss detector for a fix analogous to
+   `tests/reconciliation_race_test.rs`.
 
 ### Log Monitoring
 
@@ -265,6 +292,32 @@ grep "moved to DLQ" /var/log/synapse-core/app.log
 # Partition maintenance
 grep "partition" /var/log/synapse-core/app.log
 ```
+
+### Scheduled Job Health Alerts
+
+`JobScheduler::check_job_health(grace_period)` (`src/services/scheduler.rs`)
+returns a list of `JobHealthAlert`s for every registered job, one per
+alertable condition. A job can surface neither, either, or both at once —
+they are independent checks:
+
+- **`MissedRun`** — the job has not completed successfully within its own
+  cron schedule's expected interval plus `grace_period` (or has never run at
+  all, if `last_success` is `None`). This usually means the job process
+  crashed, is stuck in a crash loop, or a previous run is holding a lock and
+  never released it. **Response**: check the job's logs for the last
+  attempt, confirm no stale lock is held (see Database Operations →
+  Distributed Locks), and manually trigger a run once the blocker is
+  cleared.
+- **`Failed`** — the job's most recent execution attempt returned an error.
+  This means the job *is* running on schedule but erroring — typically a
+  logic bug or an unavailable dependency (DB, Redis, external API).
+  **Response**: check the error logged at the failed run's timestamp; this
+  does not by itself mean the job stopped running — it will attempt again at
+  its next scheduled time.
+
+This is detection/alerting only — automatic retry or catch-up of a missed
+run is job-type-specific (see, e.g., the compliance report job's own
+catch-up logic) and out of scope here.
 
 ---
 

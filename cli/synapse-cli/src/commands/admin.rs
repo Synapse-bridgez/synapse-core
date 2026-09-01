@@ -468,14 +468,40 @@ async fn handle_admin_settlements(
 
 // ── Distributed locks ────────────────────────────────────────────────────────
 
+/// Locks held at least this long (seconds) are flagged as suspicious in the
+/// table view by default — separate from (and typically tighter than) the
+/// server's own `overdue` flag (2x expected duration), since "suspicious
+/// enough to look at" and "overdue" are different operator questions.
+const DEFAULT_SUSPICIOUS_SECS: u64 = 900;
+
 #[derive(Subcommand)]
 pub enum LockCommands {
     #[command(
         about = "List active distributed locks",
-        long_about = "List active distributed locks currently held by this Synapse instance.\n\nRequired flags: none.\nOptional flags:\n  --json            Print the raw API response as pretty JSON instead of the default table.\n\nOutput fields:\n  resource          Protected resource name for the lock.\n  token             Lock owner token.\n  acquired_at       Unix timestamp, in seconds, when the lock was acquired.\n  ttl_secs          Lock TTL in seconds.\n  expected_duration_secs  Expected lock hold duration in seconds.\n  overdue           Whether the lock has exceeded twice its expected duration."
+        long_about = "List active distributed locks currently held by this Synapse instance.\n\nRequired flags: none.\nOptional flags:\n  --json            Print the raw API response as pretty JSON instead of the default table.\n  --suspicious-secs Age (seconds) at which a lock is flagged SUSPICIOUS in the table (default: 900).\n\nOutput fields:\n  resource          Protected resource name for the lock.\n  token             Lock owner token.\n  age               Human-readable time since the lock was acquired.\n  expires_in        Human-readable time until the lock's TTL expires.\n  overdue           Whether the lock has exceeded twice its expected duration.\n  flag              SUSPICIOUS if held at least --suspicious-secs."
     )]
     List {
         /// Print the raw API response as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Age, in seconds, at which a lock is flagged as suspicious.
+        #[arg(long, default_value_t = DEFAULT_SUSPICIOUS_SECS)]
+        suspicious_secs: u64,
+    },
+
+    #[command(
+        about = "Force-release a distributed lock",
+        long_about = "Force-release a distributed lock regardless of its current owner — an escape hatch for a lock stuck after a crash.\n\nRequired flags:\n  --yes             Required to confirm the force-release; without it, the command aborts and prints what it would do.\n\nIdempotent: releasing a lock that has already been released or expired returns success rather than erroring."
+    )]
+    ForceRelease {
+        /// Resource name of the lock to release (see `resource` in `list`).
+        resource: String,
+
+        /// Confirm the force-release. Required — the command aborts without it.
+        #[arg(long)]
+        yes: bool,
+
         #[arg(long)]
         json: bool,
     },
@@ -502,16 +528,67 @@ async fn handle_locks(base_url: &str, api_key: &str, command: LockCommands) -> R
     let client = AdminClient::new(base_url, api_key);
 
     match command {
-        LockCommands::List { json } => {
+        LockCommands::List {
+            json,
+            suspicious_secs,
+        } => {
             let response: ListLocksResponse = client.get("/admin/locks").await?;
-            println!("{}", output::render(&response, json, format_locks_table)?);
+            println!(
+                "{}",
+                output::render(&response, json, |r| format_locks_table(
+                    r,
+                    suspicious_secs
+                ))?
+            );
+        }
+        LockCommands::ForceRelease {
+            resource,
+            yes,
+            json,
+        } => {
+            if !yes {
+                bail!(
+                    "Refusing to force-release lock '{resource}' without --yes. \
+                     Re-run with --yes to confirm."
+                );
+            }
+            let response: ForceReleaseLockResponse = client
+                .post_json(
+                    &format!("/admin/locks/{resource}/force-release"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            println!(
+                "{}",
+                output::render(&response, json, format_force_release_table)?
+            );
         }
     }
 
     Ok(())
 }
 
-fn format_locks_table(response: &ListLocksResponse) -> String {
+/// Human-readable duration for a non-negative number of seconds, e.g.
+/// "2h 5m", "45s". Negative input (already elapsed past a TTL) renders "0s".
+fn humanize_secs(secs: i64) -> String {
+    let secs = secs.max(0) as u64;
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let mins = (secs % 3_600) / 60;
+    let s = secs % 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+fn format_locks_table(response: &ListLocksResponse, suspicious_secs: u64) -> String {
     let mut lines = vec![format!(
         "Active locks: {} total ({} overdue)",
         response.total, response.overdue
@@ -522,22 +599,54 @@ fn format_locks_table(response: &ListLocksResponse) -> String {
         return lines.join("\n");
     }
 
-    lines.push("Resource | Token | Acquired At | TTL | Expected Duration | Overdue".to_string());
-    lines.push("-------- | ----- | ----------- | --- | ----------------- | -------".to_string());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    lines.push("Resource | Token | Age | Expires In | Overdue | Flag".to_string());
+    lines.push("-------- | ----- | --- | ---------- | ------- | ----".to_string());
 
     for lock in &response.active_locks {
+        let age_secs = now.saturating_sub(lock.acquired_at);
+        let expires_in_secs = lock.ttl_secs as i64 - age_secs as i64;
+        let flag = if age_secs >= suspicious_secs {
+            "SUSPICIOUS"
+        } else {
+            ""
+        };
         lines.push(format!(
             "{} | {} | {} | {} | {} | {}",
             lock.resource,
             lock.token,
-            lock.acquired_at,
-            lock.ttl_secs,
-            lock.expected_duration_secs,
-            yes_no(lock.overdue)
+            humanize_secs(age_secs as i64),
+            if expires_in_secs > 0 {
+                humanize_secs(expires_in_secs)
+            } else {
+                "expired".to_string()
+            },
+            yes_no(lock.overdue),
+            flag,
         ));
     }
 
     lines.join("\n")
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ForceReleaseLockResponse {
+    resource: String,
+    released: bool,
+    message: String,
+}
+
+fn format_force_release_table(response: &ForceReleaseLockResponse) -> String {
+    format!(
+        "Resource: {}\nReleased: {}\n{}",
+        response.resource,
+        yes_no(response.released),
+        response.message
+    )
 }
 
 // ── Tenant quotas ────────────────────────────────────────────────────────────
