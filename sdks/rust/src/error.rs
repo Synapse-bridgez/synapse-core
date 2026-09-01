@@ -35,8 +35,8 @@ pub enum SynapseError {
     Forbidden(String),
 
     /// The request has been rate-limited (HTTP 429). Back off before retrying.
-    #[error("rate limit exceeded")]
-    RateLimited,
+    #[error("rate limit exceeded: {0}")]
+    RateLimited(String),
 
     /// A pagination cursor was rejected as invalid or expired (HTTP 400).
     #[error("invalid cursor: {0}")]
@@ -50,6 +50,16 @@ pub enum SynapseError {
     /// produced by resource methods.
     #[error("HTTP {status}: {body}")]
     Http { status: u16, body: String },
+
+    /// Raw HTTP error status with a server-provided `Retry-After` delay —
+    /// used internally by the retry layer so backoff honors the server's
+    /// own guidance instead of only client-side jitter.
+    #[error("HTTP {status} (retry after {retry_after_ms}ms): {body}")]
+    HttpRetryAfter {
+        status: u16,
+        body: String,
+        retry_after_ms: u64,
+    },
 
     /// A GraphQL-level error returned inside a 200 OK response.
     ///
@@ -69,8 +79,20 @@ impl SynapseError {
     pub fn is_transient(&self) -> bool {
         match self {
             SynapseError::Network(_) => true,
+            SynapseError::HttpRetryAfter { .. } => true,
             SynapseError::Http { status, .. } | SynapseError::Api { status, .. } => *status >= 500,
             _ => false,
+        }
+    }
+
+    /// The server-provided `Retry-After` delay for this error, if any.
+    ///
+    /// When present, the retry layer honors it instead of computing a
+    /// jitter-based backoff.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            SynapseError::HttpRetryAfter { retry_after_ms, .. } => Some(*retry_after_ms),
+            _ => None,
         }
     }
 }

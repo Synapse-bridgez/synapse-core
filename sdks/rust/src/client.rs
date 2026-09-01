@@ -16,6 +16,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+/// Parse a `Retry-After` response header (seconds, per RFC 9110 §10.2.3) into
+/// milliseconds. Returns `None` if the header is absent or not a plain
+/// integer (the HTTP-date form is not handled).
+fn parse_retry_after_ms(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|secs| secs.saturating_mul(1000))
+}
+
 /// HTTP client for the Synapse public API.
 ///
 /// Construct via [`SynapseClient::new`] or [`SynapseClient::builder`]. All
@@ -161,8 +172,16 @@ impl SynapseClient {
                     .map_err(SynapseError::Network)?;
                 let status = resp.status().as_u16();
                 if status >= 400 {
+                    let retry_after_ms = parse_retry_after_ms(&resp);
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(SynapseError::Http { status, body });
+                    return Err(match retry_after_ms {
+                        Some(retry_after_ms) => SynapseError::HttpRetryAfter {
+                            status,
+                            body,
+                            retry_after_ms,
+                        },
+                        None => SynapseError::Http { status, body },
+                    });
                 }
                 resp.json::<T>()
                     .await
@@ -172,13 +191,20 @@ impl SynapseClient {
         .await;
         match raw {
             Err(SynapseError::Http { status, body }) => Err(self.map_api_error(status, body).await),
+            Err(SynapseError::HttpRetryAfter { status, body, .. }) => {
+                Err(self.map_api_error(status, body).await)
+            }
             other => other,
         }
     }
 
     /// Issue an authenticated POST request with a JSON body and deserialize the JSON response.
     ///
-    /// 4xx responses are returned immediately without retrying.
+    /// POST is a mutating, non-idempotent request: unlike GET, it is **never**
+    /// auto-retried on transient failure, since a lost response after a
+    /// successful server-side write would otherwise be silently resent as a
+    /// duplicate. If you need retries for a mutating call, wrap it in your
+    /// own retry loop with an idempotency key your application controls.
     pub async fn post<T: DeserializeOwned, B: Serialize + Clone + Send + 'static>(
         &self,
         path: &str,
@@ -187,7 +213,7 @@ impl SynapseClient {
         let url = format!("{}{}", self.base_url, path);
         let key = self.api_key.clone();
         let http = self.http.clone();
-        let raw = retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+        let raw = retry_with_backoff(1, self.base_delay_ms, || {
             let url = url.clone();
             let key = key.clone();
             let http = http.clone();
@@ -491,6 +517,11 @@ impl AdminSynapseClient {
     }
 
     /// Issue an authenticated POST request with JSON body and deserialize the JSON response.
+    ///
+    /// POST is a mutating, non-idempotent request: unlike GET, it is **never**
+    /// auto-retried on transient failure, since a lost response after a
+    /// successful server-side write (e.g. a webhook replay or reconciliation
+    /// run) would otherwise be silently resent as a duplicate.
     pub async fn post<B: serde::Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -501,7 +532,7 @@ impl AdminSynapseClient {
         let http = self.http.clone();
         let body_json =
             serde_json::to_string(body).map_err(|e| SynapseError::Decode(e.to_string()))?;
-        retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
+        retry_with_backoff(1, self.base_delay_ms, || {
             let url = url.clone();
             let key = key.clone();
             let http = http.clone();

@@ -220,6 +220,18 @@ pub async fn export_reconciliation_report(
     let period_start: DateTime<Utc> = row.try_get("period_start").unwrap_or_else(|_| Utc::now());
     let period_end: DateTime<Utc> = row.try_get("period_end").unwrap_or_else(|_| Utc::now());
 
+    if let Err(e) = crate::telemetry::data_export::record_compliance_export(
+        pool,
+        "reconciliation_report",
+        id,
+        "admin",
+        serde_json::json!({ "format": query.format }),
+    )
+    .await
+    {
+        tracing::error!("Failed to record compliance export telemetry: {e}");
+    }
+
     match query.format.to_lowercase().as_str() {
         "pdf" => export_as_pdf(&report, id, generated_at, period_start, period_end).into_response(),
         _ => export_as_csv(&report, id, generated_at, period_start, period_end).into_response(),

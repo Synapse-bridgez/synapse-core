@@ -82,3 +82,16 @@ Lists previously generated reports, optionally filtered by `period`, newest
   authentication failures show up the same way any other admin endpoint's do
   (401/429 responses, `admin_auth_lockout_triggered_total` on rate-limit
   lockout) — see the main [runbook](runbook.md#security-operations).
+- `compliance_export_events_total{report_type}` — every successful compliance
+  report generation (`POST /admin/compliance/reports`) and reconciliation
+  report export (`GET /admin/reconciliation/reports/:id/export`) also emits
+  this counter and an `audit_logs` row (`entity_type = "compliance_export"`),
+  kept separate from the routine `admin_compliance_report_requests_total`
+  counter above because who exported compliance-sensitive data is itself a
+  compliance-relevant fact — retained per
+  [`audit_log_retention.md`](audit_log_retention.md). See
+  `telemetry::data_export::record_compliance_export`. The `actor` on these
+  rows is currently always `"admin"`: the admin API authenticates with a
+  single shared key (no per-operator identity yet), so this cannot
+  distinguish which operator performed the export until that identity work
+  lands.

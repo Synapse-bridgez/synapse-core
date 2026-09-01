@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Readiness state for the application.
 /// Used for Kubernetes readiness probes and connection draining.
@@ -235,9 +235,35 @@ pub async fn drain_handler(
 
     let timeout = state.app_state.readiness.start_drain();
 
+    let connections_open_at_start = state.app_state.ws_connection_pool.active_connections();
+    crate::metrics::ws_drain_connections_open_at_start()
+        .record(connections_open_at_start as f64, &[]);
+
     // Spawn a task that exits the process after the drain timeout
+    let drain_start = Instant::now();
+    let ws_pool = state.app_state.ws_connection_pool.clone();
     tokio::spawn(async move {
         tokio::time::sleep(timeout).await;
+
+        // Connections still open at the deadline had to be forcibly
+        // terminated by process exit rather than closing themselves in
+        // response to the drain signal (see `handle_socket`'s drain check).
+        let (clean, forced) =
+            drain_close_outcome(connections_open_at_start, ws_pool.active_connections());
+        let closed_total = crate::metrics::ws_drain_connections_closed_total();
+        if clean > 0 {
+            closed_total.add(clean as u64, &[opentelemetry::KeyValue::new("outcome", "clean")]);
+        }
+        if forced > 0 {
+            closed_total.add(forced as u64, &[opentelemetry::KeyValue::new("outcome", "forced")]);
+            tracing::warn!(
+                forced_close_count = forced,
+                "Drain timeout elapsed with connections still open — forcibly closing"
+            );
+        }
+        crate::metrics::ws_drain_duration_ms()
+            .record(drain_start.elapsed().as_millis() as f64, &[]);
+
         tracing::info!("Drain timeout elapsed — shutting down process");
         std::process::exit(0);
     });
@@ -249,6 +275,16 @@ pub async fn drain_handler(
             "drain_timeout_secs": timeout.as_secs()
         })),
     )
+}
+
+/// Splits the WebSocket connections open at drain start into those closed
+/// cleanly (in response to the drain signal, before the deadline) vs those
+/// still open at the deadline and therefore forcibly terminated by process
+/// exit. Returns `(clean, forced)`.
+fn drain_close_outcome(open_at_start: usize, remaining_at_deadline: usize) -> (usize, usize) {
+    let forced = remaining_at_deadline.min(open_at_start);
+    let clean = open_at_start - forced;
+    (clean, forced)
 }
 
 /// Extension trait to easily add readiness state to AppState

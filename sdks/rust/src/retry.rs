@@ -126,6 +126,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn honors_server_retry_after_over_jitter() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let start = std::time::Instant::now();
+        let result: Result<u32, _> = retry_with_backoff(2, 1, || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(SynapseError::HttpRetryAfter {
+                        status: 503,
+                        body: String::new(),
+                        retry_after_ms: 50,
+                    })
+                } else {
+                    Ok(7)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert!(
+            start.elapsed().as_millis() >= 50,
+            "must wait at least the server-provided Retry-After delay"
+        );
+    }
+
+    #[tokio::test]
     async fn exhausts_all_attempts_on_persistent_5xx() {
         let calls = Arc::new(AtomicU32::new(0));
         let c = calls.clone();

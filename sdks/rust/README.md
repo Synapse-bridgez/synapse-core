@@ -172,6 +172,31 @@ async fn main() {
 }
 ```
 
+### Testing your integration
+
+Enable the `testing-support` feature to get a reusable, documented mock
+HTTP server for testing code that calls this SDK, without hitting a real
+staging environment:
+
+```toml
+[dev-dependencies]
+synapse-sdk = { version = "*", features = ["testing-support"] }
+```
+
+```rust,no_run
+use synapse_sdk::testing::{spawn_mock_server, stub_endpoint, stub_rate_limited};
+
+# async fn example() {
+let server = spawn_mock_server().await;
+stub_endpoint(&server, "GET", "/v1/transactions/123", 200, serde_json::json!({"id": "123"})).await;
+stub_rate_limited(&server, "POST", "/v1/webhooks/replay", 30, "slow down").await;
+# }
+```
+
+`stub_error` builds a response from this crate's own `error::CatalogEntry`
+model, so mocked error shapes can't silently drift from what the real API
+returns. See `synapse_sdk::testing` for the full API.
+
 ## Module overview
 
 | Module                      | Contents                                      |
@@ -180,6 +205,7 @@ async fn main() {
 | `synapse_sdk::error`        | `SynapseError` enum                           |
 | `synapse_sdk::retry`        | `retry_with_backoff` (used internally)        |
 | `synapse_sdk::pagination`   | `PageIter` lazy cursor-pagination iterator    |
+| `synapse_sdk::testing`      | Reusable mock server (`testing-support` feature) |
 
 ## License
 
