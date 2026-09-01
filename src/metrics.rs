@@ -350,6 +350,45 @@ pub fn pending_queue_depth() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Registers the observable gauges reporting each resource category's
+/// current active-task count and configured limit
+/// (`src/services/resource_limits.rs::resource_category_snapshots`), labeled
+/// by `category`. Call once at startup; the returned gauges must be kept
+/// alive for as long as their callbacks should keep reporting (dropping them
+/// stops the observation).
+///
+/// Reads the already-tracked semaphore permit counts on the export path
+/// only — no additional lock is taken on the task-execution hot path.
+pub fn register_resource_limiter_gauges() -> (ObservableGauge<u64>, ObservableGauge<u64>) {
+    let active_gauge = meter()
+        .u64_observable_gauge("resource_limiter_active_tasks")
+        .with_description("Current active-task count per resource category")
+        .with_callback(|observer| {
+            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
+                observer.observe(
+                    snapshot.active as u64,
+                    &[KeyValue::new("category", snapshot.category)],
+                );
+            }
+        })
+        .init();
+
+    let limit_gauge = meter()
+        .u64_observable_gauge("resource_limiter_limit")
+        .with_description("Configured concurrency limit per resource category")
+        .with_callback(|observer| {
+            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
+                observer.observe(
+                    snapshot.limit as u64,
+                    &[KeyValue::new("category", snapshot.category)],
+                );
+            }
+        })
+        .init();
+
+    (active_gauge, limit_gauge)
+}
+
 /// Settlement operation duration histogram (milliseconds).
 pub fn settlement_duration_ms() -> Histogram<f64> {
     meter()

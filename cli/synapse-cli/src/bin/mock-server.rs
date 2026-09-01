@@ -102,6 +102,25 @@
 //! that's a pre-existing product gap, not mock/real drift, so it's excluded
 //! from the route-parity check via `MOCK_ONLY_EXCEPTIONS` rather than papered
 //! over silently.
+//!
+//! # Duplicate/out-of-order webhook delivery testing scenario (opt-in)
+//!
+//! Setting `MOCK_SERVER_WEBHOOK_DUPLICATE_SCENARIO_RECEIVER=http://host:port/path`
+//! switches this binary into a one-shot testing mode instead of running the
+//! mock API server above: it sends a scripted sequence of `POST` requests,
+//! simulating duplicate and out-of-order webhook delivery, to the given
+//! receiver URL, then exits. This is **never** the default behavior — the
+//! mock server only ever does this when that env var is explicitly set — and
+//! it exists purely so third-party webhook receiver implementations can
+//! exercise their own idempotency-key handling against a realistic worst
+//! case. It is not representative of normal-case delivery ordering
+//! guarantees (see `docs/webhook-delivery-architecture.md` — in normal
+//! operation, per-endpoint delivery is enqueued with an exactly-once
+//! `ON CONFLICT DO NOTHING` guard); it deliberately violates that guarantee's
+//! *observed* ordering (though never its at-least-once semantics) to test
+//! the worst realistic case, e.g. a retry racing a fresh delivery. See
+//! `docs/idempotency.md` for the `X-Idempotency-Key` contract every event
+//! carries, which a correct receiver uses to de-duplicate.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -119,7 +138,111 @@ const SAMPLE_EXPORT_TX_ID: &str = "550e8400-e29b-41d4-a716-446655440030";
 /// same pattern already used for `SAMPLE_REPORT_ID` etc. above).
 const DEFAULT_ADMIN_TOKEN: &str = "test-admin-token";
 
+/// One simulated webhook delivery attempt in the duplicate/out-of-order scenario.
+struct ScenarioEvent {
+    /// Carried as `X-Idempotency-Key` — a correct receiver de-dupes on this.
+    idempotency_key: &'static str,
+    event_type: &'static str,
+    transaction_id: &'static str,
+    sequence: u32,
+}
+
+/// The scripted sequence: two distinct events delivered out of order
+/// (sequence 2 before sequence 1), followed by a duplicate of each — the
+/// worst realistic case a receiver's idempotency handling must survive.
+const DUPLICATE_OUT_OF_ORDER_SCENARIO: &[ScenarioEvent] = &[
+    ScenarioEvent {
+        idempotency_key: "scenario-txn-2",
+        event_type: "transaction.completed",
+        transaction_id: "scenario-txn-2",
+        sequence: 2,
+    },
+    ScenarioEvent {
+        idempotency_key: "scenario-txn-1",
+        event_type: "transaction.completed",
+        transaction_id: "scenario-txn-1",
+        sequence: 1,
+    },
+    ScenarioEvent {
+        idempotency_key: "scenario-txn-1",
+        event_type: "transaction.completed",
+        transaction_id: "scenario-txn-1",
+        sequence: 1,
+    },
+    ScenarioEvent {
+        idempotency_key: "scenario-txn-2",
+        event_type: "transaction.completed",
+        transaction_id: "scenario-txn-2",
+        sequence: 2,
+    },
+];
+
+/// Parses a `http://host:port/path` URL into its connect target and request
+/// path. Deliberately minimal (no query strings, no https) — this is a
+/// localhost testing tool, not a general HTTP client.
+fn parse_http_url(url: &str) -> Result<(String, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("only http:// URLs are supported, got: {url}"))?;
+    match rest.find('/') {
+        Some(idx) => Ok((rest[..idx].to_string(), rest[idx..].to_string())),
+        None => Ok((rest.to_string(), "/".to_string())),
+    }
+}
+
+/// Sends one scripted event as a `POST` to `receiver_url`, returning the
+/// response status line (or an error describing the connection failure).
+fn send_scenario_event(receiver_url: &str, event: &ScenarioEvent) -> std::io::Result<String> {
+    let (host, path) = parse_http_url(receiver_url)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let body = format!(
+        r#"{{"event_type":"{}","transaction_id":"{}","sequence":{}}}"#,
+        event.event_type, event.transaction_id, event.sequence
+    );
+    let mut stream = TcpStream::connect(&host)?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Idempotency-Key: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+        event.idempotency_key,
+    );
+    stream.write_all(request.as_bytes())?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line)?;
+    Ok(status_line.trim().to_string())
+}
+
+/// Runs the opt-in duplicate/out-of-order webhook delivery testing scenario
+/// against `receiver_url` and exits. See the module doc comment above.
+fn run_duplicate_out_of_order_scenario(receiver_url: &str) -> std::io::Result<()> {
+    eprintln!(
+        "Running duplicate/out-of-order webhook delivery scenario against {receiver_url} \
+         (testing tool only — not representative of normal delivery ordering)"
+    );
+    for event in DUPLICATE_OUT_OF_ORDER_SCENARIO {
+        match send_scenario_event(receiver_url, event) {
+            Ok(status) => eprintln!(
+                "  sent idempotency_key={} sequence={} -> {status}",
+                event.idempotency_key, event.sequence
+            ),
+            Err(e) => eprintln!(
+                "  sent idempotency_key={} sequence={} -> error: {e}",
+                event.idempotency_key, event.sequence
+            ),
+        }
+    }
+    eprintln!("Scenario complete.");
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
+    if let Ok(receiver_url) =
+        std::env::var("MOCK_SERVER_WEBHOOK_DUPLICATE_SCENARIO_RECEIVER")
+    {
+        return run_duplicate_out_of_order_scenario(&receiver_url);
+    }
+
     let addr = std::env::var("MOCK_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:4010".to_string());
     let scenario = std::env::var("MOCK_SERVER_SCENARIO").unwrap_or_else(|_| "happy".to_string());
 
@@ -1367,6 +1490,63 @@ mod tests {
              Either the real route was removed (delete the mock arm) or this \
              is an intentional mock-only route that needs a documented \
              MOCK_ONLY_EXCEPTIONS entry."
+        );
+    }
+
+    // ── Duplicate/out-of-order webhook delivery scenario ──────────────────────
+
+    #[test]
+    fn test_parse_http_url_splits_host_and_path() {
+        assert_eq!(
+            parse_http_url("http://127.0.0.1:4020/webhook").unwrap(),
+            ("127.0.0.1:4020".to_string(), "/webhook".to_string())
+        );
+        assert_eq!(
+            parse_http_url("http://127.0.0.1:4020").unwrap(),
+            ("127.0.0.1:4020".to_string(), "/".to_string())
+        );
+        assert!(parse_http_url("https://example.com/webhook").is_err());
+    }
+
+    #[test]
+    fn test_duplicate_out_of_order_scenario_is_actually_out_of_order_and_duplicated() {
+        let sequences: Vec<u32> = DUPLICATE_OUT_OF_ORDER_SCENARIO
+            .iter()
+            .map(|e| e.sequence)
+            .collect();
+        assert_eq!(sequences, vec![2, 1, 1, 2], "scenario should deliver sequence 2 before 1, then repeat both");
+
+        let keys: std::collections::HashSet<_> = DUPLICATE_OUT_OF_ORDER_SCENARIO
+            .iter()
+            .map(|e| e.idempotency_key)
+            .collect();
+        assert_eq!(
+            keys.len(),
+            2,
+            "scenario should reuse each idempotency key exactly once as a duplicate"
+        );
+    }
+
+    /// Example of the receiver-side idempotency-key check that correctly
+    /// handles this scenario: a receiver that de-dupes on
+    /// `X-Idempotency-Key` processes each of the two distinct events exactly
+    /// once, in whatever order they arrive, and ignores the duplicates —
+    /// regardless of the out-of-order delivery. This mirrors the
+    /// `X-Idempotency-Key` contract documented in `docs/idempotency.md`.
+    #[test]
+    fn test_example_receiver_deduplicates_scenario_via_idempotency_key() {
+        let mut processed = std::collections::HashSet::new();
+        let mut process_count = 0;
+
+        for event in DUPLICATE_OUT_OF_ORDER_SCENARIO {
+            if processed.insert(event.idempotency_key) {
+                process_count += 1; // first time seeing this key: process it
+            } // else: duplicate, correctly ignored
+        }
+
+        assert_eq!(
+            process_count, 2,
+            "a correct receiver processes each of the 2 distinct events exactly once"
         );
     }
 }
