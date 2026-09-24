@@ -547,6 +547,24 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
         .init()
 }
 
+/// Replication lag measurement histogram (milliseconds), labeled by `replica`.
+/// A value of -1 indicates the replica is unreachable.
+pub fn replica_lag_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("replica_lag_ms")
+        .with_description("Replication lag on read replicas in milliseconds, labeled by replica name")
+        .with_unit(crate::metrics::Unit::new("ms"))
+        .init()
+}
+
+/// Replica lag alert counter, labeled by `replica` and `reason` ("threshold_exceeded" | "unreachable").
+pub fn replica_lag_alert_total() -> Counter<u64> {
+    meter()
+        .u64_counter("replica_lag_alert_total")
+        .with_description("Alerts triggered when replica lag exceeds threshold or replica becomes unreachable")
+        .init()
+}
+
 // ---------------------------------------------------------------------------
 // Provider initialisation
 // ---------------------------------------------------------------------------
