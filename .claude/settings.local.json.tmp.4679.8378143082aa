@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(update-config)",
+      "Bash(gh issue *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'feat\\(1269\\): Add settlement dispute SLA timers with auto-escalation *)"
+    ]
+  }
+}

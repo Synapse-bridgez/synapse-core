@@ -159,6 +159,11 @@ pub struct Settlement {
     pub original_total_amount: Option<BigDecimal>,
     pub reviewed_by: Option<String>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    pub sla_priority: Option<String>,
+    pub sla_duration_minutes: Option<i32>,
+    pub sla_deadline: Option<DateTime<Utc>>,
+    pub sla_breached: Option<bool>,
+    pub sla_breach_notified_at: Option<DateTime<Utc>>,
 }
 
 #[async_graphql::Object]

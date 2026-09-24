@@ -379,6 +379,18 @@ impl SettlementService {
         .await
         .map_err(map_update_settlement_err)
     }
+
+    /// Initialize SLA timer for a disputed settlement
+    pub async fn initialize_sla(&self, settlement_id: Uuid, priority: &str) -> Result<(), AppError> {
+        let sla_job = crate::services::settlement_sla::SettlementSLAJob::new(self.pool.clone());
+        sla_job.initialize_sla_for_dispute(settlement_id, priority).await
+    }
+
+    /// Clear SLA for a resolved settlement
+    pub async fn clear_sla(&self, settlement_id: Uuid) -> Result<(), AppError> {
+        let sla_job = crate::services::settlement_sla::SettlementSLAJob::new(self.pool.clone());
+        sla_job.clear_sla_for_resolution(settlement_id).await
+    }
 }
 
 #[cfg(test)]
