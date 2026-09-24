@@ -40,6 +40,18 @@ enum Commands {
     /// Render or check the SDK/CLI/API compatibility matrix
     /// (COMPATIBILITY.toml -> docs/compatibility-matrix.md).
     CompatMatrix(commands::compat::CompatMatrixArgs),
+
+    /// Audit indexes for low usage over a monitoring window.
+    ///
+    /// Identifies unused or rarely-used indexes that are not backing constraints,
+    /// so operators can safely remove them and reduce write overhead.
+    AuditIndexes(commands::audit_indexes::IndexAuditArgs),
+
+    /// Check for schema drift between migrations and live database.
+    ///
+    /// Compares the schema produced by replaying all migrations against the live schema,
+    /// catching drift caused by manual out-of-band changes.
+    SchemaDrift(commands::schema_drift::SchemaDriftArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -51,5 +63,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Lint(args) => commands::lint::run(args),
         Commands::Release(args) => commands::release::run(args),
         Commands::CompatMatrix(args) => commands::compat::run(args),
+        Commands::AuditIndexes(args) => commands::audit_indexes::run(args),
+        Commands::SchemaDrift(args) => commands::schema_drift::run(args),
     }
 }
