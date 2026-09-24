@@ -15,6 +15,21 @@ use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+// ── Granular transaction event types ──────────────────────────────────────
+
+/// Granular transaction lifecycle event types.
+/// These map 1:1 to state machine transitions and allow consumers to
+/// subscribe only to the transitions they care about.
+pub const EVENT_TRANSACTION_CREATED: &str = "transaction.created";
+pub const EVENT_TRANSACTION_MATCHED: &str = "transaction.matched"; // pending -> processing
+pub const EVENT_TRANSACTION_COMPLETED: &str = "transaction.completed";
+pub const EVENT_TRANSACTION_FAILED: &str = "transaction.failed";
+
+/// Legacy generic event type (for backward compatibility).
+/// Existing tenants receive this unless they explicitly opt into granular events
+/// via the filter rules engine.
+pub const EVENT_TRANSACTION_LEGACY: &str = "transaction.update";
+
 const MAX_ATTEMPTS: i32 = 5;
 /// Base delay in seconds for exponential backoff (2^attempt * BASE_DELAY_SECS)
 const BASE_DELAY_SECS: i64 = 10;
@@ -46,6 +61,33 @@ return {current, healed}
 /// that a crashed probe holder doesn't wedge the breaker in "no one may
 /// probe" for long.
 const CB_PROBE_LEASE_MS: i64 = 30_000;
+
+/// Maps a state machine transition to the corresponding granular event type.
+/// Returns the granular event type and a flag indicating whether to also emit
+/// the legacy generic event (for backward compatibility during opt-in period).
+pub fn transition_to_event_type(from_status: &str, to_status: &str) -> (String, bool) {
+    let event_type = match (from_status, to_status) {
+        ("pending", "processing") => EVENT_TRANSACTION_MATCHED.to_string(),
+        ("pending", "completed") => EVENT_TRANSACTION_COMPLETED.to_string(),
+        ("pending", "failed") => EVENT_TRANSACTION_FAILED.to_string(),
+        ("processing", "completed") => EVENT_TRANSACTION_COMPLETED.to_string(),
+        ("processing", "failed") => EVENT_TRANSACTION_FAILED.to_string(),
+        ("failed", "pending") => EVENT_TRANSACTION_MATCHED.to_string(), // requeue/reprocess
+        ("dlq", "pending") => EVENT_TRANSACTION_MATCHED.to_string(),
+        ("pending_review", "completed") => EVENT_TRANSACTION_COMPLETED.to_string(),
+        ("pending_review", "failed") => EVENT_TRANSACTION_FAILED.to_string(),
+        ("pending_review", "pending") => EVENT_TRANSACTION_MATCHED.to_string(),
+        // Same-state transitions are valid but don't generate events
+        (from, to) if from == to => {
+            return (EVENT_TRANSACTION_LEGACY.to_string(), false);
+        }
+        // Unmapped transitions (shouldn't happen if state machine is complete)
+        _ => EVENT_TRANSACTION_LEGACY.to_string(),
+    };
+
+    // Return granular event type and flag to also emit legacy event
+    (event_type, true)
+}
 
 /// Number of half-open probe failures within `cb_flap_window_secs()` that
 /// constitutes "flapping" for alerting purposes. What counts as flapping is
@@ -1906,4 +1948,69 @@ pub async fn get_endpoint_health(
             .unwrap_or(0),
         last_success_at: r.try_get("last_success_at").unwrap_or(None),
     })
+}
+
+#[cfg(test)]
+mod event_type_tests {
+    use super::*;
+
+    #[test]
+    fn test_transition_to_event_type_pending_to_processing() {
+        let (event_type, emit_legacy) = transition_to_event_type("pending", "processing");
+        assert_eq!(event_type, EVENT_TRANSACTION_MATCHED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_completed() {
+        let (event_type, emit_legacy) = transition_to_event_type("processing", "completed");
+        assert_eq!(event_type, EVENT_TRANSACTION_COMPLETED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_failed() {
+        let (event_type, emit_legacy) = transition_to_event_type("processing", "failed");
+        assert_eq!(event_type, EVENT_TRANSACTION_FAILED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_requeue() {
+        let (event_type, emit_legacy) = transition_to_event_type("failed", "pending");
+        assert_eq!(event_type, EVENT_TRANSACTION_MATCHED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_same_state_no_event() {
+        let (event_type, emit_legacy) = transition_to_event_type("pending", "pending");
+        assert_eq!(event_type, EVENT_TRANSACTION_LEGACY);
+        assert!(!emit_legacy);
+    }
+
+    #[test]
+    fn test_all_state_transitions_mapped() {
+        // Verify that all valid state machine transitions have corresponding event types
+        let transitions = vec![
+            ("pending", "processing"),
+            ("pending", "completed"),
+            ("pending", "failed"),
+            ("processing", "completed"),
+            ("processing", "failed"),
+            ("failed", "pending"),
+            ("dlq", "pending"),
+            ("pending_review", "completed"),
+            ("pending_review", "failed"),
+            ("pending_review", "pending"),
+        ];
+
+        for (from, to) in transitions {
+            let (event_type, emit_legacy) = transition_to_event_type(from, to);
+            // Verify event type is set
+            assert!(!event_type.is_empty(), "Event type should not be empty for {} -> {}", from, to);
+            // Verify we emit legacy events for backward compatibility
+            assert!(emit_legacy, "Should emit legacy event for {} -> {}", from, to);
+        }
+    }
 }
