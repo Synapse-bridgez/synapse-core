@@ -8,6 +8,7 @@ pub mod processor;
 pub mod query_cache;
 pub mod reconciliation;
 pub mod resource_limits;
+pub mod retention_policy;
 pub mod scheduler;
 pub mod settlement;
 pub mod transaction_processor;
