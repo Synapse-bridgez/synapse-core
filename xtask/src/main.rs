@@ -40,6 +40,9 @@ enum Commands {
     /// Render or check the SDK/CLI/API compatibility matrix
     /// (COMPATIBILITY.toml -> docs/compatibility-matrix.md).
     CompatMatrix(commands::compat::CompatMatrixArgs),
+
+    /// Analyze connection pool utilization and recommend sizing.
+    PoolAdvisor(commands::pool_advisor::PoolAdvisorArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -51,5 +54,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Lint(args) => commands::lint::run(args),
         Commands::Release(args) => commands::release::run(args),
         Commands::CompatMatrix(args) => commands::compat::run(args),
+        Commands::PoolAdvisor(args) => commands::pool_advisor::run(args),
     }
 }

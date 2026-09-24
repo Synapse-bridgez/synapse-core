@@ -1,5 +1,6 @@
 pub mod compat;
 pub mod lint;
+pub mod pool_advisor;
 pub mod release;
 pub mod setup;
 pub mod test;
