@@ -180,6 +180,10 @@ pub struct Config {
     // Settlement batch limits
     pub settlement_max_batch_size: usize,
     pub settlement_min_tx_count: usize,
+    // Partition configuration
+    pub partition_lookahead_months: u32,
+    pub partition_lookahead_min: u32,
+    pub partition_lookahead_max: u32,
 }
 
 pub mod assets;
@@ -321,6 +325,33 @@ impl Config {
             settlement_min_tx_count: env::var("SETTLEMENT_MIN_TX_COUNT")
                 .unwrap_or_else(|_| "1".to_string())
                 .parse()?,
+            partition_lookahead_min: env::var("PARTITION_LOOKAHEAD_MIN")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
+            partition_lookahead_months: {
+                let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
+                    .unwrap_or_else(|_| "1".to_string())
+                    .parse()
+                    .unwrap_or(1);
+                let max: u32 = env::var("PARTITION_LOOKAHEAD_MAX")
+                    .unwrap_or_else(|_| "12".to_string())
+                    .parse()
+                    .unwrap_or(12);
+                let lookahead: u32 = env::var("PARTITION_LOOKAHEAD_MONTHS")
+                    .unwrap_or_else(|_| "3".to_string())
+                    .parse()?;
+
+                if lookahead < min {
+                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be less than PARTITION_LOOKAHEAD_MIN ({})", lookahead, min);
+                }
+                if lookahead > max {
+                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be greater than PARTITION_LOOKAHEAD_MAX ({})", lookahead, max);
+                }
+                lookahead
+            },
         })
     }
 }
