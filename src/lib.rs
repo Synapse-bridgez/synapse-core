@@ -380,6 +380,11 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/webhooks/redirects/:id/cancel",
             post(handlers::admin::webhook_redirects::cancel_webhook_redirect),
         )
+        // Admin: asset processing rules dry-run/preview mode (#1260)
+        .route(
+            "/admin/rules/preview",
+            post(handlers::admin::rules_preview::preview_rules),
+        )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     // SecretsStore must be the outermost layer here (axum applies the *last*

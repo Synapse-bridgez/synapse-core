@@ -4,6 +4,7 @@ pub mod compliance;
 pub mod locks;
 pub mod quota;
 pub mod reconciliation;
+pub mod rules_preview;
 pub mod transaction_notes;
 pub mod webhook_filter_rules;
 pub mod webhook_redirects;
