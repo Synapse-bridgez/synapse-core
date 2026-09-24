@@ -4,6 +4,7 @@ pub mod backup_verification_job;
 pub mod compliance;
 pub mod feature_flags;
 pub mod lock_manager;
+pub mod materialized_views;
 pub mod processor;
 pub mod query_cache;
 pub mod reconciliation;
