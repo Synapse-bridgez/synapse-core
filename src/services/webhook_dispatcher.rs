@@ -94,6 +94,9 @@ pub struct WebhookEndpoint {
     pub enabled: bool,
     pub max_delivery_rate: i32,
     pub filter_rules: Option<serde_json::Value>,
+    /// Tags for bulk operation filtering (e.g., "eu-region", "staging")
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
 }
@@ -1415,6 +1418,116 @@ fn sign_payload(secret: &str, body: &str) -> String {
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+// Tag-based filtering functions for bulk operations
+impl WebhookDispatcher {
+    /// Get all webhook endpoints matching the given tags (AND operation).
+    pub async fn get_endpoints_by_tags(&self, tags: &[String]) -> anyhow::Result<Vec<WebhookEndpoint>> {
+        if tags.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query_str = format!(
+            r#"
+            SELECT id, url, secret, event_types, enabled, max_delivery_rate,
+                   filter_rules, tags, created_at, updated_at
+            FROM webhook_endpoints
+            WHERE tags @> $1::text[]
+            ORDER BY created_at DESC
+            "#,
+        );
+
+        let endpoints = sqlx::query_as::<_, WebhookEndpoint>(&query_str)
+            .bind(tags)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(endpoints)
+    }
+
+    /// Update tags for a webhook endpoint.
+    pub async fn update_endpoint_tags(&self, endpoint_id: Uuid, tags: Vec<String>) -> anyhow::Result<()> {
+        // Validate tag count (max 100)
+        if tags.len() > 100 {
+            return Err(anyhow::anyhow!("Maximum 100 tags allowed per endpoint"));
+        }
+
+        // Validate tag names (alphanumeric, hyphens, underscores, max 50 chars)
+        for tag in &tags {
+            if tag.is_empty() || tag.len() > 50 {
+                return Err(anyhow::anyhow!("Tag length must be between 1 and 50 characters"));
+            }
+            if !tag.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                return Err(anyhow::anyhow!(
+                    "Tags must contain only alphanumeric characters, hyphens, and underscores"
+                ));
+            }
+        }
+
+        sqlx::query(
+            "UPDATE webhook_endpoints SET tags = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(&tags)
+        .bind(endpoint_id)
+        .execute(&self.pool)
+        .await?;
+
+        self.invalidate_endpoint_filter_cache(endpoint_id).await;
+        Ok(())
+    }
+
+    /// Add a tag to a webhook endpoint.
+    pub async fn add_tag_to_endpoint(&self, endpoint_id: Uuid, tag: String) -> anyhow::Result<()> {
+        // Validate tag
+        if tag.is_empty() || tag.len() > 50 {
+            return Err(anyhow::anyhow!("Tag length must be between 1 and 50 characters"));
+        }
+        if !tag.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return Err(anyhow::anyhow!(
+                "Tags must contain only alphanumeric characters, hyphens, and underscores"
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE webhook_endpoints
+            SET tags = CASE
+                WHEN tags IS NULL THEN ARRAY[$1]::text[]
+                WHEN NOT tags @> ARRAY[$1]::text[] THEN array_append(tags, $1)
+                ELSE tags
+            END,
+            updated_at = NOW()
+            WHERE id = $2
+            "#,
+        )
+        .bind(&tag)
+        .bind(endpoint_id)
+        .execute(&self.pool)
+        .await?;
+
+        self.invalidate_endpoint_filter_cache(endpoint_id).await;
+        Ok(())
+    }
+
+    /// Remove a tag from a webhook endpoint.
+    pub async fn remove_tag_from_endpoint(&self, endpoint_id: Uuid, tag: String) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE webhook_endpoints
+            SET tags = array_remove(tags, $1),
+                updated_at = NOW()
+            WHERE id = $2
+            "#,
+        )
+        .bind(&tag)
+        .bind(endpoint_id)
+        .execute(&self.pool)
+        .await?;
+
+        self.invalidate_endpoint_filter_cache(endpoint_id).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
