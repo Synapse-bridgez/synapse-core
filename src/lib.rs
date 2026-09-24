@@ -370,6 +370,16 @@ pub fn create_app(app_state: AppState) -> Router {
             post(handlers::admin::webhook_retry_policy::update_webhook_retry_policy)
                 .get(handlers::admin::webhook_retry_policy::get_webhook_retry_policy),
         )
+        // Admin: webhook endpoint redirects for migrations (#1259)
+        .route(
+            "/admin/webhooks/endpoints/:id/redirects",
+            post(handlers::admin::webhook_redirects::create_webhook_redirect)
+                .get(handlers::admin::webhook_redirects::list_active_redirects),
+        )
+        .route(
+            "/admin/webhooks/redirects/:id/cancel",
+            post(handlers::admin::webhook_redirects::cancel_webhook_redirect),
+        )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     // SecretsStore must be the outermost layer here (axum applies the *last*

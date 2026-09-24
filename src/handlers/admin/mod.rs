@@ -6,6 +6,7 @@ pub mod quota;
 pub mod reconciliation;
 pub mod transaction_notes;
 pub mod webhook_filter_rules;
+pub mod webhook_redirects;
 pub mod webhook_replay;
 pub mod webhook_retry_policy;
 

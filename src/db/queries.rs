@@ -2462,6 +2462,130 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+// --- Webhook Endpoint Redirects (Issue #1259) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WebhookEndpointRedirect {
+    pub id: i64,
+    pub endpoint_id: Uuid,
+    pub redirect_url: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRedirectRequest {
+    pub redirect_url: String,
+    pub expires_at: DateTime<Utc>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Create a new webhook endpoint redirect
+pub async fn create_webhook_redirect(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+    redirect_url: &str,
+    expires_at: DateTime<Utc>,
+    metadata: Option<serde_json::Value>,
+) -> Result<WebhookEndpointRedirect> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO webhook_endpoint_redirects",
+        async {
+            sqlx::query_as::<_, WebhookEndpointRedirect>(
+                r#"
+                INSERT INTO webhook_endpoint_redirects (endpoint_id, redirect_url, expires_at, metadata)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id, endpoint_id, redirect_url, enabled, created_at, started_at, expires_at, cancelled_at, metadata
+                "#,
+            )
+            .bind(endpoint_id)
+            .bind(redirect_url)
+            .bind(expires_at)
+            .bind(metadata)
+            .fetch_one(pool)
+            .await
+        },
+    )
+    .await
+}
+
+/// Get active redirects for an endpoint (not expired, not cancelled)
+pub async fn get_active_endpoint_redirects(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+) -> Result<Vec<WebhookEndpointRedirect>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM webhook_endpoint_redirects WHERE endpoint_id = $1 AND active",
+        async {
+            sqlx::query_as::<_, WebhookEndpointRedirect>(
+                r#"
+                SELECT id, endpoint_id, redirect_url, enabled, created_at, started_at, expires_at, cancelled_at, metadata
+                FROM webhook_endpoint_redirects
+                WHERE endpoint_id = $1
+                    AND enabled = true
+                    AND cancelled_at IS NULL
+                    AND expires_at > NOW()
+                ORDER BY created_at DESC
+                "#,
+            )
+            .bind(endpoint_id)
+            .fetch_all(pool)
+            .await
+        },
+    )
+    .await
+}
+
+/// Cancel a webhook redirect (soft delete)
+pub async fn cancel_webhook_redirect(
+    pool: &PgPool,
+    redirect_id: i64,
+) -> Result<bool> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE webhook_endpoint_redirects SET cancelled_at = NOW()",
+        async {
+            let result = sqlx::query(
+                "UPDATE webhook_endpoint_redirects SET cancelled_at = NOW() WHERE id = $1 AND cancelled_at IS NULL"
+            )
+            .bind(redirect_id)
+            .execute(pool)
+            .await?;
+
+            Ok(result.rows_affected() > 0)
+        },
+    )
+    .await
+}
+
+/// Mark redirect as started
+pub async fn start_webhook_redirect(
+    pool: &PgPool,
+    redirect_id: i64,
+) -> Result<bool> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE webhook_endpoint_redirects SET started_at = NOW()",
+        async {
+            let result = sqlx::query(
+                "UPDATE webhook_endpoint_redirects SET started_at = NOW() WHERE id = $1 AND started_at IS NULL"
+            )
+            .bind(redirect_id)
+            .execute(pool)
+            .await?;
+
+            Ok(result.rows_affected() > 0)
+        },
+    )
+    .await
+}
+
 // --- Webhook Retry Policy (Issue #1258) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
