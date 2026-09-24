@@ -565,6 +565,23 @@ pub fn replica_lag_alert_total() -> Counter<u64> {
         .init()
 }
 
+/// ANALYZE staleness ratio histogram (0.0-1.0), labeled by `table` (schema.table).
+/// Ratio = n_mod_since_analyze / estimate_live_rows.
+pub fn analyze_staleness_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("analyze_staleness_ratio")
+        .with_description("Ratio of modifications since last ANALYZE relative to estimated live rows")
+        .init()
+}
+
+/// Count of tables flagged as stale (n_mod_since_analyze exceeding configured threshold).
+pub fn stale_tables_total() -> Counter<u64> {
+    meter()
+        .u64_counter("stale_tables_total")
+        .with_description("Number of tables with stale ANALYZE statistics relative to write volume")
+        .init()
+}
+
 // ---------------------------------------------------------------------------
 // Provider initialisation
 // ---------------------------------------------------------------------------

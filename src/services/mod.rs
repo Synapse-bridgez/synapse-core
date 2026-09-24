@@ -1,4 +1,5 @@
 pub mod account_monitor;
+pub mod analyze_monitor;
 pub mod backup;
 pub mod backup_verification_job;
 pub mod compliance;
