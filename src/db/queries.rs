@@ -2462,6 +2462,124 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+// --- Transaction Notes (Issue #1257) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TransactionNote {
+    pub id: i64,
+    pub transaction_id: Uuid,
+    pub admin_principal: String,
+    pub note_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTransactionNoteRequest {
+    pub note_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedNotes {
+    pub items: Vec<TransactionNote>,
+    pub has_more: bool,
+    pub cursor: Option<i64>,
+}
+
+/// Add a note to a transaction (immutable, append-only)
+pub async fn add_transaction_note(
+    pool: &PgPool,
+    transaction_id: Uuid,
+    admin_principal: &str,
+    note_text: &str,
+) -> Result<TransactionNote> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO transaction_notes (transaction_id, admin_principal, note_text)",
+        async {
+            sqlx::query_as::<_, TransactionNote>(
+                r#"
+                INSERT INTO transaction_notes (transaction_id, admin_principal, note_text)
+                VALUES ($1, $2, $3)
+                RETURNING id, transaction_id, admin_principal, note_text, created_at
+                "#,
+            )
+            .bind(transaction_id)
+            .bind(admin_principal)
+            .bind(note_text)
+            .fetch_one(pool)
+            .await
+        },
+    )
+    .await
+}
+
+/// Get paginated notes for a transaction
+pub async fn get_transaction_notes(
+    pool: &PgPool,
+    transaction_id: Uuid,
+    limit: i64,
+    cursor: Option<i64>,
+) -> Result<PaginatedNotes> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transaction_notes WHERE transaction_id = $1 ORDER BY id DESC",
+        async {
+            // Fetch limit + 1 to determine if there are more results
+            let fetch_limit = limit + 1;
+            let notes = if let Some(cursor_id) = cursor {
+                sqlx::query_as::<_, TransactionNote>(
+                    r#"
+                    SELECT id, transaction_id, admin_principal, note_text, created_at
+                    FROM transaction_notes
+                    WHERE transaction_id = $1 AND id < $2
+                    ORDER BY id DESC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(transaction_id)
+                .bind(cursor_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await?
+            } else {
+                sqlx::query_as::<_, TransactionNote>(
+                    r#"
+                    SELECT id, transaction_id, admin_principal, note_text, created_at
+                    FROM transaction_notes
+                    WHERE transaction_id = $1
+                    ORDER BY id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(transaction_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await?
+            };
+
+            let has_more = notes.len() > limit as usize;
+            let items = if has_more {
+                notes[..limit as usize].to_vec()
+            } else {
+                notes
+            };
+
+            let next_cursor = if has_more && !items.is_empty() {
+                Some(items.last().unwrap().id)
+            } else {
+                None
+            };
+
+            Ok(PaginatedNotes {
+                items,
+                has_more,
+                cursor: next_cursor,
+            })
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;

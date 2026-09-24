@@ -358,6 +358,12 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
         )
+        // Admin: transaction notes API (#1257)
+        .route(
+            "/admin/transactions/:id/notes",
+            post(handlers::admin::transaction_notes::create_transaction_note)
+                .get(handlers::admin::transaction_notes::get_transaction_notes),
+        )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     // SecretsStore must be the outermost layer here (axum applies the *last*
