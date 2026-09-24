@@ -10,6 +10,7 @@ pub mod reconciliation;
 pub mod resource_limits;
 pub mod scheduler;
 pub mod settlement;
+pub mod tenant_deletion;
 pub mod tenant_export;
 pub mod transaction_processor;
 pub mod transaction_processor_job;
