@@ -1531,6 +1531,65 @@ impl WebhookDispatcher {
 }
 
 #[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    #[test]
+    fn test_health_insufficient_data() {
+        let label = calculate_health_label(true, 100.0, "closed", None, 0);
+        assert_eq!(label, HealthLabel::InsufficientData);
+    }
+
+    #[test]
+    fn test_health_failing_when_disabled() {
+        let label = calculate_health_label(false, 95.0, "closed", None, 10);
+        assert_eq!(label, HealthLabel::Failing);
+    }
+
+    #[test]
+    fn test_health_failing_low_success_rate() {
+        let label = calculate_health_label(true, 70.0, "closed", None, 10);
+        assert_eq!(label, HealthLabel::Failing);
+    }
+
+    #[test]
+    fn test_health_failing_open_circuit() {
+        let label = calculate_health_label(true, 95.0, "open", None, 10);
+        assert_eq!(label, HealthLabel::Failing);
+    }
+
+    #[test]
+    fn test_health_degraded_half_open() {
+        let label = calculate_health_label(true, 95.0, "half-open", None, 10);
+        assert_eq!(label, HealthLabel::Degraded);
+    }
+
+    #[test]
+    fn test_health_degraded_moderate_success_rate() {
+        let label = calculate_health_label(true, 85.0, "closed", None, 10);
+        assert_eq!(label, HealthLabel::Degraded);
+    }
+
+    #[test]
+    fn test_health_degraded_high_latency() {
+        let label = calculate_health_label(true, 99.0, "closed", Some(6000.0), 10);
+        assert_eq!(label, HealthLabel::Degraded);
+    }
+
+    #[test]
+    fn test_health_healthy() {
+        let label = calculate_health_label(true, 99.0, "closed", Some(1000.0), 10);
+        assert_eq!(label, HealthLabel::Healthy);
+    }
+
+    #[test]
+    fn test_health_healthy_no_latency_data() {
+        let label = calculate_health_label(true, 99.0, "closed", None, 10);
+        assert_eq!(label, HealthLabel::Healthy);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1939,7 +1998,32 @@ mod tests {
 // Admin query helpers (used by handlers/admin.rs)
 // ---------------------------------------------------------------------------
 
+/// Health status label derived from aggregated metrics.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum HealthLabel {
+    #[serde(rename = "healthy")]
+    Healthy,
+    #[serde(rename = "degraded")]
+    Degraded,
+    #[serde(rename = "failing")]
+    Failing,
+    #[serde(rename = "insufficient_data")]
+    InsufficientData,
+}
+
+impl std::fmt::Display for HealthLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HealthLabel::Healthy => write!(f, "healthy"),
+            HealthLabel::Degraded => write!(f, "degraded"),
+            HealthLabel::Failing => write!(f, "failing"),
+            HealthLabel::InsufficientData => write!(f, "insufficient_data"),
+        }
+    }
+}
+
 /// Snapshot of an endpoint's health as returned by the admin API.
+/// Aggregates circuit breaker state, delivery stats, and latency metrics.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct EndpointHealth {
     pub id: Uuid,
@@ -1948,6 +2032,17 @@ pub struct EndpointHealth {
     pub success_rate: f64,
     pub total_deliveries: i32,
     pub last_success_at: Option<chrono::DateTime<Utc>>,
+    /// Circuit breaker state: "closed", "open", or "half-open"
+    #[serde(default)]
+    pub circuit_state: String,
+    /// Percentile latency metrics (in milliseconds)
+    #[serde(default)]
+    pub latency_p50_ms: Option<f64>,
+    #[serde(default)]
+    pub latency_p95_ms: Option<f64>,
+    /// Aggregate health label: healthy, degraded, failing, or insufficient_data
+    #[serde(default)]
+    pub health_status: String,
 }
 
 /// Return health scores for all webhook endpoints.
@@ -1956,7 +2051,11 @@ pub async fn list_endpoint_health(
 ) -> Result<Vec<EndpointHealth>, crate::error::AppError> {
     let rows = sqlx::query(
         r#"
-        SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
+        SELECT
+            id, url, enabled, success_rate, total_deliveries, last_success_at,
+            circuit_state,
+            NULL::float8 as latency_p50,
+            NULL::float8 as latency_p95
         FROM webhook_endpoints
         ORDER BY success_rate ASC, total_deliveries DESC
         "#,
@@ -1965,24 +2064,90 @@ pub async fn list_endpoint_health(
     .await
     .map_err(crate::error::AppError::Database)?;
 
+    use sqlx::Row;
     Ok(rows
         .into_iter()
-        .map(|r: sqlx::postgres::PgRow| EndpointHealth {
-            id: r.get("id"),
-            url: r.get("url"),
-            enabled: r.get("enabled"),
-            success_rate: r
+        .map(|r: sqlx::postgres::PgRow| {
+            let enabled: bool = r.get("enabled");
+            let success_rate = r
                 .try_get::<sqlx::types::BigDecimal, _>("success_rate")
                 .ok()
                 .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
-                .unwrap_or(100.0),
-            total_deliveries: r
+                .unwrap_or(100.0);
+            let total_deliveries = r
                 .try_get::<Option<i32>, _>("total_deliveries")
                 .unwrap_or(None)
-                .unwrap_or(0),
-            last_success_at: r.try_get("last_success_at").unwrap_or(None),
+                .unwrap_or(0);
+            let circuit_state: String = r.get("circuit_state");
+            let latency_p95: Option<f64> = r.try_get("latency_p95").unwrap_or(None);
+
+            let health_label = calculate_health_label(
+                enabled,
+                success_rate,
+                &circuit_state,
+                latency_p95,
+                total_deliveries,
+            );
+
+            EndpointHealth {
+                id: r.get("id"),
+                url: r.get("url"),
+                enabled,
+                success_rate,
+                total_deliveries,
+                last_success_at: r.try_get("last_success_at").unwrap_or(None),
+                circuit_state,
+                latency_p50_ms: r.try_get("latency_p50").unwrap_or(None),
+                latency_p95_ms: latency_p95,
+                health_status: health_label.to_string(),
+            }
         })
         .collect())
+}
+
+/// Calculate health label based on aggregated metrics.
+///
+/// Uses the following scoring:
+/// - Insufficient data: No recent deliveries
+/// - Healthy: success_rate >= 95% AND circuit_state = closed AND p95_latency < 5s
+/// - Degraded: success_rate >= 75% OR circuit_state = half-open OR p95_latency >= 5s
+/// - Failing: success_rate < 75% OR circuit_state = open OR endpoint disabled
+fn calculate_health_label(
+    enabled: bool,
+    success_rate: f64,
+    circuit_state: &str,
+    p95_latency_ms: Option<f64>,
+    total_deliveries: i32,
+) -> HealthLabel {
+    // Insufficient data: no recent deliveries
+    if total_deliveries == 0 {
+        return HealthLabel::InsufficientData;
+    }
+
+    // Failing conditions (highest priority)
+    if !enabled || success_rate < 75.0 || circuit_state == "open" {
+        return HealthLabel::Failing;
+    }
+
+    // Degraded conditions
+    if success_rate < 95.0 || circuit_state == "half-open" {
+        if let Some(latency) = p95_latency_ms {
+            if latency >= 5000.0 {
+                return HealthLabel::Degraded;
+            }
+        }
+        return HealthLabel::Degraded;
+    }
+
+    // Check latency for healthy endpoints
+    if let Some(latency) = p95_latency_ms {
+        if latency >= 5000.0 {
+            return HealthLabel::Degraded;
+        }
+    }
+
+    // All checks passed
+    HealthLabel::Healthy
 }
 
 /// Return health score for a single endpoint.
@@ -1992,7 +2157,21 @@ pub async fn get_endpoint_health(
 ) -> Result<EndpointHealth, crate::error::AppError> {
     let r = sqlx::query(
         r#"
-        SELECT id, url, enabled, success_rate, total_deliveries, last_success_at
+        SELECT
+            id, url, enabled, success_rate, total_deliveries, last_success_at,
+            circuit_state,
+            COALESCE(
+                (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY response_time_ms)
+                 FROM webhook_delivery_events
+                 WHERE endpoint_id = $1 AND delivered_at > NOW() - INTERVAL '24 hours'),
+                NULL
+            ) as latency_p50,
+            COALESCE(
+                (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY response_time_ms)
+                 FROM webhook_delivery_events
+                 WHERE endpoint_id = $1 AND delivered_at > NOW() - INTERVAL '24 hours'),
+                NULL
+            ) as latency_p95
         FROM webhook_endpoints
         WHERE id = $1
         "#,
@@ -2004,19 +2183,32 @@ pub async fn get_endpoint_health(
     .ok_or_else(|| crate::error::AppError::NotFound(format!("Endpoint {endpoint_id} not found")))?;
 
     use sqlx::Row;
+    let enabled: bool = r.get("enabled");
+    let success_rate = r
+        .try_get::<sqlx::types::BigDecimal, _>("success_rate")
+        .ok()
+        .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+        .unwrap_or(100.0);
+    let total_deliveries = r
+        .try_get::<Option<i32>, _>("total_deliveries")
+        .unwrap_or(None)
+        .unwrap_or(0);
+    let circuit_state: String = r.get("circuit_state");
+    let latency_p50: Option<f64> = r.try_get("latency_p50").unwrap_or(None);
+    let latency_p95: Option<f64> = r.try_get("latency_p95").unwrap_or(None);
+
+    let health_label = calculate_health_label(enabled, success_rate, &circuit_state, latency_p95, total_deliveries);
+
     Ok(EndpointHealth {
         id: r.get("id"),
         url: r.get("url"),
-        enabled: r.get("enabled"),
-        success_rate: r
-            .try_get::<sqlx::types::BigDecimal, _>("success_rate")
-            .ok()
-            .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
-            .unwrap_or(100.0),
-        total_deliveries: r
-            .try_get::<Option<i32>, _>("total_deliveries")
-            .unwrap_or(None)
-            .unwrap_or(0),
+        enabled,
+        success_rate,
+        total_deliveries,
         last_success_at: r.try_get("last_success_at").unwrap_or(None),
+        circuit_state,
+        latency_p50_ms: latency_p50,
+        latency_p95_ms: latency_p95,
+        health_status: health_label.to_string(),
     })
 }
