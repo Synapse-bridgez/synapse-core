@@ -407,6 +407,11 @@ pub struct ComplianceReport {
     pub volume_by_asset: serde_json::Value,
     pub top_accounts: serde_json::Value,
     pub created_at: DateTime<Utc>,
+    pub status: Option<String>,
+    pub reviewed_by: Option<Uuid>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub reviewer_notes: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 // Minimal Asset struct for asset cache functionality
