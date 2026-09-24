@@ -85,6 +85,25 @@ enum CircuitDecision {
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub max_attempts: i32,
+    pub base_delay_secs: i32,
+    pub multiplier: f64,
+    pub max_delay_secs: i32,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_secs: 10,
+            multiplier: 2.0,
+            max_delay_secs: 300,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WebhookEndpoint {
     pub id: Uuid,
@@ -94,8 +113,19 @@ pub struct WebhookEndpoint {
     pub enabled: bool,
     pub max_delivery_rate: i32,
     pub filter_rules: Option<serde_json::Value>,
+    pub retry_policy: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl WebhookEndpoint {
+    /// Get the retry policy for this endpoint, or the default if not set
+    pub fn get_retry_policy(&self) -> RetryPolicy {
+        self.retry_policy
+            .as_ref()
+            .and_then(|val| serde_json::from_value(val.clone()).ok())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -621,6 +651,7 @@ impl WebhookDispatcher {
                         now,
                         Some(status_code),
                         Some(resp_body),
+                        endpoint,
                     )
                     .await?;
                     Ok(false)
@@ -640,7 +671,7 @@ impl WebhookDispatcher {
                 )
                 .await?;
 
-                self.handle_failure(delivery, new_attempt_count, now, None, Some(err_msg))
+                self.handle_failure(delivery, new_attempt_count, now, None, Some(err_msg), endpoint)
                     .await?;
                 Ok(false)
             }
@@ -688,9 +719,9 @@ impl WebhookDispatcher {
 
     /// Handle a failed delivery attempt.
     ///
-    /// * If `attempt_count < MAX_ATTEMPTS`: schedule a retry with exponential
+    /// * If `attempt_count < endpoint.retry_policy.max_attempts`: schedule a retry with exponential
     ///   backoff and keep the status as `pending`.
-    /// * If `attempt_count >= MAX_ATTEMPTS`: move the delivery to the DLQ table
+    /// * If `attempt_count >= endpoint.retry_policy.max_attempts`: move the delivery to the DLQ table
     ///   with full attempt history, set status to `failed`.
     async fn handle_failure(
         &self,
@@ -699,8 +730,11 @@ impl WebhookDispatcher {
         now: chrono::DateTime<Utc>,
         response_status: Option<i32>,
         response_body: Option<String>,
+        endpoint: &WebhookEndpoint,
     ) -> anyhow::Result<()> {
-        let (new_status, next_attempt_at) = if attempt_count >= MAX_ATTEMPTS {
+        let retry_policy = endpoint.get_retry_policy();
+
+        let (new_status, next_attempt_at) = if attempt_count >= retry_policy.max_attempts {
             tracing::warn!(
                 delivery_id = %delivery.id,
                 endpoint_id = %delivery.endpoint_id,
@@ -709,8 +743,14 @@ impl WebhookDispatcher {
             );
             ("failed", None)
         } else {
-            let base_delay = BASE_DELAY_SECS * (1_i64 << attempt_count);
-            let delay = crate::utils::retry::apply_jitter(base_delay as u64) as i64;
+            // Calculate exponential backoff: base_delay * (multiplier ^ attempt)
+            let base_delay_secs = retry_policy.base_delay_secs as i64;
+            let multiplier = retry_policy.multiplier;
+            let delay_secs = base_delay_secs * (multiplier.powi(attempt_count - 1) as i64);
+
+            // Clamp to max_delay_secs
+            let clamped_delay = delay_secs.min(retry_policy.max_delay_secs as i64);
+            let delay = crate::utils::retry::apply_jitter(clamped_delay as u64) as i64;
             let next = now + chrono::Duration::seconds(delay);
             tracing::warn!(
                 delivery_id = %delivery.id,
@@ -746,7 +786,7 @@ impl WebhookDispatcher {
         .await?;
 
         // Route to DLQ on exhaustion
-        if attempt_count >= MAX_ATTEMPTS {
+        if attempt_count >= retry_policy.max_attempts {
             self.route_to_dlq(delivery, attempt_count, response_status, response_body)
                 .await?;
         }

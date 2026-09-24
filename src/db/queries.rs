@@ -2462,6 +2462,91 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+// --- Webhook Retry Policy (Issue #1258) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicyRequest {
+    pub max_attempts: Option<i32>,
+    pub base_delay_secs: Option<i32>,
+    pub multiplier: Option<f64>,
+    pub max_delay_secs: Option<i32>,
+}
+
+impl RetryPolicyRequest {
+    /// Validates the retry policy request against platform-wide safety boundaries
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(attempts) = self.max_attempts {
+            if attempts < 1 || attempts > 50 {
+                return Err("max_attempts must be between 1 and 50".to_string());
+            }
+        }
+        if let Some(delay) = self.base_delay_secs {
+            if delay < 1 || delay > 3600 {
+                return Err("base_delay_secs must be between 1 and 3600".to_string());
+            }
+        }
+        if let Some(mult) = self.multiplier {
+            if mult <= 1.0 || mult > 10.0 {
+                return Err("multiplier must be between 1.0 (exclusive) and 10.0".to_string());
+            }
+        }
+        if let Some(delay) = self.max_delay_secs {
+            if delay < 60 || delay > 86400 {
+                return Err("max_delay_secs must be between 60 and 86400".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Update retry policy for a webhook endpoint
+pub async fn update_webhook_retry_policy(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+    policy: RetryPolicyRequest,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE webhook_endpoints SET retry_policy",
+        async {
+            // Build policy JSON with defaults for unspecified fields
+            let current_policy: serde_json::Value = sqlx::query_scalar(
+                "SELECT COALESCE(retry_policy, jsonb_build_object('max_attempts', 5, 'base_delay_secs', 10, 'multiplier', 2.0, 'max_delay_secs', 300)) FROM webhook_endpoints WHERE id = $1"
+            )
+            .bind(endpoint_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound)?;
+
+            let mut updated = current_policy.as_object().cloned().unwrap_or_default();
+
+            if let Some(attempts) = policy.max_attempts {
+                updated.insert("max_attempts".to_string(), serde_json::json!(attempts));
+            }
+            if let Some(delay) = policy.base_delay_secs {
+                updated.insert("base_delay_secs".to_string(), serde_json::json!(delay));
+            }
+            if let Some(mult) = policy.multiplier {
+                updated.insert("multiplier".to_string(), serde_json::json!(mult));
+            }
+            if let Some(delay) = policy.max_delay_secs {
+                updated.insert("max_delay_secs".to_string(), serde_json::json!(delay));
+            }
+
+            sqlx::query(
+                "UPDATE webhook_endpoints SET retry_policy = $1, updated_at = NOW() WHERE id = $2"
+            )
+            .bind(serde_json::to_value(&updated)?)
+            .bind(endpoint_id)
+            .execute(pool)
+            .await?;
+
+            Ok(())
+        },
+    )
+    .await
+}
+
 // --- Transaction Notes (Issue #1257) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

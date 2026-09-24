@@ -364,6 +364,12 @@ pub fn create_app(app_state: AppState) -> Router {
             post(handlers::admin::transaction_notes::create_transaction_note)
                 .get(handlers::admin::transaction_notes::get_transaction_notes),
         )
+        // Admin: webhook retry policy configuration (#1258)
+        .route(
+            "/admin/webhooks/endpoints/:id/retry-policy",
+            post(handlers::admin::webhook_retry_policy::update_webhook_retry_policy)
+                .get(handlers::admin::webhook_retry_policy::get_webhook_retry_policy),
+        )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     // SecretsStore must be the outermost layer here (axum applies the *last*
