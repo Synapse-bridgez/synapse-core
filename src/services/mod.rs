@@ -12,6 +12,7 @@ pub mod resource_limits;
 pub mod scheduler;
 pub mod settlement;
 pub mod settlement_sla;
+pub mod table_bloat_monitor;
 pub mod transaction_processor;
 pub mod transaction_processor_job;
 pub mod webhook_dispatcher;
@@ -29,6 +30,7 @@ pub use resource_limits::{resource_category_snapshots, ResourceCategorySnapshot,
 pub use scheduler::{AuditLogRetentionJob, Job, JobHealthAlert, JobScheduler, JobStatus};
 pub use settlement::SettlementService;
 pub use settlement_sla::{SettlementSLAJob, SLAConfig, SLABreach};
+pub use table_bloat_monitor::{AutovacuumRecommendation, BloatMetrics, TableBloatMonitorJob};
 pub use transaction_processor::TransactionProcessor;
 pub use transaction_processor_job::TransactionProcessorJob;
 pub use webhook_dispatcher::WebhookDispatcher;

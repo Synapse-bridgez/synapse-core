@@ -547,6 +547,22 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
         .init()
 }
 
+/// Table bloat ratio as a percentage, labeled by `schema` and `table`
+pub fn table_bloat_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_ratio")
+        .with_description("Estimated table bloat ratio as percentage of wasted space, labeled by schema and table")
+        .init()
+}
+
+/// Estimated table bloat size in megabytes, labeled by `schema` and `table`
+pub fn table_bloat_size_mb() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_size_mb")
+        .with_description("Estimated table bloat size in MB, labeled by schema and table")
+        .init()
+}
+
 // ---------------------------------------------------------------------------
 // Provider initialisation
 // ---------------------------------------------------------------------------
