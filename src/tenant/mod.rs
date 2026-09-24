@@ -16,6 +16,12 @@ pub struct TenantConfig {
     pub stellar_account: String,
     pub rate_limit_per_minute: i32,
     pub is_active: bool,
+    #[serde(default = "default_idempotency_ttl")]
+    pub idempotency_ttl_seconds: i64,
+}
+
+fn default_idempotency_ttl() -> i64 {
+    86400 // 24 hours by default
 }
 
 #[derive(Debug, Clone)]
