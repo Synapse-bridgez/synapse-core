@@ -280,6 +280,10 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
+        .route(
+            "/admin/config/export",
+            get(handlers::admin::config_export::export_config),
+        )
         // Stats endpoints
         .route("/stats/status", get(handlers::stats::status_counts))
         .route("/stats/daily", get(handlers::stats::daily_totals))
