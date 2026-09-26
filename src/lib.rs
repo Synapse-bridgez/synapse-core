@@ -311,6 +311,12 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/quotas/:tenant_id/reset",
             axum::routing::delete(handlers::admin::quota::reset_tenant_quota),
         )
+        // Admin: per-tenant data quota (storage + row-count) (#1287)
+        .route(
+            "/admin/quotas/:tenant_id/data",
+            axum::routing::put(handlers::admin::quota::set_tenant_data_quota)
+                .get(handlers::admin::quota::get_tenant_data_quota),
+        )
         // Admin: tenant secret rotation and revocation
         .route(
             "/admin/tenants/:tenant_id/rotate-secret",
@@ -335,6 +341,15 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/admin/audit/search",
             get(handlers::admin::audit::search_audit_logs_handler),
+        )
+        // Admin: cold-storage unified audit log query (#1285)
+        .route(
+            "/admin/audit/unified",
+            get(handlers::admin::audit::query_unified_audit_logs_handler),
+        )
+        .route(
+            "/admin/audit/cold/pointers",
+            get(handlers::admin::audit::list_cold_pointers_handler),
         )
         // Admin: compliance report generation/listing — same gap as audit
         // search above.
@@ -369,6 +384,26 @@ pub fn create_app(app_state: AppState) -> Router {
         admin_only_routes = admin_only_routes.layer(axum::Extension(store.clone()));
     }
 
+    // #1288: Blue-green deployment admin routes.
+    // These are mounted separately from admin_only_routes because they use a
+    // different state type (BlueGreenState, not ApiState).  They are still
+    // protected by admin_auth via their own layer.
+    let bg_url_blue = std::env::var("BLUE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let bg_url_green = std::env::var("GREEN_URL")
+        .unwrap_or_else(|_| "http://localhost:3001".to_string());
+    let bg_rollback_secs = std::env::var("BLUE_GREEN_ROLLBACK_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60);
+    let bg_state = services::BlueGreenState::new(
+        bg_url_blue,
+        bg_url_green,
+        std::time::Duration::from_secs(bg_rollback_secs),
+    );
+    let blue_green_admin_routes = services::blue_green::blue_green_routes(bg_state)
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
+
     public_health_routes
         // Unversioned routes default to V2 behaviour
         .merge(core_routes.layer(axum_middleware::from_fn(
@@ -397,6 +432,11 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/ws", get(handlers::ws::ws_handler))
                 .with_state(app_state),
         )
+        // #1288: Blue-green deployment control plane.
+        // blue_green_admin_routes is Router<()> (state already baked in via
+        // with_state(bg_state)); merge after with_state(api_state) so both
+        // sides of the merge are Router<()>.
+        .merge(blue_green_admin_routes)
         // NOTE: axum applies the *last* `.layer()` call as the *outermost* wrapper,
         // so it runs first on the request path and last on the response path.
         // `request_logger` must stay outermost relative to `error_enrichment`:

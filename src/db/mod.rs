@@ -48,6 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod audit;
+pub mod cold_storage;
 pub mod cron;
 pub mod models;
 pub mod partition;

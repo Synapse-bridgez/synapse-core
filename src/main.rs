@@ -540,6 +540,16 @@ async fn serve(
         tracing::warn!("Failed to register audit log retention job: {}", e);
     }
 
+    // #1287: Register the tenant data quota measurement job (runs every 15 minutes).
+    let tenant_data_quota_job =
+        synapse_core::services::TenantDataQuotaJob::new(pool.clone());
+    if let Err(e) = scheduler
+        .register_job(Box::new(tenant_data_quota_job))
+        .await
+    {
+        tracing::warn!("Failed to register tenant data quota job: {}", e);
+    }
+
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
