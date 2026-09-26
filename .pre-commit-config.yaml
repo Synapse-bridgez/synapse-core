@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: scan-secrets
+        name: scan secrets
+        entry: bash scripts/scan-secrets.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

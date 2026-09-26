@@ -127,6 +127,22 @@ pub fn db_pool_idle_connections() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Maximum configured DB pool size gauge.
+pub fn db_pool_max_connections() -> ObservableGauge<u64> {
+    meter()
+        .u64_observable_gauge("db_pool_max_connections")
+        .with_description("Configured maximum size of the database pool")
+        .init()
+}
+
+/// Database pool saturation ratio: active connections divided by configured max.
+pub fn db_pool_saturation_ratio() -> ObservableGauge<f64> {
+    meter()
+        .f64_observable_gauge("db_pool_saturation_ratio")
+        .with_description("Fraction of the configured database pool currently in use")
+        .init()
+}
+
 /// DB query timeout counter (mirrors `DB_QUERY_TIMEOUT_TOTAL` atomic).
 pub fn db_query_timeout_total() -> Counter<u64> {
     meter()
