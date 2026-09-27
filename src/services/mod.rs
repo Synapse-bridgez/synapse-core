@@ -1,6 +1,7 @@
 pub mod account_monitor;
 pub mod backup;
 pub mod backup_verification_job;
+pub mod canary_controller;
 pub mod compliance;
 pub mod feature_flags;
 pub mod lock_manager;
@@ -17,6 +18,7 @@ pub mod webhook_dispatcher;
 pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
 pub use backup_verification_job::BackupVerificationJob;
+pub use canary_controller::{CanaryController, CanaryDimension, CanaryRelease, CanaryUpdate};
 pub use feature_flags::FeatureFlagService;
 pub use lock_manager::LeaderElection;
 pub use lock_manager::{FairLockConfig, FairLockManager};

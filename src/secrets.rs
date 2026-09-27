@@ -156,6 +156,26 @@ impl SecretsStore {
 pub struct SecretsManager {
     client: VaultClient,
     kv_mount: String,
+    vault_addr: String,
+    client_token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DatabaseLeaseResponse {
+    lease_id: String,
+    lease_duration: u64,
+    data: DatabaseLeaseData,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DatabaseLeaseData {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LeaseRenewalResponse {
+    lease_duration: u64,
 }
 
 impl SecretsManager {
@@ -181,7 +201,12 @@ impl SecretsManager {
             .context("failed to authenticate to Vault with AppRole")?;
         client.set_token(&auth.client_token);
 
-        Ok(Self { client, kv_mount })
+        Ok(Self {
+            client,
+            kv_mount,
+            vault_addr,
+            client_token: auth.client_token,
+        })
     }
 
     pub async fn get_db_password(&self) -> Result<String> {
@@ -215,6 +240,110 @@ impl SecretsManager {
             .get("api_key")
             .cloned()
             .context("api_key not found in Vault secret/admin")
+    }
+
+    async fn issue_database_lease(&self, role: &str) -> Result<DatabaseLeaseResponse> {
+        let response = reqwest::Client::new()
+            .get(format!("{}/v1/database/creds/{role}", self.vault_addr.trim_end_matches('/')))
+            .header("X-Vault-Token", &self.client_token)
+            .send()
+            .await
+            .context("failed to request dynamic database credentials from Vault")?;
+        response
+            .error_for_status()
+            .context("Vault rejected dynamic database credential request")?
+            .json()
+            .await
+            .context("invalid Vault database credential response")
+    }
+
+    async fn renew_database_lease(&self, lease_id: &str) -> Result<u64> {
+        let response: LeaseRenewalResponse = reqwest::Client::new()
+            .put(format!("{}/v1/sys/leases/renew", self.vault_addr.trim_end_matches('/')))
+            .header("X-Vault-Token", &self.client_token)
+            .json(&serde_json::json!({ "lease_id": lease_id }))
+            .send()
+            .await
+            .context("failed to renew Vault database lease")?
+            .error_for_status()
+            .context("Vault rejected database lease renewal")?
+            .json()
+            .await
+            .context("invalid Vault lease renewal response")?;
+        Ok(response.lease_duration)
+    }
+
+    /// Keep Vault database credentials alive and replace the active pool before
+    /// the lease expires. The pool manager atomically swaps handles and drains
+    /// the old pool, so requests already in progress are never interrupted.
+    pub fn start_database_rotation_task(
+        &self,
+        pool_manager: crate::db::pool_manager::PoolManager,
+        role: String,
+        database_url_template: String,
+    ) {
+        let vault_addr = self.vault_addr.clone();
+        let client_token = self.client_token.clone();
+        tokio::spawn(async move {
+            let http = reqwest::Client::new();
+            let mut lease: Option<DatabaseLeaseResponse> = None;
+            loop {
+                let next = match &lease {
+                    Some(current) => {
+                        let renewal = http
+                            .put(format!("{}/v1/sys/leases/renew", vault_addr.trim_end_matches('/')))
+                            .header("X-Vault-Token", &client_token)
+                            .json(&serde_json::json!({ "lease_id": current.lease_id }))
+                            .send()
+                            .await;
+                        match renewal {
+                            Ok(response) if response.status().is_success() => {
+                                response.json::<LeaseRenewalResponse>().await.ok().map(|renewed| {
+                                    tokio::time::sleep(Duration::from_secs((renewed.lease_duration / 2).max(5)));
+                                    renewed.lease_duration
+                                })
+                            }
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+
+                if next.is_none() {
+                    match http
+                        .get(format!("{}/v1/database/creds/{role}", vault_addr.trim_end_matches('/')))
+                        .header("X-Vault-Token", &client_token)
+                        .send()
+                        .await
+                    {
+                        Ok(response) if response.status().is_success() => {
+                            match response.json::<DatabaseLeaseResponse>().await {
+                                Ok(new_lease) => {
+                                    let database_url = database_url_template
+                                        .replace("{username}", &new_lease.data.username)
+                                        .replace("{password}", &new_lease.data.password);
+                                    if let Err(error) = pool_manager.rotate_primary(&database_url).await {
+                                        tracing::error!("Vault credential rotation pool swap failed: {error}");
+                                    } else {
+                                        tracing::info!(lease_id = %new_lease.lease_id, "Vault database credentials rotated");
+                                    }
+                                    let delay = Duration::from_secs((new_lease.lease_duration / 2).max(5));
+                                    lease = Some(new_lease);
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                Err(error) => tracing::error!("Invalid Vault database lease: {error}"),
+                            }
+                        }
+                        Ok(response) => tracing::error!(status = %response.status(), "Vault database credential request failed"),
+                        Err(error) => tracing::error!("Vault database credential request failed: {error}"),
+                    }
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(next.unwrap().max(5) / 2)).await;
+                }
+            }
+        });
     }
 
     /// Spawn the background tasks that keep secrets fresh and coordinated

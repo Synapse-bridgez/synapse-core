@@ -271,6 +271,23 @@ pub fn create_app(app_state: AppState) -> Router {
     // covered these) — see "Also fixes" in the PR description.
     let mut admin_only_routes = Router::new()
         .route(
+            "/admin/canary",
+            get(handlers::admin::get_canary_dashboard),
+        )
+        .route(
+            "/admin/canary/:release_name",
+            get(handlers::admin::get_canary_release)
+                .post(handlers::admin::create_canary_release),
+        )
+        .route(
+            "/admin/canary/:release_name/step",
+            post(handlers::admin::step_canary_release),
+        )
+        .route(
+            "/admin/canary/:release_name/error-rate",
+            post(handlers::admin::record_canary_error_rate),
+        )
+        .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
         )

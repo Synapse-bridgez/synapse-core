@@ -48,6 +48,23 @@ This document outlines the disaster recovery procedures for the application, res
 ## 5. Multi-Region Failover Procedure
 **Estimated Recovery Time:** 15-20 minutes
 
+### Automated execution
+
+After incident command authorizes the operation, run the guarded playbook from
+an operator workstation:
+
+```bash
+DNS_CUTOVER_COMMAND='your-dns-provider-command' \
+DB_PROMOTION_COMMAND='your-replica-promotion-command' \
+SERVICE_RESTART_COMMAND='kubectl -n synapse rollout restart deployment/synapse-core' \
+HEALTHCHECK_URL='https://api.example.com' \
+./scripts/dr-failover.sh --confirm-failover us-west-2
+```
+
+The command requires an exact typed confirmation, records every command and
+timestamp under `var/dr-failover/`, and prints the post-failover checklist.
+It never triggers unattended failover.
+
 ### Procedure:
 1. Confirm the primary region is wholly unreachable or experiencing critical infrastructure failures.
 2. Escalate to the incident response tier to officially authorize the failover operation.

@@ -340,6 +340,17 @@ async fn serve(
                 let anchor_secret = manager.get_anchor_secret().await?;
                 let admin_key = manager.get_admin_api_key().await?;
                 let store = SecretsStore::new(anchor_secret, admin_key);
+                if let (Ok(role), Ok(template)) = (
+                    std::env::var("VAULT_DATABASE_ROLE"),
+                    std::env::var("VAULT_DATABASE_URL_TEMPLATE"),
+                ) {
+                    manager.start_database_rotation_task(
+                        pool_manager.clone(),
+                        role,
+                        template,
+                    );
+                    tracing::info!("Vault database lease renewal and credential rotation enabled");
+                }
                 manager.start_refresh_task(store.clone(), config.redis_url.clone());
                 tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
                 Some(store)
