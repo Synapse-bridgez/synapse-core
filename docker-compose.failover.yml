@@ -1,0 +1,6 @@
+services:
+  app:
+    environment:
+      DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
+      DATABASE_REPLICA_URL: postgres://synapse_app:synapse_app@replica:5432/synapse
+      REDIS_URL: redis://redis:6379

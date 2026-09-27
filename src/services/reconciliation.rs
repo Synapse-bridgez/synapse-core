@@ -17,6 +17,15 @@ pub struct ReconciliationReport {
     pub missing_on_chain: Vec<MissingTransaction>,
     pub orphaned_payments: Vec<OrphanedPayment>,
     pub amount_mismatches: Vec<AmountMismatch>,
+    /// `failed` transactions whose memo matches an on-chain payment — i.e.
+    /// the payment actually arrived after (or despite) the transaction
+    /// being marked failed. Part A audit item: identifies transactions
+    /// `process_batch`'s bounded retry window may have given up on too
+    /// early, or that failed for any other reason before a late deposit
+    /// landed. Only visible in `report_json`; not broken out into its own
+    /// `reconciliation_reports` summary column (see `store_report`).
+    #[serde(default)]
+    pub late_payments: Vec<LatePayment>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +36,13 @@ pub struct MissingTransaction {
     pub asset_code: String,
     pub memo: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Distributed trace ID (`transactions.trace_id`) this transaction was
+    /// created under, if any, so an operator can jump straight from a
+    /// reconciliation discrepancy to the originating webhook's trace.
+    /// `#[serde(default)]` keeps deserialization of reports stored before
+    /// this field existed working.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +62,24 @@ pub struct AmountMismatch {
     pub db_amount: String,
     pub chain_amount: String,
     pub memo: Option<String>,
+    /// See [`MissingTransaction::trace_id`].
+    #[serde(default)]
+    pub trace_id: Option<String>,
+}
+
+/// A `failed` transaction whose memo matches an on-chain payment — evidence
+/// the failure may have been premature (e.g. a late deposit that arrived
+/// after `process_batch` gave up and marked it failed).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LatePayment {
+    pub transaction_id: Uuid,
+    pub payment_id: String,
+    pub failed_amount: String,
+    pub chain_amount: String,
+    pub memo: Option<String>,
+    /// See [`MissingTransaction::trace_id`].
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -56,6 +90,7 @@ struct DbTransaction {
     asset_code: String,
     memo: Option<String>,
     created_at: DateTime<Utc>,
+    trace_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -93,7 +128,9 @@ impl ReconciliationService {
         );
 
         // Fetch DB transactions
-        let db_txs = self.fetch_db_transactions(account, start, end).await?;
+        let db_txs = self
+            .fetch_db_transactions(account, start, end, "completed")
+            .await?;
         info!("Found {} transactions in database", db_txs.len());
 
         // Fetch chain payments
@@ -131,6 +168,7 @@ impl ReconciliationService {
                             db_amount: tx.amount.clone(),
                             chain_amount: payment.amount.clone(),
                             memo: Some(memo.clone()),
+                            trace_id: tx.trace_id.clone(),
                         });
                     }
                 } else {
@@ -142,6 +180,7 @@ impl ReconciliationService {
                         asset_code: tx.asset_code.clone(),
                         memo: tx.memo.clone(),
                         created_at: tx.created_at,
+                        trace_id: tx.trace_id.clone(),
                     });
                 }
             }
@@ -166,6 +205,28 @@ impl ReconciliationService {
             }
         }
 
+        // Failed transactions whose memo matches an on-chain payment: the
+        // deposit may have actually arrived despite the terminal failure
+        // (Part A audit item — see `LatePayment` doc).
+        let failed_txs = self
+            .fetch_db_transactions(account, start, end, "failed")
+            .await?;
+        let mut late_payments = Vec::new();
+        for tx in &failed_txs {
+            if let Some(memo) = &tx.memo {
+                if let Some(payment) = chain_by_memo.get(memo) {
+                    late_payments.push(LatePayment {
+                        transaction_id: tx.id,
+                        payment_id: payment.id.clone(),
+                        failed_amount: tx.amount.clone(),
+                        chain_amount: payment.amount.clone(),
+                        memo: Some(memo.clone()),
+                        trace_id: tx.trace_id.clone(),
+                    });
+                }
+            }
+        }
+
         let report = ReconciliationReport {
             generated_at: Utc::now(),
             period_start: start,
@@ -175,13 +236,15 @@ impl ReconciliationService {
             missing_on_chain,
             orphaned_payments,
             amount_mismatches,
+            late_payments,
         };
 
         info!(
-            "Reconciliation complete: {} missing, {} orphaned, {} mismatches",
+            "Reconciliation complete: {} missing, {} orphaned, {} mismatches, {} late payments on failed transactions",
             report.missing_on_chain.len(),
             report.orphaned_payments.len(),
-            report.amount_mismatches.len()
+            report.amount_mismatches.len(),
+            report.late_payments.len()
         );
 
         Ok(report)
@@ -192,33 +255,48 @@ impl ReconciliationService {
         account: &str,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
+        status: &str,
     ) -> anyhow::Result<Vec<DbTransaction>> {
-        let rows =
-            sqlx::query_as::<_, (Uuid, String, String, String, Option<String>, DateTime<Utc>)>(
-                "SELECT id, stellar_account, amount::text, asset_code, memo, created_at 
-             FROM transactions 
-             WHERE stellar_account = $1 
-             AND created_at >= $2 
-             AND created_at <= $3 
-             AND status = 'completed'
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                String,
+                String,
+                Option<String>,
+                DateTime<Utc>,
+                Option<String>,
+            ),
+        >(
+            "SELECT id, stellar_account, amount::text, asset_code, memo, created_at, trace_id
+             FROM transactions
+             WHERE stellar_account = $1
+             AND created_at >= $2
+             AND created_at <= $3
+             AND status = $4
              ORDER BY created_at",
-            )
-            .bind(account)
-            .bind(start)
-            .bind(end)
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .bind(account)
+        .bind(start)
+        .bind(end)
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .into_iter()
             .map(
-                |(id, stellar_account, amount, asset_code, memo, created_at)| DbTransaction {
-                    id,
-                    stellar_account,
-                    amount,
-                    asset_code,
-                    memo,
-                    created_at,
+                |(id, stellar_account, amount, asset_code, memo, created_at, trace_id)| {
+                    DbTransaction {
+                        id,
+                        stellar_account,
+                        amount,
+                        asset_code,
+                        memo,
+                        created_at,
+                        trace_id,
+                    }
                 },
             )
             .collect())
@@ -348,9 +426,11 @@ impl crate::services::scheduler::Job for ReconciliationJob {
     }
 
     async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut registered_as_leader = false;
+
         if let Some(election) = &self.leader_election {
             match election.try_acquire_leadership().await {
-                Ok(true) => {}
+                Ok(true) => registered_as_leader = true,
                 Ok(false) => {
                     info!(
                         instance_id = election.instance_id(),
@@ -373,6 +453,25 @@ impl crate::services::scheduler::Job for ReconciliationJob {
             }
         }
 
+        let result = self.run_reconciliation().await;
+
+        // Release the lock_registry entry now that this cycle's use of
+        // leadership is done — the underlying Redis lease is much shorter
+        // than this job's 24h schedule, so without this the admin /admin/locks
+        // view would keep reporting this instance as actively leading (and,
+        // after 2x the lease TTL, falsely "overdue") for the rest of the day.
+        if registered_as_leader {
+            if let Some(election) = &self.leader_election {
+                election.release_leadership_registration().await;
+            }
+        }
+
+        result
+    }
+}
+
+impl ReconciliationJob {
+    async fn run_reconciliation(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Truncate to the UTC day boundary so that if this does run
         // concurrently on more than one instance (leader election disabled,
         // failed open, or a lease handed off mid-check), every instance
@@ -487,6 +586,7 @@ mod tests {
             missing_on_chain: vec![],
             orphaned_payments: vec![],
             amount_mismatches: vec![],
+            late_payments: vec![],
         };
 
         assert_eq!(report.total_db_transactions, 0);
@@ -507,6 +607,7 @@ mod tests {
             asset_code: "USDC".to_string(),
             memo: Some("memo-xyz".to_string()),
             created_at: now,
+            trace_id: None,
         };
 
         assert_eq!(missing.id, id);
@@ -542,6 +643,7 @@ mod tests {
             db_amount: "100.00".to_string(),
             chain_amount: "99.99".to_string(),
             memo: Some("mismatch-memo".to_string()),
+            trace_id: None,
         };
 
         assert_eq!(mismatch.transaction_id, tx_id);
@@ -567,6 +669,7 @@ mod tests {
                 asset_code: "XLM".to_string(),
                 memo: Some("m1".to_string()),
                 created_at: start,
+                trace_id: None,
             }],
             orphaned_payments: vec![OrphanedPayment {
                 payment_id: "p1".to_string(),
@@ -577,6 +680,14 @@ mod tests {
                 memo: None,
             }],
             amount_mismatches: vec![],
+            late_payments: vec![LatePayment {
+                transaction_id: id,
+                payment_id: "p2".to_string(),
+                failed_amount: "7.00".to_string(),
+                chain_amount: "7.00".to_string(),
+                memo: Some("m2".to_string()),
+                trace_id: None,
+            }],
         };
 
         let json = serde_json::to_string(&report).expect("serialization failed");
@@ -588,6 +699,7 @@ mod tests {
         assert_eq!(deserialized.missing_on_chain.len(), 1);
         assert_eq!(deserialized.orphaned_payments.len(), 1);
         assert!(deserialized.amount_mismatches.is_empty());
+        assert_eq!(deserialized.late_payments.len(), 1);
     }
 
     // ---------------------------------------------------------------------------

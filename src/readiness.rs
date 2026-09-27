@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Readiness state for the application.
 /// Used for Kubernetes readiness probes and connection draining.
@@ -99,6 +99,7 @@ impl ReadinessState {
         horizon_url: &str,
     ) -> Result<(), InitializationError> {
         tracing::info!("Starting initialization checks...");
+        let started_at = std::time::Instant::now();
 
         // Check 1: Verify pool warm-up completed (create_pool blocks until min_connections are established)
         tracing::info!("✓ Database pool warm-up already completed during pool creation");
@@ -132,12 +133,28 @@ impl ReadinessState {
             }
             Err(e) => {
                 let err = InitializationError::DatabaseCheck(e.to_string());
-                tracing::error!("✗ Database check failed (critical): {}", err);
+                tracing::error!(
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "✗ Database check failed (critical): {}",
+                    err
+                );
+                crate::metrics::readiness_initialization_duration_ms().record(
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    &[opentelemetry::KeyValue::new("outcome", "failed")],
+                );
                 return Err(err);
             }
         }
 
-        tracing::info!("All initialization checks passed - marking service as ready");
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        tracing::info!(
+            elapsed_ms,
+            "All initialization checks passed - marking service as ready"
+        );
+        crate::metrics::readiness_initialization_duration_ms().record(
+            elapsed_ms as f64,
+            &[opentelemetry::KeyValue::new("outcome", "ready")],
+        );
         self.set_ready();
         Ok(())
     }
@@ -218,9 +235,35 @@ pub async fn drain_handler(
 
     let timeout = state.app_state.readiness.start_drain();
 
+    let connections_open_at_start = state.app_state.ws_connection_pool.active_connections();
+    crate::metrics::ws_drain_connections_open_at_start()
+        .record(connections_open_at_start as f64, &[]);
+
     // Spawn a task that exits the process after the drain timeout
+    let drain_start = Instant::now();
+    let ws_pool = state.app_state.ws_connection_pool.clone();
     tokio::spawn(async move {
         tokio::time::sleep(timeout).await;
+
+        // Connections still open at the deadline had to be forcibly
+        // terminated by process exit rather than closing themselves in
+        // response to the drain signal (see `handle_socket`'s drain check).
+        let (clean, forced) =
+            drain_close_outcome(connections_open_at_start, ws_pool.active_connections());
+        let closed_total = crate::metrics::ws_drain_connections_closed_total();
+        if clean > 0 {
+            closed_total.add(clean as u64, &[opentelemetry::KeyValue::new("outcome", "clean")]);
+        }
+        if forced > 0 {
+            closed_total.add(forced as u64, &[opentelemetry::KeyValue::new("outcome", "forced")]);
+            tracing::warn!(
+                forced_close_count = forced,
+                "Drain timeout elapsed with connections still open — forcibly closing"
+            );
+        }
+        crate::metrics::ws_drain_duration_ms()
+            .record(drain_start.elapsed().as_millis() as f64, &[]);
+
         tracing::info!("Drain timeout elapsed — shutting down process");
         std::process::exit(0);
     });
@@ -232,6 +275,16 @@ pub async fn drain_handler(
             "drain_timeout_secs": timeout.as_secs()
         })),
     )
+}
+
+/// Splits the WebSocket connections open at drain start into those closed
+/// cleanly (in response to the drain signal, before the deadline) vs those
+/// still open at the deadline and therefore forcibly terminated by process
+/// exit. Returns `(clean, forced)`.
+fn drain_close_outcome(open_at_start: usize, remaining_at_deadline: usize) -> (usize, usize) {
+    let forced = remaining_at_deadline.min(open_at_start);
+    let clean = open_at_start - forced;
+    (clean, forced)
 }
 
 /// Extension trait to easily add readiness state to AppState
@@ -277,5 +330,45 @@ mod tests {
     fn test_default_drain_timeout() {
         let state = ReadinessState::new();
         assert_eq!(state.drain_timeout().as_secs(), 30);
+    }
+
+    /// Orchestrator-compatibility requirement: readiness must flip to
+    /// not-ready synchronously at the start of the drain, before any
+    /// in-flight-request wait — otherwise the orchestrator could keep
+    /// routing new traffic for the duration of the drain timeout.
+    #[test]
+    fn test_shutdown_drain_flips_readiness_immediately() {
+        let state = ReadinessState::new();
+        state.set_ready();
+        assert!(state.is_ready());
+
+        state.start_drain();
+
+        assert!(
+            !state.is_ready(),
+            "readiness must flip to not-ready as soon as drain starts, not after the timeout"
+        );
+        assert!(state.is_draining());
+    }
+
+    /// A migration/dependency check that is slow-but-progressing must keep
+    /// readiness false throughout (never flip early) and only flip once the
+    /// check actually completes.
+    #[tokio::test]
+    async fn test_slow_dependency_startup_stays_not_ready_until_complete() {
+        let state = ReadinessState::new();
+        assert!(!state.is_ready());
+
+        let simulated_check = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        simulated_check.await;
+        assert!(
+            !state.is_ready(),
+            "must remain not-ready while a slow startup dependency check is in progress"
+        );
+
+        state.set_ready();
+        assert!(state.is_ready());
     }
 }

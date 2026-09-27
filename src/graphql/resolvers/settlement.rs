@@ -1,4 +1,5 @@
 use crate::db::{models::Settlement, queries};
+use crate::graphql::error::GqlResultExt;
 use crate::AppState;
 use async_graphql::{Context, Object, Result};
 
@@ -19,6 +20,6 @@ impl SettlementQuery {
         let state = ctx.data::<AppState>()?;
         queries::list_settlements(&state.db, limit.unwrap_or(20), offset.unwrap_or(0))
             .await
-            .map_err(|e| e.into())
+            .into_gql()
     }
 }

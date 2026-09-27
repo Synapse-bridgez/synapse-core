@@ -160,6 +160,23 @@ The Stellar Horizon client includes a circuit breaker to prevent cascading failu
 - Configurable failure threshold and reset timeout
 - See [docs/circuit-breaker.md](docs/circuit-breaker.md) for detailed documentation
 
+## 🔐 Security Fixes: Tenant Isolation & Auth Hardening
+
+This branch closes an active, unauthenticated cross-tenant data exposure
+(`/transactions*`, `/settlements*`, `/ws` resync all returned real,
+unscoped data across tenant boundaries), a dead admin quota write path,
+missing auth rate limiting on `admin_auth`/`api_key_auth`, and an
+unauthenticated, unbounded `/reconnect` session store (removed entirely —
+it was never actually connected to the live WebSocket handler).
+
+Root cause of the tenant-isolation gap: every environment this repo
+defines connected the app directly as the Postgres `initdb` bootstrap
+superuser, which unconditionally bypasses Row-Level Security — so a
+correctly-written RLS policy, tenant-context extractor, and scoped-query
+helper all existed in the codebase with zero live effect.
+
+Full writeup, evidence, and verification: `docs/postmortem-cross-tenant-leak.md`, `docs/quota-configuration.md`, `docs/auth-rate-limiting.md`.
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on:

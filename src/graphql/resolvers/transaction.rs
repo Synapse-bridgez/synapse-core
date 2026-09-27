@@ -1,4 +1,6 @@
 use crate::db::{models::Transaction, queries};
+use crate::error::AppError;
+use crate::graphql::error::{GqlResultExt, IntoGraphQlError};
 use crate::graphql::input_validation::{
     validate_asset_code, validate_limit, validate_status, validate_stellar_account,
 };
@@ -22,6 +24,20 @@ pub struct TransactionFilter {
 
 /// Transaction query resolver.
 ///
+/// # Tenant scoping
+///
+/// Deliberately *not* tenant-filtered, unlike the REST `/transactions`
+/// routes (`queries::get_transaction_for_tenant` /
+/// `TenantContext`-scoped listing). `/graphql` is mounted only behind
+/// `admin_auth` (`middleware/auth.rs`), which checks a single shared
+/// platform-admin secret — not a per-tenant credential — so, same as every
+/// other route already in `admin_router` (settlement dispute review,
+/// reconciliation reports), a caller who clears that gate is a full
+/// platform admin by design and is supposed to see across all tenants.
+/// Adding tenant filtering here would not close an authorization gap; it
+/// would break legitimate admin functionality. If a tenant-scoped-admin
+/// role is ever introduced, this resolver needs revisiting then.
+///
 /// # Idempotency
 ///
 /// Query operations are inherently idempotent and do not require
@@ -42,9 +58,7 @@ impl TransactionQuery {
     /// The transaction object or an error if not found.
     async fn transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
-        queries::get_transaction(&state.db, id)
-            .await
-            .map_err(|e| e.into())
+        queries::get_transaction(&state.db, id).await.into_gql()
     }
 
     /// List transactions with optional filtering.
@@ -76,25 +90,26 @@ impl TransactionQuery {
         offset: Option<i64>,
     ) -> Result<Vec<Transaction>> {
         let effective_limit = limit.unwrap_or(20);
-        validate_limit(effective_limit).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        validate_limit(effective_limit).into_gql()?;
 
         if let Some(ref f) = filter {
             if let Some(ref s) = f.status {
-                validate_status(s).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                validate_status(s).into_gql()?;
             }
             if let Some(ref a) = f.asset_code {
-                validate_asset_code(a).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                validate_asset_code(a).into_gql()?;
             }
             if let Some(ref acc) = f.stellar_account {
-                validate_stellar_account(acc)
-                    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+                validate_stellar_account(acc).into_gql()?;
             }
         }
 
         let _ = offset;
         let state = ctx.data::<AppState>()?;
 
-        let txs = queries::list_transactions(&state.db, effective_limit, None, false).await?;
+        let txs = queries::list_transactions(&state.db, effective_limit, None, false)
+            .await
+            .into_gql()?;
 
         if let Some(f) = filter {
             let filtered = txs
@@ -159,27 +174,97 @@ impl TransactionMutation {
     ///
     /// # Side Effects
     ///
-    /// - Updates transaction status to 'completed'
-    /// - Invalidates query cache for the asset
-    /// - Triggers webhook delivery if configured
+    /// - Validates the current status can legally transition to 'completed'
+    ///   (see `validation::state_machine`) — an already-failed, refunded,
+    ///   disputed, or mid-processing transaction is rejected rather than
+    ///   silently force-completed.
+    /// - Updates transaction status to 'completed' with a CAS-guarded write
+    ///   (`WHERE status = <status just read>`), so two concurrent callers
+    ///   racing this mutation cannot both "succeed": the loser's write
+    ///   affects zero rows and the mutation returns an error instead.
+    /// - Records an audit log entry for the status change.
+    /// - Invalidates query cache for the asset.
+    ///
+    /// Part D fix: this previously ran an unconditional `UPDATE ... SET
+    /// status = 'completed'` with no read of the current status and no
+    /// `WHERE status = ...` guard — any admin-key holder could force *any*
+    /// transaction, in any state, to completed, and two concurrent calls
+    /// could both apparently succeed with whichever write landed last
+    /// silently winning. See `services/transaction_processor.rs`'s
+    /// `CompleteStage` for the equivalent guard on the batch-completion path.
     async fn force_complete_transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
 
-        let asset_code: String =
-            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
-                .bind(id)
-                .fetch_one(&state.db)
-                .await?;
+        let mut db_tx = state.db.begin().await.into_gql()?;
 
-        let result = sqlx::query_as::<_, Transaction>(
-            "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING *"
+        let (current_status, trace_id): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, trace_id FROM transactions WHERE id = $1 FOR UPDATE",
         )
         .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+        .fetch_one(&mut *db_tx)
+        .await
+        .into_gql()?;
 
-        crate::db::queries::invalidate_caches_for_asset(Some(&state.query_cache), &asset_code)
-            .await;
+        // validate_status_transition treats same-state transitions as
+        // idempotently valid (by design, for callers that want retries to
+        // no-op rather than error). That's wrong for *this* mutation
+        // specifically: if a concurrent caller already completed this
+        // transaction while we were blocked on the row lock above, we must
+        // report a loss, not a silent no-op "success" — otherwise two
+        // racing calls both return as if they'd completed it, which is
+        // exactly the double-success this CAS guard exists to prevent.
+        if current_status == "completed" {
+            return Err(AppError::ConcurrentModification(
+                "transaction was already completed by a concurrent request".to_string(),
+            )
+            .into_graphql_error());
+        }
+
+        crate::validation::state_machine::validate_status_transition(&current_status, "completed")
+            .into_gql()?;
+
+        let result = sqlx::query_as::<_, Transaction>(
+            "UPDATE transactions SET status = 'completed', updated_at = NOW() \
+             WHERE id = $1 AND status = $2 RETURNING *",
+        )
+        .bind(id)
+        .bind(&current_status)
+        .fetch_optional(&mut *db_tx)
+        .await
+        .into_gql()?;
+
+        let result = match result {
+            Some(t) => t,
+            None => {
+                return Err(AppError::ConcurrentModification(
+                    "transaction status changed before completion could be applied".to_string(),
+                )
+                .into_graphql_error());
+            }
+        };
+
+        // admin_auth is a single shared platform-admin secret today, not a
+        // per-operator identity (see middleware/auth.rs::is_valid_admin_request)
+        // — "admin" is the most specific actor available until that changes.
+        crate::db::audit::AuditLog::log_status_change_traced(
+            &mut db_tx,
+            id,
+            crate::db::audit::ENTITY_TRANSACTION,
+            &current_status,
+            "completed",
+            "admin",
+            trace_id.as_deref(),
+        )
+        .await
+        .into_gql()?;
+
+        db_tx.commit().await.into_gql()?;
+
+        crate::db::queries::invalidate_caches_for_asset(
+            Some(&state.query_cache),
+            &result.asset_code,
+        )
+        .await;
 
         Ok(result)
     }

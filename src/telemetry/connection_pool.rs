@@ -38,6 +38,141 @@ impl Default for PoolConfig {
     }
 }
 
+/// Configuration for the trend-based pool-exhaustion early warning.
+///
+/// Unlike a point-in-time "pool is at 100%" alert (a lagging indicator), this
+/// fits a linear trend over a sliding window of utilization samples and
+/// projects it forward by `forecast_window`. A projection crossing
+/// `warning_threshold` fires the warning *before* the pool actually runs out,
+/// giving operators time to react.
+#[derive(Debug, Clone)]
+pub struct EarlyWarningConfig {
+    /// How far back to look when fitting the utilization trend. Wider windows
+    /// smooth over brief spikes but react more slowly to real trends.
+    pub window: Duration,
+    /// How far ahead to project the fitted trend.
+    pub forecast_window: Duration,
+    /// Projected utilization (0.0-1.0) at which the warning fires.
+    pub warning_threshold: f64,
+    /// Minimum number of samples required before a trend is evaluated, to
+    /// avoid firing on noise early in the pool's lifetime.
+    pub min_samples: usize,
+}
+
+impl Default for EarlyWarningConfig {
+    /// Defaults calibrated against `tests/load/` steady-ramp runs: a 2-minute
+    /// window is long enough to average out a request-burst-driven spike
+    /// (which recovers within seconds) while still catching a genuine
+    /// utilization trend with enough of the 1-minute forecast window to
+    /// spare for an operator to react. See `docs/pool_monitoring.md` for how
+    /// to recalibrate per-deployment.
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(120),
+            forecast_window: Duration::from_secs(60),
+            warning_threshold: 0.9,
+            min_samples: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UtilizationSample {
+    at: Instant,
+    utilization: f64,
+}
+
+/// Fits a linear trend over recent pool-utilization samples and forecasts
+/// whether the pool is on a trajectory toward exhaustion.
+///
+/// Uses ordinary least-squares regression over the sliding window rather than
+/// a full forecasting model, per the design goal of staying simple and
+/// explainable. A spike-then-recover pattern nets out to a near-zero slope
+/// over the window (utilization goes up, then back down), so it does not
+/// trigger a warning — only a *sustained* upward trend does.
+#[derive(Debug)]
+pub struct ExhaustionForecaster {
+    config: EarlyWarningConfig,
+    samples: Mutex<VecDeque<UtilizationSample>>,
+}
+
+impl ExhaustionForecaster {
+    pub fn new(config: EarlyWarningConfig) -> Self {
+        Self {
+            config,
+            samples: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Records a pool-utilization sample (0.0-1.0) at the given instant.
+    /// Samples older than `config.window` are dropped.
+    pub fn record_at(&self, utilization: f64, at: Instant) {
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        samples.push_back(UtilizationSample { at, utilization });
+        let window = self.config.window;
+        while let Some(front) = samples.front() {
+            if at.saturating_duration_since(front.at) > window {
+                samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Records a sample at the current time.
+    pub fn record(&self, utilization: f64) {
+        self.record_at(utilization, Instant::now());
+    }
+
+    /// Returns `Some(projected_utilization)` when a sustained growth trend
+    /// forecasts the pool crossing `warning_threshold` within
+    /// `forecast_window`. Returns `None` when there isn't enough data, the
+    /// trend is flat/declining, or the projection stays under the threshold.
+    pub fn evaluate(&self) -> Option<f64> {
+        let samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() < self.config.min_samples {
+            return None;
+        }
+
+        let t0 = samples.front()?.at;
+        let points: Vec<(f64, f64)> = samples
+            .iter()
+            .map(|s| (s.at.saturating_duration_since(t0).as_secs_f64(), s.utilization))
+            .collect();
+
+        let n = points.len() as f64;
+        let mean_x = points.iter().map(|(x, _)| x).sum::<f64>() / n;
+        let mean_y = points.iter().map(|(_, y)| y).sum::<f64>() / n;
+
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (x, y) in &points {
+            num += (x - mean_x) * (y - mean_y);
+            den += (x - mean_x).powi(2);
+        }
+
+        if den == 0.0 {
+            return None;
+        }
+
+        let slope = num / den; // utilization change per second
+        if slope <= 0.0 {
+            return None; // flat or declining: not a sustained growth trend
+        }
+
+        let intercept = mean_y - slope * mean_x;
+        let last_x = points.last().map(|(x, _)| *x).unwrap_or(mean_x);
+        let forecast_x = last_x + self.config.forecast_window.as_secs_f64();
+        let projected = (intercept + slope * forecast_x).clamp(0.0, 1.0);
+
+        if projected >= self.config.warning_threshold {
+            Some(projected)
+        } else {
+            None
+        }
+    }
+}
+
 /// A single connection managed by the pool.
 #[derive(Debug)]
 pub struct PooledConnection {
@@ -104,6 +239,7 @@ impl PoolState {
 pub struct ConnectionPool {
     config: PoolConfig,
     state: Arc<Mutex<PoolState>>,
+    forecaster: Arc<ExhaustionForecaster>,
 }
 
 impl ConnectionPool {
@@ -136,7 +272,24 @@ impl ConnectionPool {
         Ok(Self {
             config,
             state: Arc::new(Mutex::new(PoolState::new())),
+            forecaster: Arc::new(ExhaustionForecaster::new(EarlyWarningConfig::default())),
         })
+    }
+
+    fn record_utilization(&self, state: &PoolState) {
+        let utilization = state.total as f64 / self.config.max_size as f64;
+        self.forecaster.record(utilization);
+    }
+
+    /// Returns `Some(projected_utilization)` when utilization is on a
+    /// sustained trajectory toward exhaustion within the forecaster's
+    /// configured forecast window. See [`ExhaustionForecaster::evaluate`].
+    ///
+    /// This is a leading indicator — call it from a periodic health check
+    /// alongside [`ConnectionPool::total_count`] to alert operators before
+    /// [`TelemetryError::PoolExhausted`] actually occurs.
+    pub fn forecast_exhaustion(&self) -> Option<f64> {
+        self.forecaster.evaluate()
     }
 
     /// Acquires a connection from the pool for use.
@@ -161,6 +314,7 @@ impl ConnectionPool {
         self.evict_stale_locked(&mut state);
 
         if let Some(conn) = state.available.pop_front() {
+            self.record_utilization(&state);
             return Ok(conn);
         }
 
@@ -170,6 +324,7 @@ impl ConnectionPool {
 
         let id = state.next_id();
         state.total += 1;
+        self.record_utilization(&state);
         Ok(PooledConnection::new(id, self.config.endpoint.clone()))
     }
 
@@ -185,11 +340,13 @@ impl ConnectionPool {
 
         if conn.is_stale(self.config.max_idle) {
             state.total = state.total.saturating_sub(1);
+            self.record_utilization(&state);
             return;
         }
 
         conn.touch();
         state.available.push_back(conn);
+        self.record_utilization(&state);
     }
 
     /// Number of idle connections currently in the pool.
@@ -313,6 +470,91 @@ mod tests {
             ..Default::default()
         };
         assert!(ConnectionPool::with_config(config).is_err());
+    }
+
+    fn config_for_test() -> EarlyWarningConfig {
+        EarlyWarningConfig {
+            window: Duration::from_secs(120),
+            forecast_window: Duration::from_secs(60),
+            warning_threshold: 0.9,
+            min_samples: 4,
+        }
+    }
+
+    #[test]
+    fn early_warning_fires_on_steady_growth_trend() {
+        let forecaster = ExhaustionForecaster::new(config_for_test());
+        let t0 = Instant::now();
+        // Utilization climbs from 40% to 82% over 100s at a steady rate;
+        // projecting 60s further crosses the 90% threshold.
+        for i in 0..=10 {
+            let utilization = 0.40 + (i as f64) * 0.042;
+            forecaster.record_at(utilization, t0 + Duration::from_secs(i * 10));
+        }
+        assert!(
+            forecaster.evaluate().is_some(),
+            "sustained steady growth should trigger the early warning"
+        );
+    }
+
+    #[test]
+    fn early_warning_does_not_fire_on_spike_then_recover() {
+        let forecaster = ExhaustionForecaster::new(config_for_test());
+        let t0 = Instant::now();
+        // A brief burst pushes utilization to 95% then it recovers to 45% -
+        // net trend over the window is roughly flat, not a sustained climb.
+        let series = [0.45, 0.60, 0.95, 0.90, 0.70, 0.50, 0.45, 0.46];
+        for (i, utilization) in series.iter().enumerate() {
+            forecaster.record_at(*utilization, t0 + Duration::from_secs(i as u64 * 10));
+        }
+        assert!(
+            forecaster.evaluate().is_none(),
+            "a spike that recovers must not trigger the early warning"
+        );
+    }
+
+    #[test]
+    fn early_warning_does_not_fire_below_min_samples() {
+        let forecaster = ExhaustionForecaster::new(config_for_test());
+        let t0 = Instant::now();
+        forecaster.record_at(0.95, t0);
+        forecaster.record_at(0.97, t0 + Duration::from_secs(10));
+        assert!(
+            forecaster.evaluate().is_none(),
+            "must not evaluate a trend from too few samples"
+        );
+    }
+
+    #[test]
+    fn early_warning_does_not_fire_on_declining_trend() {
+        let forecaster = ExhaustionForecaster::new(config_for_test());
+        let t0 = Instant::now();
+        for i in 0..=10 {
+            let utilization = 0.95 - (i as f64) * 0.05;
+            forecaster.record_at(utilization, t0 + Duration::from_secs(i * 10));
+        }
+        assert!(
+            forecaster.evaluate().is_none(),
+            "a declining trend must not trigger the early warning"
+        );
+    }
+
+    #[test]
+    fn pool_forecast_exhaustion_reflects_sustained_acquisition_growth() {
+        let config = PoolConfig {
+            max_size: 10,
+            ..Default::default()
+        };
+        let pool = ConnectionPool::with_config(config).unwrap();
+        let t0 = Instant::now();
+        // Simulate steady, sustained growth toward the pool's capacity by
+        // feeding the forecaster directly (acquire()/release() always sample
+        // "now", so we drive the forecaster the same way the pool does).
+        for i in 0..=10 {
+            let utilization = 0.30 + (i as f64) * 0.06;
+            pool.forecaster.record_at(utilization, t0 + Duration::from_secs(i * 10));
+        }
+        assert!(pool.forecast_exhaustion().is_some());
     }
 
     #[test]

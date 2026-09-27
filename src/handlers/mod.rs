@@ -5,7 +5,6 @@ pub mod graphql;
 pub mod idempotency;
 pub mod pagination;
 pub mod profiling;
-pub mod reconnection;
 pub mod search;
 pub mod session;
 pub mod settlements;

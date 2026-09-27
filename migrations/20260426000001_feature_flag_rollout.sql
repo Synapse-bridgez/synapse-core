@@ -3,3 +3,6 @@ ALTER TABLE feature_flags ADD COLUMN rollout_percentage INT DEFAULT 100 CHECK (r
 
 -- Create index for rollout queries
 CREATE INDEX idx_feature_flags_rollout ON feature_flags(rollout_percentage);
+
+COMMENT ON COLUMN feature_flags.rollout_percentage IS
+    'Percentage rollout target for deterministic gradual exposure by tenant or account key.';

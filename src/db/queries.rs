@@ -35,8 +35,10 @@ use crate::db::models::{Settlement, Transaction};
 use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use sqlx::types::BigDecimal;
 use sqlx::{PgPool, Postgres, Result, Row, Transaction as SqlxTransaction};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,14 +160,288 @@ where
 
 // --- Tenant Queries --------------------------------------------------------
 
-/// Look up whether an API key exists and belongs to an active tenant.
-/// Returns `Ok(true)` if valid, `Ok(false)` if not found or inactive.
-pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
-    let row = sqlx::query("SELECT 1 FROM tenants WHERE api_key = $1 AND is_active = true LIMIT 1")
-        .bind(api_key)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.is_some())
+type HmacSha256 = Hmac<Sha256>;
+
+/// Server-side secret used to (a) key the HMAC-SHA256 hash of tenant API keys
+/// and (b) as the pgcrypto passphrase for `webhook_secret` encryption at
+/// rest. Never stored in the database, so a stolen `tenants` table alone
+/// cannot be used to forge API keys or recover webhook secrets.
+///
+/// See `migrations/20260824000003_hash_tenant_secrets.sql`, which renamed
+/// `tenants.api_key` to `api_key_hash` and switched `webhook_secret` to a
+/// pgcrypto-encrypted `BYTEA`.
+pub fn tenant_secret_key() -> String {
+    std::env::var("TENANT_SECRET_KEY").unwrap_or_else(|_| {
+        tracing::error!(
+            "TENANT_SECRET_KEY is not set; falling back to an insecure default. \
+             This must be set to a strong random value in any environment that \
+             handles real tenant credentials."
+        );
+        "insecure-dev-only-tenant-secret".to_string()
+    })
+}
+
+/// Hash a tenant API key for storage/lookup. HMAC-SHA256 keyed by
+/// [`tenant_secret_key`], so equality comparisons never touch the raw key.
+pub fn hash_api_key(api_key: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(tenant_secret_key().as_bytes())
+        .expect("HMAC-SHA256 accepts a key of any length");
+    mac.update(api_key.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Maximum allowed grace period duration for tenant secret rotation (7 days).
+pub const MAX_ROTATION_GRACE_SECONDS: u64 = 7 * 24 * 3600;
+/// Default grace period duration (1 hour).
+pub const DEFAULT_ROTATION_GRACE_SECONDS: u64 = 3600;
+
+/// Result of rotating a tenant's API key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RotateTenantSecretResult {
+    pub tenant_id: Uuid,
+    pub new_api_key: String,
+    pub new_api_key_hash: String,
+    pub previous_api_key_hash: Option<String>,
+    pub grace_period_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Look up which tenant an API key belongs to.
+/// Returns `Ok(Some(tenant_id))` if valid (matching current hash or previous hash within grace period) and active, `Ok(None)` otherwise.
+///
+/// This used to return a plain `bool`, which was enough for `api_key_auth`'s
+/// yes/no gate but left `/ws` resync with no way to know *whose* data a
+/// caller was entitled to see once it started checking keys at all — see
+/// `handlers::ws::authenticate_ws_token`.
+pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<Option<Uuid>> {
+    let row = sqlx::query(
+        "SELECT tenant_id FROM tenants WHERE (api_key_hash = $1 OR (previous_api_key_hash = $1 AND grace_period_expires_at > NOW())) AND is_active = true LIMIT 1",
+    )
+    .bind(hash_api_key(api_key))
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.get::<Uuid, _>("tenant_id")))
+}
+
+/// Rotate a tenant's API key with a configurable grace period.
+///
+/// Sets `api_key_hash` to the new key's HMAC hash and moves the current hash to
+/// `previous_api_key_hash` with expiry `grace_period_expires_at` (NOW() + grace_seconds).
+/// If `grace_seconds` is 0, the previous secret is immediately revoked.
+/// Inserts an audit log entry for the secret issuance/rotation.
+pub async fn rotate_tenant_api_key(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    new_api_key: Option<String>,
+    grace_seconds: u64,
+    actor: &str,
+) -> Result<RotateTenantSecretResult> {
+    if grace_seconds > MAX_ROTATION_GRACE_SECONDS {
+        return Err(sqlx::Error::Decode(
+            format!(
+                "grace_seconds exceeds maximum of {MAX_ROTATION_GRACE_SECONDS} (7 days), got {grace_seconds}"
+            )
+            .into(),
+        ));
+    }
+
+    let raw_key = match new_api_key {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => {
+            use rand::Rng;
+            let mut bytes = [0u8; 24];
+            rand::thread_rng().fill(&mut bytes);
+            format!("syn_{}", hex::encode(bytes))
+        }
+    };
+
+    let new_hash = hash_api_key(&raw_key);
+    let expires_at = if grace_seconds > 0 {
+        Some(chrono::Utc::now() + chrono::Duration::seconds(grace_seconds as i64))
+    } else {
+        None
+    };
+
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE tenants SET api_key_hash = $1, previous_api_key_hash = $2, grace_period_expires_at = $3 WHERE tenant_id = $4",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let current_hash: Option<String> = sqlx::query_scalar(
+                "SELECT api_key_hash FROM tenants WHERE tenant_id = $1 AND is_active = true FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_optional(&mut *db_tx)
+            .await?;
+
+            let current_hash = current_hash.ok_or(sqlx::Error::RowNotFound)?;
+
+            let prev_hash = if grace_seconds > 0 {
+                Some(current_hash.clone())
+            } else {
+                None
+            };
+
+            sqlx::query(
+                "UPDATE tenants SET api_key_hash = $1, previous_api_key_hash = $2, grace_period_expires_at = $3, updated_at = NOW() WHERE tenant_id = $4 AND is_active = true",
+            )
+            .bind(&new_hash)
+            .bind(&prev_hash)
+            .bind(expires_at)
+            .bind(tenant_id)
+            .execute(&mut *db_tx)
+            .await?;
+
+            AuditLog::log(
+                &mut db_tx,
+                tenant_id,
+                "tenant",
+                "secret_issued",
+                Some(serde_json::json!({
+                    "api_key_hash": current_hash,
+                })),
+                Some(serde_json::json!({
+                    "api_key_hash": new_hash,
+                    "previous_api_key_hash": prev_hash,
+                    "grace_period_expires_at": expires_at,
+                    "grace_seconds": grace_seconds,
+                })),
+                actor,
+            )
+            .await?;
+
+            // If grace_seconds == 0, old key was revoked immediately
+            if grace_seconds == 0 {
+                AuditLog::log(
+                    &mut db_tx,
+                    tenant_id,
+                    "tenant",
+                    "secret_revoked",
+                    Some(serde_json::json!({
+                        "revoked_api_key_hash": current_hash,
+                        "reason": "immediate_rotation",
+                    })),
+                    None,
+                    actor,
+                )
+                .await?;
+            }
+
+            db_tx.commit().await?;
+
+            Ok(RotateTenantSecretResult {
+                tenant_id,
+                new_api_key: raw_key,
+                new_api_key_hash: new_hash,
+                previous_api_key_hash: prev_hash,
+                grace_period_expires_at: expires_at,
+            })
+        },
+    )
+    .await
+}
+
+/// Revoke a tenant's previous API key hash immediately, terminating any active grace period.
+/// Logs an audit log entry for the secret revocation if a previous secret was active.
+pub async fn revoke_tenant_previous_secret(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    actor: &str,
+) -> Result<bool> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE tenants SET previous_api_key_hash = NULL, grace_period_expires_at = NULL WHERE tenant_id = $1",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let prev_hash: Option<Option<String>> = sqlx::query_scalar(
+                "SELECT previous_api_key_hash FROM tenants WHERE tenant_id = $1 AND is_active = true FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_optional(&mut *db_tx)
+            .await?;
+
+            let prev_hash = prev_hash.ok_or(sqlx::Error::RowNotFound)?;
+
+            if let Some(old_hash) = prev_hash {
+                sqlx::query(
+                    "UPDATE tenants SET previous_api_key_hash = NULL, grace_period_expires_at = NULL, updated_at = NOW() WHERE tenant_id = $1 AND is_active = true",
+                )
+                .bind(tenant_id)
+                .execute(&mut *db_tx)
+                .await?;
+
+                AuditLog::log(
+                    &mut db_tx,
+                    tenant_id,
+                    "tenant",
+                    "secret_revoked",
+                    Some(serde_json::json!({
+                        "revoked_api_key_hash": old_hash,
+                    })),
+                    None,
+                    actor,
+                )
+                .await?;
+
+                db_tx.commit().await?;
+                Ok(true)
+            } else {
+                db_tx.commit().await?;
+                Ok(false)
+            }
+        },
+    )
+    .await
+}
+
+/// Revoke all expired previous API keys across tenants, creating audit log entries for each revoked secret.
+pub async fn revoke_expired_tenant_secrets(
+    pool: &PgPool,
+    actor: &str,
+) -> Result<u64> {
+    with_timeout(
+        QueryTier::Write,
+        "SELECT tenant_id, previous_api_key_hash FROM tenants WHERE previous_api_key_hash IS NOT NULL AND grace_period_expires_at <= NOW()",
+        async {
+            let mut db_tx = pool.begin().await?;
+
+            let expired_rows: Vec<(Uuid, String)> = sqlx::query_as(
+                "SELECT tenant_id, previous_api_key_hash FROM tenants WHERE previous_api_key_hash IS NOT NULL AND grace_period_expires_at <= NOW() FOR UPDATE",
+            )
+            .fetch_all(&mut *db_tx)
+            .await?;
+
+            let count = expired_rows.len() as u64;
+
+            for (tid, old_hash) in &expired_rows {
+                sqlx::query(
+                    "UPDATE tenants SET previous_api_key_hash = NULL, grace_period_expires_at = NULL, updated_at = NOW() WHERE tenant_id = $1",
+                )
+                .bind(tid)
+                .execute(&mut *db_tx)
+                .await?;
+
+                AuditLog::log(
+                    &mut db_tx,
+                    *tid,
+                    "tenant",
+                    "secret_revoked",
+                    Some(serde_json::json!({
+                        "revoked_api_key_hash": old_hash,
+                        "reason": "grace_period_expired",
+                    })),
+                    None,
+                    actor,
+                )
+                .await?;
+            }
+
+            db_tx.commit().await?;
+            Ok(count)
+        },
+    )
+    .await
 }
 
 /// Load active tenant configuration used by request authentication and
@@ -173,8 +449,9 @@ pub async fn lookup_api_key(pool: &PgPool, api_key: &str) -> Result<bool> {
 /// callers must not log or persist them in audit records.
 pub async fn get_all_tenant_configs(pool: &PgPool) -> Result<Vec<TenantConfig>> {
     let configs = sqlx::query_as::<_, TenantConfig>(
-        "SELECT tenant_id, name, webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
+        "SELECT tenant_id, name, pgp_sym_decrypt(webhook_secret, $1) AS webhook_secret, stellar_account, rate_limit_per_minute, is_active FROM tenants WHERE is_active = true",
     )
+    .bind(tenant_secret_key())
     .fetch_all(pool)
     .await?;
     Ok(configs)
@@ -563,6 +840,31 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     .await
 }
 
+/// Tenant-scoped equivalent of [`get_transaction`] used by GET
+/// /transactions/:id. `tenant_id IS NULL` rows are legacy/pre-migration data
+/// and remain visible to every tenant, matching the RLS policy in
+/// migrations/20260501000000_tenant_rls.sql — this is an application-level
+/// mirror of that policy (defense in depth), not a substitute for it: RLS
+/// still applies underneath regardless of whether this WHERE clause is
+/// present, since the connected role no longer bypasses it.
+pub async fn get_transaction_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Transaction> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        sqlx::query_as::<_, Transaction>(
+            "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_one(pool),
+    )
+    .await
+}
+
 pub async fn list_transactions(
     pool: &PgPool,
     limit: i64,
@@ -688,6 +990,91 @@ pub async fn list_transactions_filtered(
             if let Some(to) = to_date {
                 q = q.bind(to);
             }
+            q = q.bind(limit);
+
+            let mut rows = q.fetch_all(pool).await?;
+            if backward {
+                rows.reverse();
+            }
+            Ok(rows)
+        },
+    )
+    .await
+}
+
+/// Tenant-scoped equivalent of [`list_transactions_filtered`] used by GET
+/// /transactions. See [`get_transaction_for_tenant`] for the NULL-tenant and
+/// defense-in-depth notes — identical rules apply here.
+pub async fn list_transactions_filtered_for_tenant(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+    tenant_id: Uuid,
+) -> Result<Vec<Transaction>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions [tenant-scoped filtered cursor-paginated]",
+        async {
+            let mut conditions: Vec<String> = Vec::new();
+            let mut bind_idx = 1i32;
+
+            if cursor.is_some() {
+                if !backward {
+                    conditions.push(format!(
+                        "(created_at, id) < (${}, ${})",
+                        bind_idx,
+                        bind_idx + 1
+                    ));
+                } else {
+                    conditions.push(format!(
+                        "(created_at, id) > (${}, ${})",
+                        bind_idx,
+                        bind_idx + 1
+                    ));
+                }
+                bind_idx += 2;
+            }
+
+            if from_date.is_some() {
+                conditions.push(format!("created_at >= ${}", bind_idx));
+                bind_idx += 1;
+            }
+            if to_date.is_some() {
+                conditions.push(format!("created_at <= ${}", bind_idx));
+                bind_idx += 1;
+            }
+
+            conditions.push(format!("(tenant_id = ${} OR tenant_id IS NULL)", bind_idx));
+            bind_idx += 1;
+
+            let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+            let order = if !backward {
+                "ORDER BY created_at DESC, id DESC"
+            } else {
+                "ORDER BY created_at ASC, id ASC"
+            };
+
+            let sql = format!(
+                "SELECT * FROM transactions {} {} LIMIT ${}",
+                where_clause, order, bind_idx
+            );
+
+            let mut q = sqlx::query_as::<_, Transaction>(&sql);
+
+            if let Some((ts, id)) = cursor {
+                q = q.bind(ts).bind(id);
+            }
+            if let Some(from) = from_date {
+                q = q.bind(from);
+            }
+            if let Some(to) = to_date {
+                q = q.bind(to);
+            }
+            q = q.bind(tenant_id);
             q = q.bind(limit);
 
             let mut rows = q.fetch_all(pool).await?;
@@ -838,6 +1225,43 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
     .await
 }
 
+/// Tenant-scoped settlement lookup used by GET /settlements/:id.
+///
+/// Settlements have no `tenant_id` column of their own — a single settlement
+/// can legitimately batch transactions from many tenants, since
+/// `SettlementService::settle_asset` groups unsettled transactions by
+/// `asset_code` only (see migrations/20260824000001_settlement_rls.sql for
+/// the full reasoning). A settlement is visible to `tenant_id` if at least
+/// one of its transactions belongs to that tenant (or is a legacy row with
+/// no tenant_id) — this mirrors the RLS policy's own EXISTS check so
+/// behavior is identical whether or not RLS is what actually enforces it on
+/// a given connection.
+pub async fn get_settlement_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Settlement> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT settlements.* FROM settlements WHERE id = $1 AND EXISTS(tenant-scoped transactions)",
+        sqlx::query_as::<_, Settlement>(
+            r#"
+            SELECT settlements.* FROM settlements
+            WHERE settlements.id = $1
+              AND EXISTS (
+                  SELECT 1 FROM transactions t
+                  WHERE t.settlement_id = settlements.id
+                    AND (t.tenant_id IS NULL OR t.tenant_id = $2)
+              )
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_one(pool),
+    )
+    .await
+}
+
 pub async fn list_settlements(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Settlement>> {
     with_timeout(
         QueryTier::Read,
@@ -891,6 +1315,90 @@ pub async fn list_settlements_cursor(
                 )
                 .bind(limit)
                 .fetch_all(pool).await?;
+                rows.reverse();
+                Ok(rows)
+            }
+        },
+    )
+    .await
+}
+
+/// Tenant-scoped equivalent of [`list_settlements_cursor`] used by GET
+/// /settlements. See [`get_settlement_for_tenant`] for why this is a JOIN
+/// against `transactions.tenant_id` rather than a column on `settlements`.
+pub async fn list_settlements_cursor_for_tenant(
+    pool: &PgPool,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    backward: bool,
+    tenant_id: Uuid,
+) -> Result<Vec<Settlement>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT settlements.* FROM settlements [tenant-scoped cursor-paginated]",
+        async {
+            const TENANT_EXISTS: &str = r#"
+                EXISTS (
+                    SELECT 1 FROM transactions t
+                    WHERE t.settlement_id = settlements.id
+                      AND (t.tenant_id IS NULL OR t.tenant_id = $TENANT_PARAM)
+                )
+            "#;
+
+            if let Some((ts, id)) = cursor {
+                if !backward {
+                    let sql = format!(
+                        "SELECT settlements.* FROM settlements \
+                         WHERE (created_at, id) < ($1, $2) AND {} \
+                         ORDER BY created_at DESC, id DESC LIMIT $4",
+                        TENANT_EXISTS.replace("$TENANT_PARAM", "$3")
+                    );
+                    sqlx::query_as::<_, Settlement>(&sql)
+                        .bind(ts)
+                        .bind(id)
+                        .bind(tenant_id)
+                        .bind(limit)
+                        .fetch_all(pool)
+                        .await
+                } else {
+                    let sql = format!(
+                        "SELECT settlements.* FROM settlements \
+                         WHERE (created_at, id) > ($1, $2) AND {} \
+                         ORDER BY created_at ASC, id ASC LIMIT $4",
+                        TENANT_EXISTS.replace("$TENANT_PARAM", "$3")
+                    );
+                    let mut rows = sqlx::query_as::<_, Settlement>(&sql)
+                        .bind(ts)
+                        .bind(id)
+                        .bind(tenant_id)
+                        .bind(limit)
+                        .fetch_all(pool)
+                        .await?;
+                    rows.reverse();
+                    Ok(rows)
+                }
+            } else if !backward {
+                let sql = format!(
+                    "SELECT settlements.* FROM settlements WHERE {} \
+                     ORDER BY created_at DESC, id DESC LIMIT $2",
+                    TENANT_EXISTS.replace("$TENANT_PARAM", "$1")
+                );
+                sqlx::query_as::<_, Settlement>(&sql)
+                    .bind(tenant_id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await
+            } else {
+                let sql = format!(
+                    "SELECT settlements.* FROM settlements WHERE {} \
+                     ORDER BY created_at ASC, id ASC LIMIT $2",
+                    TENANT_EXISTS.replace("$TENANT_PARAM", "$1")
+                );
+                let mut rows = sqlx::query_as::<_, Settlement>(&sql)
+                    .bind(tenant_id)
+                    .bind(limit)
+                    .fetch_all(pool)
+                    .await?;
                 rows.reverse();
                 Ok(rows)
             }
@@ -1152,6 +1660,163 @@ pub async fn search_transactions(
             if let Some((ts, id)) = cursor {
                 data_query_builder = data_query_builder.bind(ts).bind(id);
             }
+            data_query_builder = data_query_builder.bind(limit);
+
+            let transactions = data_query_builder.fetch_all(pool).await?;
+
+            Ok((total, transactions))
+        },
+    )
+    .await
+}
+
+/// Tenant-scoped equivalent of [`search_transactions`] used by GET
+/// /transactions/search. See [`get_transaction_for_tenant`] for the
+/// NULL-tenant and defense-in-depth notes — identical rules apply here.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_transactions_for_tenant(
+    pool: &PgPool,
+    status: Option<&str>,
+    asset_code: Option<&str>,
+    min_amount: Option<&BigDecimal>,
+    max_amount: Option<&BigDecimal>,
+    from_date: Option<DateTime<Utc>>,
+    to_date: Option<DateTime<Utc>>,
+    stellar_account: Option<&str>,
+    limit: i64,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    tenant_id: Uuid,
+) -> Result<(i64, Vec<Transaction>)> {
+    with_timeout(
+        QueryTier::Read,
+        "search_transactions [tenant-scoped dynamic WHERE clause]",
+        async {
+            let mut conditions = Vec::new();
+            let mut param_count = 1;
+
+            if status.is_some() {
+                conditions.push(format!("status = ${}", param_count));
+                param_count += 1;
+            }
+
+            if asset_code.is_some() {
+                conditions.push(format!("asset_code = ${}", param_count));
+                param_count += 1;
+            }
+
+            if min_amount.is_some() {
+                conditions.push(format!("amount >= ${}", param_count));
+                param_count += 1;
+            }
+
+            if max_amount.is_some() {
+                conditions.push(format!("amount <= ${}", param_count));
+                param_count += 1;
+            }
+
+            if from_date.is_some() {
+                conditions.push(format!("created_at >= ${}", param_count));
+                param_count += 1;
+            }
+
+            if to_date.is_some() {
+                conditions.push(format!("created_at <= ${}", param_count));
+                param_count += 1;
+            }
+
+            if stellar_account.is_some() {
+                conditions.push(format!("stellar_account = ${}", param_count));
+                param_count += 1;
+            }
+
+            // Add cursor condition
+            if cursor.is_some() {
+                conditions.push(format!(
+                    "(created_at, id) < (${}, ${})",
+                    param_count,
+                    param_count + 1
+                ));
+                param_count += 2;
+            }
+
+            // Unconditional tenant scope — always present, unlike the filters above.
+            let tenant_param = param_count;
+            conditions.push(format!(
+                "(tenant_id = ${} OR tenant_id IS NULL)",
+                tenant_param
+            ));
+            param_count += 1;
+
+            let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+            let count_query = format!(
+                "SELECT COUNT(*) as count FROM transactions {}",
+                where_clause
+            );
+
+            let data_query = format!(
+                "SELECT * FROM transactions {} ORDER BY created_at DESC, id DESC LIMIT ${}",
+                where_clause, param_count
+            );
+
+            let mut count_query_builder = sqlx::query(&count_query);
+
+            if let Some(s) = status {
+                count_query_builder = count_query_builder.bind(s);
+            }
+            if let Some(a) = asset_code {
+                count_query_builder = count_query_builder.bind(a);
+            }
+            if let Some(min) = min_amount {
+                count_query_builder = count_query_builder.bind(min);
+            }
+            if let Some(max) = max_amount {
+                count_query_builder = count_query_builder.bind(max);
+            }
+            if let Some(from) = from_date {
+                count_query_builder = count_query_builder.bind(from);
+            }
+            if let Some(to) = to_date {
+                count_query_builder = count_query_builder.bind(to);
+            }
+            if let Some(acc) = stellar_account {
+                count_query_builder = count_query_builder.bind(acc);
+            }
+            if let Some((ts, id)) = cursor {
+                count_query_builder = count_query_builder.bind(ts).bind(id);
+            }
+            count_query_builder = count_query_builder.bind(tenant_id);
+
+            let count_row = count_query_builder.fetch_one(pool).await?;
+            let total: i64 = count_row.try_get("count")?;
+
+            let mut data_query_builder = sqlx::query_as::<_, Transaction>(&data_query);
+
+            if let Some(s) = status {
+                data_query_builder = data_query_builder.bind(s);
+            }
+            if let Some(a) = asset_code {
+                data_query_builder = data_query_builder.bind(a);
+            }
+            if let Some(min) = min_amount {
+                data_query_builder = data_query_builder.bind(min);
+            }
+            if let Some(max) = max_amount {
+                data_query_builder = data_query_builder.bind(max);
+            }
+            if let Some(from) = from_date {
+                data_query_builder = data_query_builder.bind(from);
+            }
+            if let Some(to) = to_date {
+                data_query_builder = data_query_builder.bind(to);
+            }
+            if let Some(acc) = stellar_account {
+                data_query_builder = data_query_builder.bind(acc);
+            }
+            if let Some((ts, id)) = cursor {
+                data_query_builder = data_query_builder.bind(ts).bind(id);
+            }
+            data_query_builder = data_query_builder.bind(tenant_id);
             data_query_builder = data_query_builder.bind(limit);
 
             let transactions = data_query_builder.fetch_all(pool).await?;
@@ -1695,6 +2360,7 @@ pub async fn get_asset_stats(pool: &PgPool) -> Result<Vec<AssetStats>> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct IdempotencyKey {
+    pub tenant_id: String,
     pub key: String,
     pub status: String,
     pub response: Option<serde_json::Value>,
@@ -1702,17 +2368,53 @@ pub struct IdempotencyKey {
     pub expires_at: DateTime<Utc>,
 }
 
-pub async fn check_idempotency_key(pool: &PgPool, key: &str) -> Result<Option<IdempotencyKey>> {
-    sqlx::query_as::<_, IdempotencyKey>(
-        "SELECT key, status, response, created_at, expires_at FROM idempotency_keys WHERE key = $1 AND expires_at > NOW()",
+/// Look up an idempotency record by composite (tenant_id, key).
+/// Falls back to the 'default' tenant when the namespacing flag is off so
+/// records written by the old single-tenant path are still found during the
+/// migration cutover window.
+pub async fn check_idempotency_key(
+    pool: &PgPool,
+    tenant_id: &str,
+    key: &str,
+) -> Result<Option<IdempotencyKey>> {
+    // Primary lookup: composite (tenant_id, key) — always attempted.
+    let found = sqlx::query_as::<_, IdempotencyKey>(
+        "SELECT tenant_id, key, status, response, created_at, expires_at \
+         FROM idempotency_keys \
+         WHERE tenant_id = $1 AND key = $2 AND expires_at > NOW()",
     )
+    .bind(tenant_id)
     .bind(key)
     .fetch_optional(pool)
-    .await
+    .await?;
+
+    if found.is_some() {
+        return Ok(found);
+    }
+
+    // Cutover-window fallback: if the caller is a real tenant (not 'default')
+    // also check the legacy 'default' bucket. This handles the transition where
+    // old records were written without a tenant namespace. Once
+    // rollout_percentage reaches 100 and all pre-migration records have expired
+    // this path becomes a fast no-op (the WHERE tenant_id = 'default' row will
+    // not exist for the new-namespace keys).
+    if tenant_id != "default" {
+        return sqlx::query_as::<_, IdempotencyKey>(
+            "SELECT tenant_id, key, status, response, created_at, expires_at \
+             FROM idempotency_keys \
+             WHERE tenant_id = 'default' AND key = $1 AND expires_at > NOW()",
+        )
+        .bind(key)
+        .fetch_optional(pool)
+        .await;
+    }
+
+    Ok(None)
 }
 
 pub async fn insert_idempotency_key(
     pool: &PgPool,
+    tenant_id: &str,
     key: &str,
     status: &str,
     response: Option<&serde_json::Value>,
@@ -1720,11 +2422,12 @@ pub async fn insert_idempotency_key(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO idempotency_keys (key, status, response, expires_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (key) DO NOTHING
+        INSERT INTO idempotency_keys (tenant_id, key, status, response, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (tenant_id, key) DO NOTHING
         "#,
     )
+    .bind(tenant_id)
     .bind(key)
     .bind(status)
     .bind(response)
@@ -1736,14 +2439,19 @@ pub async fn insert_idempotency_key(
 
 pub async fn update_idempotency_key_response(
     pool: &PgPool,
+    tenant_id: &str,
     key: &str,
     response: &serde_json::Value,
 ) -> Result<()> {
-    sqlx::query("UPDATE idempotency_keys SET response = $2, status = 'completed' WHERE key = $1")
-        .bind(key)
-        .bind(response)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE idempotency_keys SET response = $3, status = 'completed' \
+         WHERE tenant_id = $1 AND key = $2",
+    )
+    .bind(tenant_id)
+    .bind(key)
+    .bind(response)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1780,12 +2488,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT")
         .bind(420)
         .bind(true)
@@ -1807,12 +2516,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("test tenant 2")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret2")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT2")
         .bind(50)
         .bind(true)
@@ -1888,12 +2598,13 @@ mod integration_tests {
         let tenant_id = uuid::Uuid::new_v4();
 
         sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt($4, $5), $6, $7, $8)",
         )
         .bind(tenant_id)
         .bind("rl-test-tenant")
-        .bind(format!("key-{tenant_id}"))
+        .bind(hash_api_key(&format!("key-{tenant_id}")))
         .bind("secret")
+        .bind(tenant_secret_key())
         .bind("GTESTACCOUNT3")
         .bind(60)
         .bind(true)
