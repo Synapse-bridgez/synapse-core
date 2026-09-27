@@ -18,7 +18,7 @@ fails it (exit `1`).
 | | |
 |---|---|
 | Scanner | [gitleaks](https://github.com/gitleaks/gitleaks) v8.30.1, default ruleset |
-| Refs | `main` at `5a770bc` and `develop` at `c1cacec` (2026-08-24) |
+| Refs | `main` at `5a770bc` (`develop` is an ancestor of `main`, so it adds no commits) |
 | Commits scanned | 733. gitleaks scans each non-merge commit's patch. Merge commits' combined diffs are not scanned. |
 | Output | `--redact`: secret values never appear in the report |
 
@@ -30,7 +30,7 @@ agree.
 Reproduce from a full clone:
 
 ```bash
-gitleaks git --redact --log-opts="origin/main origin/develop" .
+gitleaks git --redact --log-opts="origin/main" .
 ```
 
 ## Findings
