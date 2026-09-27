@@ -150,7 +150,13 @@ fn only_the_documented_states_are_reachable_from_pending() {
     // `dlq` has an outgoing edge (requeue) but no incoming one: rows enter
     // it through DLQ tooling outside this state machine, never via a
     // validated transition.
-    let expected = BTreeSet::from(["completed", "failed", "pending", "processing"]);
+    let expected = BTreeSet::from([
+        "completed",
+        "failed",
+        "pending",
+        "pending_review",
+        "processing",
+    ]);
     assert_eq!(reachable_from(INITIAL), expected);
     assert!(states().contains("dlq"));
 }

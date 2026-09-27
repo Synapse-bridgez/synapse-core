@@ -146,7 +146,7 @@ and guarded edges from `TRANSACTION_TRANSITIONS` and checks the real
   no-ops for every pair of known states and a set of non-states (`""`,
   `"PENDING"`, `"cancelled"`, ...).
 - **Reachability:** from `pending`, exactly `pending`, `processing`,
-  `completed` and `failed` are reachable. `dlq` has an outgoing edge (requeue
+  `pending_review`, `completed` and `failed` are reachable. `dlq` has an outgoing edge (requeue
   to `pending`) but no incoming one, so rows only enter it through DLQ
   tooling outside this state machine.
 - **Terminal state:** `completed` is absorbing.
