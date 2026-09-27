@@ -4,6 +4,8 @@ use std::fmt;
 
 pub mod schemas;
 pub mod state_machine;
+#[cfg(test)]
+mod state_machine_model;
 pub mod state_transitions;
 
 pub const STELLAR_ACCOUNT_LEN: usize = 56;
