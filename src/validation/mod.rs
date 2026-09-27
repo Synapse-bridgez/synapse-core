@@ -2,6 +2,8 @@ use bigdecimal::BigDecimal;
 use serde::Deserialize;
 use std::fmt;
 
+#[cfg(test)]
+mod regex_audit;
 pub mod schemas;
 pub mod state_machine;
 pub mod state_transitions;
