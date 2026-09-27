@@ -101,3 +101,28 @@ once a target environment for scratch databases is decided.
 
 - `src/services/backup_verification_job.rs`
 - `src/services/backup.rs` (`verify_backup_checksum`, `restore_backup`)
+
+## Addendum: Coexistence with DR-Drill Restore Testing (Issue 45)
+
+The DR drill introduced in issue 45 performs a full restore-and-verify
+against a scratch target — i.e. it is exactly "Alternative 1" above,
+implemented, but as an on-demand/periodic drill rather than the every-run
+weekly job. This does not amend or contradict the decision in this ADR:
+
+- The **weekly `BackupVerificationJob`** stays checksum-only. Its job is
+  cheap, frequent, unattended proof that backup *files* aren't corrupted
+  at rest, per the Decision above.
+- The **DR drill** covers the gap this ADR names in Consequences/Negative
+  (checksum-only "does not prove the backup is actually *restorable*").
+  It answers that question on its own cadence, using its own isolated
+  target, without changing what the weekly job does.
+
+Net effect: two verification guarantees intentionally coexist at
+different frequencies and cost points — checksum-only (weekly, cheap,
+file-level) and full restore-test (drill cadence, expensive, proves
+restorability). Cold-storage tiering (issue 39) does not change this
+split; tiered/archived backups are still subject to the same
+checksum-only weekly check plus periodic drill coverage, not a third
+policy. Should DR-drill frequency ever increase to the point of
+overlapping the weekly job's role, this addendum — not silent drift —
+is where that tradeoff should be revisited.

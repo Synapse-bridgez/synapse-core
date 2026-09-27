@@ -158,7 +158,11 @@ impl TransactionProcessor {
         self
     }
 
-    #[instrument(name = "processor.process_transaction", skip(self), fields(transaction.id = %tx_id))]
+    #[instrument(
+        name = "processor.process_transaction",
+        skip(self),
+        fields(transaction.id = %tx_id, trace_id = tracing::field::Empty)
+    )]
     pub async fn process_transaction(&self, tx_id: uuid::Uuid) -> anyhow::Result<()> {
         // Fetch the transaction first
         let tx: crate::db::models::Transaction =
@@ -166,6 +170,15 @@ impl TransactionProcessor {
                 .bind(tx_id)
                 .fetch_one(&self.pool)
                 .await?;
+
+        // Record the trace ID (propagated from the inbound webhook that
+        // created this transaction, see `handlers/webhook.rs`) onto this
+        // span so every `tracing` event emitted by the pipeline stages below
+        // — validate/enrich/verify/complete — carries it structurally,
+        // without threading it through each stage's function signature.
+        if let Some(trace_id) = &tx.trace_id {
+            tracing::Span::current().record("trace_id", &trace_id.as_str());
+        }
 
         // Define the pipeline stages
         let mut stages: Vec<Box<dyn ProcessingStage>> = Vec::new();

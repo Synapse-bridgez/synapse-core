@@ -1,0 +1,32 @@
+{
+  "$schema_note": "Generated from docs/error-catalog.md — do not edit by hand.",
+  "error_response_format": {
+    "rest": {"body_fields": ["error", "code", "status"]},
+    "graphql": {"status": 200, "code_field": "errors[].extensions.code"}
+  },
+  "errors": [
+    {"code": "ERR_DATABASE_001", "http_status": 500, "graphql_surfacing": "extensions.code", "description": "Database connection error"},
+    {"code": "ERR_DATABASE_002", "http_status": 500, "graphql_surfacing": "extensions.code", "description": "Database query execution error"},
+    {"code": "ERR_VALIDATION_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Validation error - invalid input"},
+    {"code": "ERR_NOT_FOUND_001", "http_status": 404, "graphql_surfacing": "extensions.code", "description": "Resource not found"},
+    {"code": "ERR_INTERNAL_001", "http_status": 500, "graphql_surfacing": "extensions.code", "description": "Internal server error"},
+    {"code": "ERR_BAD_REQUEST_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Bad request - invalid parameters"},
+    {"code": "ERR_AUTH_001", "http_status": 401, "graphql_surfacing": "extensions.code", "description": "Invalid authentication credentials"},
+    {"code": "ERR_AUTH_002", "http_status": 403, "graphql_surfacing": "extensions.code", "description": "Insufficient permissions"},
+    {"code": "ERR_UNAUTHORIZED_001", "http_status": 401, "graphql_surfacing": "extensions.code", "description": "Unauthorized - authentication required"},
+    {"code": "ERR_TRANSACTION_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Invalid transaction amount"},
+    {"code": "ERR_TRANSACTION_002", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Transaction amount below minimum"},
+    {"code": "ERR_TRANSACTION_003", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Invalid Stellar address"},
+    {"code": "ERR_TRANSACTION_004", "http_status": 409, "graphql_surfacing": "extensions.code", "description": "Transaction already processed (idempotency)"},
+    {"code": "ERR_TRANSACTION_005", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Invalid transaction status transition"},
+    {"code": "ERR_TRANSACTION_006", "http_status": 409, "graphql_surfacing": "extensions.code", "description": "Concurrent modification: transaction state changed during processing"},
+    {"code": "ERR_WEBHOOK_001", "http_status": 401, "graphql_surfacing": "extensions.code", "description": "Invalid webhook signature"},
+    {"code": "ERR_WEBHOOK_002", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Malformed webhook payload"},
+    {"code": "ERR_SETTLEMENT_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Invalid settlement amount"},
+    {"code": "ERR_SETTLEMENT_002", "http_status": 409, "graphql_surfacing": "extensions.code", "description": "Settlement already exists"},
+    {"code": "ERR_SETTLEMENT_003", "http_status": 409, "graphql_surfacing": "extensions.code", "description": "Stale transition: settlement state changed during processing"},
+    {"code": "ERR_RATE_LIMIT_001", "http_status": 429, "graphql_surfacing": "extensions.code", "description": "Rate limit exceeded"},
+    {"code": "ERR_REDIS_001", "http_status": 500, "graphql_surfacing": "extensions.code", "description": "Redis operation failed"},
+    {"code": "ERR_QUERY_COMPLEXITY_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Query exceeds depth, complexity, or alias limits (GraphQL)"}
+  ]
+}

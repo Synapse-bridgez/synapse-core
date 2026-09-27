@@ -19,6 +19,7 @@ concurrency:
 jobs:
   handle-webhook:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Serialize external API calls (taiki-e install-action) to prevent GitHub API rate limits
     concurrency:
       group: ${{ github.workflow }}-install-tools-${{ github.ref }}
@@ -59,4 +60,4 @@ jobs:
         run: cargo build --verbose
 
       - name: Run webhook-related tests
-        run: cargo test --lib webhook -- --nocapture
+        run: cargo test --lib webhook -- --nocapture --test-threads=1

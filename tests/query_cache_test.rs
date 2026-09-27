@@ -43,6 +43,43 @@ async fn test_cache_metrics() {
 
 #[ignore = "Requires Redis"]
 #[tokio::test]
+async fn test_hit_rate_report_tracks_per_query_type_under_mixed_workload() {
+    let cache = QueryCache::new("redis://localhost:6379").await.unwrap();
+
+    // status_counts: one set + one hit
+    cache
+        .set(
+            "query:status_counts",
+            &"v".to_string(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let _: Option<String> = cache.get("query:status_counts").await.unwrap();
+
+    // daily_totals: two misses (distinct keys, never set)
+    let _: Option<String> = cache.get("query:daily_totals:1").await.unwrap();
+    let _: Option<String> = cache.get("query:daily_totals:2").await.unwrap();
+
+    let report = cache.hit_rate_report();
+    let status_counts = report
+        .iter()
+        .find(|r| r.query_type == "status_counts")
+        .expect("status_counts should appear in the report");
+    assert!(status_counts.hits >= 1);
+
+    let daily_totals = report
+        .iter()
+        .find(|r| r.query_type == "daily_totals")
+        .expect("daily_totals should appear in the report");
+    assert_eq!(daily_totals.misses, 2);
+    assert_eq!(daily_totals.hit_rate, 0.0);
+
+    cache.invalidate_exact("query:status_counts").await.unwrap();
+}
+
+#[ignore = "Requires Redis"]
+#[tokio::test]
 async fn test_cache_invalidation() {
     let cache = QueryCache::new("redis://localhost:6379").await.unwrap();
 

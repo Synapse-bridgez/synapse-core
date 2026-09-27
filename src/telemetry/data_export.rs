@@ -413,6 +413,72 @@ pub fn create_metric_record(name: &str, metric_type: MetricType, value: f64) -> 
     }
 }
 
+// ── Compliance export telemetry ─────────────────────────────────────────────
+//
+// Exports of compliance-classified reports (e.g. `ComplianceReport` from
+// `services::compliance`, `ReconciliationReport` from
+// `services::reconciliation`) carry different sensitivity and different
+// retention/review requirements than routine data exports, so who exported
+// what compliance data is itself a compliance-relevant fact. This emits a
+// telemetry event distinct from routine export telemetry (the
+// `admin_*_report_requests_total` counters recorded in the admin handlers)
+// and persists it to `audit_logs`, where it is retained per
+// `docs/audit_log_retention.md`.
+
+/// Record a compliance-classified export event.
+///
+/// This is the single call site every compliance-report export code path
+/// should go through, rather than each call site independently remembering
+/// to classify and log its export — see issue tracking this telemetry gap.
+///
+/// `actor` identifies who performed the export. Today the admin API is
+/// authenticated with a single shared admin key (see
+/// `middleware::auth::admin_auth`), so there is no per-operator identity to
+/// record yet; callers should pass `"admin"` until a per-operator identity
+/// exists (tracked separately against the access-control matrix work).
+pub async fn record_compliance_export(
+    pool: &sqlx::PgPool,
+    report_type: &str,
+    report_id: uuid::Uuid,
+    actor: &str,
+    filters: serde_json::Value,
+) -> sqlx::Result<()> {
+    crate::metrics::compliance_export_events_total().add(
+        1,
+        &[opentelemetry::KeyValue::new(
+            "report_type",
+            report_type.to_string(),
+        )],
+    );
+
+    let mut tx = pool.begin().await?;
+    crate::db::audit::AuditLog::log(
+        &mut tx,
+        report_id,
+        crate::db::audit::ENTITY_COMPLIANCE_EXPORT,
+        "compliance_export",
+        None,
+        Some(serde_json::json!({
+            "classification": "compliance",
+            "report_type": report_type,
+            "filters": filters,
+        })),
+        actor,
+    )
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(
+        classification = "compliance",
+        report_type,
+        report_id = %report_id,
+        actor,
+        "compliance data export"
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

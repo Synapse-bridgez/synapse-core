@@ -274,7 +274,7 @@ impl IdempotencyService {
                 // "no fallback record found" rather than propagating the
                 // error and failing the request open with no idempotency
                 // protection at all.
-                match crate::db::queries::check_idempotency_key(&self.pool, key).await {
+                match crate::db::queries::check_idempotency_key(&self.pool, tenant_id, key).await {
                     Ok(Some(db_key)) => {
                         crate::metrics::idempotency_db_fallback_recovered_total().add(1, &[]);
                         return Ok(db_key_to_status(db_key));
@@ -319,25 +319,27 @@ impl IdempotencyService {
                 );
                 self.fallback_count.fetch_add(1, Ordering::Relaxed);
 
-                self.check_idempotency_db(key).await
+                self.check_idempotency_db(tenant_id, key).await
             }
         }
     }
 
     async fn check_idempotency_db(
         &self,
+        tenant_id: &str,
         key: &str,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
         use chrono::{Duration, Utc};
 
         // Check if key exists in database
-        if let Some(db_key) = crate::db::queries::check_idempotency_key(&self.pool, key).await? {
+        if let Some(db_key) = crate::db::queries::check_idempotency_key(&self.pool, tenant_id, key).await? {
             Ok(db_key_to_status(db_key))
         } else {
             // Key doesn't exist, try to insert as processing
             let expires_at = Utc::now() + Duration::hours(24);
             crate::db::queries::insert_idempotency_key(
                 &self.pool,
+                tenant_id,
                 key,
                 "processing",
                 None,
@@ -356,7 +358,7 @@ impl IdempotencyService {
         lock_token: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if lock_token.is_none() {
-            return self.store_response_db(key, &response).await;
+            return self.store_response_db(tenant_id, key, &response).await;
         }
 
         let cache_key = _cache_key(tenant_id, key);
@@ -386,18 +388,19 @@ impl IdempotencyService {
                     redis_err
                 );
 
-                self.store_response_db(key, &response).await
+                self.store_response_db(tenant_id, key, &response).await
             }
         }
     }
 
     async fn store_response_db(
         &self,
+        tenant_id: &str,
         key: &str,
         response: &CachedResponse,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response_json = serde_json::to_value(response)?;
-        crate::db::queries::update_idempotency_key_response(&self.pool, key, &response_json)
+        crate::db::queries::update_idempotency_key_response(&self.pool, tenant_id, key, &response_json)
             .await?;
         Ok(())
     }

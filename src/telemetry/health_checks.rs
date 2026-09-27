@@ -158,7 +158,7 @@ impl HealthCheckManager {
         drop(check_count);
 
         // Perform actual health check
-        let result = self.perform_health_check().await?;
+        let result = self.perform_health_check(check_type).await?;
 
         // Cache the result
         let mut cache = self.cached_result.write().await;
@@ -171,20 +171,36 @@ impl HealthCheckManager {
     }
 
     /// Internal implementation of health check logic (should be implemented by callers).
-    async fn perform_health_check(&self) -> Result<HealthCheckResult, String> {
+    async fn perform_health_check(&self, check_type: &str) -> Result<HealthCheckResult, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "Failed to get current timestamp".to_string())?
             .as_millis() as u64;
 
+        let mut components = HealthComponents {
+            database: ComponentStatus::unhealthy("not checked"),
+            telemetry_export: ComponentStatus::unhealthy("not checked"),
+            message_queue: ComponentStatus::unhealthy("not checked"),
+        };
+        match check_type {
+            "database" => components.database = ComponentStatus::healthy(),
+            "telemetry_export" => components.telemetry_export = ComponentStatus::healthy(),
+            "message_queue" => components.message_queue = ComponentStatus::healthy(),
+            _ => {}
+        }
+        let status = if components.database.status == "healthy"
+            && components.telemetry_export.status == "healthy"
+            && components.message_queue.status == "healthy"
+        {
+            "healthy"
+        } else {
+            "degraded"
+        };
+
         Ok(HealthCheckResult {
-            status: "healthy".to_string(),
+            status: status.to_string(),
             timestamp: now,
-            components: HealthComponents {
-                database: ComponentStatus::healthy(),
-                telemetry_export: ComponentStatus::healthy(),
-                message_queue: ComponentStatus::healthy(),
-            },
+            components,
         })
     }
 }
