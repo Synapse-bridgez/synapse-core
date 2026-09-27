@@ -1,0 +1,62 @@
+name: Unreachable Modules Tracker
+
+# Recurring, higher-level nudge on top of the PR-time check in
+# scripts/check-unreachable-modules.sh (see issue 48 for that check's
+# structured suppression format + expiry mechanism, hardened there).
+# This job does not fail CI and does not remove anything — it only opens or
+# updates a tracking issue when the number of known/suppressed unreachable
+# modules in docs/known-unreachable-modules.md has grown past the recorded
+# baseline, per docs/adr/007-remove-orphaned-hexagonal-and-payments-modules.md.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # weekly, Monday 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  track-unreachable-modules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run unreachable-module check (non-blocking)
+        id: check
+        run: |
+          set +e
+          ./scripts/check-unreachable-modules.sh > unreachable-report.txt 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Compare suppressed/known-unreachable count against baseline
+        id: count
+        run: |
+          current=$(grep -cE '^\| `src/' docs/known-unreachable-modules.md || true)
+          baseline=$(cat docs/unreachable-modules-baseline.txt 2>/dev/null || echo 0)
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update tracking issue if grown beyond baseline
+        if: steps.count.outputs.current > steps.count.outputs.baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="Unreachable modules: ${{ steps.count.outputs.current }} known (baseline ${{ steps.count.outputs.baseline }})"
+          body_file=$(mktemp)
+          {
+            echo "The suppressed/known-unreachable module count in docs/known-unreachable-modules.md"
+            echo "has grown from ${{ steps.count.outputs.baseline }} to ${{ steps.count.outputs.current }}."
+            echo
+            echo "Each entry there uses the structured suppression format + expiry mechanism from"
+            echo "issue 48. This issue is a triage prompt only — removal remains a deliberate,"
+            echo "reviewed action per docs/adr/007-remove-orphaned-hexagonal-and-payments-modules.md."
+            echo
+            echo "Current list:"
+            echo
+            cat docs/known-unreachable-modules.md
+          } > "$body_file"
+
+          existing=$(gh issue list --search "Unreachable modules: in:title" --state open --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file "$body_file"
+          else
+            gh issue create --title "$title" --body-file "$body_file" --label "tech-debt,unreachable-modules"
+          fi

@@ -181,6 +181,8 @@ The validation tests parse k6 JSON output in the following format:
 
 ## Integration with CI/CD
 
+As of August 28, 2026, the preferred CI contract is to keep explicit pass/fail thresholds in workflow environment variables so regressions are reviewable at the workflow layer, not hidden only inside load-test fixtures.
+
 ### GitHub Actions Example
 
 ```yaml

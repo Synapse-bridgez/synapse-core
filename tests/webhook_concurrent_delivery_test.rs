@@ -1,15 +1,65 @@
-use mockito::Server;
+//! Exactly-once webhook delivery verification harness.
+//!
+//! `migrations/20260601000000_webhook_exactly_once_delivery.sql` and
+//! `src/services/webhook_dispatcher.rs` together promise that every logical
+//! event - a `(endpoint_id, transaction_id, event_type)` tuple - is
+//! delivered to its endpoint exactly once, even when duplicate-triggering
+//! conditions pile up (a replica race on the claim, a retry after a
+//! transient fault, a crashed worker being reclaimed, a double replay out
+//! of the DLQ). That guarantee is easy to silently regress in a future
+//! refactor, so this file is a standing harness that re-proves it under
+//! concurrent load on every CI run rather than relying on manual review.
+//!
+//! # Shape
+//!
+//! Each scenario:
+//!   1. stands up a throwaway Postgres (per test) and Redis,
+//!   2. points a webhook endpoint at an in-process counting HTTP receiver
+//!      whose responses are scripted by a [`ResponsePlan`],
+//!   3. applies one duplicate-triggering [`Trigger`],
+//!   4. drives `WebhookDispatcher::process_pending` to completion across one
+//!      or more dispatcher instances, and
+//!   5. asserts the receiver acknowledged the event exactly once and the
+//!      `webhook_deliveries` / `webhook_delivery_dlq` rows agree.
+//!
+//! # Determinism
+//!
+//! No assertion depends on wall-clock timing. Retry backoff and circuit
+//! breaker cooldowns are stepped past by rewriting `next_attempt_at` and
+//! deleting the Redis breaker keys directly (see [`fast_forward`]), never by
+//! sleeping and hoping. In-flight ordering that a scenario needs is
+//! established with an explicit signal from the receiver, not a delay.
+//!
+//! # Adding a scenario
+//!
+//! See `docs/webhook-exactly-once-harness.md`. In short: add a [`Trigger`]
+//! variant (or reuse one), teach [`Scenario::run`] how to set it up and
+//! which assertion to run, then add a `#[tokio::test] #[ignore]` wrapper
+//! named `exactly_once_<thing>`. Scenarios that need bespoke orchestration
+//! (an in-flight pause, a two-phase setup) are written as standalone tests
+//! that reuse the helpers in this file.
+
 use redis::Client as RedisClient;
 use sqlx::migrate::Migrator;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 use synapse_core::services::WebhookDispatcher;
 use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
 use testcontainers_modules::postgres::Postgres;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, Mutex, Semaphore};
 use uuid::Uuid;
 
-/// Set up a test Postgres instance with all migrations applied.
-/// Also ensures the current month partition exists for the transactions table.
+const EVENT_TYPE: &str = "transaction.completed";
+
+// === Infra setup
+
+/// Throwaway Postgres with every migration applied, plus the current-month
+/// `transactions` partition (some dispatcher queries touch `transactions`).
 async fn setup_postgres() -> (PgPool, ContainerAsync<Postgres>) {
     let container = Postgres::default()
         .with_tag("14-alpine")
@@ -28,7 +78,6 @@ async fn setup_postgres() -> (PgPool, ContainerAsync<Postgres>) {
         .await
         .unwrap();
 
-    // Ensure current month partition for transactions table
     let _ = sqlx::query(
         r#"
         DO $$
@@ -53,42 +102,240 @@ async fn setup_postgres() -> (PgPool, ContainerAsync<Postgres>) {
     (pool, container)
 }
 
-/// Set up Redis – tries testcontainers first, falls back to REDIS_URL env var.
+/// Prefer a Redis from `REDIS_URL` (CI supplies one as a service); otherwise
+/// start a container. Breaker and rate-limit keys are namespaced by a random
+/// endpoint UUID per test, so a shared CI Redis does not cross-contaminate.
 async fn setup_redis() -> (String, Option<ContainerAsync<testcontainers::GenericImage>>) {
-    // Prefer a running Redis from the environment.
     if let Ok(url) = std::env::var("REDIS_URL") {
         return (url, None);
     }
-    // Fallback: start a Redis container with testcontainers.
     let image = testcontainers::GenericImage::new("redis", "7-alpine");
     let container = image.start().await.unwrap();
     let port = container.get_host_port_ipv4(6379).await.unwrap();
-    let url = format!("redis://127.0.0.1:{}/", port);
-    (url, Some(container))
+    (format!("redis://127.0.0.1:{}/", port), Some(container))
 }
 
-/// Helper: insert a webhook endpoint and a pending delivery row.
-async fn insert_endpoint_and_delivery(
-    pool: &PgPool,
-    url: &str,
-    max_delivery_rate: i32,
-    event_type: &str,
-) -> (Uuid, Uuid) {
-    let endpoint_id: Uuid = sqlx::query_scalar(
+struct Ctx {
+    pool: PgPool,
+    redis_url: String,
+    _pg: ContainerAsync<Postgres>,
+    _redis: Option<ContainerAsync<testcontainers::GenericImage>>,
+}
+
+async fn setup() -> Ctx {
+    let (pool, pg) = setup_postgres().await;
+    let (redis_url, redis) = setup_redis().await;
+    Ctx {
+        pool,
+        redis_url,
+        _pg: pg,
+        _redis: redis,
+    }
+}
+
+fn redis_client(url: &str) -> RedisClient {
+    RedisClient::open(url).unwrap()
+}
+
+// === Counting HTTP receiver
+
+/// How the receiver answers each attempt for a given logical event.
+#[derive(Clone, Copy)]
+enum ResponsePlan {
+    /// Always answer `200`.
+    AlwaysAccept,
+    /// Always answer `500` - used to drive a delivery to exhaustion.
+    AlwaysReject,
+    /// Close the connection with no response for the first `drops` attempts
+    /// (a transport error to the dispatcher), then answer `500` for the next
+    /// `errors` attempts, then `200` from then on.
+    DropsThenErrorsThenAccept { drops: usize, errors: usize },
+    /// Hold every request open until [`Receiver::release_all`], then `200`.
+    /// Lets a test pin a delivery in flight while it races a second cycle.
+    BlockUntilReleased,
+}
+
+struct ReceiverState {
+    plan: ResponsePlan,
+    // key -> total requests seen
+    seen: Mutex<HashMap<String, usize>>,
+    // key -> requests answered 2xx
+    accepted: Mutex<HashMap<String, usize>>,
+    arrivals: broadcast::Sender<String>,
+    gate: Semaphore,
+}
+
+struct Receiver {
+    base_url: String,
+    state: Arc<ReceiverState>,
+    _accept_loop: tokio::task::JoinHandle<()>,
+}
+
+impl Receiver {
+    async fn spawn(plan: ResponsePlan) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (arrivals, _) = broadcast::channel(256);
+        let state = Arc::new(ReceiverState {
+            plan,
+            seen: Mutex::new(HashMap::new()),
+            accepted: Mutex::new(HashMap::new()),
+            arrivals,
+            gate: Semaphore::new(0),
+        });
+
+        let loop_state = state.clone();
+        let accept_loop = tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let conn_state = loop_state.clone();
+                tokio::spawn(async move { serve_connection(sock, &conn_state).await });
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            state,
+            _accept_loop: accept_loop,
+        }
+    }
+
+    fn endpoint_url(&self) -> String {
+        format!("{}/webhook", self.base_url)
+    }
+
+    /// Subscribe before the traffic that should be observed is started.
+    fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.state.arrivals.subscribe()
+    }
+
+    fn release_all(&self) {
+        self.state.gate.add_permits(4096);
+    }
+
+    async fn seen(&self, key: &str) -> usize {
+        *self.state.seen.lock().await.get(key).unwrap_or(&0)
+    }
+
+    async fn accepted(&self, key: &str) -> usize {
+        *self.state.accepted.lock().await.get(key).unwrap_or(&0)
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn header_value(head: &str, name_lower: &str) -> Option<String> {
+    head.lines()
+        .find(|line| line.to_ascii_lowercase().starts_with(&format!("{name_lower}:")))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, v)| v.trim().to_string())
+}
+
+async fn serve_connection(mut sock: TcpStream, state: &ReceiverState) {
+    let mut buf = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+
+    // Read until end of headers.
+    let header_end = loop {
+        let n = match sock.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if buf.len() > 64 * 1024 {
+            return;
+        }
+    };
+
+    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let content_len: usize = header_value(&head, "content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    while buf.len() < header_end + content_len {
+        match sock.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+
+    let body_end = (header_end + content_len).min(buf.len());
+    let body = &buf[header_end..body_end];
+    let event_type = header_value(&head, "x-webhook-event").unwrap_or_default();
+    let transaction_id = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("transaction_id")
+                .and_then(|t| t.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let key = format!("{transaction_id}:{event_type}");
+
+    let attempt_ordinal = {
+        let mut seen = state.seen.lock().await;
+        let count = seen.entry(key.clone()).or_insert(0);
+        *count += 1;
+        *count
+    };
+    let _ = state.arrivals.send(key.clone());
+
+    let accept = match state.plan {
+        ResponsePlan::AlwaysAccept => true,
+        ResponsePlan::AlwaysReject => false,
+        ResponsePlan::DropsThenErrorsThenAccept { drops, errors } => {
+            if attempt_ordinal <= drops {
+                // Drop mid-delivery: no HTTP response at all.
+                return;
+            }
+            attempt_ordinal > drops + errors
+        }
+        ResponsePlan::BlockUntilReleased => {
+            state.gate.acquire().await.unwrap().forget();
+            true
+        }
+    };
+
+    if accept {
+        *state.accepted.lock().await.entry(key).or_insert(0) += 1;
+        let _ = sock
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .await;
+    } else {
+        let _ = sock
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 3\r\nConnection: close\r\n\r\nERR",
+            )
+            .await;
+    }
+    let _ = sock.flush().await;
+}
+
+// === Delivery-row helpers
+
+async fn insert_endpoint(pool: &PgPool, url: &str) -> Uuid {
+    // max_delivery_rate is set high so the per-endpoint rate limiter never
+    // interferes with an exactly-once assertion.
+    sqlx::query_scalar(
         r#"
         INSERT INTO webhook_endpoints (url, secret, event_types, max_delivery_rate)
-        VALUES ($1, 'test-secret', ARRAY[$3], $2)
+        VALUES ($1, 'harness-secret', ARRAY[$2], 100000)
         RETURNING id
         "#,
     )
     .bind(url)
-    .bind(max_delivery_rate)
-    .bind(event_type)
+    .bind(EVENT_TYPE)
     .fetch_one(pool)
     .await
-    .expect("Failed to insert endpoint");
+    .expect("insert endpoint")
+}
 
-    let delivery_id: Uuid = sqlx::query_scalar(
+async fn insert_pending_delivery(pool: &PgPool, endpoint_id: Uuid, transaction_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
         r#"
         INSERT INTO webhook_deliveries
             (endpoint_id, transaction_id, event_type, payload, status, next_attempt_at)
@@ -97,343 +344,489 @@ async fn insert_endpoint_and_delivery(
         "#,
     )
     .bind(endpoint_id)
-    .bind(Uuid::new_v4())
-    .bind(event_type)
-    .bind(serde_json::json!({"event_type": event_type, "transaction_id": "test", "timestamp": "2025-01-01T00:00:00Z", "data": {"key": "value"}}))
+    .bind(transaction_id)
+    .bind(EVENT_TYPE)
+    .bind(serde_json::json!({
+        "event_type": EVENT_TYPE,
+        "transaction_id": transaction_id.to_string(),
+        "timestamp": "2026-01-01T00:00:00Z",
+        "data": {},
+    }))
     .fetch_one(pool)
     .await
-    .expect("Failed to insert delivery");
-
-    (endpoint_id, delivery_id)
+    .expect("insert delivery")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 1: Two concurrent process_pending runs deliver each event exactly once
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-#[ignore = "Requires Docker"]
-async fn test_concurrent_process_pending_delivers_exactly_once() {
-    let (pool, _pg) = setup_postgres().await;
-    let (redis_url, _redis) = setup_redis().await;
-
-    // Start a mock server that accepts POSTs and returns 200.
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/webhook")
-        .with_status(200)
-        .expect(1) // Exactly one delivery expected
-        .create();
-
-    let endpoint_url = format!("{}/webhook", server.url());
-
-    // Insert one endpoint + one delivery.
-    let (_ep_id, delivery_id) =
-        insert_endpoint_and_delivery(&pool, &endpoint_url, 100, "test.event").await;
-
-    // Create two independent dispatcher instances (simulating two replicas).
-    let dispatcher1 = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher 1");
-    let dispatcher2 = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher 2");
-
-    // Run both process_pending calls concurrently.
-    let (r1, r2) = tokio::join!(dispatcher1.process_pending(), dispatcher2.process_pending());
-    assert!(r1.is_ok(), "first process_pending should succeed: {:?}", r1);
-    assert!(
-        r2.is_ok(),
-        "second process_pending should succeed: {:?}",
-        r2
-    );
-
-    // The mock was set to expect(1), so mockito will assert that only one
-    // request was received.
-    mock.assert_async().await;
-
-    // Verify the delivery row was marked as 'delivered'.
-    let status: String = sqlx::query_scalar("SELECT status FROM webhook_deliveries WHERE id = $1")
-        .bind(delivery_id)
-        .fetch_one(&pool)
+async fn delivery_ids_for(pool: &PgPool, transaction_id: Uuid) -> Vec<Uuid> {
+    sqlx::query_scalar("SELECT id FROM webhook_deliveries WHERE transaction_id = $1")
+        .bind(transaction_id)
+        .fetch_all(pool)
         .await
-        .expect("delivery should exist");
-    assert_eq!(
-        status, "delivered",
-        "delivery should be delivered exactly once"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 2: An exhausted delivery lands in the DLQ with full attempt history
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-#[ignore = "Requires Docker"]
-async fn test_exhausted_delivery_routed_to_dlq_with_history() {
-    let (pool, _pg) = setup_postgres().await;
-    let (redis_url, _redis) = setup_redis().await;
-
-    // Mock endpoint always returns 500 so the delivery exhausts.
-    let mut server = Server::new_async().await;
-    let mock = server
-        .mock("POST", "/fail")
-        .with_status(500)
-        .expect(5) // Exactly MAX_ATTEMPTS (5) attempts
-        .create();
-
-    let endpoint_url = format!("{}/fail", server.url());
-    let (ep_id, delivery_id) =
-        insert_endpoint_and_delivery(&pool, &endpoint_url, 100, "test.exhaust").await;
-
-    let dispatcher = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
-    let mut redis_conn = RedisClient::open(redis_url.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
-        .await
-        .unwrap();
-    let cb_key = format!("webhook_cb:{ep_id}");
+}
 
-    // Run process_pending in a loop to exhaust the delivery.
-    // After each failure, reset next_attempt_at so the next cycle picks it up
-    // immediately, bypassing the exponential backoff. Also clear the circuit
-    // breaker's own independent cooldown (CB_RESET_TIMEOUT_SECS, 300s) for
-    // this endpoint after each cycle — otherwise, once the breaker trips
-    // (CB_FAILURE_THRESHOLD is lower than MAX_ATTEMPTS), it would keep
-    // blocking the remaining attempts needed to reach exhaustion within
-    // this test's fast execution window, even though the backoff bypass
-    // above already fast-forwards past the retry delay. In real time this
-    // isn't a problem: the endpoint's genuine downtime naturally covers the
-    // breaker's reset window too, so the delivery still exhausts, just over
-    // a longer wall-clock period than the raw backoff math alone implies.
-    for _ in 0..6 {
-        let _ = dispatcher.process_pending().await;
-        sqlx::query(
-            "UPDATE webhook_deliveries SET next_attempt_at = NOW() WHERE status = 'pending'",
-        )
-        .execute(&pool)
+async fn open_delivery_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM webhook_deliveries WHERE status IN ('pending', 'in_progress')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+// === Driving process_pending deterministically
+
+/// Run one `process_pending` pass on every dispatcher at once (separate
+/// tasks, so the claim path is genuinely raced).
+async fn run_cycle(dispatchers: &[WebhookDispatcher]) {
+    let handles: Vec<_> = dispatchers
+        .iter()
+        .cloned()
+        .map(|d| tokio::spawn(async move { d.process_pending().await }))
+        .collect();
+    for h in handles {
+        h.await
+            .expect("process_pending task panicked")
+            .expect("process_pending returned an error");
+    }
+}
+
+/// Step past retry backoff and circuit-breaker cooldowns without sleeping:
+/// pull every still-pending delivery's `next_attempt_at` to now and drop the
+/// endpoint's Redis breaker / probe / rate keys.
+async fn fast_forward(pool: &PgPool, redis: &RedisClient, endpoint_ids: &[Uuid]) {
+    sqlx::query("UPDATE webhook_deliveries SET next_attempt_at = NOW() WHERE status = 'pending'")
+        .execute(pool)
         .await
         .unwrap();
+
+    let mut conn = redis.get_multiplexed_async_connection().await.unwrap();
+    for id in endpoint_ids {
         let _: () = redis::cmd("DEL")
-            .arg(&cb_key)
-            .query_async(&mut redis_conn)
+            .arg(format!("webhook_cb:{id}"))
+            .arg(format!("webhook_cb_probe:{id}"))
+            .arg(format!("webhook_rate:{id}"))
+            .query_async(&mut conn)
             .await
             .unwrap();
     }
+}
 
-    mock.assert_async().await;
-
-    // Verify the delivery is now 'failed'.
-    let status: String = sqlx::query_scalar("SELECT status FROM webhook_deliveries WHERE id = $1")
-        .bind(delivery_id)
-        .fetch_one(&pool)
-        .await
-        .expect("delivery should exist");
-    assert_eq!(
-        status, "failed",
-        "delivery should be failed after exhaustion"
-    );
-
-    // Verify the DLQ entry exists.
-    let dlq_entry: Option<(Uuid, i32, serde_json::Value)> = sqlx::query_as(
-        r#"
-        SELECT id, attempt_count, attempt_history
-        FROM webhook_delivery_dlq
-        WHERE delivery_id = $1
-        "#,
-    )
-    .bind(delivery_id)
-    .fetch_optional(&pool)
-    .await
-    .expect("DLQ query should succeed");
-
-    assert!(
-        dlq_entry.is_some(),
-        "Delivery should be in the DLQ after exhaustion"
-    );
-
-    let (_dlq_id, attempt_count, attempt_history) = dlq_entry.unwrap();
-    assert_eq!(attempt_count, 5, "DLQ should record 5 attempts");
-
-    // attempt_history should be a JSON array with 5 entries
-    if let Some(history_array) = attempt_history.as_array() {
-        assert!(
-            history_array.len() >= 5,
-            "DLQ attempt history should have at least 5 entries, got {}",
-            history_array.len()
-        );
-        // Each entry should have an attempt field
-        for entry in history_array {
-            assert!(
-                entry.get("attempt").is_some(),
-                "Each history entry should have an 'attempt' field"
-            );
+/// Cycle until nothing is pending/in_progress or `max_cycles` is hit.
+async fn drive_until_settled(
+    dispatchers: &[WebhookDispatcher],
+    pool: &PgPool,
+    redis: &RedisClient,
+    endpoint_ids: &[Uuid],
+    max_cycles: usize,
+) {
+    for cycle in 0..max_cycles {
+        run_cycle(dispatchers).await;
+        if open_delivery_count(pool).await == 0 {
+            return;
         }
-    } else {
-        panic!(
-            "attempt_history should be a JSON array, got {:?}",
-            attempt_history
-        );
+        fast_forward(pool, redis, endpoint_ids).await;
+        if cycle + 1 == max_cycles {
+            eprintln!("drive_until_settled: hit max_cycles={max_cycles} with work still open");
+        }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 3: A failing endpoint trips its breaker without starving healthy endpoints
-// ═══════════════════════════════════════════════════════════════════════════════
+// === Exactly-once assertions
+
+/// Count of `attempt_history` entries whose recorded response was a 2xx.
+fn successful_attempts(history: &serde_json::Value) -> usize {
+    history
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| {
+                    e.get("response_status")
+                        .and_then(|s| s.as_i64())
+                        .map(|c| (200..300).contains(&c))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+async fn assert_delivered_exactly_once(
+    receiver: &Receiver,
+    key: &str,
+    pool: &PgPool,
+    delivery_id: Uuid,
+) {
+    assert_eq!(
+        receiver.accepted(key).await,
+        1,
+        "endpoint must acknowledge exactly one successful delivery for {key}"
+    );
+
+    let (status, history): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT status, COALESCE(attempt_history, '[]'::jsonb) FROM webhook_deliveries WHERE id = $1",
+    )
+    .bind(delivery_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    assert_eq!(status, "delivered", "delivery row must end 'delivered'");
+    assert_eq!(
+        successful_attempts(&history),
+        1,
+        "attempt_history must record exactly one successful attempt"
+    );
+
+    let dlq: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_delivery_dlq WHERE delivery_id = $1")
+            .bind(delivery_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(dlq, 0, "a delivered event must not also be in the DLQ");
+}
+
+async fn assert_exhausted_exactly_once(
+    receiver: &Receiver,
+    key: &str,
+    pool: &PgPool,
+    delivery_id: Uuid,
+) {
+    assert_eq!(
+        receiver.accepted(key).await,
+        0,
+        "an always-failing endpoint must never record a success"
+    );
+
+    let (status, attempt_count): (String, i32) =
+        sqlx::query_as("SELECT status, attempt_count FROM webhook_deliveries WHERE id = $1")
+            .bind(delivery_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "failed", "exhausted delivery row must end 'failed'");
+    assert_eq!(attempt_count, 5, "exhaustion is exactly MAX_ATTEMPTS attempts");
+
+    let dlq: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_delivery_dlq WHERE delivery_id = $1")
+            .bind(delivery_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(dlq, 1, "an exhausted delivery lands in the DLQ exactly once");
+}
+
+// === Parameterized scenarios
+
+/// The duplicate-triggering condition a scenario injects.
+#[derive(Clone, Copy)]
+enum Trigger {
+    /// `enqueue()` called `copies` times concurrently for one logical event.
+    /// The `ON CONFLICT (endpoint_id, transaction_id, event_type) DO NOTHING`
+    /// enqueue must collapse them to a single delivery row.
+    DuplicateEnqueue { copies: usize },
+    /// `workers` dispatcher replicas call `process_pending` at once against a
+    /// single due delivery. `FOR UPDATE SKIP LOCKED` plus the status flip
+    /// must let exactly one of them deliver.
+    ConcurrentReplicas { workers: usize },
+    /// The endpoint drops the connection, then 500s, then recovers. The
+    /// retry loop must produce exactly one successful receipt.
+    RetryAfterTransientFault { drops: usize, errors: usize },
+    /// The endpoint never recovers. The event must exhaust to a single DLQ
+    /// row and never be reported delivered.
+    ExhaustionToDlq,
+    /// A worker claimed the row and then "crashed" (row left `in_progress`
+    /// with a stale `claimed_at`). Replicas that reclaim it must still
+    /// deliver exactly once.
+    ReclaimAfterCrashedClaim { workers: usize },
+}
+
+struct Scenario {
+    name: &'static str,
+    trigger: Trigger,
+}
+
+impl Scenario {
+    fn response_plan(&self) -> ResponsePlan {
+        match self.trigger {
+            Trigger::RetryAfterTransientFault { drops, errors } => {
+                ResponsePlan::DropsThenErrorsThenAccept { drops, errors }
+            }
+            Trigger::ExhaustionToDlq => ResponsePlan::AlwaysReject,
+            _ => ResponsePlan::AlwaysAccept,
+        }
+    }
+
+    fn worker_count(&self) -> usize {
+        match self.trigger {
+            Trigger::ConcurrentReplicas { workers }
+            | Trigger::ReclaimAfterCrashedClaim { workers } => workers,
+            Trigger::ExhaustionToDlq => 3,
+            _ => 1,
+        }
+    }
+
+    async fn run(&self) {
+        eprintln!("exactly-once scenario: {}", self.name);
+        let ctx = setup().await;
+        let redis = redis_client(&ctx.redis_url);
+
+        let receiver = Receiver::spawn(self.response_plan()).await;
+        let endpoint_id = insert_endpoint(&ctx.pool, &receiver.endpoint_url()).await;
+        let transaction_id = Uuid::new_v4();
+        let key = format!("{transaction_id}:{EVENT_TYPE}");
+
+        let delivery_id = self.arrange(&ctx, endpoint_id, transaction_id).await;
+
+        let dispatchers: Vec<WebhookDispatcher> = (0..self.worker_count())
+            .map(|_| WebhookDispatcher::new(ctx.pool.clone(), &ctx.redis_url).unwrap())
+            .collect();
+        drive_until_settled(&dispatchers, &ctx.pool, &redis, &[endpoint_id], 12).await;
+
+        match self.trigger {
+            Trigger::ExhaustionToDlq => {
+                assert_exhausted_exactly_once(&receiver, &key, &ctx.pool, delivery_id).await
+            }
+            _ => assert_delivered_exactly_once(&receiver, &key, &ctx.pool, delivery_id).await,
+        }
+    }
+
+    /// Create the delivery row in the state the trigger calls for and return
+    /// its id.
+    async fn arrange(&self, ctx: &Ctx, endpoint_id: Uuid, transaction_id: Uuid) -> Uuid {
+        match self.trigger {
+            Trigger::DuplicateEnqueue { copies } => {
+                let dispatcher =
+                    WebhookDispatcher::new(ctx.pool.clone(), &ctx.redis_url).unwrap();
+                let handles: Vec<_> = (0..copies)
+                    .map(|_| {
+                        let d = dispatcher.clone();
+                        tokio::spawn(async move {
+                            d.enqueue(transaction_id, EVENT_TYPE, serde_json::json!({"k": "v"}))
+                                .await
+                        })
+                    })
+                    .collect();
+                for h in handles {
+                    h.await.unwrap().expect("enqueue");
+                }
+
+                let ids = delivery_ids_for(&ctx.pool, transaction_id).await;
+                assert_eq!(
+                    ids.len(),
+                    1,
+                    "concurrent duplicate enqueue must create exactly one delivery row"
+                );
+                ids[0]
+            }
+            Trigger::ReclaimAfterCrashedClaim { .. } => {
+                let id = insert_pending_delivery(&ctx.pool, endpoint_id, transaction_id).await;
+                sqlx::query(
+                    "UPDATE webhook_deliveries \
+                     SET status = 'in_progress', claimed_at = NOW() - INTERVAL '10 minutes' \
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .execute(&ctx.pool)
+                .await
+                .unwrap();
+                id
+            }
+            _ => insert_pending_delivery(&ctx.pool, endpoint_id, transaction_id).await,
+        }
+    }
+}
+
+// === Scenario tests
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
-async fn test_circuit_breaker_isolates_failing_endpoint() {
-    let (pool, _pg) = setup_postgres().await;
-    let (redis_url, _redis) = setup_redis().await;
-
-    // Two separate mock servers: one that always fails, one that succeeds.
-    let mut fail_server = Server::new_async().await;
-    let _failing_mock = fail_server
-        .mock("POST", "/fail-endpoint")
-        .with_status(500)
-        .create(); // No fixed expect count – it will trip the breaker.
-
-    let mut ok_server = Server::new_async().await;
-    let _healthy_mock = ok_server
-        .mock("POST", "/healthy-endpoint")
-        .with_status(200)
-        .create();
-
-    let fail_url = format!("{}/fail-endpoint", fail_server.url());
-    let ok_url = format!("{}/healthy-endpoint", ok_server.url());
-
-    // Insert two endpoints: one failing, one healthy.
-    let failing_ep_id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO webhook_endpoints (url, secret, event_types, max_delivery_rate)
-        VALUES ($1, 'fail-secret', ARRAY['fail.event'], 100)
-        RETURNING id
-        "#,
-    )
-    .bind(&fail_url)
-    .fetch_one(&pool)
-    .await
-    .expect("Failed to insert failing endpoint");
-
-    let healthy_ep_id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO webhook_endpoints (url, secret, event_types, max_delivery_rate)
-        VALUES ($1, 'ok-secret', ARRAY['ok.event'], 100)
-        RETURNING id
-        "#,
-    )
-    .bind(&ok_url)
-    .fetch_one(&pool)
-    .await
-    .expect("Failed to insert healthy endpoint");
-
-    // Insert 3 deliveries for the failing endpoint to trip the breaker.
-    let mut failing_delivery_ids = Vec::new();
-    for _ in 0..3 {
-        let did: Uuid = sqlx::query_scalar(
-            r#"
-            INSERT INTO webhook_deliveries
-                (endpoint_id, transaction_id, event_type, payload, status, next_attempt_at)
-            VALUES ($1, $2, 'fail.event', $3, 'pending', NOW())
-            RETURNING id
-            "#,
-        )
-        .bind(failing_ep_id)
-        .bind(Uuid::new_v4())
-        .bind(serde_json::json!({"event_type": "fail.event", "transaction_id": "fail", "timestamp": "2025-01-01T00:00:00Z", "data": {}}))
-        .fetch_one(&pool)
-        .await
-        .expect("Failed to insert failing delivery");
-        failing_delivery_ids.push(did);
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_duplicate_enqueue() {
+    Scenario {
+        name: "duplicate-enqueue",
+        trigger: Trigger::DuplicateEnqueue { copies: 4 },
     }
+    .run()
+    .await;
+}
 
-    // Insert 1 delivery for the healthy endpoint.
-    let healthy_delivery_id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO webhook_deliveries
-            (endpoint_id, transaction_id, event_type, payload, status, next_attempt_at)
-        VALUES ($1, $2, 'ok.event', $3, 'pending', NOW())
-        RETURNING id
-        "#,
-    )
-    .bind(healthy_ep_id)
-    .bind(Uuid::new_v4())
-    .bind(serde_json::json!({"event_type": "ok.event", "transaction_id": "ok", "timestamp": "2025-01-01T00:00:00Z", "data": {}}))
-    .fetch_one(&pool)
-    .await
-    .expect("Failed to insert healthy delivery");
+#[tokio::test]
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_concurrent_replicas() {
+    Scenario {
+        name: "concurrent-replicas",
+        trigger: Trigger::ConcurrentReplicas { workers: 4 },
+    }
+    .run()
+    .await;
+}
 
-    let dispatcher = WebhookDispatcher::new(pool.clone(), &redis_url).expect("dispatcher");
+#[tokio::test]
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_retry_after_transient_fault() {
+    Scenario {
+        name: "retry-after-transient-fault",
+        trigger: Trigger::RetryAfterTransientFault { drops: 1, errors: 1 },
+    }
+    .run()
+    .await;
+}
 
-    // Run process_pending multiple times, resetting next_attempt_at so the
-    // failures happen back-to-back (bypassing exponential backoff).
-    // The failing endpoint should trip the circuit breaker after
-    // CB_FAILURE_THRESHOLD (3) failures.
-    // The healthy endpoint should always be delivered.
-    for _ in 0..6 {
-        let _ = dispatcher.process_pending().await;
-        sqlx::query(
-            "UPDATE webhook_deliveries SET next_attempt_at = NOW() WHERE status = 'pending'",
-        )
-        .execute(&pool)
+#[tokio::test]
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_exhaustion_routes_to_single_dlq_entry() {
+    Scenario {
+        name: "exhaustion-to-dlq",
+        trigger: Trigger::ExhaustionToDlq,
+    }
+    .run()
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_reclaim_after_crashed_claim() {
+    Scenario {
+        name: "reclaim-after-crashed-claim",
+        trigger: Trigger::ReclaimAfterCrashedClaim { workers: 2 },
+    }
+    .run()
+    .await;
+}
+
+// === Bespoke scenarios
+//
+// These need orchestration the parameterized runner does not model: pausing
+// a delivery mid-flight, or a two-phase setup. They reuse the same helpers
+// and the same exactly-once assertions.
+
+/// A second `process_pending` cycle that overlaps an in-flight delivery must
+/// not start a duplicate attempt. The first attempt is pinned open at the
+/// receiver; while it is parked, a second dispatcher runs a full cycle and
+/// must find nothing to do (the row is `in_progress` with a fresh
+/// `claimed_at`, so neither the pending branch nor the reclaim branch of the
+/// claim query matches it).
+#[tokio::test]
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_inflight_delivery_not_redelivered_by_overlapping_cycle() {
+    let ctx = setup().await;
+    let receiver = Receiver::spawn(ResponsePlan::BlockUntilReleased).await;
+    let endpoint_id = insert_endpoint(&ctx.pool, &receiver.endpoint_url()).await;
+    let transaction_id = Uuid::new_v4();
+    let key = format!("{transaction_id}:{EVENT_TYPE}");
+    let delivery_id = insert_pending_delivery(&ctx.pool, endpoint_id, transaction_id).await;
+
+    let mut arrivals = receiver.subscribe();
+
+    let d1 = WebhookDispatcher::new(ctx.pool.clone(), &ctx.redis_url).unwrap();
+    let inflight = tokio::spawn(async move { d1.process_pending().await });
+
+    // The claim commits well before the HTTP request leaves, so once the
+    // receiver reports the arrival the row is definitely `in_progress`.
+    let arrived = tokio::time::timeout(Duration::from_secs(30), arrivals.recv())
         .await
+        .expect("the in-flight attempt should reach the receiver")
         .unwrap();
-    }
+    assert_eq!(arrived, key);
 
-    // All failing deliveries should still be pending (not burned), but their
-    // next_attempt_at should be pushed into the future by the circuit breaker.
-    for did in &failing_delivery_ids {
-        let row = sqlx::query(
-            "SELECT status, attempt_count, next_attempt_at FROM webhook_deliveries WHERE id = $1",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .expect("failing delivery should exist");
-
-        let status: String = row.get("status");
-        let attempt_count: i32 = row.get("attempt_count");
-
-        assert_eq!(
-            status, "pending",
-            "failing delivery {} should still be pending (not consumed)",
-            did
-        );
-        assert!(
-            attempt_count < 5,
-            "failing delivery {} should not have exhausted attempts (was {})",
-            did,
-            attempt_count
-        );
-    }
-
-    // The healthy delivery should have been delivered.
-    let healthy_status: String =
-        sqlx::query_scalar("SELECT status FROM webhook_deliveries WHERE id = $1")
-            .bind(healthy_delivery_id)
-            .fetch_one(&pool)
-            .await
-            .expect("healthy delivery should exist");
+    let d2 = WebhookDispatcher::new(ctx.pool.clone(), &ctx.redis_url).unwrap();
+    d2.process_pending().await.unwrap();
     assert_eq!(
-        healthy_status, "delivered",
-        "healthy endpoint delivery should succeed despite failing endpoint"
+        receiver.seen(&key).await,
+        1,
+        "overlapping cycle must not start a second delivery of an in-flight event"
     );
 
-    // Verify the circuit breaker key exists in Redis.
-    let mut redis_conn = RedisClient::open(redis_url.as_str())
-        .unwrap()
-        .get_multiplexed_async_connection()
+    receiver.release_all();
+    inflight.await.unwrap().unwrap();
+
+    assert_delivered_exactly_once(&receiver, &key, &ctx.pool, delivery_id).await;
+}
+
+/// Replaying the same DLQ entry twice - concurrently - must converge on a
+/// single live delivery row (`ON CONFLICT ... DO UPDATE`) and therefore a
+/// single successful receipt, not two.
+#[tokio::test]
+#[ignore = "Requires Docker (testcontainers) and Redis"]
+async fn exactly_once_double_replay_from_dlq_delivers_once() {
+    let ctx = setup().await;
+    let redis = redis_client(&ctx.redis_url);
+
+    // Phase 1: exhaust an event into the DLQ.
+    let rejecting = Receiver::spawn(ResponsePlan::AlwaysReject).await;
+    let endpoint_id = insert_endpoint(&ctx.pool, &rejecting.endpoint_url()).await;
+    let transaction_id = Uuid::new_v4();
+    let key = format!("{transaction_id}:{EVENT_TYPE}");
+    let delivery_id = insert_pending_delivery(&ctx.pool, endpoint_id, transaction_id).await;
+
+    let dispatcher = WebhookDispatcher::new(ctx.pool.clone(), &ctx.redis_url).unwrap();
+    drive_until_settled(
+        std::slice::from_ref(&dispatcher),
+        &ctx.pool,
+        &redis,
+        &[endpoint_id],
+        12,
+    )
+    .await;
+
+    let dlq_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM webhook_delivery_dlq WHERE delivery_id = $1")
+            .bind(delivery_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .expect("phase 1 should have produced a DLQ row");
+
+    // Phase 2: point the endpoint at an accepting receiver, then replay the
+    // DLQ entry twice at once.
+    let accepting = Receiver::spawn(ResponsePlan::AlwaysAccept).await;
+    sqlx::query("UPDATE webhook_endpoints SET url = $1 WHERE id = $2")
+        .bind(accepting.endpoint_url())
+        .bind(endpoint_id)
+        .execute(&ctx.pool)
         .await
         .unwrap();
-    let cb_key = format!("webhook_cb:{failing_ep_id}");
-    let cb_data: Option<String> = redis::cmd("GET")
-        .arg(&cb_key)
-        .query_async(&mut redis_conn)
-        .await
-        .unwrap();
-    assert!(
-        cb_data.is_some(),
-        "Circuit breaker state should be persisted in Redis for failing endpoint"
+    fast_forward(&ctx.pool, &redis, &[endpoint_id]).await;
+
+    let (r1, r2) = tokio::join!(
+        dispatcher.replay_from_dlq(dlq_id),
+        dispatcher.replay_from_dlq(dlq_id)
     );
-    if let Some(data) = cb_data {
-        let state: serde_json::Value = serde_json::from_str(&data).unwrap();
-        assert_eq!(state["state"], "open", "Circuit breaker should be open");
-    }
+    let live_id = r1.expect("replay 1");
+    assert_eq!(
+        live_id,
+        r2.expect("replay 2"),
+        "concurrent replays must converge on one live delivery row"
+    );
+
+    drive_until_settled(
+        std::slice::from_ref(&dispatcher),
+        &ctx.pool,
+        &redis,
+        &[endpoint_id],
+        12,
+    )
+    .await;
+
+    assert_eq!(
+        accepting.accepted(&key).await,
+        1,
+        "a double replay must still deliver the event exactly once"
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM webhook_deliveries WHERE id = $1")
+            .bind(live_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "delivered");
+
+    let dlq_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_delivery_dlq WHERE delivery_id = $1")
+            .bind(delivery_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+    assert_eq!(dlq_rows, 1, "replay must not add a second DLQ row");
 }

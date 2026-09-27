@@ -10,6 +10,9 @@ services:
       - "5432:5432"
     volumes:
       - postgres_dev_data:/var/lib/postgresql/data
+      # Provisions the restricted synapse_app role (NOBYPASSRLS) the app
+      # connects as below. Only runs on first init of an empty data volume.
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U synapse"]
       interval: 5s
@@ -52,7 +55,8 @@ services:
     environment:
       APP_ENV: development
       SERVER_PORT: 3000
-      DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      # Restricted, non-superuser role — see scripts/db-init/01-create-app-role.sql.
+      DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
       REDIS_URL: redis://redis:6379
       ANCHOR_WEBHOOK_SECRET: dev-secret

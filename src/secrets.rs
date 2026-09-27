@@ -758,4 +758,96 @@ mod rotation_tests {
             "received payload should be the exact publish timestamp used for lag calculation"
         );
     }
+
+    #[tokio::test]
+    async fn webhook_endpoint_secret_rotation_workflow() {
+        let store = SecretsStore::new(
+            "initial-webhook-secret".to_string(),
+            "initial-admin-key".to_string(),
+        );
+
+        let initial_secrets = store.valid_webhook_secrets().await;
+        assert_eq!(initial_secrets.len(), 1);
+        assert_eq!(initial_secrets[0], "initial-webhook-secret");
+    }
+
+    #[tokio::test]
+    async fn webhook_secret_rotation_and_grace_period() {
+        let store = SecretsStore::new(
+            "webhook-v1".to_string(),
+            "admin-v1".to_string(),
+        );
+
+        assert!(store.verify_webhook_secret("webhook-v1").await);
+        assert!(!store.verify_webhook_secret("webhook-v2").await);
+
+        let mut secret = store.anchor_webhook_secret.write().await;
+        secret.rotate("webhook-v2".to_string());
+        drop(secret);
+
+        let valid_secrets = store.valid_webhook_secrets().await;
+        assert_eq!(valid_secrets.len(), 2);
+        assert!(valid_secrets.contains(&"webhook-v2".to_string()));
+        assert!(valid_secrets.contains(&"webhook-v1".to_string()));
+
+        assert!(store.verify_webhook_secret("webhook-v1").await);
+        assert!(store.verify_webhook_secret("webhook-v2").await);
+    }
+
+    #[tokio::test]
+    async fn webhook_secret_expires_after_grace_period() {
+        let store = SecretsStore::new(
+            "webhook-old".to_string(),
+            "admin-key".to_string(),
+        );
+
+        let mut secret = store.anchor_webhook_secret.write().await;
+        secret.rotate("webhook-new".to_string());
+
+        secret.previous = secret.previous.take().map(|(v, _)| {
+            (
+                v,
+                Instant::now() - ROTATION_GRACE_PERIOD - Duration::from_secs(1),
+            )
+        });
+        drop(secret);
+
+        assert!(!store.verify_webhook_secret("webhook-old").await);
+        assert!(store.verify_webhook_secret("webhook-new").await);
+    }
+
+    #[tokio::test]
+    async fn multiple_webhook_secret_rotations() {
+        let store = SecretsStore::new(
+            "webhook-v1".to_string(),
+            "admin-v1".to_string(),
+        );
+
+        let mut secret = store.anchor_webhook_secret.write().await;
+        secret.rotate("webhook-v2".to_string());
+        secret.rotate("webhook-v3".to_string());
+        drop(secret);
+
+        assert!(store.verify_webhook_secret("webhook-v3").await);
+        assert!(!store.verify_webhook_secret("webhook-v1").await);
+    }
+
+    #[tokio::test]
+    async fn secrets_store_thread_safe_webhook_rotation() {
+        let store = SecretsStore::new(
+            "webhook-initial".to_string(),
+            "admin-initial".to_string(),
+        );
+
+        let store_clone = store.clone();
+        let handle = tokio::spawn(async move {
+            let mut secret = store_clone.anchor_webhook_secret.write().await;
+            secret.rotate("webhook-updated".to_string());
+        });
+
+        handle.await.unwrap();
+
+        let updated_secrets = store.valid_webhook_secrets().await;
+        assert!(updated_secrets.contains(&"webhook-updated".to_string()));
+    }
 }

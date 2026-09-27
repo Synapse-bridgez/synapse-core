@@ -1,3 +1,4 @@
+pub mod compat;
 pub mod lint;
 pub mod release;
 pub mod setup;

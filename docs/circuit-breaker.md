@@ -162,3 +162,43 @@ This allows the application to:
 - Add configurable failure predicates (e.g., only count 5xx errors)
 - Implement custom instrumentation for logging state transitions
 >>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
+
+> **Note:** The unresolved merge-conflict markers above are pre-existing
+> (from an unrelated prior PR) and out of scope for this change.
+
+## Webhook Dispatcher Circuit Breaker: Half-Open Metrics & Flapping Alerting
+
+The webhook dispatcher's per-endpoint, Redis-backed circuit breaker
+(`src/services/webhook_dispatcher.rs`) is a separate breaker from the
+Horizon client one documented above. It now emits half-open-specific
+metrics via `webhook_circuit_breaker_transitions_total` (labeled by
+`transition`) and a new histogram:
+
+| Transition label      | Meaning                                                        |
+|------------------------|-----------------------------------------------------------------|
+| `probe_sent`           | Half-open probe lease acquired; one delivery let through         |
+| `probe_blocked`        | Breaker still open; another caller already holds the probe lease |
+| `probe_succeeded`      | The half-open probe delivery succeeded (breaker closes)          |
+| `probe_failed`         | The half-open probe delivery failed (breaker re-opens)           |
+| `flapping_detected`    | Probe failures within the flap window hit the alert threshold    |
+
+`webhook_circuit_breaker_half_open_duration_ms` (histogram) records how
+long each half-open probe took to resolve.
+
+**Flapping detection:** repeated `probe_failed` outcomes for the same
+endpoint within a sliding window are counted (self-healing INCR+EXPIRE in
+Redis, keyed per endpoint). Once the count reaches the threshold within the
+window, a `flapping_detected` metric increment and a `tracing::warn!` log
+are emitted — the alertable signal that an endpoint is oscillating between
+half-open and open rather than recovering. A successful probe clears the
+window. Both the threshold and window are tunable per deployment via env
+vars (defaults shown):
+
+| Env var                          | Default | Description                                   |
+|-----------------------------------|---------|------------------------------------------------|
+| `WEBHOOK_CB_FLAP_THRESHOLD`       | `3`     | Probe failures within the window to alert on   |
+| `WEBHOOK_CB_FLAP_WINDOW_SECS`     | `3600`  | Sliding window, in seconds, for counting probe failures |
+
+There is no in-repo Prometheus/Alertmanager configuration today; these
+metrics and logs are exported via the existing OTLP pipeline
+(`src/metrics.rs`) for an external alerting stack to act on.

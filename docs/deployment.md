@@ -48,6 +48,16 @@ Kubernetes readiness probe. Returns `200` when ready, `503` during drain or befo
 { "status": "not_ready", "draining": true }
 ```
 
+Startup dependency checks (DB/Redis/Horizon, see
+`ReadinessState::run_initialization_checks`) record their total duration to
+the `readiness_initialization_duration_ms` metric, labeled by outcome
+(`ready`/`failed`). A slow-but-progressing startup shows up as a large
+value on that metric once the checks eventually complete; a genuinely stuck
+startup instead shows up as the metric never reporting at all for that pod
+combined with `/ready` staying `503` past `initialDelaySeconds +
+periodSeconds * failureThreshold` — that combination, not the metric value
+alone, is what should page.
+
 ---
 
 ## Kubernetes Deployment Spec

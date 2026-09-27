@@ -1,3 +1,4 @@
+use super::compat;
 use super::run_cmd;
 use clap::Args;
 use std::process::Command;
@@ -20,6 +21,10 @@ pub struct ReleaseArgs {
     /// Remote to push the tag to.
     #[arg(long, default_value = "origin")]
     pub remote: String,
+
+    /// Skip pushing release artifacts after the local build completes.
+    #[arg(long)]
+    pub skip_push: bool,
 }
 
 pub fn run(args: ReleaseArgs) -> anyhow::Result<()> {
@@ -27,6 +32,7 @@ pub fn run(args: ReleaseArgs) -> anyhow::Result<()> {
     println!("==> synapse-core release v{version}");
 
     ensure_clean_tree()?;
+    compat::ensure_matrix_has_entry_for(version)?;
 
     if !args.skip_tests {
         println!("\n-- Running tests before release --");
@@ -36,7 +42,7 @@ pub fn run(args: ReleaseArgs) -> anyhow::Result<()> {
     println!("\n-- Building release binary --");
     run_cmd("cargo", &["build", "--release"])?;
 
-    if !args.skip_tag {
+    if !args.skip_tag && !args.skip_push {
         create_and_push_tag(version, &args.remote)?;
     }
 
