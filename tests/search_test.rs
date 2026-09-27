@@ -12,6 +12,13 @@ use testcontainers_modules::postgres::Postgres;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+/// GET /transactions/search now requires a resolvable tenant API key (see
+/// TenantContext / the Part A fix) — every test below authenticates with
+/// this key. The seeded transactions keep their default NULL tenant_id,
+/// which the tenant-scoped queries treat as legacy rows visible to every
+/// tenant, so search results are unaffected by which tenant is calling.
+const TEST_API_KEY: &str = "search-test-api-key";
+
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     let container = Postgres::default().start().await.unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
@@ -28,6 +35,17 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     .await
     .unwrap();
     migrator.run(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+         VALUES ($1, 'SearchTestTenant', $2, pgp_sym_encrypt('', $3), '', 6000, true)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(synapse_core::db::queries::hash_api_key(TEST_API_KEY))
+    .bind(synapse_core::db::queries::tenant_secret_key())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
@@ -65,6 +83,7 @@ async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
             ),
         ),
     };
+    app_state.load_tenant_configs().await.unwrap();
     let app = create_app(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -199,6 +218,7 @@ async fn test_search_by_status() {
     // Search for completed transactions
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("status", "completed")])
         .send()
         .await
@@ -227,6 +247,7 @@ async fn test_search_by_asset_code() {
     // Search for USD transactions
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("asset_code", "USD")])
         .send()
         .await
@@ -258,6 +279,7 @@ async fn test_search_by_date_range() {
 
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("from", &from), ("to", &to)])
         .send()
         .await
@@ -281,6 +303,7 @@ async fn test_search_pagination() {
     // First page with limit 2
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("limit", "2")])
         .send()
         .await
@@ -297,6 +320,7 @@ async fn test_search_pagination() {
     // Second page using cursor
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("limit", "2"), ("cursor", cursor)])
         .send()
         .await
@@ -338,6 +362,7 @@ async fn test_search_empty_results() {
     // Search for non-existent asset code
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("asset_code", "XYZ")])
         .send()
         .await
@@ -362,6 +387,7 @@ async fn test_search_invalid_parameters() {
     // Invalid date format
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("from", "invalid-date")])
         .send()
         .await
@@ -374,6 +400,7 @@ async fn test_search_invalid_parameters() {
     // Invalid cursor
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("cursor", "invalid-cursor")])
         .send()
         .await
@@ -386,6 +413,7 @@ async fn test_search_invalid_parameters() {
     // Invalid min_amount
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("min_amount", "not-a-number")])
         .send()
         .await
@@ -407,6 +435,7 @@ async fn test_search_combined_filters() {
     // Search for completed USD transactions
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("status", "completed"), ("asset_code", "USD")])
         .send()
         .await
@@ -435,6 +464,7 @@ async fn test_search_by_stellar_account() {
     // Search for specific stellar account
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("stellar_account", "GABC1111111111")])
         .send()
         .await
@@ -458,6 +488,7 @@ async fn test_search_with_amount_range() {
     // Search for transactions between 100 and 500
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("min_amount", "100"), ("max_amount", "500")])
         .send()
         .await
@@ -486,6 +517,7 @@ async fn test_search_limit_boundaries() {
     // Test with limit 1
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("limit", "1")])
         .send()
         .await
@@ -499,6 +531,7 @@ async fn test_search_limit_boundaries() {
     // Test with limit exceeding max (should cap at 100)
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("limit", "200")])
         .send()
         .await
@@ -521,6 +554,7 @@ async fn test_search_no_next_cursor_on_last_page() {
     // Request all results with high limit
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("limit", "100")])
         .send()
         .await
@@ -544,6 +578,7 @@ async fn test_search_ordering() {
     // Get all transactions
     let res = client
         .get(format!("{}/transactions/search", base_url))
+        .header("X-API-Key", TEST_API_KEY)
         .query(&[("limit", "100")])
         .send()
         .await

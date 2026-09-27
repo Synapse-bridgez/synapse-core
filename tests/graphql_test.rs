@@ -7,16 +7,41 @@ use synapse_core::services::feature_flags::FeatureFlagService;
 use synapse_core::{create_app, AppState};
 use tokio::net::TcpListener;
 
-#[ignore = "Requires Docker/external services"]
-#[tokio::test]
-async fn test_graphql_queries() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(v) => v,
-        Err(_) => {
-            println!("Skipping GraphQL test: DATABASE_URL not set");
-            return;
-        }
-    };
+/// Connects to `DATABASE_URL`, runs migrations, ensures the current-month
+/// transactions partition exists, spawns a live `create_app` server on an
+/// ephemeral port, and returns `(reqwest client, graphql_url, callback_url,
+/// pool)` — the shared setup every test in this file needs to exercise the
+/// real `/graphql` HTTP route end to end. Returns `None` if `DATABASE_URL`
+/// isn't set, so callers can skip cleanly.
+/// `POST /callback` now requires a valid HMAC signature (see
+/// `middleware::webhook_signature::verify_anchor_signature`) — the app built
+/// here has no `SecretsStore`, so the middleware falls back to this env var.
+const TEST_WEBHOOK_SECRET: &str = "graphql-test-webhook-secret";
+
+/// Signs `body` the same way `cache::webhook::verify_signature` expects:
+/// HMAC-SHA256 over `{timestamp}.{body}`. Returns `(timestamp, signature)`.
+fn sign_webhook_body(body: &[u8]) -> (String, String) {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(TEST_WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    (timestamp, signature)
+}
+
+async fn spawn_test_app() -> Option<(reqwest::Client, String, String, PgPool)> {
+    std::env::set_var("ANCHOR_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET);
+    let database_url = std::env::var("DATABASE_URL").ok()?;
 
     let pool = PgPool::connect(&database_url).await.unwrap();
     let migrator = Migrator::new(Path::join(
@@ -41,7 +66,7 @@ async fn test_graphql_queries() {
             partition_name := 'transactions_y' || TO_CHAR(partition_date, 'YYYY') || 'm' || TO_CHAR(partition_date, 'MM');
             start_date := TO_CHAR(partition_date, 'YYYY-MM-DD');
             end_date := TO_CHAR(partition_date + INTERVAL '1 month', 'YYYY-MM-DD');
-            
+
             IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = partition_name) THEN
                 EXECUTE format(
                     'CREATE TABLE %I PARTITION OF transactions FOR VALUES FROM (%L) TO (%L)',
@@ -58,9 +83,6 @@ async fn test_graphql_queries() {
     let feature_flags = FeatureFlagService::new(pool.clone());
     let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
     let readiness = synapse_core::ReadinessState::new();
-    let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379")
-        .await
-        .unwrap();
 
     let app_state = AppState {
         db: pool.clone(),
@@ -106,15 +128,34 @@ async fn test_graphql_queries() {
     });
 
     let client = reqwest::Client::new();
-    let graphql_url = format!("http://{}/graphql", addr);
+    Some((
+        client,
+        format!("http://{}/graphql", addr),
+        format!("http://{}/callback", addr),
+        pool,
+    ))
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_queries() {
+    let Some((client, graphql_url, callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping GraphQL test: DATABASE_URL not set");
+        return;
+    };
 
     let query = json!({
         "query": "{ transactions { id status } }"
     });
-    let res = client.post(&graphql_url).json(&query).send().await.unwrap();
+    let res = client
+        .post(&graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let callback_url = format!("http://{}/callback", addr);
     let payload = json!({
         "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "amount": "100.50",
@@ -122,8 +163,12 @@ async fn test_graphql_queries() {
         "callback_type": "deposit",
         "callback_status": "completed"
     });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(&callback_url)
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -135,7 +180,13 @@ async fn test_graphql_queries() {
     let query = json!({
         "query": format!("{{ transaction(id: \"{}\") {{ id status amount assetCode }} }}", tx_id)
     });
-    let res = client.post(&graphql_url).json(&query).send().await.unwrap();
+    let res = client
+        .post(&graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = res.json().await.unwrap();
     assert_eq!(body["data"]["transaction"]["id"], tx_id);
@@ -149,71 +200,25 @@ async fn test_graphql_queries() {
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL complexity scoring (Part E). NOTE: the live `/graphql` HTTP route
-// (handlers::graphql::graphql_handler) is a hand-rolled string-matching stand-in
-// that never calls into the real async-graphql schema (see issue #7) — so this
-// test executes against `AppSchema` directly via `Schema::execute`, which is
-// the only currently-reachable path that exercises the resolver-level
-// `#[graphql(complexity = ...)]` annotations this change adds.
+// GraphQL complexity scoring, exercised through the live HTTP `/graphql`
+// route (Part C regression coverage). Until Part C's fix,
+// `handlers::graphql::graphql_handler` was a hand-rolled string-matching
+// stand-in that never called into the real async-graphql schema at all — so
+// this test previously had to call `AppSchema::execute` directly to exercise
+// anything, which proved the resolver-level `#[graphql(complexity = ...)]`
+// annotations worked in isolation but not that they were actually reachable
+// from production traffic. It now goes through `create_app` + a real HTTP
+// POST to `/graphql`, so a regression back to a non-executing stand-in
+// handler would fail this test.
 // ---------------------------------------------------------------------------
 
 #[ignore = "Requires Docker/external services"]
 #[tokio::test]
 async fn test_graphql_complexity_scales_with_requested_limit() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(v) => v,
-        Err(_) => {
-            println!("Skipping GraphQL complexity test: DATABASE_URL not set");
-            return;
-        }
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping GraphQL complexity test: DATABASE_URL not set");
+        return;
     };
-
-    let pool = PgPool::connect(&database_url).await.unwrap();
-    let migrator = Migrator::new(Path::join(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-        "migrations",
-    ))
-    .await
-    .unwrap();
-    migrator.run(&pool).await.unwrap();
-
-    let pool_manager = PoolManager::new(&database_url, None, 5).await.unwrap();
-    let feature_flags = FeatureFlagService::new(pool.clone());
-    let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
-    let readiness = synapse_core::ReadinessState::new();
-
-    let app_state = AppState {
-        db: pool.clone(),
-        pool_manager,
-        horizon_client: synapse_core::stellar::HorizonClient::new(
-            "https://horizon-testnet.stellar.org".to_string(),
-        ),
-        feature_flags,
-        redis_url: "redis://localhost:6379".to_string(),
-        start_time: std::time::Instant::now(),
-        tx_broadcast,
-        readiness,
-        query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
-            .await
-            .unwrap(),
-        allowed_ips: synapse_core::config::AllowedIps::Any,
-        trusted_proxy_depth: 1,
-        profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
-        tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
-        secrets_store: None,
-        metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
-        ws_connection_pool: std::sync::Arc::new(
-            synapse_core::ws::connection_pool::ConnectionPool::new(
-                synapse_core::ws::connection_pool::PoolConfig::default(),
-            ),
-        ),
-    };
-
-    let schema = synapse_core::graphql::schema::build_schema(app_state);
 
     // Exactly at the alias cap (20), each requesting the max page size (1000).
     // Under the old field-occurrence-only accounting this stayed well under
@@ -223,35 +228,321 @@ async fn test_graphql_complexity_scales_with_requested_limit() {
         .map(|i| format!("a{i}: transactions(limit: 1000) {{ id }}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let exploit_query = format!("{{ {aliased_fields} }}");
+    let exploit_query = json!({ "query": format!("{{ {aliased_fields} }}") });
 
-    let response = schema
-        .execute(async_graphql::Request::new(exploit_query))
-        .await;
+    let res = client
+        .post(&graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&exploit_query)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK); // GraphQL errors are 200 + an errors[] array, not an HTTP error
+    let body: serde_json::Value = res.json().await.unwrap();
+    let errors = body["errors"]
+        .as_array()
+        .expect("expected an errors array rejecting the over-complex query");
     assert!(
-        !response.errors.is_empty(),
+        !errors.is_empty(),
         "20 aliases x limit:1000 should be rejected by the complexity limit, got: {:?}",
-        response.data
+        body
     );
     assert!(
-        response
-            .errors
-            .iter()
-            .any(|e| e.message.to_lowercase().contains("complex")),
+        errors.iter().any(|e| e["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("complex")),
         "expected a complexity-limit error, got: {:?}",
-        response.errors
+        errors
     );
 
-    // A single modest-limit query must still pass, proving this isn't a
-    // blanket rejection.
-    let modest_response = schema
-        .execute(async_graphql::Request::new(
-            "{ transactions(limit: 20) { id } }".to_string(),
-        ))
-        .await;
+    // A single modest-limit query must still pass through the same live
+    // route, proving this isn't a blanket rejection.
+    let modest_query = json!({ "query": "{ transactions(limit: 20) { id } }" });
+    let res = client
+        .post(&graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&modest_query)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = res.json().await.unwrap();
     assert!(
-        modest_response.errors.is_empty(),
+        body.get("errors").is_none() || body["errors"].as_array().unwrap().is_empty(),
         "modest query should not trip the complexity limit: {:?}",
-        modest_response.errors
+        body
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Part D regression tests: forceCompleteTransaction must validate the
+// current status and be CAS-guarded, not unconditionally overwrite whatever
+// state the transaction was in.
+// ---------------------------------------------------------------------------
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_force_complete_transaction_rejects_invalid_state() {
+    let Some((client, graphql_url, _callback_url, pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let tx_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at) \
+         VALUES (gen_random_uuid(), 'GFAILEDTEST00000000000000000000000000000000000000000', 10.00, 'USD', 'failed', NOW(), NOW()) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mutation = json!({
+        "query": format!(
+            "mutation {{ forceCompleteTransaction(id: \"{}\") {{ id status }} }}",
+            tx_id
+        )
+    });
+    let res = client
+        .post(&graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&mutation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(
+        body.get("errors").is_some() && !body["errors"].as_array().unwrap().is_empty(),
+        "forceCompleteTransaction on an already-failed transaction should be rejected, got: {:?}",
+        body
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM transactions WHERE id = $1")
+        .bind(tx_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed", "status must not have changed");
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_force_complete_transaction_concurrent_calls_only_one_succeeds() {
+    let Some((client, graphql_url, _callback_url, pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let tx_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at) \
+         VALUES (gen_random_uuid(), 'GCONCURRENTTEST0000000000000000000000000000000000000', 10.00, 'USD', 'pending', NOW(), NOW()) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mutation = json!({
+        "query": format!(
+            "mutation {{ forceCompleteTransaction(id: \"{}\") {{ id status }} }}",
+            tx_id
+        )
+    });
+
+    let (res_a, res_b) = tokio::join!(
+        client
+            .post(&graphql_url)
+            .header("Authorization", "Bearer admin-secret-key")
+            .json(&mutation)
+            .send(),
+        client
+            .post(&graphql_url)
+            .header("Authorization", "Bearer admin-secret-key")
+            .json(&mutation)
+            .send()
+    );
+
+    let body_a: serde_json::Value = res_a.unwrap().json().await.unwrap();
+    let body_b: serde_json::Value = res_b.unwrap().json().await.unwrap();
+
+    let a_ok = body_a.get("errors").is_none() || body_a["errors"].as_array().unwrap().is_empty();
+    let b_ok = body_b.get("errors").is_none() || body_b["errors"].as_array().unwrap().is_empty();
+
+    assert_eq!(
+        [a_ok, b_ok].iter().filter(|ok| **ok).count(),
+        1,
+        "expected exactly one concurrent forceCompleteTransaction call to succeed, got \
+         a_ok={a_ok} b_ok={b_ok} (a={body_a:?} b={body_b:?})",
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM transactions WHERE id = $1")
+        .bind(tx_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed");
+}
+
+// ---------------------------------------------------------------------------
+// Error taxonomy: every resolver error must carry a stable
+// `extensions.code` drawn from docs/error-catalog.md, and must not leak
+// internal detail. Exercised through the live HTTP `/graphql` route.
+// ---------------------------------------------------------------------------
+
+/// Returns the `extensions.code` of the first error in a GraphQL response body.
+fn first_error_code(body: &serde_json::Value) -> Option<String> {
+    body["errors"][0]["extensions"]["code"]
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+async fn post_graphql(
+    client: &reqwest::Client,
+    graphql_url: &str,
+    query: serde_json::Value,
+) -> serde_json::Value {
+    let res = client
+        .post(graphql_url)
+        .header("Authorization", "Bearer admin-secret-key")
+        .json(&query)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    res.json().await.unwrap()
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_transaction_not_found_has_catalog_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let missing_id = uuid::Uuid::new_v4();
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({
+            "query": format!("{{ transaction(id: \"{missing_id}\") {{ id }} }}")
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_NOT_FOUND_001"),
+        "expected ERR_NOT_FOUND_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_invalid_limit_has_validation_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({ "query": "{ transactions(limit: 5000) { id } }" }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_VALIDATION_001"),
+        "expected ERR_VALIDATION_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_invalid_status_filter_has_validation_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({
+            "query": "{ transactions(filter: { status: \"not-a-real-status\" }) { id } }"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_VALIDATION_001"),
+        "expected ERR_VALIDATION_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_over_complex_query_has_complexity_code() {
+    let Some((client, graphql_url, _callback_url, _pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let aliased_fields: String = (0..20)
+        .map(|i| format!("a{i}: transactions(limit: 1000) {{ id }}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({ "query": format!("{{ {aliased_fields} }}") }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_QUERY_COMPLEXITY_001"),
+        "expected ERR_QUERY_COMPLEXITY_001, got: {body:?}"
+    );
+}
+
+#[ignore = "Requires Docker/external services"]
+#[tokio::test]
+async fn test_graphql_force_complete_invalid_state_has_transition_code() {
+    let Some((client, graphql_url, _callback_url, pool)) = spawn_test_app().await else {
+        println!("Skipping test: DATABASE_URL not set");
+        return;
+    };
+
+    let tx_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO transactions (id, stellar_account, amount, asset_code, status, created_at, updated_at) \
+         VALUES (gen_random_uuid(), 'GTAXONOMYTEST000000000000000000000000000000000000000', 10.00, 'USD', 'failed', NOW(), NOW()) \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let body = post_graphql(
+        &client,
+        &graphql_url,
+        json!({
+            "query": format!(
+                "mutation {{ forceCompleteTransaction(id: \"{tx_id}\") {{ id status }} }}"
+            )
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        first_error_code(&body).as_deref(),
+        Some("ERR_TRANSACTION_005"),
+        "expected ERR_TRANSACTION_005, got: {body:?}"
     );
 }

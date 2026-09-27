@@ -10,6 +10,7 @@ services:
       - "5433:5432"
     volumes:
       - load_postgres_data:/var/lib/postgresql/data
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U synapse"]
       interval: 5s
@@ -69,7 +70,8 @@ services:
         condition: service_healthy
     environment:
       SERVER_PORT: 3000
-      DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
+      # Restricted, non-superuser role — see scripts/db-init/01-create-app-role.sql.
+      DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
       REDIS_URL: redis://redis:6379
       RUST_LOG: info

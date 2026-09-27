@@ -144,6 +144,58 @@ fn bench_cursor_roundtrip(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Benchmark: query-cache key construction (src/services/query_cache.rs)
+// ---------------------------------------------------------------------------
+
+fn bench_query_cache_key_construction(c: &mut Criterion) {
+    use synapse_core::services::query_cache::{cache_key_asset_total, cache_key_daily_totals};
+
+    c.bench_function("query_cache_key_daily_totals", |b| {
+        b.iter(|| cache_key_daily_totals(black_box(30)))
+    });
+
+    c.bench_function("query_cache_key_asset_total", |b| {
+        b.iter(|| cache_key_asset_total(black_box("USD")))
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: circuit-breaker half-open decision logic
+//
+// Mirrors the in-process (non-I/O) portion of
+// `WebhookDispatcher::circuit_breaker_decision`
+// (src/services/webhook_dispatcher.rs) — the JSON state parse and reset-
+// timeout comparison that runs on every dispatch attempt for an endpoint
+// with a persisted breaker state. The Redis GET/SET calls that surround it
+// are out of scope for a micro-benchmark (see bench_search_query_construction
+// above for the same mirroring approach already used in this file).
+// ---------------------------------------------------------------------------
+
+fn bench_circuit_breaker_decision(c: &mut Criterion) {
+    use chrono::Utc;
+
+    let open_state_json = serde_json::json!({
+        "state": "open",
+        "opened_at": (Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+    })
+    .to_string();
+
+    c.bench_function("circuit_breaker_decision_parse", |b| {
+        b.iter(|| {
+            let state: serde_json::Value =
+                serde_json::from_str(black_box(&open_state_json)).unwrap();
+            let is_open = state["state"] == "open";
+            let opened_at = state["opened_at"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            let elapsed = opened_at.map(|t| Utc::now() - t);
+            black_box((is_open, elapsed))
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_callback_validation,
@@ -151,5 +203,7 @@ criterion_group!(
     bench_search_query_construction,
     bench_hmac_signing,
     bench_cursor_roundtrip,
+    bench_query_cache_key_construction,
+    bench_circuit_breaker_decision,
 );
 criterion_main!(benches);

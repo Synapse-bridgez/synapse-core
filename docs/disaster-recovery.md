@@ -58,6 +58,9 @@ This document outlines the disaster recovery procedures for the application, res
 
 ## Monitoring Alerts and Escalation Procedures
 
+## 6. Scheduled Disaster-Recovery Drill
+Run a documented recovery drill at least once per quarter and after any major backup, failover, or schema workflow change. Record the drill date, operator, restore source, measured recovery time, and follow-up actions in the incident tracker.
+
 ### Key Alerts:
 * **Database Connection Failure:** Triggered when DB does not respond to ping attempts > 30s.
 * **Elevated Application Errors:** Triggered when 5xx errors > 5% for a consecutive 2-minute period.

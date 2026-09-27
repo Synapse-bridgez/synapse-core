@@ -4,7 +4,7 @@ This document lists all stable error codes used by the Synapse Core API. Error c
 
 ## Error Response Format
 
-All error responses follow this format:
+REST error responses follow this format:
 
 ```json
 {
@@ -13,6 +13,25 @@ All error responses follow this format:
   "status": 400
 }
 ```
+
+GraphQL responses carry the same `code` values in each error's `extensions.code`:
+
+```json
+{
+  "errors": [
+    {
+      "message": "Human readable error message",
+      "extensions": { "code": "ERR_CATEGORY_NNN" }
+    }
+  ]
+}
+```
+
+The transport differs (a GraphQL response is always HTTP 200 with an `errors`
+array), but a client can branch on a single `code` value regardless of
+transport. The `HTTP Status` column below is the status the equivalent REST
+response would carry. Rate-limit errors additionally carry `extensions.retryAfter`
+(seconds).
 
 ## Error Codes
 
@@ -69,6 +88,7 @@ All error responses follow this format:
 | ERR_TRANSACTION_003 | 400 | Invalid Stellar address |
 | ERR_TRANSACTION_004 | 409 | Transaction already processed (idempotency) |
 | ERR_TRANSACTION_005 | 400 | Invalid transaction status transition |
+| ERR_TRANSACTION_006 | 409 | Concurrent modification: transaction state changed during processing |
 
 ### Webhook Errors (ERR_WEBHOOK_xxx)
 
@@ -83,12 +103,25 @@ All error responses follow this format:
 |------|-------------|-------------|
 | ERR_SETTLEMENT_001 | 400 | Invalid settlement amount |
 | ERR_SETTLEMENT_002 | 409 | Settlement already exists |
+| ERR_SETTLEMENT_003 | 409 | Stale transition: settlement state changed during processing |
 
 ### Rate Limiting Errors (ERR_RATE_LIMIT_xxx)
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
 | ERR_RATE_LIMIT_001 | 429 | Rate limit exceeded |
+
+### Redis Errors (ERR_REDIS_xxx)
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| ERR_REDIS_001 | 500 | Redis operation failed |
+
+### Query Errors (ERR_QUERY_xxx)
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| ERR_QUERY_COMPLEXITY_001 | 400 | Query exceeds depth, complexity, or alias limits (GraphQL) |
 
 ## Using Error Codes
 
@@ -125,8 +158,9 @@ if response["code"] == "ERR_TRANSACTION_004":
 
 ## Version
 
-This error catalog is version 1.0.0. API consumers can retrieve the latest version via the `/errors` endpoint.
+This error catalog is version 1.1.0. API consumers can retrieve the latest version via the `/errors` endpoint.
 
 ## Changelog
 
+- 1.1.0 - Documented `ERR_SETTLEMENT_003` and `ERR_REDIS_001` (already emitted, previously undocumented); added `ERR_TRANSACTION_006` (concurrent modification) and `ERR_QUERY_COMPLEXITY_001` (GraphQL query limits); noted that GraphQL errors carry these codes in `extensions.code`
 - 1.0.0 - Initial error catalog with 19 error codes

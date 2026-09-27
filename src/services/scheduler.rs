@@ -20,11 +20,49 @@ pub trait Job: Send + Sync {
     async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
+/// Last-run outcome recorded for a job, used to distinguish "did not run at
+/// all" from "ran but failed" when checking job health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastRunOutcome {
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Clone)]
+struct JobRunRecord {
+    at: DateTime<Utc>,
+    outcome: LastRunOutcome,
+}
+
+/// One alertable condition surfaced by [`JobScheduler::check_job_health`].
+/// `MissedRun` and `Failed` are deliberately distinct so an operator (or
+/// alerting rule) can tell "this job silently stopped running" apart from
+/// "this job is running but erroring every time" — the former usually means
+/// a crash loop or a stuck lock, the latter a logic/dependency bug.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobHealthAlert {
+    /// The job has not completed successfully within its expected interval
+    /// plus grace period. `last_success` is `None` if it has never run.
+    MissedRun {
+        job_name: String,
+        last_success: Option<DateTime<Utc>>,
+        expected_by: DateTime<Utc>,
+    },
+    /// The job's most recent run failed (regardless of whether earlier runs
+    /// succeeded within the window).
+    Failed {
+        job_name: String,
+        failed_at: DateTime<Utc>,
+    },
+}
+
 /// A job scheduler that manages cron-based recurring tasks
 pub struct JobScheduler {
     jobs: Arc<Mutex<HashMap<String, Arc<dyn Job>>>>,
     active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    last_success: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    last_run: Arc<Mutex<HashMap<String, JobRunRecord>>>,
 }
 
 impl Default for JobScheduler {
@@ -41,6 +79,8 @@ impl JobScheduler {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             active_handles: Arc::new(Mutex::new(HashMap::new())),
             shutdown_tx,
+            last_success: Arc::new(Mutex::new(HashMap::new())),
+            last_run: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -77,6 +117,8 @@ impl JobScheduler {
                 self.shutdown_tx.clone(),
                 shutdown_rx,
                 active_handles_clone,
+                self.last_success.clone(),
+                self.last_run.clone(),
             ));
 
             active_handles.lock().await.insert(name.clone(), handle);
@@ -134,6 +176,65 @@ impl JobScheduler {
         status
     }
 
+    /// Checks every registered job for missed or failed runs.
+    ///
+    /// A job alerts as [`JobHealthAlert::MissedRun`] if it has never
+    /// completed successfully, or if its last successful run is older than
+    /// its cron schedule's expected interval (computed from that job's own
+    /// cron expression, so irregular/non-fixed-interval schedules are
+    /// handled correctly) plus `grace_period`. It separately alerts as
+    /// [`JobHealthAlert::Failed`] if its most recent run attempt errored,
+    /// regardless of whether an earlier run succeeded within the window —
+    /// so a job can surface both alerts at once (ran too long ago, and the
+    /// last attempt also failed).
+    pub async fn check_job_health(&self, grace_period: Duration) -> Vec<JobHealthAlert> {
+        let jobs = self.jobs.lock().await;
+        let last_success = self.last_success.lock().await;
+        let last_run = self.last_run.lock().await;
+        let now = Utc::now();
+        let mut alerts = Vec::new();
+
+        for (name, job) in jobs.iter() {
+            let success_at = last_success.get(name).copied();
+
+            let expected_interval = match Schedule::from_str(job.schedule()) {
+                Ok(schedule) => {
+                    let anchor = success_at.unwrap_or(now);
+                    schedule
+                        .after(&anchor)
+                        .next()
+                        .map(|next| next - anchor)
+                        .unwrap_or_else(|| Duration::zero())
+                }
+                Err(_) => Duration::zero(),
+            };
+
+            let expected_by = match success_at {
+                Some(at) => at + expected_interval + grace_period,
+                None => now, // never succeeded: overdue immediately
+            };
+
+            if success_at.is_none() || expected_by < now {
+                alerts.push(JobHealthAlert::MissedRun {
+                    job_name: name.clone(),
+                    last_success: success_at,
+                    expected_by,
+                });
+            }
+
+            if let Some(record) = last_run.get(name) {
+                if record.outcome == LastRunOutcome::Failure {
+                    alerts.push(JobHealthAlert::Failed {
+                        job_name: name.clone(),
+                        failed_at: record.at,
+                    });
+                }
+            }
+        }
+
+        alerts
+    }
+
     /// Internal function that runs the job execution loop
     async fn run_job_loop(
         name: String,
@@ -141,6 +242,8 @@ impl JobScheduler {
         _shutdown_tx: tokio::sync::broadcast::Sender<()>,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
         active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+        last_success: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+        last_run: Arc<Mutex<HashMap<String, JobRunRecord>>>,
     ) {
         info!("Starting job '{}' with schedule: {}", name, job.schedule());
 
@@ -185,18 +288,35 @@ impl JobScheduler {
             // Execute the job
             match job.execute().await {
                 Ok(()) => {
+                    let completed_at = Utc::now();
                     info!(
                         "Job '{}' executed successfully at {}",
                         name,
                         next_run_time.format("%Y-%m-%d %H:%M:%S")
                     );
+                    last_success.lock().await.insert(name.clone(), completed_at);
+                    last_run.lock().await.insert(
+                        name.clone(),
+                        JobRunRecord {
+                            at: completed_at,
+                            outcome: LastRunOutcome::Success,
+                        },
+                    );
                 }
                 Err(e) => {
+                    let failed_at = Utc::now();
                     error!(
                         "Job '{}' failed at {}: {}",
                         name,
                         next_run_time.format("%Y-%m-%d %H:%M:%S"),
                         e
+                    );
+                    last_run.lock().await.insert(
+                        name.clone(),
+                        JobRunRecord {
+                            at: failed_at,
+                            outcome: LastRunOutcome::Failure,
+                        },
                     );
                 }
             }
@@ -334,5 +454,86 @@ mod tests {
         scheduler.register_job(Box::new(test_job)).await.unwrap();
 
         assert_eq!(scheduler.jobs.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_check_job_health_flags_a_job_that_has_never_run() {
+        let scheduler = JobScheduler::new();
+        // Hourly schedule, but never started/executed.
+        let job = TestJob::new("never_run_job", "0 0 * * * * *");
+        scheduler.register_job(Box::new(job)).await.unwrap();
+
+        let alerts = scheduler.check_job_health(Duration::minutes(5)).await;
+
+        assert!(alerts.iter().any(|a| matches!(
+            a,
+            JobHealthAlert::MissedRun { job_name, last_success: None, .. }
+                if job_name == "never_run_job"
+        )));
+        assert!(!alerts
+            .iter()
+            .any(|a| matches!(a, JobHealthAlert::Failed { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_check_job_health_detects_missed_run_past_grace_period() {
+        let scheduler = JobScheduler::new();
+        let job = TestJob::new("stale_job", "0 * * * * * *"); // every minute
+        scheduler.register_job(Box::new(job)).await.unwrap();
+
+        // Simulate a success far enough in the past that it's now overdue
+        // even with a grace period.
+        let stale_success = Utc::now() - Duration::hours(2);
+        scheduler
+            .last_success
+            .lock()
+            .await
+            .insert("stale_job".to_string(), stale_success);
+        scheduler.last_run.lock().await.insert(
+            "stale_job".to_string(),
+            JobRunRecord {
+                at: stale_success,
+                outcome: LastRunOutcome::Success,
+            },
+        );
+
+        let alerts = scheduler.check_job_health(Duration::minutes(5)).await;
+
+        assert!(alerts.iter().any(|a| matches!(
+            a,
+            JobHealthAlert::MissedRun { job_name, last_success: Some(_), .. }
+                if job_name == "stale_job"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_check_job_health_distinguishes_failed_from_missed_run() {
+        let scheduler = JobScheduler::new();
+        let job = TestJob::new("failing_job", "0 * * * * * *"); // every minute
+        scheduler.register_job(Box::new(job)).await.unwrap();
+
+        // The job ran recently (so it is not a "missed run"), but its most
+        // recent attempt failed.
+        let recent = Utc::now();
+        scheduler.last_run.lock().await.insert(
+            "failing_job".to_string(),
+            JobRunRecord {
+                at: recent,
+                outcome: LastRunOutcome::Failure,
+            },
+        );
+
+        let alerts = scheduler.check_job_health(Duration::minutes(5)).await;
+
+        assert!(alerts.iter().any(|a| matches!(
+            a,
+            JobHealthAlert::Failed { job_name, .. } if job_name == "failing_job"
+        )));
+        // Never succeeded, so it should still also alert as a missed run —
+        // these are separate, independently-checked conditions.
+        assert!(alerts.iter().any(|a| matches!(
+            a,
+            JobHealthAlert::MissedRun { job_name, .. } if job_name == "failing_job"
+        )));
     }
 }

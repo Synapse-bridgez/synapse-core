@@ -6,6 +6,38 @@ use synapse_core::{create_app, AppState};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
+/// GET /transactions/:id now requires a resolvable tenant API key (Part A
+/// fix — see TenantContext). Transactions inserted via the callback flow
+/// below keep the default NULL tenant_id, which the tenant-scoped queries
+/// treat as a legacy row visible to any authenticated tenant.
+const TEST_API_KEY: &str = "integration-test-api-key";
+
+/// `POST /callback` now requires a valid HMAC signature (see
+/// `middleware::webhook_signature::verify_anchor_signature`) — the app built
+/// here has no `SecretsStore`, so the middleware falls back to this env var.
+const TEST_WEBHOOK_SECRET: &str = "integration-test-webhook-secret";
+
+/// Signs `body` the same way `cache::webhook::verify_signature` expects:
+/// HMAC-SHA256 over `{timestamp}.{body}`. Returns `(timestamp, signature)`.
+fn sign_webhook_body(body: &[u8]) -> (String, String) {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(TEST_WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    (timestamp, signature)
+}
+
 async fn setup_test_app() -> (String, PgPool, impl std::any::Any) {
     setup_test_app_with_ip_filter(synapse_core::config::AllowedIps::Any, 1).await
 }
@@ -14,6 +46,7 @@ async fn setup_test_app_with_ip_filter(
     allowed_ips: synapse_core::config::AllowedIps,
     trusted_proxy_depth: usize,
 ) -> (String, PgPool, impl std::any::Any) {
+    std::env::set_var("ANCHOR_WEBHOOK_SECRET", TEST_WEBHOOK_SECRET);
     let container = Postgres::default().start().await.unwrap();
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let database_url = format!(
@@ -57,6 +90,17 @@ async fn setup_test_app_with_ip_filter(
     .execute(&pool)
     .await;
 
+    sqlx::query(
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) \
+         VALUES ($1, 'IntegrationTestTenant', $2, pgp_sym_encrypt('', $3), '', 6000, true)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(synapse_core::db::queries::hash_api_key(TEST_API_KEY))
+    .bind(synapse_core::db::queries::tenant_secret_key())
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let (tx, _rx) = tokio::sync::broadcast::channel(100);
     let _query_cache = synapse_core::services::QueryCache::new("redis://localhost:6379")
         .await
@@ -94,6 +138,7 @@ async fn setup_test_app_with_ip_filter(
             ),
         ),
     };
+    app_state.load_tenant_configs().await.unwrap();
     let app = create_app(app_state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
@@ -122,9 +167,12 @@ async fn test_valid_deposit_flow() {
         "callback_status": "completed"
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", base_url))
-        .header("X-App-Signature", "valid-signature")
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -136,6 +184,7 @@ async fn test_valid_deposit_flow() {
 
     let res = client
         .get(format!("{}/transactions/{}", base_url, tx_id))
+        .header("X-API-Key", TEST_API_KEY)
         .send()
         .await
         .unwrap();
@@ -169,9 +218,12 @@ async fn test_callback_with_memo_and_metadata() {
         }
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", base_url))
-        .header("X-App-Signature", "valid-signature")
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -192,6 +244,7 @@ async fn test_callback_with_memo_and_metadata() {
 
     let res = client
         .get(format!("{}/transactions/{}", base_url, tx_id))
+        .header("X-API-Key", TEST_API_KEY)
         .send()
         .await
         .unwrap();
@@ -217,9 +270,12 @@ async fn test_callback_with_hash_memo_type() {
         "memo_type": "hash"
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", base_url))
-        .header("X-App-Signature", "valid-signature")
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -245,9 +301,12 @@ async fn test_callback_with_invalid_memo_type() {
         "memo_type": "invalid_type"
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", base_url))
-        .header("X-App-Signature", "valid-signature")
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -272,9 +331,12 @@ async fn test_callback_with_metadata_only() {
         }
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", base_url))
-        .header("X-App-Signature", "valid-signature")
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -288,8 +350,13 @@ async fn test_callback_with_metadata_only() {
 }
 
 #[tokio::test]
-#[ignore = "Signature validation not implemented"]
+#[ignore = "Requires Docker/external services"]
 async fn test_invalid_signature_flow() {
+    // Was `#[ignore = "Signature validation not implemented"]` — accurate at
+    // the time (nothing on the live path verified a signature at all; see
+    // this repo's Part C fix for src/middleware/webhook_signature.rs). Now
+    // exercises the real rejection path: a syntactically valid signature
+    // header, computed with the wrong secret, must be rejected.
     let (base_url, _pool, _container) = setup_test_app().await;
     let client = reqwest::Client::new();
 
@@ -301,20 +368,37 @@ async fn test_invalid_signature_flow() {
         "callback_status": "completed"
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let wrong_signature = {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"definitely-the-wrong-secret").unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(&body_bytes);
+        format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+    };
+
     let res = client
         .post(format!("{}/callback", base_url))
-        .header("X-App-Signature", "invalid-signature")
+        .header("X-Webhook-Timestamp", timestamp)
+        .header("X-Webhook-Signature", wrong_signature)
         .json(&payload)
         .send()
         .await
         .unwrap();
 
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     let error_res: serde_json::Value = res.json().await.unwrap();
     assert!(error_res["error"]
         .as_str()
         .unwrap()
-        .contains("Invalid signature"));
+        .contains("signature verification failed"));
 }
 
 // ---------------------------------------------------------------------------
