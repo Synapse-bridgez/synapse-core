@@ -24,9 +24,10 @@ The inventory is enforced by `src/validation/regex_audit.rs`, which runs in
 | `src/graphql/validation.rs` `alphanumeric_pattern` | `^[a-zA-Z0-9_\-\.]+$` | GraphQL arguments (untrusted) | Static |
 | `src/graphql/validation.rs` `stellar_account_pattern` | `^[G][A-Z0-9]{55}$` | GraphQL arguments (untrusted) | Static |
 | `src/telemetry/input_validation.rs` `IDENTIFIER_PATTERN` | `^[a-zA-Z0-9_\-\.]+$` | span names | Static (named const, allowlisted in the guard) |
+| `src/handlers/profiling.rs` `SESSION_ID_RE` | `^profile-(cpu\|memory\|continuous)-[0-9]{1,20}$` | profiling `session_id` path parameter (untrusted) | Static |
+| `src/error.rs` (test module) | `ERR_[A-Z0-9_]*[0-9]{3}` | `docs/error-catalog.md` in a unit test | Static, test-only |
 
-All four run on the linear-time engine. The telemetry validator re-compiles
-its pattern on every call, which costs CPU but is not a ReDoS vector.
+All of them run on the linear-time engine.
 
 ### JSON-schema patterns (`src/validation/schemas.rs`)
 
