@@ -63,11 +63,27 @@ impl RedisCircuitBreaker {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, redis::RedisError>>,
     {
-        match self.inner.call(f()).await {
+        use crate::services::dependency_scorecard::{self as scorecard, CallOutcome, Dependency};
+
+        let permitted_before = self.inner.is_call_permitted();
+        let started = std::time::Instant::now();
+        let result = match self.inner.call(f()).await {
             Ok(v) => Ok(v),
             Err(FailsafeError::Rejected) => Err(RedisError::CircuitOpen),
             Err(FailsafeError::Inner(e)) => Err(RedisError::Redis(e)),
-        }
+        };
+        let outcome = match &result {
+            Ok(_) => CallOutcome::Success,
+            Err(RedisError::CircuitOpen) => CallOutcome::CircuitRejected,
+            Err(RedisError::Redis(e)) => scorecard::classify_redis_error(e),
+        };
+        scorecard::record_call(Dependency::Redis, outcome, started.elapsed());
+        scorecard::record_permitted_change(
+            Dependency::Redis,
+            permitted_before,
+            self.inner.is_call_permitted(),
+        );
+        result
     }
 }
 
@@ -231,96 +247,121 @@ impl IdempotencyService {
         })
     }
 
+    /// Checks (and claims) an idempotency key.
+    ///
+    /// Degraded mode (docs/redis-degradation.md): Redis is the primary
+    /// store; if it is unreachable — whether the connection cannot be opened
+    /// *or* a command fails on an open connection — the check falls back to
+    /// the Postgres `idempotency_keys` table rather than erroring (which
+    /// would let the middleware run the request with no idempotency
+    /// protection at all). Every fallback emits the shared degraded signal.
     pub async fn check_idempotency(
         &self,
         tenant_id: &str,
         key: &str,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
-        let cache_key = _cache_key(tenant_id, key);
-        let lock_key = _lock_key(tenant_id, key);
-
-        match self.client.get_multiplexed_async_connection().await {
-            Ok(mut conn) => {
-                // Check if response is cached
-                let cached: Option<String> = redis::cmd("GET")
-                    .arg(&cache_key)
-                    .query_async(&mut conn)
-                    .await?;
-
-                if let Some(data) = cached {
-                    self.cache_hits.fetch_add(1, Ordering::Relaxed);
-                    let response: CachedResponse = serde_json::from_str(&data).map_err(|e| {
-                        redis::RedisError::from((
-                            redis::ErrorKind::TypeError,
-                            "deserialization error",
-                            e.to_string(),
-                        ))
-                    })?;
-                    return Ok(IdempotencyStatus::Completed(response));
-                }
-
-                self.cache_misses.fetch_add(1, Ordering::Relaxed);
-
-                // A Redis miss here doesn't necessarily mean this key is new:
-                // it may have been recorded via the database fallback while
-                // Redis was unreachable, then Redis recovered before the
-                // caller retried. Consult the DB fallback table before
-                // treating this as a fresh request, or a retry after an
-                // outage would double-execute.
-                //
-                // A DB error here must not fail the whole check — Redis is
-                // healthy and that's the primary path; if Postgres happens
-                // to be slow/unreachable at this exact moment, degrade to
-                // "no fallback record found" rather than propagating the
-                // error and failing the request open with no idempotency
-                // protection at all.
-                match crate::db::queries::check_idempotency_key(&self.pool, tenant_id, key).await {
-                    Ok(Some(db_key)) => {
-                        crate::metrics::idempotency_db_fallback_recovered_total().add(1, &[]);
-                        return Ok(db_key_to_status(db_key));
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            "DB fallback lookup failed during healthy-Redis idempotency \
-                             check, proceeding without it: {}",
-                            e
-                        );
-                    }
-                }
-
-                // Try to acquire lock; store a JSON lock value so
-                // recover_stale_locks can inspect the locked_at timestamp.
-                let lock_token = uuid::Uuid::new_v4().to_string();
-                let acquired: bool = redis::cmd("SET")
-                    .arg(&lock_key)
-                    .arg(_lock_value(&lock_token))
-                    .arg("NX")
-                    .arg("EX")
-                    .arg(300) // 5 minute lock
-                    .query_async(&mut conn)
-                    .await?;
-
-                if acquired {
-                    self.lock_acquired.fetch_add(1, Ordering::Relaxed);
-                    Ok(IdempotencyStatus::New {
-                        lock_token: Some(lock_token),
-                    })
-                } else {
-                    self.lock_contention.fetch_add(1, Ordering::Relaxed);
-                    Ok(IdempotencyStatus::Processing)
-                }
-            }
+        match self.check_idempotency_redis(tenant_id, key).await {
+            Ok(result) => result,
             Err(redis_err) => {
-                // Redis failed, fall back to database
                 tracing::warn!(
                     "Redis unavailable for idempotency check, falling back to database: {}",
                     redis_err
                 );
                 self.fallback_count.fetch_add(1, Ordering::Relaxed);
-
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::Idempotency,
+                    crate::cache::degradation::DegradedFallback::DbFallback,
+                    &redis_err,
+                );
                 self.check_idempotency_db(tenant_id, key).await
             }
+        }
+    }
+
+    /// The Redis-backed check. The outer `Err` means Redis itself failed and
+    /// the caller should degrade; the inner result carries everything else.
+    async fn check_idempotency_redis(
+        &self,
+        tenant_id: &str,
+        key: &str,
+    ) -> Result<
+        Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>>,
+        redis::RedisError,
+    > {
+        let cache_key = _cache_key(tenant_id, key);
+        let lock_key = _lock_key(tenant_id, key);
+
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+
+        // Check if response is cached
+        let cached: Option<String> = redis::cmd("GET")
+            .arg(&cache_key)
+            .query_async(&mut conn)
+            .await?;
+
+        if let Some(data) = cached {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(serde_json::from_str::<CachedResponse>(&data)
+                .map(IdempotencyStatus::Completed)
+                .map_err(|e| {
+                    Box::new(redis::RedisError::from((
+                        redis::ErrorKind::TypeError,
+                        "deserialization error",
+                        e.to_string(),
+                    ))) as Box<dyn std::error::Error + Send + Sync>
+                }));
+        }
+
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+        // A Redis miss here doesn't necessarily mean this key is new:
+        // it may have been recorded via the database fallback while
+        // Redis was unreachable, then Redis recovered before the
+        // caller retried. Consult the DB fallback table before
+        // treating this as a fresh request, or a retry after an
+        // outage would double-execute.
+        //
+        // A DB error here must not fail the whole check — Redis is
+        // healthy and that's the primary path; if Postgres happens
+        // to be slow/unreachable at this exact moment, degrade to
+        // "no fallback record found" rather than propagating the
+        // error and failing the request open with no idempotency
+        // protection at all.
+        match crate::db::queries::check_idempotency_key(&self.pool, tenant_id, key).await {
+            Ok(Some(db_key)) => {
+                crate::metrics::idempotency_db_fallback_recovered_total().add(1, &[]);
+                return Ok(Ok(db_key_to_status(db_key)));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "DB fallback lookup failed during healthy-Redis idempotency \
+                     check, proceeding without it: {}",
+                    e
+                );
+            }
+        }
+
+        // Try to acquire lock; store a JSON lock value so
+        // recover_stale_locks can inspect the locked_at timestamp.
+        let lock_token = uuid::Uuid::new_v4().to_string();
+        let acquired: bool = redis::cmd("SET")
+            .arg(&lock_key)
+            .arg(_lock_value(&lock_token))
+            .arg("NX")
+            .arg("EX")
+            .arg(300) // 5 minute lock
+            .query_async(&mut conn)
+            .await?;
+
+        if acquired {
+            self.lock_acquired.fetch_add(1, Ordering::Relaxed);
+            Ok(Ok(IdempotencyStatus::New {
+                lock_token: Some(lock_token),
+            }))
+        } else {
+            self.lock_contention.fetch_add(1, Ordering::Relaxed);
+            Ok(Ok(IdempotencyStatus::Processing))
         }
     }
 
@@ -332,7 +373,9 @@ impl IdempotencyService {
         use chrono::{Duration, Utc};
 
         // Check if key exists in database
-        if let Some(db_key) = crate::db::queries::check_idempotency_key(&self.pool, tenant_id, key).await? {
+        if let Some(db_key) =
+            crate::db::queries::check_idempotency_key(&self.pool, tenant_id, key).await?
+        {
             Ok(db_key_to_status(db_key))
         } else {
             // Key doesn't exist, try to insert as processing
@@ -365,29 +408,36 @@ impl IdempotencyService {
         let lock_key = _lock_key(tenant_id, key);
         let data = serde_json::to_string(&response)?;
 
-        match self.client.get_multiplexed_async_connection().await {
-            Ok(mut conn) => {
-                // Store and release as one ownership-checked transaction. A
-                // worker whose lock expired or was recovered cannot overwrite
-                // the new owner's response or release its lock.
-                redis::Script::new(STORE_RESPONSE_AND_RELEASE_SCRIPT)
-                    .key(&lock_key)
-                    .key(&cache_key)
-                    .arg(lock_token.expect("checked above"))
-                    .arg(86400)
-                    .arg(&data)
-                    .invoke_async::<_, u32>(&mut conn)
-                    .await?;
+        let stored: Result<(), redis::RedisError> = async {
+            let mut conn = self.client.get_multiplexed_async_connection().await?;
+            // Store and release as one ownership-checked transaction. A
+            // worker whose lock expired or was recovered cannot overwrite
+            // the new owner's response or release its lock.
+            redis::Script::new(STORE_RESPONSE_AND_RELEASE_SCRIPT)
+                .key(&lock_key)
+                .key(&cache_key)
+                .arg(lock_token.expect("checked above"))
+                .arg(86400)
+                .arg(&data)
+                .invoke_async::<_, u32>(&mut conn)
+                .await?;
+            Ok(())
+        }
+        .await;
 
-                Ok(())
-            }
+        match stored {
+            Ok(()) => Ok(()),
             Err(redis_err) => {
-                // Redis failed, store in database
+                // Redis failed (connect or command), store in database
                 tracing::warn!(
                     "Redis unavailable for storing idempotency response, storing in database: {}",
                     redis_err
                 );
-
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::Idempotency,
+                    crate::cache::degradation::DegradedFallback::DbFallback,
+                    &redis_err,
+                );
                 self.store_response_db(tenant_id, key, &response).await
             }
         }
@@ -400,8 +450,13 @@ impl IdempotencyService {
         response: &CachedResponse,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response_json = serde_json::to_value(response)?;
-        crate::db::queries::update_idempotency_key_response(&self.pool, tenant_id, key, &response_json)
-            .await?;
+        crate::db::queries::update_idempotency_key_response(
+            &self.pool,
+            tenant_id,
+            key,
+            &response_json,
+        )
+        .await?;
         Ok(())
     }
 
@@ -908,6 +963,64 @@ mod tests {
 
         assert_eq!(idempotency_key.as_deref(), Some("test-key-123"));
         assert_eq!(tenant_id.as_deref(), Some("tenant-a"));
+    }
+
+    /// Service wired to an unreachable Redis and an unreachable Postgres
+    /// (lazy pool: no connection is attempted until a query runs).
+    fn degraded_service() -> IdempotencyService {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
+            .unwrap();
+        let c = || Arc::new(AtomicU64::new(0));
+        IdempotencyService::new("redis://127.0.0.1:1/", pool, c(), c(), c(), c(), c(), c()).unwrap()
+    }
+
+    /// Simulated Redis outage: the check must take the database fallback
+    /// path (observable as a DB error here, since Postgres is unreachable
+    /// too) and emit the shared degraded signal — not surface a Redis error.
+    #[tokio::test]
+    async fn check_falls_back_to_db_when_redis_unavailable() {
+        use crate::cache::degradation::{events_for, RedisComponent};
+        let service = degraded_service();
+        let before = events_for(RedisComponent::Idempotency);
+        let err = service
+            .check_idempotency("tenant-a", "key-1")
+            .await
+            .expect_err("both stores unreachable");
+        assert!(
+            !err.to_string().contains("Redis"),
+            "error should come from the DB fallback, got: {err}"
+        );
+        assert_eq!(service.fallback_count.load(Ordering::Relaxed), 1);
+        assert!(events_for(RedisComponent::Idempotency) > before);
+    }
+
+    #[tokio::test]
+    async fn store_falls_back_to_db_when_redis_unavailable() {
+        use crate::cache::degradation::{events_for, RedisComponent};
+        let service = degraded_service();
+        let before = events_for(RedisComponent::Idempotency);
+        let response = CachedResponse {
+            status: 200,
+            body: "{}".into(),
+            content_type: None,
+            encoding: BodyEncoding::Utf8,
+        };
+        let result = service
+            .store_response("tenant-a", "key-1", response, Some("token"))
+            .await;
+        assert!(result.is_err(), "DB is unreachable as well");
+        assert!(events_for(RedisComponent::Idempotency) > before);
+    }
+
+    #[tokio::test]
+    async fn release_lock_is_a_noop_when_redis_unavailable() {
+        let service = degraded_service();
+        assert!(service
+            .release_lock("tenant-a", "key-1", Some("token"))
+            .await
+            .is_ok());
     }
 
     #[test]

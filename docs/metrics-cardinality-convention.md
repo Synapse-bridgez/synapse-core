@@ -33,8 +33,12 @@ Only label values drawn from a small, closed set are safe:
 
 ## Reviewed exceptions
 
-None currently. Any exception must be documented at the call site with a
-comment explaining why the label's cardinality is actually bounded.
+Any exception must be documented at the call site with a comment
+explaining why the label's cardinality is actually bounded.
+
+| File | Label | Why it is bounded |
+|------|-------|-------------------|
+| `src/tenant/latency.rs` | `tenant_id` | Per-tenant latency gauges (#1337) export only the top `TENANT_LATENCY_MAX_TRACKED_TENANTS` tenants (default 50, hard cap 200) that also meet `TENANT_LATENCY_MIN_REQUESTS` in the rolling window; every other tenant is folded into `tenant_id="_other"`, unauthenticated traffic into `"_unattributed"`. Series are rolling-window gauges computed at collection time, so demoted tenants disappear instead of accumulating. Bound: `(K + 2) × 2 routes × 12 buckets`. Enforced by `tenant::latency::tests::cardinality_is_bounded_under_large_synthetic_load`. See docs/tenant-latency-histograms.md. |
 
 ## Enforcement
 

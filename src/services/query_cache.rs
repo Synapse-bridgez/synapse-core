@@ -1,4 +1,5 @@
-use crate::cache::{CacheValidator, ValidationError};
+use crate::cache::degradation::{record_redis_degraded, DegradedFallback, RedisComponent};
+use crate::cache::{is_redis_unavailable, CacheValidator, ValidationError};
 use crate::middleware::idempotency::RedisCircuitBreaker;
 use lru::LruCache;
 use redis::{aio::ConnectionManager, AsyncCommands, Client};
@@ -131,10 +132,51 @@ impl Default for RedisPoolConfig {
     }
 }
 
+/// Default bound on establishing the Redis connection.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Default bound on a single Redis operation.
+const DEFAULT_OP_TIMEOUT: Duration = Duration::from_millis(1000);
+/// Invalidations that could not reach Redis are remembered (up to this many
+/// patterns) and replayed before the next Redis read, so a value cached
+/// before an outage is not served stale after Redis recovers.
+const MAX_PENDING_INVALIDATIONS: usize = 256;
+
+fn env_duration_ms(var: &str, default: Duration) -> Duration {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+/// Query result cache: an in-process LRU in front of Redis.
+///
+/// # Degraded mode (Redis unavailable) — see docs/redis-degradation.md
+///
+/// Redis is optional for correctness here. When it is unreachable (at
+/// startup or later) the cache degrades instead of failing:
+///
+/// - construction never fails on an unreachable server — the connection is
+///   established lazily, through the circuit breaker, on first use;
+/// - `get` reports a miss (`Ok(None)`) so callers fall through to a direct
+///   Postgres read, after still trying the in-memory LRU;
+/// - `set` keeps the value in the in-memory LRU only;
+/// - invalidations clear the LRU and are queued for replay against Redis;
+/// - every such event emits the shared `redis_degraded_operations_total`
+///   signal (`cache::degradation`, component `query_cache`).
+///
+/// Connect and per-operation timeouts (`REDIS_CONNECT_TIMEOUT_MS`,
+/// `REDIS_OP_TIMEOUT_MS`) bound how long a request can wait on a blackholed
+/// Redis before the breaker opens and short-circuits further attempts.
 #[derive(Clone)]
 pub struct QueryCache {
-    // OPT: Use ConnectionManager for built-in connection pooling
-    pool: ConnectionManager,
+    client: Client,
+    // OPT: ConnectionManager for built-in connection pooling, created lazily
+    // so an unreachable Redis at startup does not prevent the process from
+    // serving traffic.
+    conn: Arc<tokio::sync::OnceCell<ConnectionManager>>,
+    connect_timeout: Duration,
+    op_timeout: Duration,
     pool_config: RedisPoolConfig,
     cb: RedisCircuitBreaker,
     hits: Arc<AtomicU64>,
@@ -144,6 +186,7 @@ pub struct QueryCache {
     lru: Arc<Mutex<LruCache<String, CacheEntry>>>,
     memory_ttl: Duration,
     query_type_counters: Arc<Mutex<HashMap<String, Arc<QueryTypeCounters>>>>,
+    pending_invalidations: Arc<Mutex<Vec<String>>>,
 }
 
 impl std::fmt::Debug for QueryCache {
@@ -185,25 +228,60 @@ fn cache_validation_error(err: ValidationError) -> redis::RedisError {
     ))
 }
 
+fn cb_error(e: crate::middleware::idempotency::RedisError) -> redis::RedisError {
+    match e {
+        crate::middleware::idempotency::RedisError::CircuitOpen => {
+            redis::RedisError::from((redis::ErrorKind::IoError, "Redis circuit breaker is open"))
+        }
+        crate::middleware::idempotency::RedisError::Redis(r) => r,
+    }
+}
+
+fn timed_out(what: &str) -> redis::RedisError {
+    redis::RedisError::from(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("Redis {what} timed out"),
+    ))
+}
+
+fn degraded(fallback: DegradedFallback, e: &redis::RedisError) {
+    record_redis_degraded(RedisComponent::QueryCache, fallback, e);
+}
+
+/// Whether a stored key matches a Redis glob pattern of the restricted form
+/// `CacheValidator::validate_pattern` allows (literal text plus `*`).
+fn pattern_matches(pattern: &str, key: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == key,
+        Some((prefix, rest)) => {
+            if !key.starts_with(prefix) {
+                return false;
+            }
+            let tail = &key[prefix.len()..];
+            if rest.is_empty() {
+                return true;
+            }
+            // Try every split point for the remainder.
+            (0..=tail.len())
+                .filter(|&i| tail.is_char_boundary(i))
+                .any(|i| pattern_matches(rest, &tail[i..]))
+        }
+    }
+}
+
 impl QueryCache {
-    /// Creates a new QueryCache with connection pooling optimized for performance.
+    /// Creates a new QueryCache.
+    ///
+    /// Fails only on an invalid Redis URL. An unreachable server is logged
+    /// and reported as degraded; the cache then runs memory-only and keeps
+    /// retrying the connection (through the circuit breaker) on use.
     ///
     /// # Connection Pool Setup
-    /// - OPT: Creates a ConnectionManager that pools Redis connections
+    /// - OPT: ConnectionManager pools and reconnects Redis connections
     /// - OPT: Pool size is configurable via REDIS_POOL_SIZE env var (default: 10)
     /// - OPT: Pool timeout is configurable via REDIS_POOL_TIMEOUT_SECS (default: 5)
-    /// - OPT: Each acquired connection is verified with PING before use
-    ///
-    /// # Arguments
-    /// * `redis_url` - The Redis server URL (e.g., "redis://localhost:6379")
-    ///
-    /// # Returns
-    /// A QueryCache instance with an initialized connection pool
     pub async fn new(redis_url: &str) -> Result<Self, redis::RedisError> {
         let client = Client::open(redis_url)?;
-
-        // OPT: Create connection manager for built-in pooling and health checks
-        let pool = ConnectionManager::new(client).await?;
 
         let pool_config = RedisPoolConfig::default();
         let cache_size = std::env::var("MEMORY_CACHE_SIZE")
@@ -216,8 +294,11 @@ impl QueryCache {
             .and_then(|v| v.parse().ok())
             .unwrap_or(CacheConfig::default().memory_cache_ttl);
 
-        Ok(Self {
-            pool,
+        let cache = Self {
+            client,
+            conn: Arc::new(tokio::sync::OnceCell::new()),
+            connect_timeout: env_duration_ms("REDIS_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT),
+            op_timeout: env_duration_ms("REDIS_OP_TIMEOUT_MS", DEFAULT_OP_TIMEOUT),
             pool_config,
             cb: RedisCircuitBreaker::from_env(),
             hits: Arc::new(AtomicU64::new(0)),
@@ -225,11 +306,106 @@ impl QueryCache {
             memory_hits: Arc::new(AtomicU64::new(0)),
             memory_misses: Arc::new(AtomicU64::new(0)),
             lru: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(cache_size).unwrap(),
+                NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap()),
             ))),
             memory_ttl: Duration::from_secs(memory_ttl_secs),
             query_type_counters: Arc::new(Mutex::new(HashMap::new())),
+            pending_invalidations: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        // Eager connect attempt so a healthy deployment logs readiness at
+        // startup; failure is degraded mode, not a startup failure.
+        if let Err(e) = cache.redis_op(|_conn| async { Ok(()) }).await {
+            degraded(DegradedFallback::InMemoryOnly, &e);
+            tracing::warn!(
+                error = %e,
+                "Query cache: Redis unreachable at startup; running memory-only with \
+                 direct Postgres reads until it recovers"
+            );
+        }
+        Ok(cache)
+    }
+
+    /// Runs `f` against the shared connection, establishing it first if
+    /// needed. Connect + operation are bounded by timeouts and run through
+    /// the circuit breaker, so a dead Redis quickly short-circuits.
+    async fn redis_op<T, F, Fut>(&self, f: F) -> Result<T, redis::RedisError>
+    where
+        F: FnOnce(ConnectionManager) -> Fut,
+        Fut: std::future::Future<Output = Result<T, redis::RedisError>>,
+    {
+        let cell = self.conn.clone();
+        let client = self.client.clone();
+        let connect_timeout = self.connect_timeout;
+        let op_timeout = self.op_timeout;
+        self.cb
+            .call(|| async move {
+                let conn = match tokio::time::timeout(
+                    connect_timeout,
+                    cell.get_or_try_init(|| ConnectionManager::new(client)),
+                )
+                .await
+                {
+                    Ok(Ok(conn)) => conn.clone(),
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => return Err(timed_out("connect")),
+                };
+                match tokio::time::timeout(op_timeout, f(conn)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(timed_out("operation")),
+                }
+            })
+            .await
+            .map_err(cb_error)
+    }
+
+    fn queue_invalidation(&self, pattern: &str) {
+        let mut pending = self.pending_invalidations.lock().unwrap();
+        if pending.iter().any(|p| p == pattern) {
+            return;
+        }
+        if pending.len() >= MAX_PENDING_INVALIDATIONS {
+            // Too much to replay precisely: fall back to invalidating every
+            // query-cache key once Redis is back.
+            pending.clear();
+            pending.push("query:*".to_string());
+            return;
+        }
+        pending.push(pattern.to_string());
+    }
+
+    /// Replays invalidations queued during an outage. Returns an error (and
+    /// keeps the queue) if Redis is still unavailable.
+    async fn flush_pending_invalidations(&self) -> Result<(), redis::RedisError> {
+        let patterns: Vec<String> = self.pending_invalidations.lock().unwrap().clone();
+        if patterns.is_empty() {
+            return Ok(());
+        }
+        let to_run = patterns.clone();
+        self.redis_op(|mut conn| async move {
+            for pattern in &to_run {
+                let keys: Vec<String> = conn.keys(pattern).await?;
+                if !keys.is_empty() {
+                    conn.del::<_, ()>(keys).await?;
+                }
+            }
+            Ok(())
         })
+        .await?;
+        self.pending_invalidations
+            .lock()
+            .unwrap()
+            .retain(|p| !patterns.contains(p));
+        tracing::info!(
+            replayed = patterns.len(),
+            "Query cache: replayed invalidations queued while Redis was unavailable"
+        );
+        Ok(())
+    }
+
+    /// Invalidations waiting to be replayed against Redis.
+    pub fn pending_invalidation_count(&self) -> usize {
+        self.pending_invalidations.lock().unwrap().len()
     }
 
     fn counters_for(&self, key: &str) -> Arc<QueryTypeCounters> {
@@ -268,7 +444,8 @@ impl QueryCache {
                 let suggested_action = if total < MIN_SAMPLE_SIZE {
                     "Not enough samples yet".to_string()
                 } else if hit_rate < LOW_HIT_RATE_THRESHOLD {
-                    "Low hit rate: consider increasing TTL, or removing caching for this query type".to_string()
+                    "Low hit rate: consider increasing TTL, or removing caching for this query type"
+                        .to_string()
                 } else if eviction_before_expiry_rate > HIGH_EVICTION_RATE_THRESHOLD {
                     "High eviction-before-expiry rate: consider increasing cache size".to_string()
                 } else {
@@ -295,16 +472,12 @@ impl QueryCache {
         report
     }
 
-    /// Acquires a connection from the pool with health verification.
+    /// Looks `key` up in the in-memory LRU, then Redis.
     ///
-    /// OPT: Uses the internal connection pool to reuse connections
-    /// OPT: Automatically verifies the connection with PING
-    /// OPT: Returns an error if pool exhaustion or timeout occurs
-    async fn get_connection(&self) -> Result<ConnectionManager, redis::RedisError> {
-        // OPT: Clone the connection manager (cheap operation, backed by Arc)
-        Ok(self.pool.clone())
-    }
-
+    /// Degraded mode: if Redis is unavailable this returns `Ok(None)` — a
+    /// miss — so the caller reads straight from Postgres; the event is
+    /// reported through the shared degraded signal. Validation and
+    /// deserialization errors are still returned as errors.
     pub async fn get<T: DeserializeOwned + Send>(
         &self,
         key: &str,
@@ -331,61 +504,77 @@ impl QueryCache {
 
         self.memory_misses.fetch_add(1, Ordering::Relaxed);
 
-        // Fall back to Redis
-        // OPT: Reuse pooled connection instead of creating new one
-        let pool = self.pool.clone();
-        let key = key.to_string();
+        // A value written to Redis before an outage may be stale if an
+        // invalidation was missed during it: replay those first, and do not
+        // trust Redis until they have gone through.
+        if let Err(e) = self.flush_pending_invalidations().await {
+            if is_redis_unavailable(&e) {
+                degraded(DegradedFallback::DirectDbRead, &e);
+                return Ok(None);
+            }
+            return Err(e);
+        }
+
         let hits = self.hits.clone();
         let misses = self.misses.clone();
         let lru = self.lru.clone();
         let memory_ttl = self.memory_ttl;
         let query_type_registry = self.query_type_counters.clone();
+        let key = key.to_string();
 
-        self.cb
-            .call(|| async move {
-                // OPT: Get connection from pool (cheap clone of internal Arc)
-                let mut conn = pool.clone();
-                let value: Option<String> = conn.get(&key).await?;
-                match value {
-                    Some(v) => {
-                        hits.fetch_add(1, Ordering::Relaxed);
-                        query_type_counters.hits.fetch_add(1, Ordering::Relaxed);
-                        // Populate in-memory cache
-                        {
-                            let mut lru_cache = lru.lock().unwrap();
-                            record_eviction_before_expiry(&lru_cache, &key, &query_type_registry);
-                            lru_cache.put(
-                                key.clone(),
-                                CacheEntry {
-                                    value: v.clone(),
-                                    expires_at: Instant::now() + memory_ttl,
-                                },
-                            );
-                        }
-                        serde_json::from_str(&v).map(Some).map_err(|e| {
-                            redis::RedisError::from((
-                                redis::ErrorKind::TypeError,
-                                "deserialization failed",
-                                e.to_string(),
-                            ))
-                        })
-                    }
-                    None => {
-                        misses.fetch_add(1, Ordering::Relaxed);
-                        query_type_counters.misses.fetch_add(1, Ordering::Relaxed);
-                        Ok(None)
-                    }
+        let raw = self
+            .redis_op(|mut conn| {
+                let key = key.clone();
+                async move { conn.get::<_, Option<String>>(&key).await }
+            })
+            .await;
+
+        let value = match raw {
+            Ok(v) => v,
+            Err(e) if is_redis_unavailable(&e) => {
+                degraded(DegradedFallback::DirectDbRead, &e);
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+
+        match value {
+            Some(v) => {
+                hits.fetch_add(1, Ordering::Relaxed);
+                query_type_counters.hits.fetch_add(1, Ordering::Relaxed);
+                // Populate in-memory cache
+                {
+                    let mut lru_cache = lru.lock().unwrap();
+                    record_eviction_before_expiry(&lru_cache, &key, &query_type_registry);
+                    lru_cache.put(
+                        key.clone(),
+                        CacheEntry {
+                            value: v.clone(),
+                            expires_at: Instant::now() + memory_ttl,
+                        },
+                    );
                 }
-            })
-            .await
-            .map_err(|e| match e {
-                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
-                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
-                ),
-                crate::middleware::idempotency::RedisError::Redis(r) => r,
-            })
+                serde_json::from_str(&v).map(Some).map_err(|e| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::TypeError,
+                        "deserialization failed",
+                        e.to_string(),
+                    ))
+                })
+            }
+            None => {
+                misses.fetch_add(1, Ordering::Relaxed);
+                query_type_counters.misses.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+        }
     }
 
+    /// Stores `value` in the in-memory LRU and Redis.
+    ///
+    /// Degraded mode: if Redis is unavailable the value stays in the
+    /// in-memory LRU only and this returns `Ok(())`; the event is reported
+    /// through the shared degraded signal.
     pub async fn set<T: Serialize + Send>(
         &self,
         key: &str,
@@ -428,25 +617,24 @@ impl QueryCache {
             );
         }
 
-        // OPT: Reuse pooled connection instead of creating new one
-        let pool = self.pool.clone();
         let key = key.to_string();
-
-        self.cb
-            .call(|| async move {
-                // OPT: Get connection from pool (cheap clone of internal Arc)
-                let mut conn = pool.clone();
-                conn.set_ex(&key, serialized.clone(), ttl_secs).await
-            })
+        match self
+            .redis_op(|mut conn| async move { conn.set_ex(&key, serialized, ttl_secs).await })
             .await
-            .map_err(|e| match e {
-                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
-                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
-                ),
-                crate::middleware::idempotency::RedisError::Redis(r) => r,
-            })
+        {
+            Ok(()) => Ok(()),
+            Err(e) if is_redis_unavailable(&e) => {
+                degraded(DegradedFallback::InMemoryOnly, &e);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
+    /// Invalidates every key matching `pattern`. The in-memory LRU is always
+    /// cleared; if Redis is unavailable the pattern is queued for replay and
+    /// the Redis error is returned (callers treat invalidation as
+    /// best-effort).
     pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
         CacheValidator::validate_pattern(pattern).map_err(cache_validation_error)?;
 
@@ -456,14 +644,17 @@ impl QueryCache {
             lru.clear();
         }
 
-        // OPT: Use pooled connection for Redis operations
-        let mut conn = self.get_connection().await?;
-        let keys: Vec<String> = conn.keys(pattern).await?;
-
-        if !keys.is_empty() {
-            conn.del::<_, ()>(keys).await?;
-        }
-        Ok(())
+        let owned = pattern.to_string();
+        let result = self
+            .redis_op(|mut conn| async move {
+                let keys: Vec<String> = conn.keys(&owned).await?;
+                if !keys.is_empty() {
+                    conn.del::<_, ()>(keys).await?;
+                }
+                Ok(())
+            })
+            .await;
+        self.handle_invalidation_result(&[pattern], result)
     }
 
     pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
@@ -475,9 +666,27 @@ impl QueryCache {
             lru.pop(key);
         }
 
-        // OPT: Use pooled connection for Redis operations
-        let mut conn = self.get_connection().await?;
-        conn.del::<_, ()>(key).await
+        let owned = key.to_string();
+        let result = self
+            .redis_op(|mut conn| async move { conn.del::<_, ()>(owned).await })
+            .await;
+        self.handle_invalidation_result(&[key], result)
+    }
+
+    fn handle_invalidation_result(
+        &self,
+        patterns: &[&str],
+        result: Result<(), redis::RedisError>,
+    ) -> Result<(), redis::RedisError> {
+        if let Err(e) = &result {
+            if is_redis_unavailable(e) {
+                for p in patterns {
+                    self.queue_invalidation(p);
+                }
+                degraded(DegradedFallback::SkippedBestEffort, e);
+            }
+        }
+        result
     }
 
     /// Invalidate only the cache keys that reflect transaction-aggregate data.
@@ -516,11 +725,12 @@ impl QueryCache {
                 .iter()
                 .filter_map(|(k, _)| {
                     let k: &str = k.as_ref();
-                    let affected = k == "query:status_counts"
-                        || k == "query:asset_stats"
-                        || k.starts_with("query:daily_totals:")
-                        || k.starts_with("query:asset_total:");
-                    if affected { Some(k.to_string()) } else { None }
+                    let affected = patterns.iter().any(|p| pattern_matches(p, k));
+                    if affected {
+                        Some(k.to_string())
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             for k in keys_to_drop {
@@ -529,13 +739,18 @@ impl QueryCache {
         }
 
         // Remove from Redis.
-        let mut conn = self.get_connection().await?;
-        for pattern in &patterns {
-            let keys: Vec<String> = conn.keys(*pattern).await?;
-            if !keys.is_empty() {
-                conn.del::<_, ()>(&keys).await?;
-            }
-        }
+        let result = self
+            .redis_op(|mut conn| async move {
+                for pattern in &patterns {
+                    let keys: Vec<String> = conn.keys(*pattern).await?;
+                    if !keys.is_empty() {
+                        conn.del::<_, ()>(&keys).await?;
+                    }
+                }
+                Ok(())
+            })
+            .await;
+        self.handle_invalidation_result(&patterns, result)?;
 
         tracing::info!(
             "Partition rotation: invalidated transaction-aggregate cache keys \
@@ -544,21 +759,16 @@ impl QueryCache {
         Ok(())
     }
 
-    /// Verifies the Redis connection pool is healthy by pinging the server.
-    ///
-    /// OPT: Sends a PING command to verify all pooled connections are responsive.
-    /// Returns an error if the pool is exhausted or the server is unreachable.
-    ///
-    /// # Returns
-    /// - `Ok(())` if the connection pool is healthy
-    /// - `Err(redis::RedisError)` if pool exhaustion or connection failure
+    /// Verifies Redis is reachable by sending a PING through the circuit
+    /// breaker (bounded by the connect/operation timeouts).
     pub async fn health_check(&self) -> Result<(), redis::RedisError> {
-        // OPT: Use pooled connection for health check
-        let mut conn = self.pool.clone();
-        redis::cmd("PING")
-            .query_async::<_, String>(&mut conn)
-            .await?;
-        Ok(())
+        self.redis_op(|mut conn| async move {
+            redis::cmd("PING")
+                .query_async::<_, String>(&mut conn)
+                .await
+                .map(|_| ())
+        })
+        .await
     }
 
     /// Returns the circuit breaker state: `"open"` or `"closed"`.
@@ -807,15 +1017,138 @@ mod tests {
         assert!(config.pool_timeout.as_secs() > 0);
     }
 
-    #[tokio::test]
-    async fn test_connection_failure_is_typed_error() {
-        // Attempt to connect to non-existent server
-        let result = QueryCache::new("redis://invalid-host-12345:6379").await;
+    // --- Degraded mode (Redis unavailable, #1335) ---
 
-        // Should return a typed redis::RedisError, not panic
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Error should be serializable/displayable
-        let _ = err.to_string();
+    /// Port 1 on loopback: connection refused immediately.
+    const DEAD_REDIS: &str = "redis://127.0.0.1:1/";
+
+    async fn dead_cache() -> QueryCache {
+        QueryCache::new(DEAD_REDIS)
+            .await
+            .expect("an unreachable Redis must not fail construction")
+    }
+
+    #[tokio::test]
+    async fn construction_succeeds_when_redis_unreachable() {
+        let before = crate::cache::degradation::events_for(RedisComponent::QueryCache);
+        let _cache = dead_cache().await;
+        assert!(crate::cache::degradation::events_for(RedisComponent::QueryCache) > before);
+    }
+
+    #[tokio::test]
+    async fn construction_still_rejects_an_invalid_url() {
+        assert!(QueryCache::new("not a url").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_reports_miss_so_caller_falls_through_to_db() {
+        let cache = dead_cache().await;
+        let before = crate::cache::degradation::events_for(RedisComponent::QueryCache);
+        let result = cache.get::<Vec<u32>>("query:status_counts").await;
+        assert!(matches!(result, Ok(None)), "got {result:?}");
+        assert!(crate::cache::degradation::events_for(RedisComponent::QueryCache) > before);
+        // A degraded read is not a real Redis miss.
+        assert_eq!(cache.metrics().misses, 0);
+    }
+
+    #[tokio::test]
+    async fn set_keeps_value_in_memory_and_serves_it_while_redis_is_down() {
+        let cache = dead_cache().await;
+        cache
+            .set(
+                "query:asset_stats",
+                &vec![1u32, 2, 3],
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("set must degrade to memory-only, not fail");
+        let got: Option<Vec<u32>> = cache.get("query:asset_stats").await.unwrap();
+        assert_eq!(got, Some(vec![1, 2, 3]));
+        assert_eq!(cache.metrics().memory_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn validation_errors_are_still_errors_in_degraded_mode() {
+        let cache = dead_cache().await;
+        assert!(cache.get::<String>("invalid key").await.is_err());
+        assert!(cache
+            .set("query:x", &1u32, Duration::from_secs(0))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_invalidations_are_queued_for_replay() {
+        let cache = dead_cache().await;
+        cache
+            .set("query:status_counts", &1u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(cache.invalidate("query:status_counts").await.is_err());
+        assert!(cache
+            .invalidate_exact("query:asset_total:USD")
+            .await
+            .is_err());
+        // Duplicates are not queued twice.
+        assert!(cache.invalidate("query:status_counts").await.is_err());
+        assert_eq!(cache.pending_invalidation_count(), 2);
+        // The local copy is gone even though Redis could not be reached.
+        let got: Option<u32> = cache.get("query:status_counts").await.unwrap();
+        assert_eq!(got, None);
+        assert!(cache.invalidate_partition_affected_keys().await.is_err());
+        assert!(cache.pending_invalidation_count() >= 4);
+    }
+
+    #[tokio::test]
+    async fn pending_invalidation_queue_is_bounded() {
+        let cache = dead_cache().await;
+        for i in 0..(MAX_PENDING_INVALIDATIONS + 5) {
+            cache.queue_invalidation(&format!("query:daily_totals:{i}"));
+        }
+        assert!(cache.pending_invalidation_count() <= MAX_PENDING_INVALIDATIONS);
+    }
+
+    #[tokio::test]
+    async fn health_check_fails_fast_when_redis_down() {
+        let cache = dead_cache().await;
+        let started = Instant::now();
+        assert!(cache.health_check().await.is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn breaker_opens_and_short_circuits_after_repeated_failures() {
+        let cache = dead_cache().await;
+        for _ in 0..10 {
+            let _ = cache.get::<u32>("query:asset_stats").await;
+        }
+        assert_eq!(cache.circuit_state(), "open");
+        // Still a miss, not an error, while short-circuited.
+        assert!(matches!(
+            cache.get::<u32>("query:asset_stats").await,
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn glob_pattern_matching() {
+        assert!(pattern_matches(
+            "query:status_counts",
+            "query:status_counts"
+        ));
+        assert!(!pattern_matches(
+            "query:status_counts",
+            "query:status_counts2"
+        ));
+        assert!(pattern_matches(
+            "query:daily_totals:*",
+            "query:daily_totals:7"
+        ));
+        assert!(!pattern_matches(
+            "query:daily_totals:*",
+            "query:asset_stats"
+        ));
+        assert!(pattern_matches("query:*:x", "query:a:b:x"));
+        assert!(!pattern_matches("query:*:x", "query:a:b:y"));
     }
 }

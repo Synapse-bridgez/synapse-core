@@ -435,6 +435,66 @@ fn canonical_quota_key(identifier: &str) -> String {
     format!("tenant:{identifier}")
 }
 
+/// Default fraction of a tenant's normal limit enforced while Redis is
+/// unavailable. Deliberately stricter than normal: the local limiter is per
+/// instance, so N instances would otherwise admit N× the configured limit
+/// fleet-wide during an outage — failing open in all but name.
+const DEFAULT_DEGRADED_LIMIT_FRACTION: f64 = 0.5;
+
+/// Bound on how long the request path waits on Redis for a rate-limit
+/// decision before degrading to the local limiter.
+const REDIS_RATE_LIMIT_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Response header set on every request decided by the degraded-mode local
+/// limiter, so clients and operators can see the stricter limit is in force.
+pub const DEGRADED_HEADER: &str = "X-RateLimit-Degraded";
+
+/// Fraction of the normal limit enforced in degraded mode, from
+/// `RATE_LIMIT_DEGRADED_FRACTION` (clamped to `0.01..=1.0`; default 0.5).
+pub fn degraded_limit_fraction() -> f64 {
+    std::env::var("RATE_LIMIT_DEGRADED_FRACTION")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|f| f.is_finite())
+        .map(|f| f.clamp(0.01, 1.0))
+        .unwrap_or(DEFAULT_DEGRADED_LIMIT_FRACTION)
+}
+
+/// The stricter limit enforced while Redis is unavailable: `limit × fraction`,
+/// rounded down, never below 1 (a tenant is throttled, not locked out).
+pub fn degraded_limit(limit: u32, fraction: f64) -> u32 {
+    ((limit as f64 * fraction).floor() as u32).clamp(1, limit.max(1))
+}
+
+/// Process-wide `QuotaManager` per Redis URL. Constructing one per request
+/// (as this middleware used to) gave every request a fresh circuit breaker
+/// that had never seen a failure, so during an outage the breaker never
+/// opened and every request paid the full connection-failure latency.
+fn shared_manager(redis_url: &str) -> Result<QuotaManager, redis::RedisError> {
+    static MANAGERS: OnceLock<Mutex<HashMap<String, QuotaManager>>> = OnceLock::new();
+    let mut map = MANAGERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(m) = map.get(redis_url) {
+        return Ok(m.clone());
+    }
+    let m = QuotaManager::new(redis_url)?;
+    map.insert(redis_url.to_string(), m.clone());
+    Ok(m)
+}
+
+/// Degraded-mode decision: consume from the bounded local limiter at the
+/// stricter degraded limit and report the event on the shared signal.
+fn degraded_decision(key: &str, limit: u32, error: &dyn std::fmt::Display) -> LocalQuotaResult {
+    crate::cache::degradation::record_redis_degraded(
+        crate::cache::degradation::RedisComponent::RateLimit,
+        crate::cache::degradation::DegradedFallback::StricterLocalLimit,
+        error,
+    );
+    consume_local_fallback(key, degraded_limit(limit, degraded_limit_fraction()))
+}
+
 fn consume_local_fallback(key: &str, limit: u32) -> LocalQuotaResult {
     // Recovering from a poisoned mutex is safe here: all bucket updates happen
     // while holding the guard, so the map remains structurally valid.
@@ -489,19 +549,29 @@ pub async fn rate_limit_middleware(
     let per_minute_key = canonical_quota_key(&quota_key);
 
     // Overload policy: Redis is authoritative when available. If it cannot be
-    // reached (including an open circuit), enforce the same fixed-window limit
-    // in a bounded, process-local map. The cap prevents attacker-controlled
+    // reached (including an open circuit or a slow Redis), enforce a
+    // *stricter* fixed-window limit (see `degraded_limit`) in a bounded,
+    // process-local map — fail-closed-ish rather than fail-open, since the
+    // local limit is per instance. The cap prevents attacker-controlled
     // identifiers from growing memory without bound; new identifiers fail
-    // closed once the cap is full. In a multi-instance deployment the outage
-    // limit is per instance until Redis recovers.
-    let redis_result = match QuotaManager::new(&state.redis_url) {
-        Ok(manager) => manager
-            .consume_quota_with_window(&per_minute_key, limit_per_minute, 60)
-            .await
-            .map(|allowed| (manager, allowed)),
+    // closed once the cap is full. See docs/redis-degradation.md.
+    let redis_result = match shared_manager(&state.redis_url) {
+        Ok(manager) => match tokio::time::timeout(
+            REDIS_RATE_LIMIT_TIMEOUT,
+            manager.consume_quota_with_window(&per_minute_key, limit_per_minute, 60),
+        )
+        .await
+        {
+            Ok(result) => result.map(|allowed| (manager, allowed)),
+            Err(_) => Err(redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "rate-limit Redis call timed out",
+            ))),
+        },
         Err(error) => Err(error),
     };
 
+    let mut degraded = false;
     let (allowed, status) = match redis_result {
         Ok((manager, allowed)) => {
             let fallback_used = if allowed {
@@ -521,8 +591,8 @@ pub async fn rate_limit_middleware(
             (allowed, status)
         }
         Err(error) => {
-            tracing::warn!(%error, "rate_limit: Redis unavailable; using bounded local limiter");
-            let result = consume_local_fallback(&per_minute_key, limit_per_minute);
+            degraded = true;
+            let result = degraded_decision(&per_minute_key, limit_per_minute, &error);
             (result.allowed, result.status)
         }
     };
@@ -544,6 +614,12 @@ pub async fn rate_limit_middleware(
             HeaderValue::from_str(&status.reset_in_seconds.to_string()).unwrap(),
         );
         headers.insert("Retry-After", HeaderValue::from_str(&retry_after).unwrap());
+        if degraded {
+            headers.insert(
+                DEGRADED_HEADER,
+                HeaderValue::from_static("redis-unavailable"),
+            );
+        }
         return response;
     }
 
@@ -561,6 +637,12 @@ pub async fn rate_limit_middleware(
         "X-RateLimit-Reset",
         HeaderValue::from_str(&status.reset_in_seconds.to_string()).unwrap(),
     );
+    if degraded {
+        headers.insert(
+            DEGRADED_HEADER,
+            HeaderValue::from_static("redis-unavailable"),
+        );
+    }
     response
 }
 
@@ -585,6 +667,68 @@ mod tests {
         let rejected = limiter.consume("tenant:a", 2, now);
         assert!(!rejected.allowed);
         assert_eq!(rejected.status.remaining, 0);
+    }
+
+    #[test]
+    fn degraded_limit_is_stricter_but_never_zero() {
+        assert_eq!(degraded_limit(100, 0.5), 50);
+        assert_eq!(degraded_limit(3, 0.5), 1);
+        assert_eq!(degraded_limit(1, 0.5), 1);
+        assert_eq!(degraded_limit(0, 0.5), 1);
+        assert_eq!(degraded_limit(100, 1.0), 100);
+        assert_eq!(degraded_limit(100, 0.01), 1);
+        for limit in [1u32, 2, 10, 100, 1000, 60_000] {
+            assert!(degraded_limit(limit, DEFAULT_DEGRADED_LIMIT_FRACTION) <= limit);
+        }
+    }
+
+    #[test]
+    fn degraded_fraction_defaults_and_clamps() {
+        // Not set in the test environment unless a test sets it; the default
+        // path must be the conservative 0.5.
+        if std::env::var("RATE_LIMIT_DEGRADED_FRACTION").is_err() {
+            assert_eq!(degraded_limit_fraction(), DEFAULT_DEGRADED_LIMIT_FRACTION);
+        }
+    }
+
+    /// Simulated Redis outage: the degraded decision enforces the stricter
+    /// limit (not the normal one, and never unlimited) and emits the shared
+    /// degraded signal.
+    #[test]
+    fn redis_outage_enforces_stricter_limit_and_signals_degraded() {
+        use crate::cache::degradation::{events_for, RedisComponent};
+        let before = events_for(RedisComponent::RateLimit);
+        let key = format!("tenant:outage-{}", uuid::Uuid::new_v4());
+        let normal_limit = 10;
+        let strict = degraded_limit(normal_limit, degraded_limit_fraction());
+        let mut allowed = 0;
+        for _ in 0..normal_limit {
+            if degraded_decision(&key, normal_limit, &"connection refused").allowed {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, strict);
+        assert!(
+            allowed < normal_limit,
+            "degraded mode must be stricter than normal"
+        );
+        assert_eq!(
+            events_for(RedisComponent::RateLimit),
+            before + normal_limit as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_manager_reuses_one_breaker_per_url() {
+        let a = shared_manager("redis://127.0.0.1:1/").unwrap();
+        // Trip the breaker through one handle...
+        for _ in 0..10 {
+            let _ = a.consume_quota_with_window("tenant:x", 10, 60).await;
+        }
+        // ...and observe it through another.
+        let b = shared_manager("redis://127.0.0.1:1/").unwrap();
+        assert_eq!(b.circuit_state(), "open");
+        assert!(shared_manager("not a url").is_err());
     }
 
     #[test]

@@ -201,6 +201,22 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> Result<impl IntoRes
     Ok((StatusCode::OK, Json(combined_metrics)))
 }
 
+/// `GET /stats/tenant-latency` (admin) — per-tenant rolling-window latency
+/// overview, slowest p95 first, within the exported cardinality bound
+/// (see `tenant::latency`).
+pub async fn tenant_latency_overview() -> impl IntoResponse {
+    Json(crate::tenant::latency::overview(
+        crate::tenant::latency::registry(),
+    ))
+}
+
+/// `GET /usage/latency` (tenant-authenticated) — the calling tenant's own
+/// latency histogram and percentiles for webhook ingestion and GraphQL over
+/// the rolling window. Percentiles are omitted below the minimum sample size.
+pub async fn tenant_latency_usage(tenant: crate::tenant::TenantContext) -> impl IntoResponse {
+    Json(crate::tenant::latency::registry().summary(tenant.tenant_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

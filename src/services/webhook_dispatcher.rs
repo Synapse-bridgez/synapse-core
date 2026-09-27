@@ -349,7 +349,33 @@ impl WebhookDispatcher {
         Ok(())
     }
 
+    /// Per-endpoint outbound rate limit. Degraded mode
+    /// (docs/redis-degradation.md): if Redis is unavailable, a process-local
+    /// fixed window at the stricter degraded fraction of `max_rate` decides
+    /// instead of failing the delivery attempt outright.
     async fn check_rate_limit(&self, endpoint_id: Uuid, max_rate: i32) -> anyhow::Result<bool> {
+        match self.check_rate_limit_redis(endpoint_id, max_rate).await {
+            Ok(allowed) => Ok(allowed),
+            Err(e) => {
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::WebhookDispatcher,
+                    crate::cache::degradation::DegradedFallback::StricterLocalLimit,
+                    &e,
+                );
+                Ok(local_degraded_rate_limit(
+                    endpoint_id,
+                    max_rate,
+                    std::time::Instant::now(),
+                ))
+            }
+        }
+    }
+
+    async fn check_rate_limit_redis(
+        &self,
+        endpoint_id: Uuid,
+        max_rate: i32,
+    ) -> Result<bool, redis::RedisError> {
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
         let key = format!("webhook_rate:{endpoint_id}");
 
@@ -994,8 +1020,10 @@ impl WebhookDispatcher {
         }
 
         if is_probe {
-            crate::metrics::webhook_circuit_breaker_transitions_total()
-                .add(1, &[opentelemetry::KeyValue::new("transition", "probe_failed")]);
+            crate::metrics::webhook_circuit_breaker_transitions_total().add(
+                1,
+                &[opentelemetry::KeyValue::new("transition", "probe_failed")],
+            );
             self.record_half_open_flap(endpoint_id).await?;
         }
 
@@ -1163,6 +1191,11 @@ impl WebhookDispatcher {
                 );
             }
             Err(e) => {
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::WebhookFilterCache,
+                    crate::cache::degradation::DegradedFallback::SkippedBestEffort,
+                    &e,
+                );
                 tracing::warn!(
                     endpoint_id = %endpoint_id,
                     "Redis unavailable for filter-rules cache invalidation: {e}"
@@ -1417,8 +1450,54 @@ fn sign_payload(secret: &str, body: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Process-local fallback for the per-endpoint outbound rate limit while
+/// Redis is unavailable: a 60 s fixed window at the degraded fraction of the
+/// endpoint's `max_rate` (`middleware::quota::degraded_limit`), so an outage
+/// slows deliveries down rather than halting them or removing the limit.
+/// Keyed by endpoint id — an admin-configured, bounded set.
+fn local_degraded_rate_limit(endpoint_id: Uuid, max_rate: i32, now: std::time::Instant) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static WINDOWS: OnceLock<Mutex<HashMap<Uuid, (std::time::Instant, u32)>>> = OnceLock::new();
+    let limit = crate::middleware::quota::degraded_limit(
+        max_rate.max(0) as u32,
+        crate::middleware::quota::degraded_limit_fraction(),
+    );
+    let mut windows = WINDOWS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let entry = windows.entry(endpoint_id).or_insert((now, 0));
+    if now.saturating_duration_since(entry.0) >= std::time::Duration::from_secs(60) {
+        *entry = (now, 0);
+    }
+    entry.1 = entry.1.saturating_add(1);
+    entry.1 <= limit
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn degraded_local_rate_limit_is_stricter_and_windowed() {
+        let endpoint = Uuid::new_v4();
+        let now = std::time::Instant::now();
+        let strict = crate::middleware::quota::degraded_limit(
+            10,
+            crate::middleware::quota::degraded_limit_fraction(),
+        );
+        let allowed = (0..10)
+            .filter(|_| local_degraded_rate_limit(endpoint, 10, now))
+            .count() as u32;
+        assert_eq!(allowed, strict);
+        assert!(allowed < 10);
+        // A new window re-admits.
+        assert!(local_degraded_rate_limit(
+            endpoint,
+            10,
+            now + std::time::Duration::from_secs(61)
+        ));
+    }
+
     use super::*;
 
     #[test]

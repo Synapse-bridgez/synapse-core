@@ -126,6 +126,11 @@ async fn invalidate_filter_cache(redis_url: &str, endpoint_id: Uuid) {
                 let _: Result<(), _> = conn.del::<_, ()>(&key).await;
             }
             Err(e) => {
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::WebhookFilterCache,
+                    crate::cache::degradation::DegradedFallback::SkippedBestEffort,
+                    &e,
+                );
                 tracing::warn!(
                     endpoint_id = %endpoint_id,
                     "Failed to get Redis connection for filter cache invalidation: {e}"

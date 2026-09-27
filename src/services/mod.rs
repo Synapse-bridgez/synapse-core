@@ -2,6 +2,7 @@ pub mod account_monitor;
 pub mod backup;
 pub mod backup_verification_job;
 pub mod compliance;
+pub mod dependency_scorecard;
 pub mod feature_flags;
 pub mod lock_manager;
 pub mod processor;
@@ -22,7 +23,9 @@ pub use lock_manager::LeaderElection;
 pub use lock_manager::{FairLockConfig, FairLockManager};
 pub use query_cache::{CacheConfig, QueryCache, QueryCacheReportJob, QueryTypeHitRateReport};
 pub use reconciliation::ReconciliationService;
-pub use resource_limits::{resource_category_snapshots, ResourceCategorySnapshot, ResourceLimiter, TaskLimits};
+pub use resource_limits::{
+    resource_category_snapshots, ResourceCategorySnapshot, ResourceLimiter, TaskLimits,
+};
 pub use scheduler::{AuditLogRetentionJob, Job, JobHealthAlert, JobScheduler, JobStatus};
 pub use settlement::SettlementService;
 pub use transaction_processor::TransactionProcessor;

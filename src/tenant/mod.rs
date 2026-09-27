@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::{error::AppError, AppState};
 
+pub mod latency;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TenantConfig {
     pub tenant_id: Uuid,
@@ -67,6 +69,12 @@ where
 
         if !config.is_active {
             return Err(AppError::Unauthorized("tenant inactive".to_string()));
+        }
+
+        // Let a wrapping tenant-latency middleware (#1337) attribute this
+        // request to the tenant that actually authenticated.
+        if let Some(slot) = parts.extensions.get::<latency::TenantAttribution>() {
+            slot.set(tenant_id);
         }
 
         Ok(TenantContext::new(tenant_id, config))

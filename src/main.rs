@@ -299,6 +299,15 @@ async fn serve(
     tracing::info!("Metrics initialized successfully");
     metrics::spawn_pool_metrics_task(pool.clone(), 30);
 
+    // Dependency health scorecard (#1334): flush per-minute samples into
+    // dependency_health_rollups and expose rolling-window gauges.
+    let _scorecard_flush =
+        synapse_core::services::dependency_scorecard::spawn_flush_task(pool.clone());
+    let _scorecard_gauges =
+        synapse_core::services::dependency_scorecard::register_scorecard_gauges();
+    // Per-tenant latency histograms (#1337), top-K bounded.
+    let _tenant_latency_gauges = synapse_core::tenant::latency::register_tenant_latency_gauges();
+
     // Tokio task leak detection (telemetry::task_leak): per-category live
     // task / load gauges, plus a monitor that alerts on task growth the load
     // doesn't explain.
@@ -371,7 +380,13 @@ async fn serve(
                 let admin_key = manager.get_admin_api_key().await?;
                 let store = SecretsStore::new(anchor_secret, admin_key);
                 manager.start_refresh_task(store.clone(), config.redis_url.clone());
-                tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
+                // Leaked deliberately: the gauges must live for the process.
+                std::mem::forget(store.register_vault_gauges());
+                tracing::info!(
+                    fallback_max_age_secs = store.fallback_config().max_age.as_secs(),
+                    "Secrets rotation enabled: refreshing from Vault every 5 minutes; \
+                     bounded last-known-good fallback during Vault outages"
+                );
                 Some(store)
             }
             Err(e) => {

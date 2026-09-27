@@ -167,6 +167,18 @@ pub fn create_app(app_state: AppState) -> Router {
     // IpFilterLayer is outermost among these three so a request from a
     // non-whitelisted source is rejected before quota/signature validation
     // spend any work on it.
+    // Per-tenant latency histograms (#1337) wrap the whole ingestion
+    // pipeline (IP filter, signature, validation, quota, handler), so they
+    // are applied last — i.e. outermost — on each ingestion route group.
+    let ingestion_latency = crate::tenant::latency::TenantLatencyLayer {
+        app_state: app_state.clone(),
+        route: crate::tenant::latency::RouteClass::WebhookIngestion,
+    };
+    let graphql_latency = crate::tenant::latency::TenantLatencyLayer {
+        app_state: app_state.clone(),
+        route: crate::tenant::latency::RouteClass::GraphQl,
+    };
+
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
@@ -184,6 +196,10 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(crate::middleware::ip_filter::IpFilterLayer::new(
             app_state.allowed_ips.clone(),
             app_state.trusted_proxy_depth,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            ingestion_latency.clone(),
+            crate::tenant::latency::tenant_latency_middleware,
         ));
 
     // Webhook route with signature verification + validation + quota middleware
@@ -199,6 +215,10 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::webhook_signature::verify_anchor_signature,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            ingestion_latency,
+            crate::tenant::latency::tenant_latency_middleware,
         ));
 
     // Tenant-scoped data routes. These previously had zero auth of any kind —
@@ -227,7 +247,9 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
-        );
+        )
+        // Tenant-facing usage: the caller's own latency histograms (#1337).
+        .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
 
     // core_routes intentionally does NOT layer api_key_auth across the board:
     // callback_routes/webhook_routes authenticate inbound anchor calls via
@@ -279,13 +301,36 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/transactions/bulk-status/jobs/:id",
             get(handlers::admin::bulk_status::get_job_status),
         )
-        .route("/graphql", post(handlers::graphql::graphql_handler))
+        .route(
+            "/graphql",
+            post(handlers::graphql::graphql_handler).layer(axum_middleware::from_fn_with_state(
+                graphql_latency,
+                crate::tenant::latency::tenant_latency_middleware,
+            )),
+        )
         .route("/export", get(handlers::export::export_transactions))
         // Stats endpoints
         .route("/stats/status", get(handlers::stats::status_counts))
         .route("/stats/daily", get(handlers::stats::daily_totals))
         .route("/stats/assets", get(handlers::stats::asset_stats))
         .route("/cache/metrics", get(handlers::stats::cache_metrics))
+        .route(
+            "/stats/tenant-latency",
+            get(handlers::stats::tenant_latency_overview),
+        )
+        // Admin: dependency health scorecard (#1334)
+        .route(
+            "/admin/dependencies/scorecard",
+            get(handlers::admin::dependency_scorecard::get_scorecard),
+        )
+        .route(
+            "/admin/dependencies/scorecard/raw",
+            get(handlers::admin::dependency_scorecard::get_raw_rollups),
+        )
+        .route(
+            "/admin/dependencies/scorecard/dashboard",
+            get(handlers::admin::dependency_scorecard::get_dashboard),
+        )
         // Admin: webhook endpoint health scores
         .route(
             "/admin/webhooks/health",

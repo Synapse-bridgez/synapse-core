@@ -141,10 +141,25 @@ pub async fn with_timeout<F, T>(tier: QueryTier, sql_label: &str, fut: F) -> Res
 where
     F: std::future::Future<Output = Result<T>>,
 {
+    use crate::services::dependency_scorecard::{self as scorecard, CallOutcome, Dependency};
+
     let dur = tier.duration();
+    let started = std::time::Instant::now();
     match timeout(dur, fut).await {
-        Ok(result) => result,
+        Ok(result) => {
+            let outcome = match &result {
+                Ok(_) => CallOutcome::Success,
+                Err(e) => scorecard::classify_sqlx_error(e),
+            };
+            scorecard::record_call(Dependency::Postgres, outcome, started.elapsed());
+            result
+        }
         Err(_elapsed) => {
+            scorecard::record_call(
+                Dependency::Postgres,
+                CallOutcome::TransportFailure,
+                started.elapsed(),
+            );
             DB_QUERY_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 tier = tier.label(),
@@ -396,10 +411,7 @@ pub async fn revoke_tenant_previous_secret(
 }
 
 /// Revoke all expired previous API keys across tenants, creating audit log entries for each revoked secret.
-pub async fn revoke_expired_tenant_secrets(
-    pool: &PgPool,
-    actor: &str,
-) -> Result<u64> {
+pub async fn revoke_expired_tenant_secrets(pool: &PgPool, actor: &str) -> Result<u64> {
     with_timeout(
         QueryTier::Write,
         "SELECT tenant_id, previous_api_key_hash FROM tenants WHERE previous_api_key_hash IS NOT NULL AND grace_period_expires_at <= NOW()",
