@@ -5,6 +5,16 @@ All notable changes to `synapse-sdk` (Rust) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows the policy described in [VERSIONING.md](./VERSIONING.md).
 
+<!--
+Migration-guide tooling convention (see `xtask/src/commands/migration_guide.rs`):
+entries are classified by their section heading (`Added` -> additive,
+`Deprecated` -> deprecated, `Removed` -> breaking) and by an explicit
+`**Breaking:**` / `**Breaking (bug fix):**` prefix on the entry text. Entries
+that cannot be confidently classified are flagged for manual review rather
+than guessed at. Keep this convention when adding entries so the generator
+can aggregate a full version range.
+-->
+
 ## [Unreleased]
 
 ### Added
