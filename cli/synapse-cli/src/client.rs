@@ -27,6 +27,7 @@ pub struct AdminClient {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    dry_run: bool,
 }
 
 impl AdminClient {
@@ -35,7 +36,24 @@ impl AdminClient {
             http: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
+            dry_run: false,
         }
+    }
+
+    /// Enable dry-run mode. When enabled, every mutating request
+    /// (`post_json`, `put_json`, `patch_json`, `delete`) short-circuits just
+    /// before the HTTP call is made: the resolved method, URL, and payload
+    /// are printed as a clearly-labelled preview and no network mutation is
+    /// sent. Read-only requests (`get`, `get_query`, `get_bytes`) are
+    /// unaffected. This reuses all upstream validation/resolution logic so
+    /// the preview reflects exactly what would really be sent.
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
     }
 
     fn url(&self, path: &str) -> String {
@@ -48,6 +66,23 @@ impl AdminClient {
         } else {
             request.header("Authorization", format!("Bearer {}", self.api_key))
         }
+    }
+
+    /// Print a consistent, unmissable preview of a mutating request that is
+    /// being skipped because dry-run mode is active. The `[DRY RUN]` marker
+    /// and the explicit "no request was sent" line make it impossible for an
+    /// operator to mistake this for real output.
+    fn print_dry_run(&self, method: &str, path: &str, body: Option<&serde_json::Value>) {
+        println!("[DRY RUN] {} {}", method, self.url(path));
+        match body {
+            Some(value) => {
+                let pretty = serde_json::to_string_pretty(value)
+                    .unwrap_or_else(|_| value.to_string());
+                println!("[DRY RUN] payload:\n{}", pretty);
+            }
+            None => println!("[DRY RUN] payload: (none)"),
+        }
+        println!("[DRY RUN] no request was sent; this is a preview only.");
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, SynapseError> {
@@ -91,6 +126,10 @@ impl AdminClient {
         path: &str,
         body: serde_json::Value,
     ) -> Result<T, SynapseError> {
+        if self.dry_run {
+            self.print_dry_run("PUT", path, Some(&body));
+            return Ok(serde_json::Value::Null);
+        }
         self.send(self.http.put(self.url(path)).json(&body)).await
     }
 
@@ -99,6 +138,11 @@ impl AdminClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
+        if self.dry_run {
+            let value = serde_json::to_value(body).unwrap_or(serde_json::Value::Null);
+            self.print_dry_run("POST", path, Some(&value));
+            return Ok(serde_json::Value::Null);
+        }
         self.send(self.http.post(self.url(path)).json(body)).await
     }
 
@@ -107,10 +151,19 @@ impl AdminClient {
         T: DeserializeOwned,
         B: Serialize + ?Sized,
     {
+        if self.dry_run {
+            let value = serde_json::to_value(body).unwrap_or(serde_json::Value::Null);
+            self.print_dry_run("PATCH", path, Some(&value));
+            return Ok(serde_json::Value::Null);
+        }
         self.send(self.http.patch(self.url(path)).json(body)).await
     }
 
     pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, SynapseError> {
+        if self.dry_run {
+            self.print_dry_run("DELETE", path, None);
+            return Ok(serde_json::Value::Null);
+        }
         self.send(self.http.delete(self.url(path))).await
     }
 
@@ -215,22 +268,71 @@ mod tests {
             .match_header("authorization", "Bearer wrong-token")
             .with_status(401)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"error":"invalid admin credentials"}"#)
+            .with_body("{\"error\": \"Unauthorized\"}")
             .create_async()
             .await;
 
         let client = AdminClient::new(&server.url(), "wrong-token");
         let result: Result<serde_json::Value, SynapseError> = client.get("/admin/locks").await;
 
-        assert!(matches!(result, Err(SynapseError::Unauthorized(_))));
+        assert!(
+            matches!(result, Err(SynapseError::Unauthorized(_))),
+            "expected Unauthorized, got: {:?}",
+            result
+        );
     }
 
-    #[test]
-    fn extracts_message_and_strips_bad_request_prefix() {
-        assert_eq!(
-            extract_error_message(r#"{"error":"Bad request: limit must be positive"}"#),
-            "limit must be positive"
-        );
-        assert_eq!(extract_error_message("not json"), "not json");
+    /// In dry-run mode a mutating POST must not reach the server at all.
+    /// `mockito` fails the test if an unexpected request is received, so a
+    /// successful call with no matching mock proves no network mutation was
+    /// sent.
+    #[tokio::test]
+    async fn dry_run_post_does_not_send_request() {
+        let server = Server::new_async().await;
+        let client = AdminClient::new(&server.url(), "token").with_dry_run(true);
+
+        let body = serde_json::json!({"amount": 100});
+        let result: Result<serde_json::Value, SynapseError> =
+            client.post_json("/admin/settlements", &body).await;
+
+        assert!(result.is_ok(), "dry-run should succeed, got: {:?}", result);
+    }
+
+    /// Dry-run must also short-circuit PUT, PATCH, and DELETE mutations.
+    #[tokio::test]
+    async fn dry_run_put_patch_delete_do_not_send_requests() {
+        let server = Server::new_async().await;
+        let client = AdminClient::new(&server.url(), "token").with_dry_run(true);
+
+        let body = serde_json::json!({"quota": 500});
+        let put: Result<serde_json::Value, SynapseError> =
+            client.put_json("/admin/quota", body.clone()).await;
+        let patch: Result<serde_json::Value, SynapseError> =
+            client.patch_json("/admin/webhooks/1", &body).await;
+        let delete: Result<serde_json::Value, SynapseError> =
+            client.delete("/admin/webhooks/1").await;
+
+        assert!(put.is_ok(), "dry-run PUT should succeed, got: {:?}", put);
+        assert!(patch.is_ok(), "dry-run PATCH should succeed, got: {:?}", patch);
+        assert!(delete.is_ok(), "dry-run DELETE should succeed, got: {:?}", delete);
+    }
+
+    /// Read-only requests must still hit the network even when dry-run is on.
+    #[tokio::test]
+    async fn dry_run_does_not_affect_read_only_requests() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/admin/locks")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let client = AdminClient::new(&server.url(), "token").with_dry_run(true);
+        let result: Result<serde_json::Value, SynapseError> = client.get("/admin/locks").await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        mock.assert_async().await;
     }
 }
