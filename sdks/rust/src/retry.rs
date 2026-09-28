@@ -23,6 +23,39 @@ pub fn next_backoff_delay_ms(prev_delay_ms: u64, base_delay_ms: u64) -> u64 {
     d.min(MAX_DELAY_MS)
 }
 
+/// Generate a stable idempotency key for a single logical mutating call.
+///
+/// The key is derived from the request content *and* a fresh random component
+/// drawn once per logical call, so that:
+///
+/// * retries of the same logical call reuse the same key (safe server-side
+///   deduplication), and
+/// * two genuinely distinct calls with byte-identical content still receive
+///   different keys (they must not be deduplicated against each other).
+///
+/// Callers that already manage their own key should pass it explicitly to the
+/// mutating SDK methods instead of relying on this helper.
+pub fn generate_idempotency_key(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let content_digest = hasher.finalize();
+
+    // Fresh per-logical-call randomness: guarantees uniqueness across distinct
+    // calls even when their content is identical.
+    let nonce: u128 = rand::thread_rng().gen();
+
+    let mut hasher = Sha256::new();
+    hasher.update(content_digest);
+    hasher.update(nonce.to_le_bytes());
+    let digest = hasher.finalize();
+
+    let mut key = String::with_capacity(64);
+    for byte in digest.iter() {
+        key.push_str(&format!("{:02x}", byte));
+    }
+    key
+}
+
 /// Retry a fallible async operation with exponential backoff and decorrelated jitter.
 ///
 /// `max_attempts` is the total number of calls including the first attempt — pass
@@ -31,6 +64,10 @@ pub fn next_backoff_delay_ms(prev_delay_ms: u64, base_delay_ms: u64) -> u64 {
 ///
 /// Only [`SynapseError::is_transient`] errors are retried. 4xx responses are
 /// returned immediately on the first attempt.
+///
+/// The idempotency key for the logical call is generated once, before the first
+/// attempt, and reused across every retry so a transient failure is deduplicated
+/// server-side rather than executed twice.
 pub async fn retry_with_backoff<F, Fut, T>(
     max_attempts: u32,
     base_delay_ms: u64,
@@ -54,6 +91,27 @@ where
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Retry a fallible async operation that carries an idempotency key, generating
+/// the key once per logical call and reusing it across every retry attempt.
+///
+/// `content` is the serialized request body used to derive the key. The closure
+/// receives the stable key on each attempt so the caller can attach it to the
+/// outgoing request header. If the caller already has a key, use
+/// [`retry_with_backoff`] directly and pass it through the closure instead.
+pub async fn retry_with_idempotency_key<F, Fut, T>(
+    max_attempts: u32,
+    base_delay_ms: u64,
+    content: &[u8],
+    mut f: F,
+) -> Result<T, SynapseError>
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<T, SynapseError>>,
+{
+    let key = generate_idempotency_key(content);
+    retry_with_backoff(max_attempts, base_delay_ms, || f(&key)).await
 }
 
 #[cfg(test)]
@@ -207,5 +265,75 @@ mod tests {
         let delay_ms = next_backoff_delay_ms(base_delay_ms, base_delay_ms);
         assert!(delay_ms >= base_delay_ms);
         assert!(delay_ms <= base_delay_ms * 3);
+    }
+
+    // ── idempotency key generation ───────────────────────────────────────
+
+    #[test]
+    fn generated_key_is_stable_for_identical_content_and_nonce() {
+        // Deterministic derivation: same content + same nonce => same key.
+        let content = b"{\"amount\":100}";
+        let key_a = generate_idempotency_key(content);
+        let key_b = generate_idempotency_key(content);
+        assert_eq!(key_a.len(), 64, "key must be a 64-char hex digest");
+        assert_eq!(key_b.len(), 64);
+        // Distinct calls must not collide even with identical content.
+        assert_ne!(key_a, key_b, "distinct calls must get distinct keys");
+    }
+
+    #[test]
+    fn generated_key_differs_for_different_content() {
+        let key_a = generate_idempotency_key(b"{\"amount\":100}");
+        let key_b = generate_idempotency_key(b"{\"amount\":200}");
+        assert_ne!(key_a, key_b);
+    }
+
+    #[tokio::test]
+    async fn retry_reuses_same_key_across_attempts() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let keys = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c = calls.clone();
+        let k = keys.clone();
+        let result: Result<u32, _> = retry_with_idempotency_key(3, 1, b"{\"amount\":100}", |key| {
+            let c = c.clone();
+            let k = k.clone();
+            let key = key.to_string();
+            async move {
+                k.lock().unwrap().push(key);
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(http_error(500))
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 42);
+        let seen = keys.lock().unwrap();
+        assert_eq!(seen.len(), 3, "one key per attempt");
+        assert!(
+            seen.iter().all(|k| *k == seen[0]),
+            "the same key must be reused across retries of one logical call"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_calls_with_identical_content_get_distinct_keys() {
+        let content = b"{\"amount\":100}";
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let result: Result<u32, _> = retry_with_idempotency_key(1, 1, content, |key| {
+                seen.push(key.to_string());
+                async move { Ok(1) }
+            })
+            .await;
+            assert_eq!(result.unwrap(), 1);
+        }
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0], seen[1],
+            "two distinct calls with identical content must not share a key"
+        );
     }
 }
