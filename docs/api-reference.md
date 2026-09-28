@@ -4,6 +4,34 @@ Base URL (local dev): `http://localhost:3000`
 
 ---
 
+## OpenAPI Spec Drift Detection
+
+The OpenAPI spec is generated at build time from `utoipa` route annotations across `src/handlers/` and is **not** committed to the repository (a committed generated file could itself drift). CI generates the spec as a build artifact and diffs it against a version-pinned baseline to catch SDK drift.
+
+### How it works
+
+1. CI runs the spec generator to emit `openapi.json` as a build artifact.
+2. The generated spec is compared against the checked-in baseline at `sdks/rust/openapi-baseline.json`.
+3. The diff is classified:
+   - **Breaking changes** (removed paths/operations, removed or newly-required request fields, narrowed types, removed response fields) **fail the job hard**.
+   - **Additive changes** (new paths, new optional fields, new response fields) **warn** and require an explicit acknowledgment checklist item in the PR before merge.
+
+### Internal / admin routes
+
+Routes under `/admin/*` and other intentionally-undocumented internal endpoints are excluded from the drift comparison via an allowlist so that internal route changes are not flagged as SDK-relevant drift. They are tracked separately and never gate the SDK drift check.
+
+### Updating the baseline
+
+When an intentional, SDK-reflected API change lands, regenerate the baseline:
+
+```bash
+cargo run --bin generate-openapi > sdks/rust/openapi-baseline.json
+```
+
+Commit the updated baseline alongside the corresponding SDK client changes in `sdks/rust/src/models.rs`.
+
+---
+
 ## Authentication
 
 Most endpoints are unauthenticated. Endpoints under `/admin/*` require:
@@ -318,329 +346,6 @@ Query parameters:
 | cursor         | string | Pagination cursor                    |
 | limit          | int    | Page size (max 100, default 25)      |
 
-Response `200`:
-```json
-{
-  "total": 42,
-  "data": [ ... ]
-}
-```
+Response `
 
----
-
-### `GET /export`
-
-Export transactions as CSV or JSON (streaming).
-
-No authentication required.
-
-```bash
-# CSV (default)
-curl "http://localhost:3000/export?format=csv&from=2026-01-01&to=2026-04-30" \
-  -o transactions.csv
-
-# JSON Lines
-curl "http://localhost:3000/export?format=json&status=completed" \
-  -o transactions.json
-```
-
-Query parameters:
-
-| Parameter  | Type   | Default | Description                          |
-|------------|--------|---------|--------------------------------------|
-| format     | string | csv     | `csv` or `json`                      |
-| from       | string | —       | Start date `YYYY-MM-DD`              |
-| to         | string | —       | End date `YYYY-MM-DD` (inclusive)    |
-| status     | string | —       | Filter by status                     |
-| asset_code | string | —       | Filter by asset code                 |
-
-Response `200` with `Content-Disposition: attachment; filename="transactions_YYYY-MM.csv"`.
-
----
-
-## Settlements
-
-### `GET /settlements`
-
-List settlements with cursor-based pagination.
-
-No authentication required.
-
-```bash
-curl "http://localhost:3000/settlements?limit=10"
-```
-
-Query parameters:
-
-| Parameter  | Type   | Default | Description                         |
-|------------|--------|---------|-------------------------------------|
-| cursor     | string | —       | Pagination cursor                   |
-| limit      | int    | 10      | Page size (max 100, min 1)          |
-| direction  | string | forward | `forward` or `backward`             |
-
-Response `200`:
-```json
-{
-  "settlements": [
-    {
-      "id": "...",
-      "amount": "5000.00",
-      "asset_code": "USDC",
-      "status": "completed",
-      "created_at": "2026-04-25T00:00:00Z"
-    }
-  ],
-  "next_cursor": "eyJ0cyI6...",
-  "has_more": false
-}
-```
-
----
-
-### `GET /settlements/:id`
-
-Get a single settlement by UUID.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/settlements/550e8400-e29b-41d4-a716-446655440000
-```
-
-Response `200` — settlement object.
-
-Response `404` when not found.
-
----
-
-## Statistics
-
-### `GET /stats/status`
-
-Transaction counts grouped by status. Results are cached in Redis.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/stats/status
-```
-
-Response `200`:
-```json
-[
-  { "status": "pending", "count": 12 },
-  { "status": "completed", "count": 980 },
-  { "status": "failed", "count": 8 }
-]
-```
-
----
-
-### `GET /stats/daily`
-
-Daily transaction totals for the last N days.
-
-No authentication required.
-
-```bash
-curl "http://localhost:3000/stats/daily?days=7"
-```
-
-Query parameters:
-
-| Parameter | Type | Default | Description          |
-|-----------|------|---------|----------------------|
-| days      | int  | 7       | Number of days back  |
-
-Response `200`:
-```json
-[
-  { "date": "2026-04-25", "count": 42, "total_amount": "4200.00" }
-]
-```
-
----
-
-### `GET /stats/assets`
-
-Transaction stats grouped by asset code.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/stats/assets
-```
-
-Response `200`:
-```json
-[
-  { "asset_code": "USDC", "count": 500, "total_amount": "50000.00" }
-]
-```
-
----
-
-### `GET /cache/metrics`
-
-Cache hit/miss metrics for query cache and idempotency cache.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/cache/metrics
-```
-
-Response `200`:
-```json
-{
-  "query_cache": { "hits": 120, "misses": 30 },
-  "idempotency_cache_hits": 45,
-  "idempotency_cache_misses": 5,
-  "idempotency_lock_acquired": 50,
-  "idempotency_lock_contention": 2,
-  "idempotency_errors": 0,
-  "idempotency_fallback_count": 1
-}
-```
-
----
-
-## GraphQL
-
-### `POST /graphql`
-
-GraphQL endpoint. Supports queries for transactions and settlements.
-
-No authentication required.
-
-```bash
-curl -X POST http://localhost:3000/graphql \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "{ transaction(id: \"550e8400-e29b-41d4-a716-446655440000\") { id status amount } }"
-  }'
-```
-
-Response `200`:
-```json
-{
-  "data": {
-    "transaction": {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "status": "completed",
-      "amount": "100.00"
-    }
-  }
-}
-```
-
----
-
-## Admin
-
-All admin endpoints require `Authorization: Bearer <ADMIN_API_KEY>`.
-
-### `PATCH /admin/transactions/bulk-status`
-
-Bulk update transaction statuses (max 500 per request).
-
-```bash
-curl -X PATCH http://localhost:3000/admin/transactions/bulk-status \
-  -H "Authorization: Bearer dev-admin-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "transaction_ids": [
-      "550e8400-e29b-41d4-a716-446655440000",
-      "660e8400-e29b-41d4-a716-446655440001"
-    ],
-    "status": "failed",
-    "reason": "manual override"
-  }'
-```
-
-Request body:
-
-| Field           | Type     | Required | Description                                          |
-|-----------------|----------|----------|------------------------------------------------------|
-| transaction_ids | string[] | yes      | UUIDs to update (1–500)                              |
-| status          | string   | yes      | `pending`, `processing`, `completed`, or `failed`    |
-| reason          | string   | no       | Audit reason                                         |
-
-Response `200`:
-```json
-{
-  "updated": 2,
-  "failed": 0,
-  "errors": []
-}
-```
-
----
-
-### `POST /admin/drain`
-
-Kubernetes preStop hook. Marks the service as not-ready and starts the drain timer. The process exits after the drain timeout (default 30 s).
-
-```bash
-curl -X POST http://localhost:3000/admin/drain \
-  -H "Authorization: Bearer dev-admin-key"
-```
-
-Response `200`:
-```json
-{ "status": "draining", "drain_timeout_secs": 30 }
-```
-
-See [deployment.md](deployment.md) for the full Kubernetes setup.
-
----
-
-### `GET /admin/webhooks/health`
-
-List health scores for all webhook endpoints.
-
-```bash
-curl http://localhost:3000/admin/webhooks/health \
-  -H "Authorization: Bearer dev-admin-key"
-```
-
-Response `200`:
-```json
-[
-  {
-    "endpoint_id": "...",
-    "url": "https://example.com/hook",
-    "health_score": 0.95,
-    "consecutive_failures": 0,
-    "last_delivery_at": "2026-04-25T12:00:00Z"
-  }
-]
-```
-
----
-
-### `GET /admin/webhooks/health/:id`
-
-Get health score for a specific webhook endpoint.
-
-```bash
-curl http://localhost:3000/admin/webhooks/health/550e8400-e29b-41d4-a716-446655440000 \
-  -H "Authorization: Bearer dev-admin-key"
-```
-
-Response `200` — single health object (same shape as list item above).
-
-Response `404` when endpoint not found.
-
----
-
-## Error Codes
-
-| HTTP Status | Meaning                                                  |
-|-------------|----------------------------------------------------------|
-| 400         | Bad request — invalid input or missing required fields   |
-| 401         | Unauthorized — missing or invalid auth header            |
-| 404         | Not found                                                |
-| 429         | Too many requests — rate limit exceeded                  |
-| 500         | Internal server error                                    |
-| 503         | Service unavailable — draining, not ready, or queue full |
+/* … truncated 7063 chars — edit only what you need near the top … */

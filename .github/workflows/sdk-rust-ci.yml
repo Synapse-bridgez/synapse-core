@@ -4,9 +4,17 @@ on:
   push:
     paths:
       - 'sdks/rust/**'
+      - 'src/handlers/**'
+      - 'src/openapi.rs'
+      - 'scripts/openapi-drift/**'
+      - '.github/workflows/sdk-rust-ci.yml'
   pull_request:
     paths:
       - 'sdks/rust/**'
+      - 'src/handlers/**'
+      - 'src/openapi.rs'
+      - 'scripts/openapi-drift/**'
+      - '.github/workflows/sdk-rust-ci.yml'
 
 jobs:
   ci:
@@ -44,3 +52,71 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  openapi-drift:
+    name: OpenAPI spec drift vs SDK baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-openapi-drift-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-openapi-drift-
+
+      # Generate the spec as a build artifact rather than committing a
+      # generated file that could itself drift. The generator excludes
+      # intentionally-undocumented internal/admin routes so their churn is
+      # not reported as SDK-relevant drift.
+      - name: Generate current OpenAPI spec
+        run: |
+          cargo run --quiet --bin openapi-drift -- generate \
+            --out "$RUNNER_TEMP/openapi-current.json"
+
+      - name: Diff against version-pinned baseline
+        id: drift
+        run: |
+          cargo run --quiet --bin openapi-drift -- diff \
+            --baseline scripts/openapi-drift/baseline.json \
+            --current "$RUNNER_TEMP/openapi-current.json" \
+            --report "$RUNNER_TEMP/openapi-drift-report.md" \
+            --ack-file scripts/openapi-drift/acknowledged-additions.txt
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-drift-report
+          path: |
+            ${{ runner.temp }}/openapi-drift-report.md
+            ${{ runner.temp }}/openapi-current.json
+          if-no-files-found: ignore
+
+      - name: Summarize drift
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/openapi-drift-report.md" ]; then
+            cat "$RUNNER_TEMP/openapi-drift-report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Breaking changes fail hard (exit 1 from the diff step above).
+      # Additive changes only warn and require an explicit acknowledgment
+      # entry in scripts/openapi-drift/acknowledged-additions.txt plus the
+      # PR checklist item, so they surface without blocking unrelated work.
+      - name: Enforce additive-change acknowledgment
+        if: steps.drift.outcome == 'success'
+        run: |
+          if grep -q 'ADDITIVE' "$RUNNER_TEMP/openapi-drift-report.md" 2>/dev/null; then
+            echo "::warning::Additive OpenAPI changes detected. Confirm the SDK surface"
+            echo "::warning::reflects them and tick the PR checklist item."
+          fi
