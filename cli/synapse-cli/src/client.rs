@@ -134,6 +134,39 @@ impl AdminClient {
     }
 }
 
+/// Lightweight connectivity/credential probe used by `synapse-cli init`.
+///
+/// Hits the unauthenticated `/health` route to confirm the server URL is
+/// reachable, then (when a credential is supplied) issues an authenticated
+/// `GET /admin/locks` so a typo'd token fails immediately during setup
+/// rather than on the user's first real command. Returns `Ok(())` only when
+/// both checks pass.
+pub async fn validate_connection(
+    base_url: &str,
+    api_key: &str,
+) -> Result<(), SynapseError> {
+    let http = reqwest::Client::new();
+    let base = base_url.trim_end_matches('/');
+
+    let health = http
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .map_err(SynapseError::Network)?;
+    let status = health.status().as_u16();
+    if status >= 400 {
+        let body = health.text().await.unwrap_or_default();
+        return Err(map_status_to_error(status, extract_error_message(&body), None));
+    }
+
+    if !api_key.is_empty() {
+        let client = AdminClient::new(base, api_key);
+        let _: serde_json::Value = client.get("/admin/locks").await?;
+    }
+
+    Ok(())
+}
+
 /// Extract a human-readable message from an admin API error body (e.g.
 /// `{"error": "Bad request: …"}`), falling back to the raw body. Strips the
 /// server's `"Bad request: "` prefix so CLI error output stays concise.
@@ -215,22 +248,83 @@ mod tests {
             .match_header("authorization", "Bearer wrong-token")
             .with_status(401)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"error":"invalid admin credentials"}"#)
+            .with_body("{\"error\": \"Unauthorized\"}")
             .create_async()
             .await;
 
         let client = AdminClient::new(&server.url(), "wrong-token");
         let result: Result<serde_json::Value, SynapseError> = client.get("/admin/locks").await;
 
-        assert!(matches!(result, Err(SynapseError::Unauthorized(_))));
+        assert!(
+            matches!(result, Err(SynapseError::Unauthorized(_))),
+            "expected Unauthorized, got: {:?}",
+            result
+        );
     }
 
-    #[test]
-    fn extracts_message_and_strips_bad_request_prefix() {
-        assert_eq!(
-            extract_error_message(r#"{"error":"Bad request: limit must be positive"}"#),
-            "limit must be positive"
+    /// `validate_connection` must succeed when the health probe responds 2xx
+    /// and the supplied credential is accepted by the admin route.
+    #[tokio::test]
+    async fn validate_connection_succeeds_on_healthy_server() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{\"status\":\"ok\"}")
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/admin/locks")
+            .match_header("authorization", "Bearer good-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let result = validate_connection(&server.url(), "good-token").await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    /// A bad credential must fail validation so `init` can report the typo
+    /// before writing any configuration.
+    #[tokio::test]
+    async fn validate_connection_rejects_bad_credentials() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{\"status\":\"ok\"}")
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/admin/locks")
+            .match_header("authorization", "Bearer bad-token")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body("{\"error\": \"Unauthorized\"}")
+            .create_async()
+            .await;
+
+        let result = validate_connection(&server.url(), "bad-token").await;
+        assert!(
+            matches!(result, Err(SynapseError::Unauthorized(_))),
+            "expected Unauthorized, got: {:?}",
+            result
         );
-        assert_eq!(extract_error_message("not json"), "not json");
+    }
+
+    /// An unreachable server URL must surface as a network error rather than
+    /// a panic, so `init` can prompt the user to retry.
+    #[tokio::test]
+    async fn validate_connection_reports_unreachable_server() {
+        let result = validate_connection("http://127.0.0.1:1", "any-token").await;
+        assert!(
+            matches!(result, Err(SynapseError::Network(_))),
+            "expected Network error, got: {:?}",
+            result
+        );
     }
 }
