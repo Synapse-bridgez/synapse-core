@@ -171,6 +171,88 @@ impl DependencyChecker for HorizonChecker {
     }
 }
 
+/// Reports Vault reachability for the readiness endpoint.
+///
+/// When Vault is unreachable at runtime, the secret cache may still serve
+/// last-known-good non-database secrets within its bounded TTL window. This
+/// checker surfaces that state so orchestration-level alerting can catch a
+/// Vault outage even before the cache's hard maximum age is reached.
+pub struct VaultChecker {
+    client: Option<vaultrs::client::VaultClient>,
+    cache_age: Option<Duration>,
+    cache_max_age: Duration,
+}
+
+impl VaultChecker {
+    pub fn new(client: vaultrs::client::VaultClient) -> Self {
+        Self {
+            client: Some(client),
+            cache_age: None,
+            cache_max_age: Duration::from_secs(60),
+        }
+    }
+
+    /// Build a checker that reports the current cached-secret fallback state
+    /// without performing a live Vault probe.
+    pub fn from_cache_state(cache_age: Option<Duration>, cache_max_age: Duration) -> Self {
+        Self {
+            client: None,
+            cache_age,
+            cache_max_age,
+        }
+    }
+}
+
+#[async_trait]
+impl DependencyChecker for VaultChecker {
+    async fn check(&self) -> DependencyStatus {
+        let start = Instant::now();
+
+        if let Some(ref client) = self.client {
+            match vaultrs::sys::health(client).await {
+                Ok(_) => {
+                    return DependencyStatus::Healthy {
+                        status: "healthy".to_string(),
+                        severity: DependencySeverity::NonCritical,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                    };
+                }
+                Err(e) => {
+                    return self.degraded_status(e.to_string());
+                }
+            }
+        }
+
+        self.degraded_status("Vault unreachable; serving cached secrets".to_string())
+    }
+}
+
+impl VaultChecker {
+    fn degraded_status(&self, error: String) -> DependencyStatus {
+        match self.cache_age {
+            Some(age) if age <= self.cache_max_age => DependencyStatus::Unhealthy {
+                status: "degraded".to_string(),
+                severity: DependencySeverity::NonCritical,
+                error: format!(
+                    "{} (cached secrets in use, age {}s of max {}s)",
+                    error,
+                    age.as_secs(),
+                    self.cache_max_age.as_secs()
+                ),
+            },
+            _ => DependencyStatus::Unhealthy {
+                status: "unhealthy".to_string(),
+                severity: DependencySeverity::Critical,
+                error: format!(
+                    "{} (cached secrets expired past max age {}s)",
+                    error,
+                    self.cache_max_age.as_secs()
+                ),
+            },
+        }
+    }
+}
+
 pub async fn check_health(
     postgres: PostgresChecker,
     redis: RedisChecker,
