@@ -199,3 +199,8 @@ See the [open issues](https://github.com/synapse-bridgez/synapse-core/issues) fo
 
 📄 License
 This project is licensed under the MIT License. See the LICENSE file for details.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1351 -->
+- #1351: [High] Add typed GraphQL codegen for the Rust SDK from the live schema
