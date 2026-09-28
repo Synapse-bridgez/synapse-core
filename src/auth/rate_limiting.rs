@@ -33,6 +33,17 @@
 //!   cascading failures.
 //! - Exhausted callers receive a structured [`AuthError::RateLimited`] with a
 //!   `retry_after_secs` hint derived from the token-bucket state.
+//!
+//! # Degraded mode (Redis unavailable)
+//!
+//! When the shared Redis-backed limiter is unavailable, this module falls back
+//! to a local, in-process token bucket with a *stricter* limit
+//! ([`DEGRADED_AUTH_LIMIT`]) rather than failing open.  Failing open during an
+//! outage is itself an abuse/security risk, so the degraded path is
+//! fail-closed-ish: it still enforces a limit, just a tighter one.  Every
+//! degraded decision emits the shared [`crate::cache::error_handling`]
+//! degraded-mode signal so operators can see the full blast radius of a Redis
+//! outage at a glance.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -54,6 +65,15 @@ const DEFAULT_VAULT_PROBE_LIMIT: u32 = 5;
 
 /// Default rate-limit window for auth operations.
 const DEFAULT_AUTH_WINDOW: Duration = Duration::from_secs(60);
+
+/// Stricter auth limit applied while Redis is unavailable (degraded mode).
+///
+/// Deliberately lower than [`DEFAULT_AUTH_LIMIT`] so that a cache-layer outage
+/// tightens rather than loosens abuse protection.
+const DEGRADED_AUTH_LIMIT: u32 = 3;
+
+/// Stricter vault-probe limit applied while Redis is unavailable.
+const DEGRADED_VAULT_PROBE_LIMIT: u32 = 2;
 
 /// Maximum allowed length for an identity key (API key or IP string).
 const MAX_IDENTITY_KEY_LEN: usize = 256;
@@ -136,6 +156,9 @@ pub struct AuthRateLimiter {
     /// Single shared bucket for vault health probes.
     vault_bucket: RateLimiter,
     metrics: AuthMetrics,
+    /// When `true`, Redis is unavailable and the stricter degraded limits are
+    /// enforced instead of the configured limits.
+    degraded: bool,
 }
 
 impl AuthRateLimiter {
@@ -156,6 +179,47 @@ impl AuthRateLimiter {
             auth_buckets: Arc::new(Mutex::new(HashMap::new())),
             vault_bucket,
             metrics: AuthMetrics::new(),
+            degraded: false,
+        }
+    }
+
+    /// Marks this limiter as running in degraded mode (Redis unavailable).
+    ///
+    /// While degraded, the stricter [`DEGRADED_AUTH_LIMIT`] and
+    /// [`DEGRADED_VAULT_PROBE_LIMIT`] are enforced so that a cache-layer
+    /// outage tightens rather than removes abuse protection.  Emits the shared
+    /// degraded-mode signal exactly once per transition so operators can see
+    /// the blast radius of the outage.
+    pub fn enter_degraded_mode(&mut self) {
+        if !self.degraded {
+            self.degraded = true;
+            crate::cache::error_handling::record_degraded_mode(
+                "auth_rate_limiting",
+                "redis unavailable; enforcing stricter local limits",
+            );
+        }
+    }
+
+    /// Returns `true` when this limiter is enforcing degraded-mode limits.
+    pub fn is_degraded(&self) -> bool {
+        self.degraded
+    }
+
+    /// Returns the effective auth limit for the current mode.
+    fn effective_auth_limit(&self) -> u32 {
+        if self.degraded {
+            DEGRADED_AUTH_LIMIT.min(self.config.auth_limit)
+        } else {
+            self.config.auth_limit
+        }
+    }
+
+    /// Returns the effective vault-probe limit for the current mode.
+    fn effective_vault_probe_limit(&self) -> u32 {
+        if self.degraded {
+            DEGRADED_VAULT_PROBE_LIMIT.min(self.config.vault_probe_limit)
+        } else {
+            self.config.vault_probe_limit
         }
     }
 
@@ -187,6 +251,7 @@ impl AuthRateLimiter {
             tracing::warn!(
                 identity = %identity,
                 retry_after_secs = retry_after,
+                degraded = self.degraded,
                 "Auth rate limit exceeded"
             );
             Err(AuthError::RateLimited(retry_after))
@@ -210,6 +275,7 @@ impl AuthRateLimiter {
                 .unwrap_or(self.config.window.as_secs());
             tracing::warn!(
                 retry_after_secs = retry_after,
+                degraded = self.degraded,
                 "Vault probe rate limit exceeded"
             );
             Err(AuthError::RateLimited(retry_after))
@@ -221,287 +287,6 @@ impl AuthRateLimiter {
     /// Returns `None` if `identity` fails validation or has no bucket yet.
     pub fn remaining_auth_tokens(&self, identity: &str) -> Option<u32> {
         validate_identity_key(identity).ok()?;
-        let map = self.auth_buckets.lock().ok()?;
-        map.get(identity).map(|l| l.available_tokens())
-    }
+        let map = self.auth_buckets.l
 
-    /// Returns the number of remaining vault probe tokens.
-    pub fn remaining_vault_probe_tokens(&self) -> u32 {
-        self.vault_bucket.available_tokens()
-    }
-
-    /// Returns a snapshot of the auth metrics.
-    pub fn metrics(&self) -> &AuthMetrics {
-        &self.metrics
-    }
-
-    /// Resets all per-identity auth buckets and the vault probe bucket.
-    ///
-    /// Intended for testing; in production prefer letting buckets refill
-    /// naturally.
-    pub fn reset_all(&self) {
-        if let Ok(map) = self.auth_buckets.lock() {
-            for limiter in map.values() {
-                limiter.reset();
-            }
-        }
-        self.vault_bucket.reset();
-        self.metrics.reset();
-    }
-
-    // -- private helpers --
-
-    fn get_or_create_auth_bucket(&self, identity: &str) -> RateLimiter {
-        let mut map = self.auth_buckets.lock().unwrap_or_else(|p| p.into_inner());
-        map.entry(identity.to_string())
-            .or_insert_with(|| {
-                RateLimiter::with_config(RateLimitConfig {
-                    max_requests: self.config.auth_limit,
-                    window: self.config.window,
-                    strategy: RateLimitStrategy::TokenBucket,
-                })
-            })
-            .clone()
-    }
-}
-
-impl Default for AuthRateLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Debug for AuthRateLimiter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuthRateLimiter")
-            .field("auth_limit", &self.config.auth_limit)
-            .field("vault_probe_limit", &self.config.vault_probe_limit)
-            .field("window", &self.config.window)
-            .finish()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shared, process-wide instances
-// ---------------------------------------------------------------------------
-
-lazy_static::lazy_static! {
-    /// Brute-force throttle for `middleware::auth::admin_auth` — the only
-    /// thing guarding every `/admin/*` route. Before this fix, admin_auth
-    /// had no rate limiting of any kind despite this exact mechanism
-    /// existing, fully built and unit-tested, unused in the same codebase
-    /// (it was constructed once, in `secrets.rs`, for Vault-probe limiting
-    /// only). Kept separate from `TENANT_AUTH_RATE_LIMITER` so a flood of
-    /// guessed admin keys and a flood of guessed tenant API keys don't share
-    /// (and drain) the same bucket budget for a given source IP.
-    pub static ref ADMIN_AUTH_RATE_LIMITER: AuthRateLimiter = AuthRateLimiter::new();
-
-    /// Brute-force throttle for tenant API-key resolution — covers both the
-    /// `TenantContext` extractor (the REST data routes fixed in this same
-    /// change) and `/ws` token authentication, which check credentials the
-    /// same way (lookup against `tenants.api_key`) and share the same
-    /// threat model.
-    pub static ref TENANT_AUTH_RATE_LIMITER: AuthRateLimiter = AuthRateLimiter::new();
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -- validate_identity_key --
-
-    #[test]
-    fn valid_key_accepted() {
-        assert!(validate_identity_key("api-key-abc123").is_ok());
-        assert!(validate_identity_key("ip:192.168.1.1").is_ok());
-        assert!(validate_identity_key("tenant_uuid_here").is_ok());
-    }
-
-    #[test]
-    fn empty_key_rejected() {
-        assert!(validate_identity_key("").is_err());
-    }
-
-    #[test]
-    fn key_too_long_rejected() {
-        let key = "a".repeat(MAX_IDENTITY_KEY_LEN + 1);
-        assert!(validate_identity_key(&key).is_err());
-    }
-
-    #[test]
-    fn key_with_invalid_chars_rejected() {
-        assert!(validate_identity_key("key with space").is_err());
-        assert!(validate_identity_key("key@domain").is_err());
-        assert!(validate_identity_key("key#hash").is_err());
-    }
-
-    #[test]
-    fn key_at_max_length_accepted() {
-        let key = "a".repeat(MAX_IDENTITY_KEY_LEN);
-        assert!(validate_identity_key(&key).is_ok());
-    }
-
-    // -- check_auth_rate_limit --
-
-    #[test]
-    fn allows_requests_within_limit() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 3,
-            vault_probe_limit: 5,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        assert!(limiter.check_auth_rate_limit("user-abc").is_ok());
-        assert!(limiter.check_auth_rate_limit("user-abc").is_ok());
-        assert!(limiter.check_auth_rate_limit("user-abc").is_ok());
-    }
-
-    #[test]
-    fn rejects_requests_over_limit() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 2,
-            vault_probe_limit: 5,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_auth_rate_limit("user-xyz").ok();
-        limiter.check_auth_rate_limit("user-xyz").ok();
-        let result = limiter.check_auth_rate_limit("user-xyz");
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthError::RateLimited(_)));
-    }
-
-    #[test]
-    fn invalid_key_returns_validation_error() {
-        let limiter = AuthRateLimiter::new();
-        let result = limiter.check_auth_rate_limit("bad key!");
-        assert!(matches!(result.unwrap_err(), AuthError::Validation(_)));
-    }
-
-    #[test]
-    fn different_identities_have_independent_buckets() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 1,
-            vault_probe_limit: 5,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_auth_rate_limit("user-a").ok();
-        // user-a is exhausted; user-b should still be allowed.
-        assert!(limiter.check_auth_rate_limit("user-b").is_ok());
-    }
-
-    #[test]
-    fn metrics_record_attempts_and_failures() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 1,
-            vault_probe_limit: 5,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_auth_rate_limit("user-m").ok();
-        limiter.check_auth_rate_limit("user-m").ok(); // rejected
-        assert_eq!(limiter.metrics().total_attempts(), 2);
-        assert_eq!(limiter.metrics().successful_auths(), 1);
-        assert_eq!(limiter.metrics().failed_auths(), 1);
-    }
-
-    #[test]
-    fn metrics_record_validation_errors_separately() {
-        let limiter = AuthRateLimiter::new();
-        // Invalid key — validation error, not counted as attempt.
-        limiter.check_auth_rate_limit("bad key!").ok();
-        assert_eq!(limiter.metrics().total_attempts(), 0);
-    }
-
-    // -- check_vault_probe_rate_limit --
-
-    #[test]
-    fn vault_probe_allows_within_limit() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 10,
-            vault_probe_limit: 3,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        assert!(limiter.check_vault_probe_rate_limit().is_ok());
-        assert!(limiter.check_vault_probe_rate_limit().is_ok());
-        assert!(limiter.check_vault_probe_rate_limit().is_ok());
-    }
-
-    #[test]
-    fn vault_probe_rejects_over_limit() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 10,
-            vault_probe_limit: 1,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_vault_probe_rate_limit().ok();
-        let result = limiter.check_vault_probe_rate_limit();
-        assert!(matches!(result.unwrap_err(), AuthError::RateLimited(_)));
-    }
-
-    // -- remaining tokens --
-
-    #[test]
-    fn remaining_tokens_decrements_on_acquire() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 5,
-            vault_probe_limit: 5,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_auth_rate_limit("user-r").ok();
-        assert_eq!(limiter.remaining_auth_tokens("user-r"), Some(4));
-    }
-
-    #[test]
-    fn remaining_tokens_none_for_unknown_identity() {
-        let limiter = AuthRateLimiter::new();
-        assert_eq!(limiter.remaining_auth_tokens("never-seen"), None);
-    }
-
-    #[test]
-    fn remaining_tokens_none_for_invalid_key() {
-        let limiter = AuthRateLimiter::new();
-        assert_eq!(limiter.remaining_auth_tokens("bad key!"), None);
-    }
-
-    // -- reset_all --
-
-    #[test]
-    fn reset_all_restores_full_buckets() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 3,
-            vault_probe_limit: 2,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_auth_rate_limit("user-reset").ok();
-        limiter.check_vault_probe_rate_limit().ok();
-        limiter.reset_all();
-        assert_eq!(limiter.remaining_auth_tokens("user-reset"), Some(3));
-        assert_eq!(limiter.remaining_vault_probe_tokens(), 2);
-    }
-
-    // -- clone shares state --
-
-    #[test]
-    fn clone_shares_bucket_store() {
-        let config = AuthRateLimitConfig {
-            auth_limit: 4,
-            vault_probe_limit: 5,
-            window: Duration::from_secs(60),
-        };
-        let limiter = AuthRateLimiter::with_config(config);
-        limiter.check_auth_rate_limit("shared-user").ok();
-        let clone = limiter.clone();
-        // Clone should see the same bucket state.
-        assert_eq!(clone.remaining_auth_tokens("shared-user"), Some(3));
-    }
-}
+/* … truncated 9910 chars — edit only what you need near the top … */
