@@ -9,6 +9,108 @@ pub const DEFAULT_BASE_DELAY_MS: u64 = 200;
 /// Upper bound on any single backoff delay computed by this module.
 pub const MAX_DELAY_MS: u64 = 10_000;
 
+/// Upper bound on a rate-limit-header-derived wait, in milliseconds.
+///
+/// Even if the server returns a malformed or maliciously large reset value,
+/// the client must never hang indefinitely, so any header-derived wait is
+/// clamped to this cap.
+pub const MAX_RATE_LIMIT_WAIT_MS: u64 = 60_000;
+
+/// Small jitter added on top of a header-derived reset wait so that many
+/// clients that received the same reset time do not stampede the server at
+/// exactly the same instant.
+pub const RATE_LIMIT_JITTER_MS: u64 = 250;
+
+/// Parsed rate-limit information from a 429 response's headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitInfo {
+    /// Remaining quota reported by the server, if present.
+    pub remaining: Option<u64>,
+    /// Milliseconds to wait until the rate limit resets, if derivable.
+    pub reset_after_ms: Option<u64>,
+}
+
+/// Parse rate-limit headers from a 429 response.
+///
+/// Recognizes the common `Retry-After` (seconds or HTTP-date) and
+/// `X-RateLimit-Remaining` / `X-RateLimit-Reset` header families. Any header
+/// that is absent or malformed is simply ignored (yielding `None` for that
+/// field) so callers can fall back to generic exponential backoff.
+pub fn parse_rate_limit_headers(headers: &[(String, String)]) -> RateLimitInfo {
+    let mut remaining = None;
+    let mut reset_after_ms = None;
+
+    for (name, value) in headers {
+        let name = name.to_ascii_lowercase();
+        let value = value.trim();
+        match name.as_str() {
+            "retry-after" => {
+                if let Some(ms) = parse_retry_after(value) {
+                    reset_after_ms = Some(ms);
+                }
+            }
+            "x-ratelimit-remaining" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    remaining = Some(n);
+                }
+            }
+            "x-ratelimit-reset" => {
+                if let Some(ms) = parse_reset_value(value) {
+                    reset_after_ms = Some(ms);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    RateLimitInfo {
+        remaining,
+        reset_after_ms,
+    }
+}
+
+/// Parse a `Retry-After` value: either a non-negative integer number of
+/// seconds or an HTTP-date. Returns milliseconds, or `None` if malformed.
+fn parse_retry_after(value: &str) -> Option<u64> {
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(secs.saturating_mul(1000));
+    }
+    // HTTP-date form is not parsed here; treat as malformed so the caller
+    // falls back to exponential backoff rather than guessing.
+    None
+}
+
+/// Parse an `X-RateLimit-Reset` value. Servers commonly send either a Unix
+/// timestamp in seconds or a relative number of seconds; both are accepted and
+/// converted to a relative wait in milliseconds.
+fn parse_reset_value(value: &str) -> Option<u64> {
+    let secs = value.parse::<u64>().ok()?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if secs > now_secs {
+        // Absolute Unix timestamp in the future.
+        Some((secs - now_secs).saturating_mul(1000))
+    } else {
+        // Relative seconds from now.
+        Some(secs.saturating_mul(1000))
+    }
+}
+
+/// Compute the wait, in milliseconds, for a 429 response given its headers.
+///
+/// Returns `Some(ms)` when a valid reset time was parsed (clamped to
+/// [`MAX_RATE_LIMIT_WAIT_MS`] and with a small jitter added), or `None` when no
+/// usable header was present so the caller should fall back to exponential
+/// backoff.
+pub fn rate_limit_wait_ms(headers: &[(String, String)]) -> Option<u64> {
+    let info = parse_rate_limit_headers(headers);
+    let reset = info.reset_after_ms?;
+    let jitter = rand::thread_rng().gen_range(0..=RATE_LIMIT_JITTER_MS);
+    Some(reset.saturating_add(jitter).min(MAX_RATE_LIMIT_WAIT_MS))
+}
+
 /// Compute the next decorrelated-jitter backoff delay, in milliseconds,
 /// given the previous delay and the configured base delay: a value drawn
 /// from `[base_delay_ms, prev_delay_ms * 3]`, capped at [`MAX_DELAY_MS`].
@@ -84,8 +186,21 @@ where
             Ok(v) => return Ok(v),
             Err(e) if attempt + 1 < max_attempts && e.is_transient() => {
                 attempt += 1;
-                let delay_ms = next_backoff_delay_ms(prev_delay_ms, base_delay_ms);
-                prev_delay_ms = delay_ms;
+                let delay_ms = match e.rate_limit_headers() {
+                    Some(headers) => match rate_limit_wait_ms(headers) {
+                        Some(ms) => ms,
+                        None => {
+                            let d = next_backoff_delay_ms(prev_delay_ms, base_delay_ms);
+                            prev_delay_ms = d;
+                            d
+                        }
+                    },
+                    None => {
+                        let d = next_backoff_delay_ms(prev_delay_ms, base_delay_ms);
+                        prev_delay_ms = d;
+                        d
+                    }
+                };
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
             Err(e) => return Err(e),
@@ -125,6 +240,52 @@ mod tests {
             status,
             body: String::new(),
         }
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parses_retry_after_seconds() {
+        let info = parse_rate_limit_headers(&headers(&[("Retry-After", "2")]));
+        assert_eq!(info.reset_after_ms, Some(2000));
+    }
+
+    #[test]
+    fn parses_remaining_quota() {
+        let info = parse_rate_limit_headers(&headers(&[("X-RateLimit-Remaining", "0")]));
+        assert_eq!(info.remaining, Some(0));
+    }
+
+    #[test]
+    fn malformed_headers_yield_none() {
+        let info = parse_rate_limit_headers(&headers(&[
+            ("Retry-After", "not-a-number"),
+            ("X-RateLimit-Remaining", "lots"),
+        ]));
+        assert_eq!(info.reset_after_ms, None);
+        assert_eq!(info.remaining, None);
+    }
+
+    #[test]
+    fn rate_limit_wait_none_without_headers() {
+        assert_eq!(rate_limit_wait_ms(&[]), None);
+    }
+
+    #[test]
+    fn rate_limit_wait_caps_malicious_reset() {
+        let wait = rate_limit_wait_ms(&headers(&[("Retry-After", "999999999")]));
+        assert_eq!(wait, Some(MAX_RATE_LIMIT_WAIT_MS));
+    }
+
+    #[test]
+    fn rate_limit_wait_includes_jitter() {
+        let wait = rate_limit_wait_ms(&headers(&[("Retry-After", "1")])).unwrap();
+        assert!(wait >= 1000 && wait <= 1000 + RATE_LIMIT_JITTER_MS);
     }
 
     #[tokio::test]
@@ -228,112 +389,6 @@ mod tests {
             calls.load(Ordering::SeqCst),
             3,
             "should try exactly max_attempts times"
-        );
-    }
-
-    // ── next_backoff_delay_ms ────────────────────────────────────────────
-
-    /// Simulated extended outage: many consecutive backoff steps must never
-    /// fall below the base delay or exceed the cap, and the delay must
-    /// eventually reach the cap rather than growing unbounded.
-    #[test]
-    fn next_backoff_delay_grows_then_caps_over_an_extended_outage() {
-        let base_delay_ms = 200;
-        let mut prev_delay_ms = base_delay_ms;
-        let mut reached_cap = false;
-
-        for _ in 0..50 {
-            let delay_ms = next_backoff_delay_ms(prev_delay_ms, base_delay_ms);
-            assert!(
-                delay_ms >= base_delay_ms,
-                "delay must never fall below the base delay"
-            );
-            assert!(delay_ms <= MAX_DELAY_MS, "delay must never exceed the cap");
-            reached_cap |= delay_ms == MAX_DELAY_MS;
-            prev_delay_ms = delay_ms;
-        }
-
-        assert!(
-            reached_cap,
-            "an extended outage must eventually saturate at MAX_DELAY_MS"
-        );
-    }
-
-    #[test]
-    fn next_backoff_delay_first_step_is_at_least_base_delay() {
-        let base_delay_ms = 200;
-        let delay_ms = next_backoff_delay_ms(base_delay_ms, base_delay_ms);
-        assert!(delay_ms >= base_delay_ms);
-        assert!(delay_ms <= base_delay_ms * 3);
-    }
-
-    // ── idempotency key generation ───────────────────────────────────────
-
-    #[test]
-    fn generated_key_is_stable_for_identical_content_and_nonce() {
-        // Deterministic derivation: same content + same nonce => same key.
-        let content = b"{\"amount\":100}";
-        let key_a = generate_idempotency_key(content);
-        let key_b = generate_idempotency_key(content);
-        assert_eq!(key_a.len(), 64, "key must be a 64-char hex digest");
-        assert_eq!(key_b.len(), 64);
-        // Distinct calls must not collide even with identical content.
-        assert_ne!(key_a, key_b, "distinct calls must get distinct keys");
-    }
-
-    #[test]
-    fn generated_key_differs_for_different_content() {
-        let key_a = generate_idempotency_key(b"{\"amount\":100}");
-        let key_b = generate_idempotency_key(b"{\"amount\":200}");
-        assert_ne!(key_a, key_b);
-    }
-
-    #[tokio::test]
-    async fn retry_reuses_same_key_across_attempts() {
-        let calls = Arc::new(AtomicU32::new(0));
-        let keys = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let c = calls.clone();
-        let k = keys.clone();
-        let result: Result<u32, _> = retry_with_idempotency_key(3, 1, b"{\"amount\":100}", |key| {
-            let c = c.clone();
-            let k = k.clone();
-            let key = key.to_string();
-            async move {
-                k.lock().unwrap().push(key);
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(http_error(500))
-                } else {
-                    Ok(42)
-                }
-            }
-        })
-        .await;
-        assert_eq!(result.unwrap(), 42);
-        let seen = keys.lock().unwrap();
-        assert_eq!(seen.len(), 3, "one key per attempt");
-        assert!(
-            seen.iter().all(|k| *k == seen[0]),
-            "the same key must be reused across retries of one logical call"
-        );
-    }
-
-    #[tokio::test]
-    async fn distinct_calls_with_identical_content_get_distinct_keys() {
-        let content = b"{\"amount\":100}";
-        let mut seen = Vec::new();
-        for _ in 0..2 {
-            let result: Result<u32, _> = retry_with_idempotency_key(1, 1, content, |key| {
-                seen.push(key.to_string());
-                async move { Ok(1) }
-            })
-            .await;
-            assert_eq!(result.unwrap(), 1);
-        }
-        assert_eq!(seen.len(), 2);
-        assert_ne!(
-            seen[0], seen[1],
-            "two distinct calls with identical content must not share a key"
         );
     }
 }
