@@ -22,10 +22,49 @@ async fn main() -> Result<()> {
         Commands::Graphql(cmd) => graphql::run(cmd.command, base_url, api_key).await,
         Commands::Init => run_init().await,
         Commands::Completions { shell } => print_completions(&shell),
+        Commands::External(args) => run_external(&args, base_url, api_key),
     };
 
     if let Err(e) = result {
         std::process::exit(synapse_cli::handle_anyhow_error(e));
+    }
+
+    Ok(())
+}
+
+/// Invoke an external `synapse-cli-<name>` plugin found on `PATH`.
+///
+/// Follows the `git`/`cargo` external-subcommand convention: the first
+/// argument selects the plugin binary, and all remaining arguments are passed
+/// through verbatim. The resolved auth/config context is exported via
+/// environment variables so plugins do not need to re-implement the CLI's own
+/// configuration resolution.
+fn run_external(args: &[String], base_url: &str, api_key: &str) -> Result<()> {
+    use std::process::Command;
+
+    let name = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no external subcommand specified"))?;
+    let binary = format!("synapse-cli-{name}");
+
+    let status = Command::new(&binary)
+        .args(&args[1..])
+        .env("SYNAPSE_BASE_URL", base_url)
+        .env("SYNAPSE_API_KEY", api_key)
+        .env("SYNAPSE_PLUGIN", name)
+        .status()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "unknown subcommand '{name}': no '{binary}' found on PATH"
+                )
+            } else {
+                anyhow::anyhow!("failed to run plugin '{binary}': {e}")
+            }
+        })?;
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     Ok(())

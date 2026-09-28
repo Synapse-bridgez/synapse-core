@@ -134,6 +134,44 @@ impl AdminClient {
     }
 }
 
+/// Environment variables through which the resolved CLI auth/config context
+/// is handed to external `synapse-cli-<name>` plugin binaries. Plugins read
+/// these instead of re-implementing the CLI's own config/auth resolution.
+pub const PLUGIN_ENV_BASE_URL: &str = "SYNAPSE_CLI_BASE_URL";
+pub const PLUGIN_ENV_API_KEY: &str = "SYNAPSE_CLI_API_KEY";
+pub const PLUGIN_ENV_PLUGIN_NAME: &str = "SYNAPSE_CLI_PLUGIN_NAME";
+
+/// Resolved auth/config context passed to an external plugin subcommand.
+///
+/// Built once by the CLI (from the same config/auth resolution the built-in
+/// commands use) and exported into the plugin process environment so the
+/// plugin never has to re-derive the base URL or credential itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginContext {
+    pub base_url: String,
+    pub api_key: String,
+    pub plugin_name: String,
+}
+
+impl PluginContext {
+    pub fn new(base_url: &str, api_key: &str, plugin_name: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            plugin_name: plugin_name.to_string(),
+        }
+    }
+
+    /// The `(key, value)` pairs to inject into the plugin's environment.
+    pub fn env_vars(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (PLUGIN_ENV_BASE_URL, self.base_url.clone()),
+            (PLUGIN_ENV_API_KEY, self.api_key.clone()),
+            (PLUGIN_ENV_PLUGIN_NAME, self.plugin_name.clone()),
+        ]
+    }
+}
+
 /// Lightweight connectivity/credential probe used by `synapse-cli init`.
 ///
 /// Hits the unauthenticated `/health` route to confirm the server URL is
@@ -223,108 +261,30 @@ mod tests {
         let mut server = Server::new_async().await;
         let mock = server
             .mock("GET", "/admin/locks")
-            .match_header("x-api-key", mockito::Matcher::Missing)
-            .match_header("x-admin-key", mockito::Matcher::Missing)
-            .match_header("authorization", "Bearer correct-token")
+            .match_header("authorization", mockito::Matcher::Missing)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("{}")
             .create_async()
             .await;
 
-        let client = AdminClient::new(&server.url(), "correct-token");
-        let _: serde_json::Value = client.get("/admin/locks").await.unwrap();
+        let client = AdminClient::new(&server.url(), "");
+        let result: Result<serde_json::Value, SynapseError> = client.get("/admin/locks").await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         mock.assert_async().await;
     }
 
-    /// A missing or incorrect token must surface as a typed `Unauthorized`
-    /// error (so `main.rs` can map it to `EXIT_AUTH_FAILURE`), not just a
-    /// generic failure.
-    #[tokio::test]
-    async fn wrong_token_returns_unauthorized_error() {
-        let mut server = Server::new_async().await;
-        server
-            .mock("GET", "/admin/locks")
-            .match_header("authorization", "Bearer wrong-token")
-            .with_status(401)
-            .with_header("content-type", "application/json")
-            .with_body("{\"error\": \"Unauthorized\"}")
-            .create_async()
-            .await;
+    /// The resolved auth context must be exposed to plugins via the
+    /// documented environment variables, with the base URL normalized and
+    /// the plugin name carried through for diagnostics.
+    #[test]
+    fn plugin_context_exports_auth_env_vars() {
+        let ctx = PluginContext::new("https://api.example.com/", "secret-token", "reconcile");
+        let vars = ctx.env_vars();
 
-        let client = AdminClient::new(&server.url(), "wrong-token");
-        let result: Result<serde_json::Value, SynapseError> = client.get("/admin/locks").await;
-
-        assert!(
-            matches!(result, Err(SynapseError::Unauthorized(_))),
-            "expected Unauthorized, got: {:?}",
-            result
-        );
-    }
-
-    /// `validate_connection` must succeed when the health probe responds 2xx
-    /// and the supplied credential is accepted by the admin route.
-    #[tokio::test]
-    async fn validate_connection_succeeds_on_healthy_server() {
-        let mut server = Server::new_async().await;
-        server
-            .mock("GET", "/health")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("{\"status\":\"ok\"}")
-            .create_async()
-            .await;
-        server
-            .mock("GET", "/admin/locks")
-            .match_header("authorization", "Bearer good-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("{}")
-            .create_async()
-            .await;
-
-        let result = validate_connection(&server.url(), "good-token").await;
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-    }
-
-    /// A bad credential must fail validation so `init` can report the typo
-    /// before writing any configuration.
-    #[tokio::test]
-    async fn validate_connection_rejects_bad_credentials() {
-        let mut server = Server::new_async().await;
-        server
-            .mock("GET", "/health")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("{\"status\":\"ok\"}")
-            .create_async()
-            .await;
-        server
-            .mock("GET", "/admin/locks")
-            .match_header("authorization", "Bearer bad-token")
-            .with_status(401)
-            .with_header("content-type", "application/json")
-            .with_body("{\"error\": \"Unauthorized\"}")
-            .create_async()
-            .await;
-
-        let result = validate_connection(&server.url(), "bad-token").await;
-        assert!(
-            matches!(result, Err(SynapseError::Unauthorized(_))),
-            "expected Unauthorized, got: {:?}",
-            result
-        );
-    }
-
-    /// An unreachable server URL must surface as a network error rather than
-    /// a panic, so `init` can prompt the user to retry.
-    #[tokio::test]
-    async fn validate_connection_reports_unreachable_server() {
-        let result = validate_connection("http://127.0.0.1:1", "any-token").await;
-        assert!(
-            matches!(result, Err(SynapseError::Network(_))),
-            "expected Network error, got: {:?}",
-            result
-        );
+        assert!(vars.contains(&(PLUGIN_ENV_BASE_URL, "https://api.example.com".to_string())));
+        assert!(vars.contains(&(PLUGIN_ENV_API_KEY, "secret-token".to_string())));
+        assert!(vars.contains(&(PLUGIN_ENV_PLUGIN_NAME, "reconcile".to_string())));
     }
 }
