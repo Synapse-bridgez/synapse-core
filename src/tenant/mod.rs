@@ -30,6 +30,157 @@ impl TenantContext {
     }
 }
 
+/// Bounded latency histogram buckets (in milliseconds) used for per-tenant
+/// real-user-monitoring views. The bucket count is deliberately fixed and
+/// small so that per-tenant series stay cheap: `TENANT_LATENCY_BUCKETS.len()`
+/// series per tenant per request path, rather than an unbounded raw-latency
+/// series. Keep this list reviewed and stable — changing it changes the
+/// cardinality budget for every tenant.
+pub const TENANT_LATENCY_BUCKETS_MS: [u64; 8] =
+    [5, 10, 25, 50, 100, 250, 500, 1000];
+
+/// Minimum number of observations a tenant must accumulate within the current
+/// roll-off window before its per-tenant histogram is considered statistically
+/// meaningful. Tenants below this threshold are aggregated into a shared
+/// `__low_volume__` bucket instead of emitting their own series, so a tenant
+/// with ~3 requests/day does not produce a cardinality-expensive but
+/// meaningless histogram.
+pub const TENANT_LATENCY_MIN_OBSERVATIONS: u64 = 20;
+
+/// Sentinel tenant label used to roll up very-low-volume tenants so they do
+/// not each consume their own histogram series.
+pub const LOW_VOLUME_TENANT_LABEL: &str = "__low_volume__";
+
+/// Per-tenant latency histogram for a single request path.
+///
+/// `buckets[i]` counts observations whose latency is `<= TENANT_LATENCY_BUCKETS_MS[i]`
+/// (cumulative, Prometheus-style), and `buckets[TENANT_LATENCY_BUCKETS_MS.len()]`
+/// counts observations above the last bound. `count` and `sum_ms` are tracked
+/// alongside so p50/p95 can be derived without storing raw samples.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TenantLatencyHistogram {
+    pub buckets: [u64; TENANT_LATENCY_BUCKETS_MS.len() + 1],
+    pub count: u64,
+    pub sum_ms: u64,
+}
+
+impl TenantLatencyHistogram {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a single latency observation, placing it in the first bucket
+    /// whose upper bound is `>= latency_ms`.
+    pub fn observe(&mut self, latency_ms: u64) {
+        let idx = TENANT_LATENCY_BUCKETS_MS
+            .iter()
+            .position(|&bound| latency_ms <= bound)
+            .unwrap_or(TENANT_LATENCY_BUCKETS_MS.len());
+        self.buckets[idx] += 1;
+        self.count += 1;
+        self.sum_ms = self.sum_ms.saturating_add(latency_ms);
+    }
+
+    /// Whether this histogram has enough observations to be reported as its
+    /// own per-tenant series rather than rolled into the low-volume bucket.
+    pub fn is_reportable(&self) -> bool {
+        self.count >= TENANT_LATENCY_MIN_OBSERVATIONS
+    }
+
+    /// Merge another histogram into this one (used when rolling low-volume
+    /// tenants into the shared sentinel series).
+    pub fn merge(&mut self, other: &TenantLatencyHistogram) {
+        for (dst, src) in self.buckets.iter_mut().zip(other.buckets.iter()) {
+            *dst += *src;
+        }
+        self.count += other.count;
+        self.sum_ms = self.sum_ms.saturating_add(other.sum_ms);
+    }
+}
+
+/// The request paths that get their own per-tenant histogram. Kept as an enum
+/// (rather than a free-form string label) so the set of emitted series is
+/// bounded and reviewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TenantLatencyPath {
+    WebhookIngestion,
+    GraphqlQuery,
+}
+
+impl TenantLatencyPath {
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            TenantLatencyPath::WebhookIngestion => "webhook_ingestion",
+            TenantLatencyPath::GraphqlQuery => "graphql_query",
+        }
+    }
+}
+
+/// Per-tenant latency histograms keyed by request path. This is the in-memory
+/// store backing both the internal dashboards and the tenant-facing quota/usage
+/// API; it is intentionally bounded by the fixed path set and bucket count.
+#[derive(Debug, Default)]
+pub struct TenantLatencyStore {
+    webhook_ingestion: std::collections::HashMap<Uuid, TenantLatencyHistogram>,
+    graphql_query: std::collections::HashMap<Uuid, TenantLatencyHistogram>,
+}
+
+impl TenantLatencyStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn map_mut(
+        &mut self,
+        path: TenantLatencyPath,
+    ) -> &mut std::collections::HashMap<Uuid, TenantLatencyHistogram> {
+        match path {
+            TenantLatencyPath::WebhookIngestion => &mut self.webhook_ingestion,
+            TenantLatencyPath::GraphqlQuery => &mut self.graphql_query,
+        }
+    }
+
+    fn map(
+        &self,
+        path: TenantLatencyPath,
+    ) -> &std::collections::HashMap<Uuid, TenantLatencyHistogram> {
+        match path {
+            TenantLatencyPath::WebhookIngestion => &self.webhook_ingestion,
+            TenantLatencyPath::GraphqlQuery => &self.graphql_query,
+        }
+    }
+
+    /// Record a latency observation for a tenant on a given request path.
+    pub fn observe(&mut self, tenant_id: Uuid, path: TenantLatencyPath, latency_ms: u64) {
+        self.map_mut(path)
+            .entry(tenant_id)
+            .or_default()
+            .observe(latency_ms);
+    }
+
+    /// Snapshot the per-tenant histograms for a path, rolling very-low-volume
+    /// tenants into the shared `__low_volume__` sentinel so the emitted series
+    /// count stays bounded regardless of how many tenants exist.
+    pub fn snapshot(&self, path: TenantLatencyPath) -> Vec<(String, TenantLatencyHistogram)> {
+        let mut out: Vec<(String, TenantLatencyHistogram)> = Vec::new();
+        let mut low_volume = TenantLatencyHistogram::new();
+
+        for (tenant_id, hist) in self.map(path) {
+            if hist.is_reportable() {
+                out.push((tenant_id.to_string(), hist.clone()));
+            } else {
+                low_volume.merge(hist);
+            }
+        }
+
+        if low_volume.count > 0 {
+            out.push((LOW_VOLUME_TENANT_LABEL.to_string(), low_volume));
+        }
+
+        out
+    }
+}
+
 // Generic over any router state `S` that can hand us an `AppState` — this is
 // what lets the extractor be used both directly (routers keyed on AppState,
 // e.g. /ws, /reconnect) and via the substate pattern (routers keyed on
@@ -165,5 +316,57 @@ async fn resolve_tenant_by_api_key(
         Ok(tenant_id)
     } else {
         Err(AppError::InvalidApiKey)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observe_places_latency_in_first_matching_bucket() {
+        let mut h = TenantLatencyHistogram::new();
+        h.observe(3);
+        h.observe(7);
+        h.observe(50);
+        h.observe(5000);
+
+        assert_eq!(h.buckets[0], 1); // <= 5
+        assert_eq!(h.buckets[1], 1); // <= 10
+        assert_eq!(h.buckets[3], 1); // <= 50
+        assert_eq!(h.buckets[TENANT_LATENCY_BUCKETS_MS.len()], 1); // overflow
+        assert_eq!(h.count, 4);
+        assert_eq!(h.sum_ms, 5060);
+    }
+
+    #[test]
+    fn low_volume_tenants_roll_into_sentinel_series() {
+        let mut store = TenantLatencyStore::new();
+        let noisy = Uuid::new_v4();
+        let quiet = Uuid::new_v4();
+
+        for _ in 0..TENANT_LATENCY_MIN_OBSERVATIONS {
+            store.observe(noisy, TenantLatencyPath::WebhookIngestion, 12);
+        }
+        store.observe(quiet, TenantLatencyPath::WebhookIngestion, 12);
+
+        let snap = store.snapshot(TenantLatencyPath::WebhookIngestion);
+        assert!(snap.iter().any(|(label, _)| label == &noisy.to_string()));
+        assert!(snap.iter().any(|(label, _)| label == LOW_VOLUME_TENANT_LABEL));
+        assert!(!snap.iter().any(|(label, _)| label == &quiet.to_string()));
+    }
+
+    #[test]
+    fn cardinality_is_bounded_under_large_multi_tenant_load() {
+        let mut store = TenantLatencyStore::new();
+        // 10k tenants, each with a single observation: none are reportable,
+        // so the emitted series count must stay at 1 (the sentinel) per path.
+        for _ in 0..10_000 {
+            store.observe(Uuid::new_v4(), TenantLatencyPath::GraphqlQuery, 8);
+        }
+        let snap = store.snapshot(TenantLatencyPath::GraphqlQuery);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].0, LOW_VOLUME_TENANT_LABEL);
+        assert_eq!(snap[0].1.count, 10_000);
     }
 }
