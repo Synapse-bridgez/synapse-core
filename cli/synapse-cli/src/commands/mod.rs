@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod doctor;
 pub mod events;
 pub mod graphql;
 pub mod health;
@@ -49,6 +50,21 @@ pub enum Commands {
     /// Administrative operations (locks, quotas, reconciliation, webhooks, …)
     #[command(subcommand)]
     Admin(admin::AdminCommands),
+
+    /// Diagnose local environment and configuration issues
+    #[command(
+        about = "Diagnose local environment and configuration issues",
+        long_about = "Run a series of independent diagnostic checks against your local \
+                      environment and the target Synapse server.\n\n\
+                      Checks:\n  \
+                      config       — Is the local config file present and valid?\n  \
+                      credentials  — Are the configured credentials accepted?\n  \
+                      connectivity — Is the server reachable, and what is the latency?\n  \
+                      version      — Is the CLI compatible with the server version?\n\n\
+                      Each failing check reports a specific suggested fix. Diagnosis only; \
+                      no changes are applied automatically."
+    )]
+    Doctor(doctor::DoctorCmd),
 
     /// Real-time event streaming commands
     #[command(subcommand)]

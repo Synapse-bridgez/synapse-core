@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use synapse_cli::commands::{
-    events, graphql, health, settlements, stats, transactions, Cli, Commands,
+    doctor, events, graphql, health, settlements, stats, transactions, Cli, Commands,
 };
 
 #[tokio::main]
@@ -12,6 +12,7 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         Commands::Admin(cmd) => synapse_cli::commands::admin::run(cmd, base_url, api_key).await,
+        Commands::Doctor(cmd) => doctor::run(cmd, base_url, api_key).await,
         Commands::Events(cmd) => {
             events::handle_events(events::EventsCmd { command: cmd }, base_url).await
         }
