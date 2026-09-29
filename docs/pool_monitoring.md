@@ -105,6 +105,75 @@ Example Prometheus alert rule:
     description: "Pool usage is {{ $value }}% on {{ $labels.instance }}"
 ```
 
+## Autoscaling Policy: queue depth and pool saturation
+
+The service already emits the two core scaling signals needed for an application-level autoscaling policy:
+
+- `pending_queue_depth`: backlog depth for the pending transaction queue.
+- `db_pool_saturation_ratio`: active DB pool share (`active / max_connections`).
+
+A scaling policy should react when either signal crosses a threshold and should include hysteresis so the fleet does not flap when the workload sits near the boundary.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: synapse-core
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: synapse-core
+  minReplicas: 2
+  maxReplicas: 12
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 20
+          periodSeconds: 300
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+    - type: Pods
+      pods:
+        metric:
+          name: pending_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "50"
+    - type: Pods
+      pods:
+        metric:
+          name: db_pool_saturation_ratio
+        target:
+          type: AverageValue
+          averageValue: "0.80"
+```
+
+Recommended psychology:
+
+- Scale up when `pending_queue_depth > 50` or `db_pool_saturation_ratio > 0.80` for 2 consecutive evaluation windows.
+- Scale down only when `pending_queue_depth < 25` and `db_pool_saturation_ratio < 0.60` for the full stabilization window.
+- Maintain the standard CPU/memory checks as guardrails, but do not use them as the primary overload signal.
+
 ## Testing
 
 Use the provided test script to verify the feature:

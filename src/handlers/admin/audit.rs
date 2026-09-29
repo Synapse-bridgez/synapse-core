@@ -1,3 +1,4 @@
+use crate::db::cold_storage::{self, TierInfo};
 use crate::db::queries::{search_audit_logs, AuditLogRow, AuditSearchParams};
 use crate::error::AppError;
 use crate::ApiState;
@@ -10,6 +11,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::Row as _;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -184,7 +186,114 @@ pub async fn search_audit_logs_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Unified (hot + cold) audit log query (#1285)
+// ---------------------------------------------------------------------------
+
+/// Query params for the unified audit log endpoint.
+#[derive(Debug, Deserialize)]
+pub struct UnifiedAuditQuery {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub entity_id: Option<Uuid>,
+    pub entity_type: Option<String>,
+    #[serde(default = "default_unified_limit")]
+    pub limit: i64,
+}
+
+fn default_unified_limit() -> i64 {
+    100
+}
+
+/// Response returned by `GET /admin/audit/unified`.
+#[derive(Debug, Serialize)]
+pub struct UnifiedAuditResponse {
+    pub total: i64,
+    pub data: Vec<crate::db::cold_storage::UnifiedAuditRow>,
+    pub tier_info: TierInfo,
+}
+
+/// `GET /admin/audit/unified` — query audit logs transparently across hot and
+/// cold storage tiers.
+///
+/// Accepts `from`, `to` (RFC 3339), optional `entity_id`, `entity_type`, and
+/// `limit` (max 1000).
+///
+/// When the requested time range overlaps cold-archived data, the response
+/// body includes `tier_info.cold_tier_touched = true` and
+/// `tier_info.cold_latency_note` so callers can surface this to their users.
+/// Cold-tier access is also logged as a structured trace event.
+pub async fn query_unified_audit_logs_handler(
+    State(state): State<ApiState>,
+    Query(q): Query<UnifiedAuditQuery>,
+) -> Result<Response, AppError> {
+    // Check whether the range touches cold archives that have NOT yet been
+    // rehydrated, and warn if so (results will be incomplete until rehydration
+    // is run).
+    let cold_overlap = cold_storage::check_cold_overlap(&state.app_state.db, q.from, q.to)
+        .await
+        .unwrap_or(false);
+
+    if cold_overlap {
+        // Cold data has been registered — it's already in cold_audit_logs.
+        // `query_audit_logs` will include it via the unified view.
+    } else {
+        // No cold pointers registered for this range.  Check if any archive
+        // file *covers* this range but hasn't been rehydrated yet.
+        let archive_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM audit_log_archives \
+             WHERE covers_from <= $2 AND covers_to >= $1)",
+        )
+        .bind(q.from)
+        .bind(q.to)
+        .fetch_one(&state.app_state.db)
+        .await
+        .unwrap_or(false);
+
+        if archive_exists {
+            cold_storage::warn_cold_data_not_rehydrated(q.from, q.to);
+        }
+    }
+
+    let result = cold_storage::query_audit_logs(
+        &state.app_state.db,
+        q.from,
+        q.to,
+        q.entity_id,
+        q.entity_type.as_deref(),
+        q.limit,
+    )
+    .await
+    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+    Ok(Json(UnifiedAuditResponse {
+        total: result.total,
+        data: result.rows,
+        tier_info: result.tier_info,
+    })
+    .into_response())
+}
+
+/// `GET /admin/audit/cold/pointers` — list all registered cold archive
+/// pointers, i.e. which archive files have been rehydrated into
+/// `cold_audit_logs` and are available for unified queries.
+pub async fn list_cold_pointers_handler(
+    State(state): State<ApiState>,
+) -> Result<impl IntoResponse, AppError> {
+    let pointers = cold_storage::list_cold_pointers(&state.app_state.db)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "count": pointers.len(),
+            "pointers": pointers,
+        })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Tests (existing + new)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

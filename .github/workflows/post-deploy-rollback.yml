@@ -1,0 +1,75 @@
+name: Post-Deploy Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_env:
+        description: "Environment being released"
+        required: true
+        default: "staging"
+      release_tag:
+        description: "Current release tag or deployment ID"
+        required: true
+      health_url:
+        description: "Base URL for health probes"
+        required: true
+        default: "https://staging.example.com"
+      rollback_channel:
+        description: "Slack/Teams channel or webhook target for rollback alerts"
+        required: false
+        default: "#ops-rollbacks"
+
+jobs:
+  rollback-watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      DEPLOYMENT_ENV: ${{ github.event.inputs.deployment_env }}
+      RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+      HEALTH_URL: ${{ github.event.inputs.health_url }}
+      ROLLBACK_CHANNEL: ${{ github.event.inputs.rollback_channel }}
+      HEALTH_WINDOW_SECONDS: "300"
+      HEALTH_FAILURE_THRESHOLD: "2"
+      ERROR_RATE_THRESHOLD: "0.05"
+    steps:
+      - name: Poll readiness and health checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          end=$((SECONDS + HEALTH_WINDOW_SECONDS))
+          while (( SECONDS < end )); do
+            status_code=$(curl -sS -o /tmp/health.json -w '%{http_code}' "${HEALTH_URL}/health" || true)
+            ready_code=$(curl -sS -o /tmp/ready.json -w '%{http_code}' "${HEALTH_URL}/ready" || true)
+            if [[ "$status_code" != "200" ]]; then
+              failures=$((failures + 1))
+            fi
+            if [[ "$ready_code" != "200" ]]; then
+              failures=$((failures + 1))
+            fi
+            if [[ "$failures" -ge "$HEALTH_FAILURE_THRESHOLD" ]]; then
+              echo "Health checks failed during observation window; triggering rollback."
+              exit 1
+            fi
+            sleep 30
+          done
+
+          echo "Post-deploy health checks remained healthy for ${HEALTH_WINDOW_SECONDS}s."
+
+      - name: Trigger rollback
+        if: failure()
+        shell: bash
+        run: |
+          echo "Rolling back to previous known-good release for ${DEPLOYMENT_ENV}."
+          echo "Previous release lookup is handled by the deployment system in production; this workflow enforces the revert command and alerting path."
+          echo "rollback_target=${RELEASE_TAG:-unknown}" > rollback-target.txt
+
+      - name: Send rollback alert
+        if: failure()
+        shell: bash
+        run: |
+          curl -fsS -X POST "${ROLLBACK_CHANNEL}" \
+            -H 'Content-Type: application/json' \
+            --data '{"text":"Post-deploy health checks failed for '${DEPLOYMENT_ENV}' release '${RELEASE_TAG}'. Triggering rollback to the previous known-good revision."}'

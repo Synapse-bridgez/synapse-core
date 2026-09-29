@@ -127,6 +127,22 @@ pub fn db_pool_idle_connections() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Maximum configured DB pool size gauge.
+pub fn db_pool_max_connections() -> ObservableGauge<u64> {
+    meter()
+        .u64_observable_gauge("db_pool_max_connections")
+        .with_description("Configured maximum size of the database pool")
+        .init()
+}
+
+/// Database pool saturation ratio: active connections divided by configured max.
+pub fn db_pool_saturation_ratio() -> ObservableGauge<f64> {
+    meter()
+        .f64_observable_gauge("db_pool_saturation_ratio")
+        .with_description("Fraction of the configured database pool currently in use")
+        .init()
+}
+
 /// DB query timeout counter (mirrors `DB_QUERY_TIMEOUT_TOTAL` atomic).
 pub fn db_query_timeout_total() -> Counter<u64> {
     meter()
@@ -544,6 +560,59 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
     meter()
         .u64_counter("admin_compliance_report_requests_total")
         .with_description("Requests to the admin compliance report endpoints, labeled by operation")
+        .init()
+}
+
+/// Replication lag measurement histogram (milliseconds), labeled by `replica`.
+/// A value of -1 indicates the replica is unreachable.
+pub fn replica_lag_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("replica_lag_ms")
+        .with_description("Replication lag on read replicas in milliseconds, labeled by replica name")
+        .with_unit(crate::metrics::Unit::new("ms"))
+        .init()
+}
+
+/// Replica lag alert counter, labeled by `replica` and `reason` ("threshold_exceeded" | "unreachable").
+pub fn replica_lag_alert_total() -> Counter<u64> {
+    meter()
+        .u64_counter("replica_lag_alert_total")
+        .with_description("Alerts triggered when replica lag exceeds threshold or replica becomes unreachable")
+        .init()
+}
+
+/// ANALYZE staleness ratio histogram (0.0-1.0), labeled by `table` (schema.table).
+/// Ratio = n_mod_since_analyze / estimate_live_rows.
+pub fn analyze_staleness_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("analyze_staleness_ratio")
+        .with_description("Ratio of modifications since last ANALYZE relative to estimated live rows")
+        .init()
+}
+
+/// Count of tables flagged as stale (n_mod_since_analyze exceeding configured threshold).
+pub fn stale_tables_total() -> Counter<u64> {
+    meter()
+        .u64_counter("stale_tables_total")
+        .with_description("Number of tables with stale ANALYZE statistics relative to write volume")
+        .init()
+}
+
+/// Table bloat ratio as a percentage, labeled by `schema` and `table`
+pub fn table_bloat_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_ratio")
+        .with_description("Estimated table bloat ratio as percentage of wasted space, labeled by schema and table")
+        .init()
+}
+
+/// Estimated table bloat size in megabytes, labeled by `schema` and `table`
+pub fn table_bloat_size_mb() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_size_mb")
+        .with_description("Estimated table bloat size in MB, labeled by schema and table")
+        .init()
+}
         .init()
 }
 

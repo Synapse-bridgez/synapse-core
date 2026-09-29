@@ -25,6 +25,7 @@
 pub mod error;
 pub mod input_validation;
 pub mod pagination;
+pub mod persisted_queries;
 pub mod rate_limiting;
 pub mod resolvers;
 pub mod schema;

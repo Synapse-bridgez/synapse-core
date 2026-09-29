@@ -1,11 +1,17 @@
 pub mod audit;
 pub mod bulk_status;
 pub mod compliance;
+pub mod config_export;
 pub mod locks;
 pub mod quota;
 pub mod reconciliation;
+pub mod rules_preview;
+pub mod transaction_notes;
+pub mod webhook_endpoints;
 pub mod webhook_filter_rules;
+pub mod webhook_redirects;
 pub mod webhook_replay;
+pub mod webhook_retry_policy;
 
 use crate::error::AppError;
 use crate::validation::{validate_max_len, validate_required};
@@ -109,6 +115,14 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
             "/webhooks/endpoints/:id/rate-limit",
             post(update_webhook_rate_limit),
         )
+}
+
+/// Create webhook endpoint management routes
+pub fn webhook_endpoints_routes() -> Router<sqlx::PgPool> {
+    Router::new().route(
+        "/webhooks/endpoints/batch",
+        post(webhook_endpoints::batch_webhook_operations),
+    )
 }
 
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
