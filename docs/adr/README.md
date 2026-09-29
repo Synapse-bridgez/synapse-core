@@ -31,13 +31,13 @@ See [000-template.md](000-template.md) for the full template.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
-| [001](001-database-partitioning.md) | Database Partitioning Strategy | Accepted | 2025-02 |
-| [002](002-circuit-breaker.md) | Circuit Breaker Pattern for External APIs | Accepted | 2025-02 |
-| [003](003-multi-tenant-isolation.md) | Multi-Tenant Isolation Strategy | Accepted | 2025-02 |
-| [004](004-payment-matching-authority.md) | Payment-Matching Authority: ReconciliationJob vs. AccountMonitor | Proposed | 2026-08 |
-| [005](005-transaction-completion-pipeline-authority.md) | Transaction Completion Pipeline Authority: processor.rs vs. transaction_processor.rs | Proposed | 2026-08 |
-| [006](006-backup-verification-checksum-only.md) | Backup Verification Is Checksum-Only, Not Restore-and-Verify | Accepted | 2026-08 |
-| [007](007-remove-orphaned-hexagonal-and-payments-modules.md) | Remove Orphaned Hexagonal Transaction Layer and Payments Module | Accepted | 2026-08 |
+| [001](./001-database-partitioning.md) | Database Partitioning Strategy | Accepted | 2025-02 |
+| [002](./002-circuit-breaker.md) | Circuit Breaker Pattern for External APIs | Accepted | TBD |
+| [003](./003-multi-tenant-isolation.md) | Multi-Tenant Isolation Strategy | Accepted | TBD |
+| [004](./004-payment-matching-authority.md) | Payment-Matching Authority — ReconciliationJob vs. AccountMonitor | Proposed | TBD |
+| [005](./005-transaction-completion-pipeline-authority.md) | Transaction Completion Pipeline Authority — processor.rs vs. transaction_processor.rs | Proposed | TBD |
+| [006](./006-backup-verification-checksum-only.md) | Backup verification is checksum-only, not restore-and-verify | Accepted | TBD |
+| [007](./007-remove-orphaned-hexagonal-and-payments-modules.md) | Remove Orphaned Hexagonal Transaction Layer and Payments Module | Accepted | TBD |
 
 ## When to Create an ADR
 
