@@ -7,6 +7,10 @@ name: Unreachable Modules Tracker
 # updates a tracking issue when the number of known/suppressed unreachable
 # modules in docs/known-unreachable-modules.md has grown past the recorded
 # baseline, per docs/adr/007-remove-orphaned-hexagonal-and-payments-modules.md.
+#
+# It also runs the documentation-freshness audit (issue 1368) on the same
+# weekly cadence, flagging docs that reference file paths, module/function
+# names, or endpoint routes that no longer resolve in the current codebase.
 
 on:
   schedule:
@@ -59,4 +63,45 @@ jobs:
             gh issue edit "$existing" --title "$title" --body-file "$body_file"
           else
             gh issue create --title "$title" --body-file "$body_file" --label "tech-debt,unreachable-modules"
+          fi
+
+  audit-doc-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run documentation-freshness audit (non-blocking)
+        id: audit
+        run: |
+          set +e
+          cargo run --quiet --manifest-path xtask/Cargo.toml -- doc-freshness --report doc-freshness-report.txt > doc-freshness.log 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          broken=$(grep -cE '^BROKEN' doc-freshness-report.txt 2>/dev/null || echo 0)
+          echo "broken=$broken" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update tracking issue if broken references found
+        if: steps.audit.outputs.broken != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="Documentation freshness: ${{ steps.audit.outputs.broken }} broken reference(s)"
+          body_file=$(mktemp)
+          {
+            echo "The documentation-freshness audit (issue 1368) found ${{ steps.audit.outputs.broken }} reference(s)"
+            echo "in docs/ that no longer resolve to real files, modules, or endpoints in the current codebase."
+            echo
+            echo "This is a triage prompt only — it checks reference/existence, not semantic accuracy."
+            echo "Intentionally illustrative/pseudocode examples can be excluded with the"
+            echo "\`<!-- doc-freshness:ignore -->\` marker."
+            echo
+            echo "Report:"
+            echo
+            cat doc-freshness-report.txt
+          } > "$body_file"
+
+          existing=$(gh issue list --search "Documentation freshness: in:title" --state open --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file "$body_file"
+          else
+            gh issue create --title "$title" --body-file "$body_file" --label "tech-debt,documentation"
           fi
