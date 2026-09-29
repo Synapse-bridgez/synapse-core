@@ -1,0 +1,171 @@
+# Contributor Onboarding Configuration
+# Maps GitHub issue labels to relevant documentation and setup guides
+
+categories:
+  # Core Platform & Architecture
+  governance_community:
+    label: "Governance & Community"
+    welcome: "Welcome! This is a governance/community issue. "
+    setup_steps:
+      - "Review CONTRIBUTING.md for overall contribution guidelines"
+      - "Familiarize yourself with docs/adr/ (Architecture Decision Records)"
+      - "Check docs/ for governance and process documentation"
+    documentation:
+      - "CONTRIBUTING.md"
+      - "docs/adr/README.md"
+      - "README.md"
+
+  database_data_platform:
+    label: "Database & Data Platform"
+    welcome: "Welcome! This involves database/data platform changes. "
+    setup_steps:
+      - "Ensure PostgreSQL 14+ is running (see CONTRIBUTING.md)"
+      - "Set up Redis 7+ for caching layer"
+      - "Run: docker-compose -f docker-compose.dev.yml up -d"
+      - "Run: sqlx migrate run"
+    documentation:
+      - "CONTRIBUTING.md"
+      - "docs/database-reconnection-logic.md"
+      - "docs/state-machine.md"
+      - "docs/tenant-rls-request-path.md"
+
+  transaction_matching:
+    label: "Transaction & Payment Matching"
+    welcome: "Welcome! This involves transaction/payment matching logic. "
+    setup_steps:
+      - "Review payment matching architecture in docs/adr/004-payment-matching-authority.md"
+      - "Understand transaction pipeline in docs/adr/005-transaction-completion-pipeline-authority.md"
+      - "Build and run: cargo build && cargo test"
+    documentation:
+      - "docs/adr/004-payment-matching-authority.md"
+      - "docs/adr/005-transaction-completion-pipeline-authority.md"
+      - "docs/state-machine.md"
+      - "CONTRIBUTING.md"
+
+  multi_tenant_isolation:
+    label: "Multi-Tenant Isolation"
+    welcome: "Welcome! This involves multi-tenant isolation and security. "
+    setup_steps:
+      - "Review multi-tenant isolation strategy in docs/adr/003-multi-tenant-isolation.md"
+      - "Understand RLS (Row-Level Security) in docs/tenant-rls-request-path.md"
+      - "Run isolation tests: cargo test tenant_isolation"
+    documentation:
+      - "docs/adr/003-multi-tenant-isolation.md"
+      - "docs/tenant-rls-request-path.md"
+      - "docs/audit_logging.md"
+
+  security:
+    label: "Security"
+    welcome: "Welcome! Thank you for contributing to security improvements. "
+    setup_steps:
+      - "Review security-related ADRs in docs/adr/"
+      - "Familiarize yourself with audit logging: docs/audit_logging.md"
+      - "Build and run full test suite: cargo test --all"
+    documentation:
+      - "docs/adr/003-multi-tenant-isolation.md"
+      - "docs/audit_logging.md"
+      - "CONTRIBUTING.md"
+
+  testing:
+    label: "Testing & Test Coverage"
+    welcome: "Welcome! Quality tests are essential for Synapse. "
+    setup_steps:
+      - "Review testing requirements in CONTRIBUTING.md"
+      - "Check test structure: tests/README_*.md files"
+      - "Run full test suite: cargo test --all"
+    documentation:
+      - "CONTRIBUTING.md"
+      - "tests/README_REQUEST_LOGGER.md"
+      - "tests/README_STARTUP_VALIDATION.md"
+
+  performance:
+    label: "Performance & Optimization"
+    welcome: "Welcome! Performance improvements help Synapse scale. "
+    setup_steps:
+      - "Review database partitioning strategy in docs/adr/001-database-partitioning.md"
+      - "Check caching documentation: docs/query-cache.md"
+      - "Set up load testing: tests/load/"
+    documentation:
+      - "docs/adr/001-database-partitioning.md"
+      - "docs/query-cache.md"
+      - "tests/load/README.md"
+
+  observability:
+    label: "Observability & Monitoring"
+    welcome: "Welcome! Observability helps us understand system behavior. "
+    setup_steps:
+      - "Review audit logging: docs/audit_logging.md"
+      - "Understand error catalog: docs/error-catalog.md"
+      - "Check load test results: tests/load/VALIDATION_README.md"
+    documentation:
+      - "docs/audit_logging.md"
+      - "docs/error-catalog.md"
+      - "tests/load/VALIDATION_README.md"
+
+  reliability:
+    label: "Reliability & Resilience"
+    welcome: "Welcome! System reliability is critical. "
+    setup_steps:
+      - "Review circuit breaker pattern: docs/adr/002-circuit-breaker.md"
+      - "Check database failover: docs/database_failover.md"
+      - "Understand recovery procedures in relevant docs"
+    documentation:
+      - "docs/adr/002-circuit-breaker.md"
+      - "docs/database_failover.md"
+      - "docs/database-reconnection-logic.md"
+
+  cli_sdk:
+    label: "CLI & SDK"
+    welcome: "Welcome! CLI and SDK improvements enhance developer experience. "
+    setup_steps:
+      - "Review CLI structure: cli/synapse-cli/README.md"
+      - "Check Rust SDK: sdks/rust/README.md"
+      - "Build SDKs: cargo build -p synapse-cli"
+    documentation:
+      - "cli/synapse-cli/README.md"
+      - "sdks/rust/README.md"
+      - "CONTRIBUTING.md"
+
+  documentation:
+    label: "Documentation"
+    welcome: "Welcome! Great documentation helps everyone. "
+    setup_steps:
+      - "Review documentation structure in docs/"
+      - "Check existing patterns in *.md files"
+      - "Ensure clarity and completeness"
+    documentation:
+      - "CONTRIBUTING.md"
+      - "docs/README.md (if exists)"
+
+  fallback:
+    welcome: "Welcome to Synapse Core! "
+    setup_steps:
+      - "Set up development environment: See CONTRIBUTING.md"
+      - "Review architecture: See docs/adr/README.md"
+      - "Build and test: cargo build && cargo test --all"
+    documentation:
+      - "CONTRIBUTING.md"
+      - "docs/adr/README.md"
+      - "README.md"
+
+# Template for the onboarding comment
+comment_template: |
+  ## 👋 Welcome, contributor!
+
+  {welcome_message}
+
+  I've prepared a checklist to help you get started:
+
+  ### ✅ Setup Checklist
+  {setup_checklist}
+
+  ### 📚 Relevant Documentation
+  {documentation_links}
+
+  ### 💡 Tips
+  - Feel free to ask questions in comments
+  - Review CONTRIBUTING.md for coding standards and PR process
+  - Make sure to run tests locally before opening a PR
+  - Join our discussions for architecture-related questions
+
+  **Happy coding! 🚀**
