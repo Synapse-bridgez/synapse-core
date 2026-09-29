@@ -1,0 +1,103 @@
+name: Office Hours Reminder
+
+# Scheduling mechanism for recurring maintainer office hours.
+# Generates/publishes the recurring calendar entry and posts a reminder
+# before each session. Notes archival is handled by the
+# docs/community/office-hours/ index (see scripts/office-hours/).
+
+on:
+  schedule:
+    # Every Monday at 15:00 UTC, one hour before the 16:00 UTC session.
+    - cron: '0 15 * * 1'
+  workflow_dispatch:
+    inputs:
+      session_date:
+        description: 'Session date (YYYY-MM-DD). Defaults to today (UTC).'
+        required: false
+        type: string
+      status:
+        description: 'Session status: scheduled or skipped'
+        required: false
+        default: 'scheduled'
+        type: choice
+        options:
+          - scheduled
+          - skipped
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  remind:
+    name: Publish office-hours reminder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve session metadata
+        id: session
+        run: |
+          DATE="${{ github.event.inputs.session_date }}"
+          if [ -z "$DATE" ]; then
+            DATE="$(date -u +%Y-%m-%d)"
+          fi
+          STATUS="${{ github.event.inputs.status }}"
+          if [ -z "$STATUS" ]; then
+            STATUS="scheduled"
+          fi
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Build reminder body
+        id: body
+        run: |
+          DATE="${{ steps.session.outputs.date }}"
+          STATUS="${{ steps.session.outputs.status }}"
+          if [ "$STATUS" = "skipped" ]; then
+            {
+              echo "body<<EOF"
+              echo "## Office Hours — $DATE (SKIPPED)"
+              echo ""
+              echo "This week's maintainer office hours session is **cancelled/skipped**."
+              echo "No notes will be archived for this date; the archive records the"
+              echo "skipped session explicitly so there is no ambiguous gap."
+              echo ""
+              echo "Next session: the following Monday at 16:00 UTC."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "body<<EOF"
+              echo "## Office Hours — $DATE"
+              echo ""
+              echo "Recurring maintainer office hours start at **16:00 UTC** (one hour from now)."
+              echo ""
+              echo "- Join link: see the pinned calendar entry in the community channel."
+              echo "- Bring architecture questions and blockers."
+              echo "- After the session, archive notes using the template at"
+              echo "  \`docs/community/office-hours/000-template.md\` and open a PR."
+              echo ""
+              echo "Notes are indexed by topic so contributors who cannot attend can"
+              echo "still find relevant discussions."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+
+      - name: Publish reminder issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = '${{ steps.session.outputs.date }}';
+            const status = '${{ steps.session.outputs.status }}';
+            const body = `${{ steps.body.outputs.body }}`;
+            const title = status === 'skipped'
+              ? `Office Hours ${date} — skipped`
+              : `Office Hours ${date} — reminder`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['office-hours'],
+            });
