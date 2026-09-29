@@ -1,0 +1,55 @@
+name: Capacity Forecast
+
+# Daily read-only projection of pool saturation, PostgreSQL storage, and request
+# throughput. The summary is visible on each scheduled workflow run; JSON and
+# Markdown are retained as run artifacts for trend comparison.
+on:
+  schedule:
+    - cron: '20 6 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "xtask/**"
+      - ".github/workflows/capacity-forecast.yml"
+      - "docs/capacity-forecast.md"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p xtask
+
+  forecast:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate forecast
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+          PROMETHEUS_BEARER_TOKEN: ${{ secrets.PROMETHEUS_BEARER_TOKEN }}
+          DATABASE_STORAGE_CAPACITY_BYTES: ${{ vars.DATABASE_STORAGE_CAPACITY_BYTES }}
+          THROUGHPUT_CAPACITY_RPS: ${{ vars.THROUGHPUT_CAPACITY_RPS || '1000' }}
+        run: |
+          args=(--window-days 90 --out-dir capacity-forecast)
+          if [ -n "$DATABASE_STORAGE_CAPACITY_BYTES" ]; then
+            args+=(--storage-capacity-bytes "$DATABASE_STORAGE_CAPACITY_BYTES")
+          fi
+          if [ -n "$THROUGHPUT_CAPACITY_RPS" ]; then
+            args+=(--throughput-capacity-rps "$THROUGHPUT_CAPACITY_RPS")
+          fi
+          cargo xtask capacity-forecast "${args[@]}"
+      - name: Publish report summary
+        run: cat capacity-forecast/capacity-forecast.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capacity-forecast-${{ github.run_id }}
+          path: capacity-forecast/
+          retention-days: 90
