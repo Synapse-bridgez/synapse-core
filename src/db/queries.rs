@@ -1512,6 +1512,97 @@ pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
 }
 
 // ---------------------------------------------------------------------------
+// Settlement Legs (Split Settlements)
+// ---------------------------------------------------------------------------
+
+pub async fn insert_settlement_leg(
+    executor: &mut SqlxTransaction<'_, Postgres>,
+    settlement_leg: &crate::db::models::SettlementLeg,
+) -> Result<crate::db::models::SettlementLeg> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO settlement_legs ... RETURNING *",
+        sqlx::query_as::<_, crate::db::models::SettlementLeg>(
+            r#"
+        INSERT INTO settlement_legs (
+            id, settlement_id, destination_account, amount, split_type, split_value,
+            sequence_order, status, delivery_attempt_count, last_delivery_error, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING *
+        "#,
+        )
+        .bind(settlement_leg.id)
+        .bind(settlement_leg.settlement_id)
+        .bind(&settlement_leg.destination_account)
+        .bind(&settlement_leg.amount)
+        .bind(&settlement_leg.split_type)
+        .bind(&settlement_leg.split_value)
+        .bind(settlement_leg.sequence_order)
+        .bind(&settlement_leg.status)
+        .bind(settlement_leg.delivery_attempt_count)
+        .bind(&settlement_leg.last_delivery_error)
+        .bind(settlement_leg.created_at)
+        .bind(settlement_leg.updated_at)
+        .fetch_one(&mut **executor),
+    )
+    .await
+}
+
+pub async fn get_settlement_legs(
+    pool: &PgPool,
+    settlement_id: Uuid,
+) -> Result<Vec<crate::db::models::SettlementLeg>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM settlement_legs WHERE settlement_id = $1 ORDER BY sequence_order",
+        sqlx::query_as::<_, crate::db::models::SettlementLeg>(
+            "SELECT * FROM settlement_legs WHERE settlement_id = $1 ORDER BY sequence_order",
+        )
+        .bind(settlement_id)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+pub async fn update_settlement_leg_status(
+    pool: &PgPool,
+    leg_id: Uuid,
+    new_status: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE settlement_legs SET status = $1, last_delivery_error = $2, updated_at = NOW() WHERE id = $3",
+        sqlx::query(
+            "UPDATE settlement_legs SET status = $1, last_delivery_error = $2, updated_at = NOW() WHERE id = $3",
+        )
+        .bind(new_status)
+        .bind(error)
+        .bind(leg_id)
+        .execute(pool),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn increment_settlement_leg_delivery_attempt(
+    pool: &PgPool,
+    leg_id: Uuid,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE settlement_legs SET delivery_attempt_count = delivery_attempt_count + 1, updated_at = NOW() WHERE id = $1",
+        sqlx::query(
+            "UPDATE settlement_legs SET delivery_attempt_count = delivery_attempt_count + 1, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(leg_id)
+        .execute(pool),
+    )
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Transaction Search
 // ---------------------------------------------------------------------------
 
@@ -2460,6 +2551,333 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
+}
+
+// --- Webhook Endpoint Redirects (Issue #1259) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WebhookEndpointRedirect {
+    pub id: i64,
+    pub endpoint_id: Uuid,
+    pub redirect_url: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRedirectRequest {
+    pub redirect_url: String,
+    pub expires_at: DateTime<Utc>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Create a new webhook endpoint redirect
+pub async fn create_webhook_redirect(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+    redirect_url: &str,
+    expires_at: DateTime<Utc>,
+    metadata: Option<serde_json::Value>,
+) -> Result<WebhookEndpointRedirect> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO webhook_endpoint_redirects",
+        async {
+            sqlx::query_as::<_, WebhookEndpointRedirect>(
+                r#"
+                INSERT INTO webhook_endpoint_redirects (endpoint_id, redirect_url, expires_at, metadata)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id, endpoint_id, redirect_url, enabled, created_at, started_at, expires_at, cancelled_at, metadata
+                "#,
+            )
+            .bind(endpoint_id)
+            .bind(redirect_url)
+            .bind(expires_at)
+            .bind(metadata)
+            .fetch_one(pool)
+            .await
+        },
+    )
+    .await
+}
+
+/// Get active redirects for an endpoint (not expired, not cancelled)
+pub async fn get_active_endpoint_redirects(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+) -> Result<Vec<WebhookEndpointRedirect>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM webhook_endpoint_redirects WHERE endpoint_id = $1 AND active",
+        async {
+            sqlx::query_as::<_, WebhookEndpointRedirect>(
+                r#"
+                SELECT id, endpoint_id, redirect_url, enabled, created_at, started_at, expires_at, cancelled_at, metadata
+                FROM webhook_endpoint_redirects
+                WHERE endpoint_id = $1
+                    AND enabled = true
+                    AND cancelled_at IS NULL
+                    AND expires_at > NOW()
+                ORDER BY created_at DESC
+                "#,
+            )
+            .bind(endpoint_id)
+            .fetch_all(pool)
+            .await
+        },
+    )
+    .await
+}
+
+/// Cancel a webhook redirect (soft delete)
+pub async fn cancel_webhook_redirect(
+    pool: &PgPool,
+    redirect_id: i64,
+) -> Result<bool> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE webhook_endpoint_redirects SET cancelled_at = NOW()",
+        async {
+            let result = sqlx::query(
+                "UPDATE webhook_endpoint_redirects SET cancelled_at = NOW() WHERE id = $1 AND cancelled_at IS NULL"
+            )
+            .bind(redirect_id)
+            .execute(pool)
+            .await?;
+
+            Ok(result.rows_affected() > 0)
+        },
+    )
+    .await
+}
+
+/// Mark redirect as started
+pub async fn start_webhook_redirect(
+    pool: &PgPool,
+    redirect_id: i64,
+) -> Result<bool> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE webhook_endpoint_redirects SET started_at = NOW()",
+        async {
+            let result = sqlx::query(
+                "UPDATE webhook_endpoint_redirects SET started_at = NOW() WHERE id = $1 AND started_at IS NULL"
+            )
+            .bind(redirect_id)
+            .execute(pool)
+            .await?;
+
+            Ok(result.rows_affected() > 0)
+        },
+    )
+    .await
+}
+
+// --- Webhook Retry Policy (Issue #1258) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicyRequest {
+    pub max_attempts: Option<i32>,
+    pub base_delay_secs: Option<i32>,
+    pub multiplier: Option<f64>,
+    pub max_delay_secs: Option<i32>,
+}
+
+impl RetryPolicyRequest {
+    /// Validates the retry policy request against platform-wide safety boundaries
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(attempts) = self.max_attempts {
+            if attempts < 1 || attempts > 50 {
+                return Err("max_attempts must be between 1 and 50".to_string());
+            }
+        }
+        if let Some(delay) = self.base_delay_secs {
+            if delay < 1 || delay > 3600 {
+                return Err("base_delay_secs must be between 1 and 3600".to_string());
+            }
+        }
+        if let Some(mult) = self.multiplier {
+            if mult <= 1.0 || mult > 10.0 {
+                return Err("multiplier must be between 1.0 (exclusive) and 10.0".to_string());
+            }
+        }
+        if let Some(delay) = self.max_delay_secs {
+            if delay < 60 || delay > 86400 {
+                return Err("max_delay_secs must be between 60 and 86400".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Update retry policy for a webhook endpoint
+pub async fn update_webhook_retry_policy(
+    pool: &PgPool,
+    endpoint_id: Uuid,
+    policy: RetryPolicyRequest,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE webhook_endpoints SET retry_policy",
+        async {
+            // Build policy JSON with defaults for unspecified fields
+            let current_policy: serde_json::Value = sqlx::query_scalar(
+                "SELECT COALESCE(retry_policy, jsonb_build_object('max_attempts', 5, 'base_delay_secs', 10, 'multiplier', 2.0, 'max_delay_secs', 300)) FROM webhook_endpoints WHERE id = $1"
+            )
+            .bind(endpoint_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound)?;
+
+            let mut updated = current_policy.as_object().cloned().unwrap_or_default();
+
+            if let Some(attempts) = policy.max_attempts {
+                updated.insert("max_attempts".to_string(), serde_json::json!(attempts));
+            }
+            if let Some(delay) = policy.base_delay_secs {
+                updated.insert("base_delay_secs".to_string(), serde_json::json!(delay));
+            }
+            if let Some(mult) = policy.multiplier {
+                updated.insert("multiplier".to_string(), serde_json::json!(mult));
+            }
+            if let Some(delay) = policy.max_delay_secs {
+                updated.insert("max_delay_secs".to_string(), serde_json::json!(delay));
+            }
+
+            sqlx::query(
+                "UPDATE webhook_endpoints SET retry_policy = $1, updated_at = NOW() WHERE id = $2"
+            )
+            .bind(serde_json::to_value(&updated)?)
+            .bind(endpoint_id)
+            .execute(pool)
+            .await?;
+
+            Ok(())
+        },
+    )
+    .await
+}
+
+// --- Transaction Notes (Issue #1257) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TransactionNote {
+    pub id: i64,
+    pub transaction_id: Uuid,
+    pub admin_principal: String,
+    pub note_text: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTransactionNoteRequest {
+    pub note_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedNotes {
+    pub items: Vec<TransactionNote>,
+    pub has_more: bool,
+    pub cursor: Option<i64>,
+}
+
+/// Add a note to a transaction (immutable, append-only)
+pub async fn add_transaction_note(
+    pool: &PgPool,
+    transaction_id: Uuid,
+    admin_principal: &str,
+    note_text: &str,
+) -> Result<TransactionNote> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO transaction_notes (transaction_id, admin_principal, note_text)",
+        async {
+            sqlx::query_as::<_, TransactionNote>(
+                r#"
+                INSERT INTO transaction_notes (transaction_id, admin_principal, note_text)
+                VALUES ($1, $2, $3)
+                RETURNING id, transaction_id, admin_principal, note_text, created_at
+                "#,
+            )
+            .bind(transaction_id)
+            .bind(admin_principal)
+            .bind(note_text)
+            .fetch_one(pool)
+            .await
+        },
+    )
+    .await
+}
+
+/// Get paginated notes for a transaction
+pub async fn get_transaction_notes(
+    pool: &PgPool,
+    transaction_id: Uuid,
+    limit: i64,
+    cursor: Option<i64>,
+) -> Result<PaginatedNotes> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transaction_notes WHERE transaction_id = $1 ORDER BY id DESC",
+        async {
+            // Fetch limit + 1 to determine if there are more results
+            let fetch_limit = limit + 1;
+            let notes = if let Some(cursor_id) = cursor {
+                sqlx::query_as::<_, TransactionNote>(
+                    r#"
+                    SELECT id, transaction_id, admin_principal, note_text, created_at
+                    FROM transaction_notes
+                    WHERE transaction_id = $1 AND id < $2
+                    ORDER BY id DESC
+                    LIMIT $3
+                    "#,
+                )
+                .bind(transaction_id)
+                .bind(cursor_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await?
+            } else {
+                sqlx::query_as::<_, TransactionNote>(
+                    r#"
+                    SELECT id, transaction_id, admin_principal, note_text, created_at
+                    FROM transaction_notes
+                    WHERE transaction_id = $1
+                    ORDER BY id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(transaction_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await?
+            };
+
+            let has_more = notes.len() > limit as usize;
+            let items = if has_more {
+                notes[..limit as usize].to_vec()
+            } else {
+                notes
+            };
+
+            let next_cursor = if has_more && !items.is_empty() {
+                Some(items.last().unwrap().id)
+            } else {
+                None
+            };
+
+            Ok(PaginatedNotes {
+                items,
+                has_more,
+                cursor: next_cursor,
+            })
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
