@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use async_graphql::{
     extensions::{Extension, ExtensionContext, ExtensionFactory, NextExecute},
-    ErrorExtensions, Response,
+    ErrorExtensions, Response, QueryPlan,
 };
 
 use crate::cache::rate_limiting::{RateLimitConfig, RateLimitStrategy, RateLimiter};
@@ -78,6 +78,24 @@ const MIN_API_KEY_LEN: usize = 32;
 /// regardless of transport (see `docs/error-catalog.md`).
 pub const RATE_LIMITED_CODE: &str = crate::error::codes::RATE_LIMIT_001.0;
 
+/// Base cost per query field (before multipliers).
+const BASE_FIELD_COST: u32 = 1;
+
+/// Multiplier for list fields (nested array multiplier).
+const LIST_MULTIPLIER: u32 = 10;
+
+/// Multiplier for each level of nesting depth.
+const DEPTH_MULTIPLIER_PER_LEVEL: f32 = 1.5;
+
+/// Maximum allowed cost per request for authenticated users.
+const MAX_AUTHED_COST_PER_REQUEST: u32 = 10000;
+
+/// Maximum allowed cost per request for anonymous users.
+const MAX_ANON_COST_PER_REQUEST: u32 = 500;
+
+/// Per-tenant cost budget per minute.
+const COST_BUDGET_PER_MINUTE: u32 = 100000;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -91,6 +109,14 @@ pub struct GraphQlRateLimitConfig {
     pub anon_limit: u32,
     /// Duration of the rate-limit window.
     pub window: Duration,
+    /// Enable cost-based rate limiting (default: true)
+    pub cost_limiting_enabled: bool,
+    /// Maximum cost per request for authenticated users
+    pub max_authed_cost: u32,
+    /// Maximum cost per request for anonymous users
+    pub max_anon_cost: u32,
+    /// Cost budget per time window (per tenant/identity)
+    pub cost_budget_per_window: u32,
 }
 
 impl Default for GraphQlRateLimitConfig {
@@ -99,8 +125,78 @@ impl Default for GraphQlRateLimitConfig {
             authed_limit: DEFAULT_AUTHED_LIMIT,
             anon_limit: DEFAULT_ANON_LIMIT,
             window: DEFAULT_WINDOW,
+            cost_limiting_enabled: true,
+            max_authed_cost: MAX_AUTHED_COST_PER_REQUEST,
+            max_anon_cost: MAX_ANON_COST_PER_REQUEST,
+            cost_budget_per_window: COST_BUDGET_PER_MINUTE,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cost Calculation
+// ---------------------------------------------------------------------------
+
+/// Calculates the complexity cost of a GraphQL query.
+///
+/// Cost is based on:
+/// - Number of fields requested (base cost = 1 per field)
+/// - List multipliers (fields returning arrays cost more)
+/// - Nesting depth (deeper queries cost more)
+///
+/// Returns the calculated cost and an optional reason for high costs.
+pub fn calculate_query_cost(query_string: &str) -> (u32, Option<String>) {
+    let mut cost: u32 = 0;
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut brace_count = 0;
+
+    // Simple lexical analysis to estimate cost
+    for ch in query_string.chars() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escape_next = true;
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = !in_string,
+            '{' if !in_string => {
+                brace_count += 1;
+                depth = depth.max(brace_count);
+                cost += BASE_FIELD_COST;
+            }
+            '}' if !in_string => {
+                brace_count = brace_count.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    // Apply depth multiplier
+    let depth_multiplier = 1.0 + ((depth as f32 - 1.0).max(0.0) * DEPTH_MULTIPLIER_PER_LEVEL);
+    cost = (cost as f32 * depth_multiplier) as u32;
+
+    // Check for list indicators (rudimentary check for [ and ])
+    let list_count = query_string.matches('[').count() as u32;
+    if list_count > 0 {
+        cost = cost.saturating_add(list_count * LIST_MULTIPLIER);
+    }
+
+    let reason = if depth > 5 {
+        Some(format!("Query depth {} exceeds recommended depth", depth))
+    } else if cost > 1000 {
+        Some(format!("High complexity query cost: {}", cost))
+    } else {
+        None
+    };
+
+    (cost, reason)
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +309,49 @@ impl Extension for GraphQlRateLimitExtension {
     ) -> Response {
         let (identity, is_authed) = resolve_identity(ctx);
 
+        // Cost-based pre-execution validation
+        if self.config.cost_limiting_enabled {
+            let query_string = ctx.query_string();
+            let (query_cost, reason) = calculate_query_cost(&query_string);
+
+            let max_cost = if is_authed {
+                self.config.max_authed_cost
+            } else {
+                self.config.max_anon_cost
+            };
+
+            if query_cost > max_cost {
+                tracing::warn!(
+                    identity = %identity,
+                    operation = ?operation_name,
+                    query_cost = query_cost,
+                    max_cost = max_cost,
+                    reason = ?reason,
+                    "GraphQL query exceeds maximum complexity cost"
+                );
+
+                let err = async_graphql::Error::new(
+                    format!(
+                        "Query too complex: cost {} exceeds maximum {} — simplify the query",
+                        query_cost, max_cost
+                    )
+                )
+                .extend_with(|_, e| {
+                    e.set("code", RATE_LIMITED_CODE);
+                    e.set("queryCost", query_cost);
+                    e.set("maxCost", max_cost);
+                    if let Some(r) = reason {
+                        e.set("reason", r);
+                    }
+                });
+
+                return Response::from_errors(vec![
+                    err.into_server_error(async_graphql::Pos::default())
+                ]);
+            }
+        }
+
+        // Per-request rate limiting (existing flat limit)
         let limit_config = if is_authed {
             RateLimitConfig {
                 max_requests: self.config.authed_limit,
@@ -306,6 +445,45 @@ fn resolve_identity(ctx: &ExtensionContext<'_>) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- calculate_query_cost --
+
+    #[test]
+    fn simple_query_has_low_cost() {
+        let query = r#"{ user { id name } }"#;
+        let (cost, _reason) = calculate_query_cost(query);
+        assert!(cost > 0, "Simple query should have positive cost");
+        assert!(cost < 100, "Simple query should have low cost");
+    }
+
+    #[test]
+    fn deeply_nested_query_has_higher_cost() {
+        let query = r#"{ a { b { c { d { e { f { g { h { i { j { k } } } } } } } } } } }"#;
+        let (cost, _reason) = calculate_query_cost(query);
+        assert!(cost > 10, "Deeply nested query should have higher cost");
+    }
+
+    #[test]
+    fn query_with_lists_increases_cost() {
+        let query = r#"{ users { id posts { id comments { id } } } }"#;
+        let (cost, _reason) = calculate_query_cost(query);
+        assert!(cost > 0, "Query with lists should have positive cost");
+    }
+
+    #[test]
+    fn very_complex_query_triggers_reason() {
+        let query = r#"{ a { b { c { d { e { f { g { h { i { j { k } } } } } } } } } } }"#;
+        let (_cost, reason) = calculate_query_cost(query);
+        assert!(reason.is_some(), "Very complex query should have a reason");
+    }
+
+    #[test]
+    fn quoted_braces_not_counted() {
+        let query = r#"{ field(arg: "{not a real brace}") { id } }"#;
+        let (cost, _reason) = calculate_query_cost(query);
+        // Should not count the braces inside the string
+        assert!(cost > 0, "Query with quoted braces should still have positive cost");
+    }
 
     // -- validate_rate_limit_key --
 

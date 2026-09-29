@@ -1,6 +1,8 @@
 pub mod account_monitor;
 pub mod backup;
 pub mod backup_verification_job;
+pub mod circuit_breaker;
+pub mod circuit_breaker_coordinator;
 pub mod compliance;
 pub mod duplicate_detection;
 pub mod feature_flags;
@@ -21,6 +23,9 @@ pub mod webhook_dispatcher;
 pub use account_monitor::AccountMonitor;
 pub use backup::BackupService;
 pub use backup_verification_job::BackupVerificationJob;
+pub use circuit_breaker_coordinator::{
+    CircuitBreakerCoordinator, CircuitBreakerState, CircuitState, CoordinatorError,
+};
 pub use duplicate_detection::{DuplicateDetectionConfig, DuplicateDetector, DuplicateIndicator, TransactionSnapshot};
 pub use feature_flags::FeatureFlagService;
 pub use lock_manager::LeaderElection;
