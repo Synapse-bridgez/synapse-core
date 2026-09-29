@@ -1,0 +1,72 @@
+name: CODEOWNERS Validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/CODEOWNERS'
+      - '.github/workflows/codeowners-validation.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/CODEOWNERS'
+      - '.github/workflows/codeowners-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-codeowners:
+    name: Validate CODEOWNERS paths
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Assert every CODEOWNERS path pattern resolves to a real path
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          codeowners_file=".github/CODEOWNERS"
+          if [[ ! -f "$codeowners_file" ]]; then
+            echo "::error::Missing $codeowners_file"
+            exit 1
+          fi
+
+          status=0
+
+          while IFS= read -r raw_line; do
+            # Strip trailing comments and surrounding whitespace.
+            line="${raw_line%%#*}"
+            line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+            # Skip blank lines.
+            [[ -z "$line" ]] && continue
+
+            # First whitespace-delimited token is the path pattern.
+            pattern="$(printf '%s' "$line" | awk '{print $1}')"
+
+            # The catch-all pattern is always valid.
+            [[ "$pattern" == "*" ]] && continue
+
+            # Normalize the pattern into a glob usable by `compgen -G`.
+            glob="${pattern#/}"
+            if [[ "$glob" == */ ]]; then
+              glob="${glob}*"
+            fi
+
+            # shellcheck disable=SC2086
+            if ! compgen -G "$glob" > /dev/null; then
+              echo "::error file=$codeowners_file::CODEOWNERS pattern '$pattern' does not resolve to any path in the repository"
+              status=1
+            fi
+          done < "$codeowners_file"
+
+          if [[ "$status" -ne 0 ]]; then
+            echo "CODEOWNERS validation failed: one or more patterns reference removed or renamed paths."
+            exit 1
+          fi
+
+          echo "All CODEOWNERS path patterns resolve to real paths."

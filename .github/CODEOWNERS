@@ -1,0 +1,51 @@
+# CODEOWNERS
+#
+# Ownership is defined at the granularity of this repository's actual module
+# boundaries so that PRs touching a given subsystem are routed to reviewers
+# with the right context. GitHub's native CODEOWNERS-based review-request
+# automation uses this file directly; no custom routing bot is required.
+#
+# The last matching pattern wins, so more specific paths are listed after
+# broader ones. Every path below is validated in CI by
+# .github/workflows/codeowners-validation.yml, which fails if a pattern no
+# longer resolves to at least one real path in the repository.
+
+# Default owner for anything not covered by a more specific rule below.
+*                                   @synapse-core/maintainers
+
+# ---------------------------------------------------------------------------
+# Core Rust subsystems
+# ---------------------------------------------------------------------------
+/src/db/                             @synapse-core/database
+/src/graphql/                        @synapse-core/backend
+/src/services/                       @synapse-core/backend
+/src/                                @synapse-core/backend
+
+# ---------------------------------------------------------------------------
+# Database migrations
+# ---------------------------------------------------------------------------
+/migrations/                         @synapse-core/database
+
+# ---------------------------------------------------------------------------
+# CLI and SDKs
+# ---------------------------------------------------------------------------
+/cli/                                @synapse-core/cli
+/sdks/                               @synapse-core/sdks
+
+# ---------------------------------------------------------------------------
+# Build tooling
+# ---------------------------------------------------------------------------
+/xtask/                              @synapse-core/devops
+
+# ---------------------------------------------------------------------------
+# Infrastructure, CI, and governance
+# ---------------------------------------------------------------------------
+/.github/                            @synapse-core/devops
+/docker-compose.dev.yml              @synapse-core/devops
+/scripts/                            @synapse-core/devops
+
+# ---------------------------------------------------------------------------
+# Security-sensitive surfaces
+# ---------------------------------------------------------------------------
+/src/auth/                           @synapse-core/security
+/src/security/                       @synapse-core/security
