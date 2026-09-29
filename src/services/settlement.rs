@@ -1,11 +1,13 @@
-use crate::db::models::{Asset, Settlement};
+use crate::db::models::{Asset, Settlement, SettlementLeg};
 use crate::db::queries;
 use crate::error::AppError;
 use crate::validation::state_transitions::{is_valid_transition, SETTLEMENT_TRANSITIONS};
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, RoundingMode};
 use chrono::Utc;
 use opentelemetry::metrics::Histogram;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -29,6 +31,21 @@ fn map_update_settlement_err(e: sqlx::Error) -> AppError {
         sqlx::Error::RowNotFound => AppError::StaleTransition,
         other => AppError::DatabaseError(other.to_string()),
     }
+}
+
+/// Configuration for a single settlement split leg (destination + split rules)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitLegConfig {
+    pub destination_account: String,
+    pub split_type: String, // "fixed" or "percentage"
+    pub split_value: Option<BigDecimal>, // percentage (0-100) or fixed amount
+}
+
+/// Split settlement configuration for a tenant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitSettlementConfig {
+    pub legs: Vec<SplitLegConfig>,
+    pub remainder_destination: String, // account to receive rounding remainder
 }
 
 pub struct SettlementService {
@@ -380,6 +397,132 @@ impl SettlementService {
         .await
         .map_err(map_update_settlement_err)
     }
+
+    /// Initialize SLA timer for a disputed settlement
+    pub async fn initialize_sla(&self, settlement_id: Uuid, priority: &str) -> Result<(), AppError> {
+        let sla_job = crate::services::settlement_sla::SettlementSLAJob::new(self.pool.clone());
+        sla_job.initialize_sla_for_dispute(settlement_id, priority).await
+    }
+
+    /// Clear SLA for a resolved settlement
+    pub async fn clear_sla(&self, settlement_id: Uuid) -> Result<(), AppError> {
+        let sla_job = crate::services::settlement_sla::SettlementSLAJob::new(self.pool.clone());
+        sla_job.clear_sla_for_resolution(settlement_id).await
+    }
+
+    /// Calculate split amounts for settlement legs with rounding safety.
+    /// Ensures splits sum to exactly the total_amount with no rounding leakage.
+    /// Remainder cents are assigned to the configured remainder destination.
+    pub fn calculate_split_amounts(
+        &self,
+        total_amount: &BigDecimal,
+        config: &SplitSettlementConfig,
+    ) -> Result<Vec<SplitLegConfig>, AppError> {
+        let mut legs = Vec::new();
+        let mut allocated = BigDecimal::from(0);
+        let hundred = BigDecimal::from(100);
+
+        for (idx, leg) in config.legs.iter().enumerate() {
+            let amount = match leg.split_type.as_str() {
+                "percentage" => {
+                    let pct = leg.split_value.as_ref()
+                        .ok_or_else(|| AppError::BadRequest(
+                            "percentage split requires split_value".to_string()
+                        ))?;
+
+                    if pct < &BigDecimal::from(0) || pct > &hundred {
+                        return Err(AppError::BadRequest(
+                            "percentage must be between 0 and 100".to_string()
+                        ));
+                    }
+
+                    (total_amount * pct / hundred).round_dp(2)
+                },
+                "fixed" => {
+                    leg.split_value.as_ref()
+                        .ok_or_else(|| AppError::BadRequest(
+                            "fixed split requires split_value".to_string()
+                        ))?
+                        .clone()
+                },
+                _ => return Err(AppError::BadRequest(
+                    format!("invalid split_type: {}", leg.split_type)
+                )),
+            };
+
+            allocated = allocated + amount.clone();
+            legs.push(SplitLegConfig {
+                destination_account: leg.destination_account.clone(),
+                split_type: leg.split_type.clone(),
+                split_value: Some(amount),
+            });
+        }
+
+        // If there's a remainder, add it to the remainder destination
+        let remainder = total_amount - &allocated;
+        if remainder != BigDecimal::from(0) {
+            legs.push(SplitLegConfig {
+                destination_account: config.remainder_destination.clone(),
+                split_type: "fixed".to_string(),
+                split_value: Some(remainder),
+            });
+        }
+
+        Ok(legs)
+    }
+
+    /// Create split settlement legs for a parent settlement.
+    /// All legs reference the same parent settlement and track delivery independently.
+    pub async fn create_settlement_with_splits(
+        &self,
+        settlement: &Settlement,
+        split_config: &SplitSettlementConfig,
+    ) -> Result<(Settlement, Vec<SettlementLeg>), AppError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Insert the parent settlement
+        let saved_settlement = queries::insert_settlement(&mut tx, settlement)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Calculate split amounts
+        let split_amounts = self.calculate_split_amounts(&settlement.total_amount, split_config)?;
+
+        // Insert legs
+        let mut legs = Vec::new();
+        for (idx, split) in split_amounts.iter().enumerate() {
+            let leg = SettlementLeg {
+                id: Uuid::new_v4(),
+                settlement_id: saved_settlement.id,
+                destination_account: split.destination_account.clone(),
+                amount: split.split_value.clone().unwrap_or_else(BigDecimal::from),
+                split_type: split.split_type.clone(),
+                split_value: split.split_value.clone(),
+                sequence_order: idx as i32,
+                status: "pending".to_string(),
+                delivery_attempt_count: 0,
+                last_delivery_error: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            let saved_leg = queries::insert_settlement_leg(&mut tx, &leg)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            legs.push(saved_leg);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok((saved_settlement, legs))
+    }
+    }
 }
 
 #[cfg(test)]
@@ -529,5 +672,126 @@ mod tests {
         // The metrics should be initialized without panicking
         // We can't easily test the actual recording in unit tests, but we can verify the method exists
         assert!(std::mem::size_of::<Histogram<f64>>() > 0);
+    }
+
+    #[test]
+    fn calculate_split_amounts_percentage() {
+        let svc = SettlementService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+        );
+
+        let total = BigDecimal::from(1000);
+        let config = SplitSettlementConfig {
+            legs: vec![
+                SplitLegConfig {
+                    destination_account: "merchant".to_string(),
+                    split_type: "percentage".to_string(),
+                    split_value: Some(BigDecimal::from(80)),
+                },
+                SplitLegConfig {
+                    destination_account: "fee".to_string(),
+                    split_type: "percentage".to_string(),
+                    split_value: Some(BigDecimal::from(20)),
+                },
+            ],
+            remainder_destination: "fee".to_string(),
+        };
+
+        let result = svc.calculate_split_amounts(&total, &config).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].split_value.as_ref().unwrap(), &BigDecimal::from(800));
+        assert_eq!(result[1].split_value.as_ref().unwrap(), &BigDecimal::from(200));
+    }
+
+    #[test]
+    fn calculate_split_amounts_fixed() {
+        let svc = SettlementService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+        );
+
+        let total = BigDecimal::from(1000);
+        let config = SplitSettlementConfig {
+            legs: vec![
+                SplitLegConfig {
+                    destination_account: "merchant".to_string(),
+                    split_type: "fixed".to_string(),
+                    split_value: Some(BigDecimal::from(900)),
+                },
+            ],
+            remainder_destination: "fee".to_string(),
+        };
+
+        let result = svc.calculate_split_amounts(&total, &config).unwrap();
+        assert_eq!(result.len(), 2); // merchant + remainder fee
+        assert_eq!(result[0].split_value.as_ref().unwrap(), &BigDecimal::from(900));
+        assert_eq!(result[1].split_value.as_ref().unwrap(), &BigDecimal::from(100));
+    }
+
+    #[test]
+    fn calculate_split_amounts_with_rounding() {
+        let svc = SettlementService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+        );
+
+        let total = BigDecimal::from_str("100.00").unwrap();
+        let config = SplitSettlementConfig {
+            legs: vec![
+                SplitLegConfig {
+                    destination_account: "merchant".to_string(),
+                    split_type: "percentage".to_string(),
+                    split_value: Some(BigDecimal::from_str("33.33").unwrap()),
+                },
+            ],
+            remainder_destination: "fee".to_string(),
+        };
+
+        let result = svc.calculate_split_amounts(&total, &config).unwrap();
+        // Should have remainder leg
+        assert_eq!(result.len(), 2);
+        // Verify no rounding leakage
+        let sum: BigDecimal = result.iter()
+            .filter_map(|r| r.split_value.as_ref())
+            .sum();
+        assert_eq!(sum, total);
+    }
+
+    #[test]
+    fn split_amounts_exact_match() {
+        let svc = SettlementService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+        );
+
+        let total = BigDecimal::from(1000);
+        let config = SplitSettlementConfig {
+            legs: vec![
+                SplitLegConfig {
+                    destination_account: "merchant".to_string(),
+                    split_type: "fixed".to_string(),
+                    split_value: Some(BigDecimal::from(500)),
+                },
+                SplitLegConfig {
+                    destination_account: "platform".to_string(),
+                    split_type: "fixed".to_string(),
+                    split_value: Some(BigDecimal::from(500)),
+                },
+            ],
+            remainder_destination: "fee".to_string(),
+        };
+
+        let result = svc.calculate_split_amounts(&total, &config).unwrap();
+        // No remainder needed since splits sum to total
+        assert_eq!(result.len(), 2);
+        let sum: BigDecimal = result.iter()
+            .filter_map(|r| r.split_value.as_ref())
+            .sum();
+        assert_eq!(sum, total);
     }
 }

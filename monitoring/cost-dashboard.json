@@ -1,0 +1,96 @@
+{
+  "title": "Cloud Infrastructure Cost Monitor",
+  "uid": "cloud-cost-monitor",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total monthly spend",
+      "targets": [
+        {
+          "expr": "sum(cloud_cost_total)",
+          "legendFormat": "total"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "graphMode": "area",
+        "colorMode": "background",
+        "justifyMode": "center",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Spend by component",
+      "targets": [
+        {
+          "expr": "sum by (component) (cloud_cost_total)",
+          "legendFormat": "{{component}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Database spend",
+      "targets": [
+        {
+          "expr": "sum by (component) (cloud_cost_total{component=\"database\"})",
+          "legendFormat": "database"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 6 }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Cache spend",
+      "targets": [
+        {
+          "expr": "sum by (component) (cloud_cost_total{component=\"cache\"})",
+          "legendFormat": "cache"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 6 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Compute spend",
+      "targets": [
+        {
+          "expr": "sum by (component) (cloud_cost_total{component=\"compute\"})",
+          "legendFormat": "compute"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 6 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Storage spend",
+      "targets": [
+        {
+          "expr": "sum by (component) (cloud_cost_total{component=\"storage\"})",
+          "legendFormat": "storage"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 }
+    }
+  ]
+}

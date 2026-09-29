@@ -39,6 +39,14 @@
 //! | `vault_fallback_active` | Gauge | 1 while any secret is served from the Vault fallback cache |
 //! | `dependency_scorecard_*` | Gauge | Rolling 7/30/90-day dependency uptime / error rate / p95 (see `services::dependency_scorecard`) |
 //! | `tenant_request_latency_window_*` | Gauge | Per-tenant rolling-window latency histograms, top-K tenants only (see `tenant::latency`) |
+//! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
+//! | `readiness_initialization_duration_ms` | Histogram | Time spent in `run_initialization_checks`, labeled by outcome (ready/failed) |
+//! | `settlement_transactions_total`   | Counter    | Transactions settled via settle_asset, labeled by asset_code |
+//! | `tokio_tasks_live` / `tokio_tasks_load` | Gauge | Live tagged tokio tasks and the load explaining them, by category (task leak detection) |
+//! | `tokio_runtime_alive_tasks`       | Gauge      | All alive tasks on the runtime (tagged or not) |
+//! | `tokio_task_leak_suspected_total` | Counter    | Load-uncorrelated task growth detections, by category |
+//! | `pipeline_stage_latency_ms`       | Histogram  | Latency attributed to each pipeline stage (latency budget) |
+//! | `pipeline_stage_
 //! | `tokio_tasks_live` / `tokio_tasks_load` | Gauge | Live tagged tokio tasks and the load explaining them, by category (task leak detection) |
 //! | `tokio_runtime_alive_tasks`       | Gauge      | All alive tasks on the runtime (tagged or not) |
 //! | `tokio_task_leak_suspected_total` | Counter    | Load-uncorrelated task growth detections, by category |
@@ -137,6 +145,22 @@ pub fn db_pool_idle_connections() -> ObservableGauge<u64> {
     meter()
         .u64_observable_gauge("db_pool_idle_connections")
         .with_description("Number of idle database connections in the pool")
+        .init()
+}
+
+/// Maximum configured DB pool size gauge.
+pub fn db_pool_max_connections() -> ObservableGauge<u64> {
+    meter()
+        .u64_observable_gauge("db_pool_max_connections")
+        .with_description("Configured maximum size of the database pool")
+        .init()
+}
+
+/// Database pool saturation ratio: active connections divided by configured max.
+pub fn db_pool_saturation_ratio() -> ObservableGauge<f64> {
+    meter()
+        .f64_observable_gauge("db_pool_saturation_ratio")
+        .with_description("Fraction of the configured database pool currently in use")
         .init()
 }
 
@@ -610,6 +634,81 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
         .init()
 }
 
+ounter("admin_audit_search_requests_total")
+        .with_description("Requests to the admin audit-log search endpoint")
+        .init()
+}
+
+/// Requests to the compliance report endpoints, labeled by `operation`
+/// ("generate" | "list").
+pub fn admin_compliance_report_requests_total() -> Counter<u64> {
+    meter()
+        .u64_counter("admin_compliance_report_requests_total")
+        .with_description("Requests to the admin compliance report endpoints, labeled by operation")
+        .init()
+}
+
+/// Replication lag measurement histogram (milliseconds), labeled by `replica`.
+/// A value of -1 indicates the replica is unreachable.
+pub fn replica_lag_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("replica_lag_ms")
+        .with_description("Replication lag on read replicas in milliseconds, labeled by replica name")
+        .with_unit(crate::metrics::Unit::new("ms"))
+        .init()
+}
+
+/// Replica lag alert counter, labeled by `replica` and `reason` ("threshold_exceeded" | "unreachable").
+pub fn replica_lag_alert_total() -> Counter<u64> {
+    meter()
+        .u64_counter("replica_lag_alert_total")
+        .with_description("Alerts triggered when replica lag exceeds threshold or replica becomes unreachable")
+        .init()
+}
+
+/// ANALYZE staleness ratio histogram (0.0-1.0), labeled by `table` (schema.table).
+/// Ratio = n_mod_since_analyze / estimate_live_rows.
+pub fn analyze_staleness_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("analyze_staleness_ratio")
+        .with_description("Ratio of modifications since last ANALYZE relative to estimated live rows")
+        .init()
+}
+
+/// Count of tables flagged as stale (n_mod_since_analyze exceeding configured threshold).
+pub fn stale_tables_total() -> Counter<u64> {
+    meter()
+        .u64_counter("stale_tables_total")
+        .with_description("Number of tables with stale ANALYZE statistics relative to write volume")
+        .init()
+}
+
+/// Table bloat ratio as a percentage, labeled by `schema` and `table`
+pub fn table_bloat_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_ratio")
+        .with_description("Estimated table bloat ratio as percentage of wasted space, labeled by schema and table")
+        .init()
+}
+
+/// Estimated table bloat size in megabytes, labeled by `schema` and `table`
+pub fn table_bloat_size_mb() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_size_mb")
+        .with_description("Estimated table bloat size in MB, labeled by schema and table")
+        .init()
+}
+
+/// Registers the observable gauges for tokio task leak detection
+/// (`src/telemetry/task_leak.rs`): `tokio_tasks_live{category}` and
+/// `tokio_tasks_load{category}` from the tagged-spawn registry, plus
+/// `tokio_runtime_alive_tasks` from tokio's own runtime metrics, which also
+/// counts untagged tasks. Call once at startup from inside the runtime and
+/// keep the returned gauges alive.
+pub fn register_task_leak_gauges() -> Vec<ObservableGauge<u64>> {
+    use crate::telemetry::task_leak;
+
+ 
 /// Registers the observable gauges for tokio task leak detection
 /// (`src/telemetry/task_leak.rs`): `tokio_tasks_live{category}` and
 /// `tokio_tasks_load{category}` from the tagged-spawn registry, plus
@@ -779,6 +878,19 @@ pub fn vault_refresh_failures_total() -> Counter<u64> {
         .u64_counter("vault_refresh_failures_total")
         .with_description("Failed Vault secret refresh attempts, labeled by secret")
         .init()
+}
+
+// ---------------------------------------------------------------------------
+// Provider initialisation
+// ---------------------------------------------------------------------------
+
+/// Initialise the global OTel metrics provider and return it so the caller
+/// can keep it alive for the process lifetime.
+///
+/// Call this once at startup, before any instruments are used.
+pub fn init_metrics_provider() -> Result<SdkMeterProvider, Box<dyn std::error::Error>> {
+    let endpoint =
+        st
 }
 
 // ---------------------------------------------------------------------------

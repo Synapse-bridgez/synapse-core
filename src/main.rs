@@ -202,15 +202,22 @@ async fn serve(
     // Initialize partition manager (runs every 24 hours). Startup-time assertion:
     // fail loudly rather than silently regress to the dead-cache-warming bug this
     // fixes if a future refactor reintroduces the construction-order mistake.
-    let partition_manager =
-        db::partition::PartitionManager::new(pool.clone(), 24, Some(query_cache.clone()));
+    let partition_manager = db::partition::PartitionManager::with_lookahead(
+        pool.clone(),
+        24,
+        Some(query_cache.clone()),
+        config.partition_lookahead_months,
+    );
     assert!(
         partition_manager.has_cache(),
         "PartitionManager must be constructed with a cache so create_partition's \
          warming path actually runs; see query_cache initialization above"
     );
     partition_manager.start();
-    tracing::info!("Partition manager started");
+    tracing::info!(
+        lookahead_months = config.partition_lookahead_months,
+        "Partition manager started with configurable lookahead"
+    );
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -379,6 +386,17 @@ async fn serve(
                 let anchor_secret = manager.get_anchor_secret().await?;
                 let admin_key = manager.get_admin_api_key().await?;
                 let store = SecretsStore::new(anchor_secret, admin_key);
+                if let (Ok(role), Ok(template)) = (
+                    std::env::var("VAULT_DATABASE_ROLE"),
+                    std::env::var("VAULT_DATABASE_URL_TEMPLATE"),
+                ) {
+                    manager.start_database_rotation_task(
+                        pool_manager.clone(),
+                        role,
+                        template,
+                    );
+                    tracing::info!("Vault database lease renewal and credential rotation enabled");
+                }
                 manager.start_refresh_task(store.clone(), config.redis_url.clone());
                 // Leaked deliberately: the gauges must live for the process.
                 std::mem::forget(store.register_vault_gauges());
@@ -583,6 +601,16 @@ async fn serve(
         .await
     {
         tracing::warn!("Failed to register audit log retention job: {}", e);
+    }
+
+    // #1287: Register the tenant data quota measurement job (runs every 15 minutes).
+    let tenant_data_quota_job =
+        synapse_core::services::TenantDataQuotaJob::new(pool.clone());
+    if let Err(e) = scheduler
+        .register_job(Box::new(tenant_data_quota_job))
+        .await
+    {
+        tracing::warn!("Failed to register tenant data quota job: {}", e);
     }
 
     if let Err(e) = scheduler.start().await {

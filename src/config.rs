@@ -12,6 +12,17 @@ pub enum AppEnv {
     Production,
 }
 
+/// Endpoint class for query timeout enforcement
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointClass {
+    /// Interactive API reads and writes (default, shortest timeout)
+    Interactive,
+    /// Admin/report operations (medium timeout)
+    AdminReport,
+    /// Background jobs and maintenance tasks (longest timeout)
+    BackgroundJob,
+}
+
 impl AppEnv {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
@@ -119,6 +130,37 @@ impl Default for DbTimeoutConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct PerClassTimeoutConfig {
+    /// Interactive endpoint timeout in milliseconds (default: 5000ms)
+    pub interactive_timeout_ms: u64,
+    /// Admin/report endpoint timeout in milliseconds (default: 30000ms)
+    pub admin_report_timeout_ms: u64,
+    /// Background job timeout in milliseconds (default: 60000ms)
+    pub background_job_timeout_ms: u64,
+}
+
+impl Default for PerClassTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            interactive_timeout_ms: 5000,
+            admin_report_timeout_ms: 30000,
+            background_job_timeout_ms: 60000,
+        }
+    }
+}
+
+impl PerClassTimeoutConfig {
+    /// Get timeout in milliseconds for the given endpoint class
+    pub fn get_timeout_ms(&self, class: EndpointClass) -> u64 {
+        match class {
+            EndpointClass::Interactive => self.interactive_timeout_ms,
+            EndpointClass::AdminReport => self.admin_report_timeout_ms,
+            EndpointClass::BackgroundJob => self.background_job_timeout_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
     pub server_port: u16,
@@ -180,6 +222,12 @@ pub struct Config {
     // Settlement batch limits
     pub settlement_max_batch_size: usize,
     pub settlement_min_tx_count: usize,
+    // Partition configuration
+    pub partition_lookahead_months: u32,
+    pub partition_lookahead_min: u32,
+    pub partition_lookahead_max: u32,
+    // Per-class query timeout configuration
+    pub per_class_timeout_config: PerClassTimeoutConfig,
 }
 
 pub mod assets;
@@ -321,6 +369,44 @@ impl Config {
             settlement_min_tx_count: env::var("SETTLEMENT_MIN_TX_COUNT")
                 .unwrap_or_else(|_| "1".to_string())
                 .parse()?,
+            partition_lookahead_min: env::var("PARTITION_LOOKAHEAD_MIN")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
+            partition_lookahead_months: {
+                let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
+                    .unwrap_or_else(|_| "1".to_string())
+                    .parse()
+                    .unwrap_or(1);
+                let max: u32 = env::var("PARTITION_LOOKAHEAD_MAX")
+                    .unwrap_or_else(|_| "12".to_string())
+                    .parse()
+                    .unwrap_or(12);
+                let lookahead: u32 = env::var("PARTITION_LOOKAHEAD_MONTHS")
+                    .unwrap_or_else(|_| "3".to_string())
+                    .parse()?;
+
+                if lookahead < min {
+                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be less than PARTITION_LOOKAHEAD_MIN ({})", lookahead, min);
+                }
+                if lookahead > max {
+                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be greater than PARTITION_LOOKAHEAD_MAX ({})", lookahead, max);
+                }
+                lookahead
+            },
+            per_class_timeout_config: PerClassTimeoutConfig {
+                interactive_timeout_ms: env::var("DB_TIMEOUT_INTERACTIVE_MS")
+                    .unwrap_or_else(|_| "5000".to_string())
+                    .parse()?,
+                admin_report_timeout_ms: env::var("DB_TIMEOUT_ADMIN_REPORT_MS")
+                    .unwrap_or_else(|_| "30000".to_string())
+                    .parse()?,
+                background_job_timeout_ms: env::var("DB_TIMEOUT_BACKGROUND_JOB_MS")
+                    .unwrap_or_else(|_| "60000".to_string())
+                    .parse()?,
+            },
         })
     }
 }

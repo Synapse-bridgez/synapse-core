@@ -32,7 +32,17 @@ DATABASE_URL=postgres://user:pass@primary-host:5432/synapse
 
 # Optional: Replica database (read-only)
 DATABASE_REPLICA_URL=postgres://user:pass@replica-host:5432/synapse
+
+# Optional Vault database secrets engine rotation
+VAULT_DATABASE_ROLE=synapse-database
+VAULT_DATABASE_URL_TEMPLATE=postgres://{username}:{password}@primary-host:5432/synapse
 ```
+
+When the Vault database variables are configured, the service requests a
+dynamic lease, renews it before half-life, and obtains replacement credentials
+before expiry. The active pool handle is swapped only after the replacement
+pool is ready; the previous pool is then drained, so in-flight requests do not
+lose their database connection or require a process restart.
 
 ### Backward Compatibility
 

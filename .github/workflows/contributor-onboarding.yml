@@ -1,0 +1,151 @@
+name: Contributor Onboarding
+
+on:
+  issues:
+    types:
+      - assigned
+      - labeled
+  issue_comment:
+    types:
+      - created
+
+jobs:
+  send-welcome:
+    name: Send Welcome & Setup Guide
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'assigned') ||
+      (github.event_name == 'issue_comment' &&
+       (contains(github.event.comment.body, '/start') ||
+        contains(github.event.comment.body, '/onboard')))
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Get issue labels
+        id: labels
+        run: |
+          import os
+          import json
+
+          labels = []
+          if os.environ.get('ISSUE_LABELS'):
+            labels = os.environ['ISSUE_LABELS'].split(',')
+
+          # Always add fallback to basic setup
+          if not labels:
+            labels = ['Governance & Community']  # default fallback
+
+          print(f"Labels: {labels}")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"labels={json.dumps(labels)}\n")
+        env:
+          ISSUE_LABELS: |
+            ${{ join(github.event.issue.labels.*.name, ',') }}
+        shell: python3
+
+      - name: Check if welcome comment already exists
+        id: check-existing
+        run: |
+          import os
+
+          # Check if a comment with our welcome marker exists
+          comments = """${{ toJson(github.event.issue.comments) }}"""
+
+          if '👋 Welcome, contributor!' in comments:
+            print("existing_comment=true")
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("existing_comment=true\n")
+          else:
+            print("existing_comment=false")
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("existing_comment=false\n")
+        shell: python3
+
+      - name: Generate onboarding comment
+        if: steps.check-existing.outputs.existing_comment != 'true'
+        id: generate
+        run: |
+          import json
+          import subprocess
+
+          labels = json.loads('${{ steps.labels.outputs.labels }}')
+
+          # Call the generation script
+          result = subprocess.run(
+            ['python3', 'scripts/generate-contributor-onboarding.py'] + labels,
+            capture_output=True,
+            text=True
+          )
+
+          if result.returncode != 0:
+            print("Error generating comment:")
+            print(result.stderr)
+            exit(1)
+
+          comment_text = result.stdout
+
+          # Save to file for step output (handles multiline)
+          with open('comment.txt', 'w') as f:
+            f.write(comment_text)
+
+          print("Comment generated successfully")
+        shell: python3
+
+      - name: Post welcome comment
+        if: steps.check-existing.outputs.existing_comment != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const comment = fs.readFileSync('comment.txt', 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+            console.log('Welcome comment posted!');
+
+      - name: Post generic fallback if needed
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 👋 Welcome, contributor!
+
+Thank you for your interest in contributing to Synapse Core!
+
+### ✅ Setup Checklist
+- [ ] Read CONTRIBUTING.md for overall guidelines
+- [ ] Set up development environment with Docker
+- [ ] Review relevant architecture decision records in docs/adr/
+- [ ] Build and run tests locally
+
+### 📚 Key Documentation
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [docs/adr/README.md](docs/adr/README.md) - Architecture decisions
+- [README.md](README.md) - Project overview
+
+### 💡 Tips
+- Ask questions in comments if you're unsure
+- Follow the branch naming conventions from CONTRIBUTING.md
+- Make sure tests pass before opening a PR
+
+**Happy coding! 🚀**`
+            });

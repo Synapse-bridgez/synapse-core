@@ -1,5 +1,8 @@
 use crate::error::AppError;
 use crate::middleware::quota::{QuotaManager, QuotaStatus};
+use crate::services::tenant_data_quota::{
+    self, SetDataQuotaRequest, TenantUsageSnapshot,
+};
 use crate::ApiState;
 use axum::{
     extract::{Path, State},
@@ -15,6 +18,9 @@ pub struct TenantQuotaView {
     pub name: String,
     pub rate_limit_per_minute: i32,
     pub quota_status: Option<QuotaStatus>,
+    /// Storage / row-count quota summary from the background job measurement.
+    /// `None` when no data quota has been configured for this tenant.
+    pub data_quota: Option<TenantUsageSnapshot>,
 }
 
 /// `custom_limit` is the per-minute limit written to
@@ -48,11 +54,16 @@ pub async fn list_tenant_quotas(
             .await
             .ok();
 
+        let data_quota = tenant_data_quota::get_quota_summary(&state.app_state.db, *tid)
+            .await
+            .unwrap_or(None);
+
         views.push(TenantQuotaView {
             tenant_id: *tid,
             name: cfg.name.clone(),
             rate_limit_per_minute: cfg.rate_limit_per_minute,
             quota_status,
+            data_quota,
         });
     }
 
@@ -78,6 +89,10 @@ pub async fn get_tenant_quota(
         .await
         .ok();
 
+    let data_quota = tenant_data_quota::get_quota_summary(&state.app_state.db, tenant_id)
+        .await
+        .unwrap_or(None);
+
     Ok((
         StatusCode::OK,
         Json(TenantQuotaView {
@@ -85,6 +100,7 @@ pub async fn get_tenant_quota(
             name: cfg.name,
             rate_limit_per_minute: cfg.rate_limit_per_minute,
             quota_status,
+            data_quota,
         }),
     ))
 }
@@ -185,4 +201,75 @@ pub async fn reset_tenant_quota(
         StatusCode::OK,
         Json(serde_json::json!({"message": "quota reset", "tenant_id": tenant_id})),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Data quota endpoints (#1287)
+// ---------------------------------------------------------------------------
+
+/// PUT /admin/quotas/:tenant_id/data — configure storage/row-count quota for
+/// a tenant.
+///
+/// Body:
+/// ```json
+/// {
+///   "max_row_count": 1000000,       // null = unlimited
+///   "max_storage_bytes": 5368709120, // null = unlimited
+///   "soft_threshold": 0.80           // optional; default 0.80
+/// }
+/// ```
+pub async fn set_tenant_data_quota(
+    State(state): State<ApiState>,
+    Path(tenant_id): Path<Uuid>,
+    Json(payload): Json<SetDataQuotaRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    if state.app_state.get_tenant_config(tenant_id).await.is_none() {
+        return Err(AppError::NotFound("tenant not found".to_string()));
+    }
+
+    if let Some(soft) = payload.soft_threshold {
+        if !(0.0..=1.0).contains(&soft) {
+            return Err(AppError::BadRequest(
+                "soft_threshold must be between 0.0 and 1.0".to_string(),
+            ));
+        }
+    }
+
+    tenant_data_quota::set_data_quota(&state.app_state.db, tenant_id, &payload)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "data quota configured",
+            "tenant_id": tenant_id,
+        })),
+    ))
+}
+
+/// GET /admin/quotas/:tenant_id/data — latest measured data quota usage for a
+/// single tenant.
+pub async fn get_tenant_data_quota(
+    State(state): State<ApiState>,
+    Path(tenant_id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    if state.app_state.get_tenant_config(tenant_id).await.is_none() {
+        return Err(AppError::NotFound("tenant not found".to_string()));
+    }
+
+    let snapshot = tenant_data_quota::get_quota_summary(&state.app_state.db, tenant_id)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+    match snapshot {
+        Some(s) => Ok((StatusCode::OK, Json(serde_json::to_value(s).unwrap()))),
+        None => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "tenant_id": tenant_id,
+                "message": "no data quota configured or measured yet"
+            })),
+        )),
+    }
 }

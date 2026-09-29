@@ -3,6 +3,7 @@ pub mod dlq;
 pub mod export;
 pub mod graphql;
 pub mod idempotency;
+pub mod import;
 pub mod pagination;
 pub mod profiling;
 pub mod search;

@@ -1,0 +1,117 @@
+name: ADR Validation
+
+on:
+  pull_request:
+    paths:
+      - 'docs/adr/**'
+      - '.github/workflows/adr-validation.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/adr/**'
+
+jobs:
+  validate-adrs:
+    name: Validate ADR Index and Structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Validate and regenerate ADR index
+        run: python3 scripts/validate-and-generate-adr-index.py
+
+      - name: Check for ADR index drift
+        run: |
+          if git diff --quiet docs/adr/README.md; then
+            echo "✓ ADR index is current"
+          else
+            echo "✗ ADR index is out of sync"
+            echo "Run: python3 scripts/validate-and-generate-adr-index.py"
+            git diff docs/adr/README.md
+            exit 1
+          fi
+
+      - name: Validate ADR numbering conventions
+        run: |
+          adr_dir="docs/adr"
+          last_number=0
+
+          for file in $(ls "$adr_dir"/*.md | sort); do
+            filename=$(basename "$file")
+
+            # Skip template
+            if [[ "$filename" == "000-template.md" ]]; then
+              continue
+            fi
+
+            # Extract number
+            if [[ $filename =~ ^([0-9]+)- ]]; then
+              number=${BASH_REMATCH[1]}
+
+              # Remove leading zeros for comparison
+              number_int=$((10#$number))
+
+              # Check for gaps
+              if [[ $number_int -lt 1 ]]; then
+                echo "✗ Invalid ADR number: $filename (must be >= 001)"
+                exit 1
+              fi
+
+              if [[ $number_int -gt $((last_number + 1)) ]]; then
+                echo "✗ ADR numbering gap detected: expected $(printf "%03d" $((last_number + 1))), got $filename"
+                exit 1
+              fi
+
+              last_number=$number_int
+            else
+              echo "✗ Invalid ADR filename: $filename (must match NNN-title.md)"
+              exit 1
+            fi
+          done
+
+          echo "✓ ADR numbering is valid"
+
+      - name: Validate ADR structure
+        run: |
+          adr_dir="docs/adr"
+
+          for file in "$adr_dir"/[0-9]*.md; do
+            filename=$(basename "$file")
+
+            # Skip template and numbered template
+            if [[ "$filename" == "000-template.md" ]]; then
+              continue
+            fi
+
+            # Check for required sections
+            required_sections=(
+              "## Status"
+              "## Context"
+              "## Decision"
+              "## Consequences"
+              "## Alternatives Considered"
+            )
+
+            for section in "${required_sections[@]}"; do
+              if ! grep -q "^$section" "$file"; then
+                echo "✗ Missing required section '$section' in $filename"
+                exit 1
+              fi
+            done
+
+            # Validate status value
+            if ! grep -A1 "^## Status" "$file" | tail -1 | grep -Eq "(Proposed|Accepted|Deprecated|Superseded)"; then
+              echo "✗ Invalid status in $filename (must be: Proposed, Accepted, Deprecated, or Superseded)"
+              exit 1
+            fi
+          done
+
+          echo "✓ ADR structure validation passed"

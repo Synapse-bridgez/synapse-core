@@ -59,7 +59,7 @@ pub async fn status_counts(State(state): State<ApiState>) -> Result<impl IntoRes
     }
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    Ok(match crate::db::queries::get_status_counts(pool).await {
+    Ok(match crate::db::queries::get_status_counts(&pool).await {
         Ok(counts) => {
             let _ = state
                 .app_state
@@ -110,7 +110,7 @@ pub async fn daily_totals(
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
     Ok(
-        match crate::db::queries::get_daily_totals(pool, query.days).await {
+        match crate::db::queries::get_daily_totals(&pool, query.days).await {
             Ok(totals) => {
                 let _ = state
                     .app_state
@@ -156,7 +156,7 @@ pub async fn asset_stats(State(state): State<ApiState>) -> Result<impl IntoRespo
     }
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    Ok(match crate::db::queries::get_asset_stats(pool).await {
+    Ok(match crate::db::queries::get_asset_stats(&pool).await {
         Ok(stats) => {
             let _ = state
                 .app_state

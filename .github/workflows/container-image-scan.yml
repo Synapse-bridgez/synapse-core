@@ -1,0 +1,35 @@
+name: Container Image Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch: {}
+
+jobs:
+  image-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image for scanning
+        run: docker build -t synapse-core:scan .
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.55.2
+
+      - name: Scan image for critical/high vulnerabilities
+        run: |
+          trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed synapse-core:scan
+
+      - name: Audit exception process
+        if: failure()
+        run: |
+          echo "A critical/high image vulnerability was found. Record the finding in the supply-chain exception process and document the accepted-risk decision before bypassing or escalating."
+          exit 1

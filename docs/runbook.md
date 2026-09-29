@@ -1,5 +1,26 @@
 # Synapse Core Operational Runbook
 
+## Guided Incident Procedures
+
+Use the checkpointed CLI for the common health, high-error-rate, database
+failure, connection-pool exhaustion, and replica-failover procedures:
+
+```bash
+python scripts/runbook.py health
+python scripts/runbook.py high-error-rate
+python scripts/runbook.py database-failure
+python scripts/runbook.py pool-exhaustion
+python scripts/runbook.py failover
+```
+
+The tool presents each action and waits for an operator acknowledgment. For
+destructive steps, the operator must type `yes` exactly; any other response
+stops the procedure. It displays commands but does not execute them. Every
+start, confirmed/declined action, and completion is appended to
+`runbook-executions.jsonl` (override with `--log-file`). The log records
+operator confirmation, not independent proof that a displayed command
+succeeded.
+
 ## Table of Contents
 
 1. [Overview](#overview)
