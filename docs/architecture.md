@@ -235,6 +235,40 @@ CREATE TABLE IF NOT EXISTS transactions (
 | PostgreSQL         | 14+       | Primary data store                 |
 | Docker             | —         | Containerization                   |
 
+## Distributed Tracing Sampling
+
+The app exports `tracing` spans through the OpenTelemetry layer. When an OTLP
+endpoint is configured, the SDK uses `AlwaysOn` head sampling so a later error
+or slow child span can influence the decision for the entire trace. Route
+`OTLP_ENDPOINT` to an OpenTelemetry Collector configured with
+[`observability/tail-sampling-collector.yaml`](../observability/tail-sampling-collector.yaml);
+run the Collector Contrib distribution, which includes the tail-sampling
+processor, and do not point the app directly at a backend that performs head
+sampling.
+
+The collector keeps traces containing an `ERROR` span or exceeding
+`OTEL_TAIL_SAMPLING_LATENCY_MS` and samples other traces at
+`OTEL_TAIL_SAMPLING_PERCENTAGE` percent. Set both variables on the collector,
+along with `OTEL_EXPORTER_OTLP_ENDPOINT` for the existing trace backend and
+`OTEL_EXPORTER_OTLP_INSECURE` (`true` or `false`). Point the app's
+`OTLP_ENDPOINT` to this collector's gRPC receiver.
+For example, a 1-second slow-trace threshold and 5% routine sample rate can be
+configured as `OTEL_TAIL_SAMPLING_LATENCY_MS=1000` and
+`OTEL_TAIL_SAMPLING_PERCENTAGE=5`; tune these independently for each deployment.
+Size `decision_wait`, `num_traces`, and memory limits for peak trace volume:
+tail sampling buffers complete traces, so a full buffer, collector outage, or
+span arriving after the decision window can still be lost. Every service
+participating in a distributed trace must forward unsampled spans to the same
+tail-sampling collector. The webhook's W3C context is persisted and restored
+on queued transaction-processing spans; however, daily reconciliation may run
+hours after ingestion, beyond any practical in-memory decision window. Its
+database trace ID provides correlation, but it cannot retroactively change a
+trace decision already made by the collector.
+
+Without `OTLP_ENDPOINT`, the SDK disables span recording. The collector config
+is an opt-in deployment component; it does not replace or automatically
+reconfigure the existing trace backend.
+
 ---
 
 ## Future Phases
