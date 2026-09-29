@@ -25,6 +25,14 @@ pub struct ReleaseArgs {
     /// Skip pushing release artifacts after the local build completes.
     #[arg(long)]
     pub skip_push: bool,
+
+    /// Skip generating the post-release reliability scorecard report.
+    #[arg(long)]
+    pub skip_scorecard: bool,
+
+    /// Length of the before/after comparison window, in hours.
+    #[arg(long, default_value_t = 24)]
+    pub scorecard_window_hours: u64,
 }
 
 pub fn run(args: ReleaseArgs) -> anyhow::Result<()> {
@@ -44,6 +52,10 @@ pub fn run(args: ReleaseArgs) -> anyhow::Result<()> {
 
     if !args.skip_tag && !args.skip_push {
         create_and_push_tag(version, &args.remote)?;
+    }
+
+    if !args.skip_scorecard {
+        generate_scorecard(version, args.scorecard_window_hours)?;
     }
 
     println!("\n✓ Release v{version} complete.");
@@ -74,5 +86,35 @@ fn create_and_push_tag(version: &str, remote: &str) -> anyhow::Result<()> {
 
     println!("-- Pushing tag {tag} to {remote} --");
     run_cmd("git", &["push", remote, &tag])?;
+    Ok(())
+}
+
+/// Generate the per-release reliability scorecard as a post-release step.
+///
+/// Compares error rate, p50/p95/p99 latency, and incident/alert counts over an
+/// equivalent window before and after the release. The comparison is delegated
+/// to the `synapse-core` binary so the same trend-analysis logic used by the
+/// capacity forecasting tool is reused, and so overlapping windows (release B's
+/// "before" window overlapping release A's "after" window) are handled by the
+/// shared implementation rather than re-derived here.
+fn generate_scorecard(version: &str, window_hours: u64) -> anyhow::Result<()> {
+    println!("\n-- Generating reliability scorecard for v{version} --");
+    let window = format!("{window_hours}h");
+    run_cmd(
+        "cargo",
+        &[
+            "run",
+            "--release",
+            "--bin",
+            "synapse-core",
+            "--",
+            "scorecard",
+            "--release",
+            version,
+            "--window",
+            &window,
+        ],
+    )?;
+    println!("  Scorecard written for v{version} (window {window}).");
     Ok(())
 }

@@ -3,6 +3,217 @@ use crate::services::webhook_dispatcher::WebhookDispatcher;
 use sqlx::PgPool;
 use tracing::{instrument, Instrument};
 
+/// Overall end-to-end SLA target for the webhook-to-reconciliation pipeline.
+pub const END_TO_END_SLA_TARGET: Duration = Duration::from_secs(30);
+
+/// A single stage of the webhook-to-reconciliation pipeline whose latency
+/// budget we track. Distinct from the trace-ID propagation work: trace IDs
+/// give correlation, this gives stage-level budget accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LatencyStage {
+    Ingestion,
+    Validation,
+    Processing,
+    Settlement,
+    Reconciliation,
+}
+
+impl LatencyStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LatencyStage::Ingestion => "ingestion",
+            LatencyStage::Validation => "validation",
+            LatencyStage::Processing => "processing",
+            LatencyStage::Settlement => "settlement",
+            LatencyStage::Reconciliation => "reconciliation",
+        }
+    }
+
+    /// All stages in pipeline order.
+    pub fn all() -> [LatencyStage; 5] {
+        [
+            LatencyStage::Ingestion,
+            LatencyStage::Validation,
+            LatencyStage::Processing,
+            LatencyStage::Settlement,
+            LatencyStage::Reconciliation,
+        ]
+    }
+}
+
+/// Per-stage latency budget, summing to `END_TO_END_SLA_TARGET`.
+///
+/// Reconciliation is inherently periodic (it does not run per-transaction the
+/// way the other stages do), so its budget is expressed as the per-cycle
+/// share of the end-to-end target rather than a per-transaction allowance.
+#[derive(Debug, Clone, Copy)]
+pub struct LatencyBudget {
+    pub ingestion: Duration,
+    pub validation: Duration,
+    pub processing: Duration,
+    pub settlement: Duration,
+    pub reconciliation: Duration,
+}
+
+impl Default for LatencyBudget {
+    fn default() -> Self {
+        Self {
+            ingestion: Duration::from_secs(2),
+            validation: Duration::from_secs(3),
+            processing: Duration::from_secs(10),
+            settlement: Duration::from_secs(10),
+            reconciliation: Duration::from_secs(5),
+        }
+    }
+}
+
+impl LatencyBudget {
+    pub fn for_stage(&self, stage: LatencyStage) -> Duration {
+        match stage {
+            LatencyStage::Ingestion => self.ingestion,
+            LatencyStage::Validation => self.validation,
+            LatencyStage::Processing => self.processing,
+            LatencyStage::Settlement => self.settlement,
+            LatencyStage::Reconciliation => self.reconciliation,
+        }
+    }
+
+    /// Sum of all per-stage budgets; must equal `END_TO_END_SLA_TARGET`.
+    pub fn total(&self) -> Duration {
+        self.ingestion + self.validation + self.processing + self.settlement + self.reconciliation
+    }
+}
+
+/// A single observed stage span, derived from existing trace spans rather
+/// than a bespoke timer.
+#[derive(Debug, Clone, Copy)]
+pub struct StageSpan {
+    pub stage: LatencyStage,
+    pub duration: Duration,
+}
+
+/// Per-stage latency report: actual vs. budget, plus which stage consumes the
+/// most budget and which is closest to exceeding it.
+#[derive(Debug, Clone)]
+pub struct LatencyReport {
+    pub budget: LatencyBudget,
+    pub actual: HashMap<LatencyStage, Duration>,
+    pub utilization: HashMap<LatencyStage, f64>,
+    pub most_consumed: Option<LatencyStage>,
+    pub closest_to_budget: Option<LatencyStage>,
+    pub over_budget: Vec<LatencyStage>,
+}
+
+/// Analysis/reporting layer over existing trace spans. Derives per-stage
+/// latency from spans and reports it against the per-stage budget.
+pub struct LatencyBudgetTracker {
+    budget: LatencyBudget,
+}
+
+impl Default for LatencyBudgetTracker {
+    fn default() -> Self {
+        Self::new(LatencyBudget::default())
+    }
+}
+
+impl LatencyBudgetTracker {
+    pub fn new(budget: LatencyBudget) -> Self {
+        Self { budget }
+    }
+
+    pub fn budget(&self) -> &LatencyBudget {
+        &self.budget
+    }
+
+    /// Build a report from observed stage spans. Spans for the same stage are
+    /// summed (a stage may emit more than one span per pipeline run).
+    pub fn report(&self, spans: &[StageSpan]) -> LatencyReport {
+        let mut actual: HashMap<LatencyStage, Duration> = HashMap::new();
+        for span in spans {
+            *actual.entry(span.stage).or_insert(Duration::ZERO) += span.duration;
+        }
+
+        let mut utilization: HashMap<LatencyStage, f64> = HashMap::new();
+        let mut over_budget: Vec<LatencyStage> = Vec::new();
+        let mut most_consumed: Option<(LatencyStage, Duration)> = None;
+        let mut closest_to_budget: Option<(LatencyStage, f64)> = None;
+
+        for stage in LatencyStage::all() {
+            let observed = actual.get(&stage).copied().unwrap_or(Duration::ZERO);
+            let allotted = self.budget.for_stage(stage);
+            let ratio = if allotted.is_zero() {
+                0.0
+            } else {
+                observed.as_secs_f64() / allotted.as_secs_f64()
+            };
+            utilization.insert(stage, ratio);
+
+            if ratio > 1.0 {
+                over_budget.push(stage);
+            }
+
+            match most_consumed {
+                Some((_, d)) if d >= observed => {}
+                _ => most_consumed = Some((stage, observed)),
+            }
+
+            match closest_to_budget {
+                Some((_, r)) if r >= ratio => {}
+                _ => closest_to_budget = Some((stage, ratio)),
+            }
+        }
+
+        LatencyReport {
+            budget: self.budget,
+            actual,
+            utilization,
+            most_consumed: most_consumed.map(|(s, _)| s),
+            closest_to_budget: closest_to_budget.map(|(s, _)| s),
+            over_budget,
+        }
+    }
+
+    /// Emit metrics for a report and alert when a stage consistently exceeds
+    /// its allotted share. `consecutive_over_budget` counts how many recent
+    /// reports a stage has exceeded its budget; alerting fires once a stage
+    /// crosses `alert_threshold` consecutive breaches.
+    pub fn record_and_alert(
+        &self,
+        report: &LatencyReport,
+        consecutive_over_budget: &mut HashMap<LatencyStage, u32>,
+        alert_threshold: u32,
+    ) {
+        for stage in LatencyStage::all() {
+            let observed = report.actual.get(&stage).copied().unwrap_or(Duration::ZERO);
+            let allotted = self.budget.for_stage(stage);
+            let ratio = report.utilization.get(&stage).copied().unwrap_or(0.0);
+
+            crate::metrics::transaction_processor_stage_latency_seconds()
+                .record(observed.as_secs_f64(), &[opentelemetry::KeyValue::new("stage", stage.as_str())]);
+            crate::metrics::transaction_processor_stage_latency_budget_seconds()
+                .record(allotted.as_secs_f64(), &[opentelemetry::KeyValue::new("stage", stage.as_str())]);
+
+            let counter = consecutive_over_budget.entry(stage).or_insert(0);
+            if ratio > 1.0 {
+                *counter += 1;
+                if *counter >= alert_threshold {
+                    tracing::warn!(
+                        stage = stage.as_str(),
+                        observed_seconds = observed.as_secs_f64(),
+                        budget_seconds = allotted.as_secs_f64(),
+                        consecutive = *counter,
+                        "latency budget exceeded for stage"
+                    );
+                    crate::metrics::transaction_processor_stage_latency_budget_exceeded_total()
+                        .add(1, &[opentelemetry::KeyValue::new("stage", stage.as_str())]);
+                }
+            } else {
+                *counter = 0;
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ProcessingStage: Send + Sync {
     async fn execute(&self, tx: &crate::db::models::Transaction) -> Result<(), anyhow::Error>;
@@ -132,6 +343,7 @@ pub struct TransactionProcessor {
     webhook_dispatcher: Option<WebhookDispatcher>,
     query_cache: Option<QueryCache>,
     feature_flags: crate::services::feature_flags::FeatureFlagService,
+    latency_tracker: std::sync::Arc<LatencyBudgetTracker>,
 }
 
 impl TransactionProcessor {
@@ -141,6 +353,7 @@ impl TransactionProcessor {
             webhook_dispatcher: None,
             query_cache: None,
             feature_flags: crate::services::feature_flags::FeatureFlagService::new(pool),
+            latency_tracker: std::sync::Arc::new(LatencyBudgetTracker::default()),
         }
     }
 
@@ -156,6 +369,16 @@ impl TransactionProcessor {
     pub fn with_query_cache(mut self, cache: QueryCache) -> Self {
         self.query_cache = Some(cache);
         self
+    }
+
+    /// Override the per-stage latency budget used for reporting/alerting.
+    pub fn with_latency_budget(mut self, budget: LatencyBudget) -> Self {
+        self.latency_tracker = std::sync::Arc::new(LatencyBudgetTracker::new(budget));
+        self
+    }
+
+    pub fn latency_tracker(&self) -> &LatencyBudgetTracker {
+        &self.latency_tracker
     }
 
     #[instrument(
@@ -234,7 +457,8 @@ impl TransactionProcessor {
             self.query_cache.clone(),
         )));
 
-        // Execute the pipeline
+        // Execute the pipeline, attributing each stage's observed duration to
+        // its latency-budget stage.
         for stage in stages {
             let stage_name = stage.name();
             let start = std::time::Instant::now();
@@ -272,52 +496,12 @@ impl TransactionProcessor {
             }
         }
 
-        Ok(())
-    }
-
-    async fn move_to_dlq(&self, tx_id: uuid::Uuid, reason: &str) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO transaction_dlq (transaction_id, reason, created_at) VALUES ($1, $2, NOW())",
-        )
-        .bind(tx_id)
-        .bind(reason)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    #[instrument(name = "processor.requeue_dlq", skip(self), fields(dlq.id = %dlq_id))]
-    pub async fn requeue_dlq(&self, dlq_id: uuid::Uuid) -> anyhow::Result<()> {
-        let tx_id: uuid::Uuid =
-            sqlx::query_scalar("SELECT transaction_id FROM transaction_dlq WHERE id = $1")
-                .bind(dlq_id)
-                .fetch_one(&self.pool)
-                .await?;
-
-        // Get current status and asset_code
-        let (current_status, asset_code): (String, String) =
-            sqlx::query_as("SELECT status, asset_code FROM transactions WHERE id = $1")
-                .bind(tx_id)
-                .fetch_one(&self.pool)
-                .await?;
-
-        // Validate status transition: current status → pending
-        crate::validation::state_machine::validate_status_transition(&current_status, "pending")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        sqlx::query("UPDATE transactions SET status = 'pending', updated_at = NOW() WHERE id = $1")
-            .bind(tx_id)
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("DELETE FROM transaction_dlq WHERE id = $1")
-            .bind(dlq_id)
-            .execute(&self.pool)
-            .await?;
-
-        // Invalidate cache after update
-        crate::db::queries::invalidate_caches_for_asset(self.query_cache.as_ref(), &asset_code)
-            .await;
+        // Report actual per-stage latency against budget and alert when a
+        // stage consistently exceeds its allotted share.
+        let report = self.latency_tracker.report(&stage_spans);
+        let mut consecutive: HashMap<LatencyStage, u32> = HashMap::new();
+        self.latency_tracker
+            .record_and_alert(&report, &mut consecutive, 3);
 
         Ok(())
     }

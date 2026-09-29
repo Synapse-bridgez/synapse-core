@@ -279,107 +279,71 @@ impl JobScheduler {
         alerts
     }
 
-    /// Internal function that runs the job execution loop
+    /// Compute the next run time for a cron expression, if parseable.
+    fn get_next_run_time(schedule: &str) -> Option<DateTime<Utc>> {
+        Schedule::from_str(schedule)
+            .ok()
+            .and_then(|s| s.upcoming(Utc).next())
+    }
+
+    /// The per-job execution loop. Runs the job on its cron schedule until
+    /// the shutdown signal is received.
     async fn run_job_loop(
         name: String,
         job: Arc<dyn Job>,
         _shutdown_tx: tokio::sync::broadcast::Sender<()>,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-        active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+        _active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
         last_success: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
         last_run: Arc<Mutex<HashMap<String, JobRunRecord>>>,
     ) {
-        info!("Starting job '{}' with schedule: {}", name, job.schedule());
-
         let schedule = match Schedule::from_str(job.schedule()) {
-            Ok(schedule) => schedule,
+            Ok(s) => s,
             Err(e) => {
-                error!("Failed to parse cron schedule for job '{}': {}", name, e);
+                error!("Job '{}' has invalid schedule: {}", name, e);
                 return;
             }
         };
 
         loop {
-            // Calculate next run time
-            let now = Utc::now();
-            let next_run = schedule.after(&now).next();
-
-            let next_run_time = match next_run {
-                Some(next_time) => {
-                    let duration = (next_time - now)
-                        .to_std()
-                        .unwrap_or_else(|_| std::time::Duration::from_secs(1));
-                    // Wait for either the duration to pass or a shutdown signal
-                    tokio::select! {
-                        _ = tokio::time::sleep(duration) => {
-                            // Time to execute the job
-                        },
-                        _ = shutdown_rx.recv() => {
-                            info!("Job '{}' received shutdown signal", name);
-                            // Remove handle from active handles
-                            let _ = active_handles.lock().await.remove(&name);
-                            return;
-                        }
-                    }
-                    next_time
-                }
-                None => {
-                    error!("Job '{}' has no next run time, stopping", name);
-                    return;
-                }
+            let next = match schedule.upcoming(Utc).next() {
+                Some(next) => next,
+                None => break,
             };
 
-            // Execute the job
-            match job.execute().await {
-                Ok(()) => {
-                    let completed_at = Utc::now();
-                    info!(
-                        "Job '{}' executed successfully at {}",
-                        name,
-                        next_run_time.format("%Y-%m-%d %H:%M:%S")
-                    );
-                    last_success.lock().await.insert(name.clone(), completed_at);
-                    last_run.lock().await.insert(
-                        name.clone(),
-                        JobRunRecord {
-                            at: completed_at,
-                            outcome: LastRunOutcome::Success,
-                        },
-                    );
-                }
-                Err(e) => {
-                    let failed_at = Utc::now();
-                    error!(
-                        "Job '{}' failed at {}: {}",
-                        name,
-                        next_run_time.format("%Y-%m-%d %H:%M:%S"),
-                        e
-                    );
-                    last_run.lock().await.insert(
-                        name.clone(),
-                        JobRunRecord {
-                            at: failed_at,
-                            outcome: LastRunOutcome::Failure,
-                        },
-                    );
-                }
-            }
-        }
-    }
+            let now = Utc::now();
+            let sleep_for = (next - now).to_std().unwrap_or_default();
 
-    /// Helper function to get the next run time for a schedule
-    fn get_next_run_time(schedule_expr: &str) -> Option<DateTime<Utc>> {
-        match Schedule::from_str(schedule_expr) {
-            Ok(schedule) => {
-                let now = Utc::now();
-                schedule.after(&now).next()
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_for) => {
+                    let outcome = match job.execute().await {
+                        Ok(()) => {
+                            last_success.lock().await.insert(name.clone(), Utc::now());
+                            LastRunOutcome::Success
+                        }
+                        Err(e) => {
+                            error!("Job '{}' failed: {}", name, e);
+                            LastRunOutcome::Failure
+                        }
+                    };
+                    last_run.lock().await.insert(
+                        name.clone(),
+                        JobRunRecord {
+                            at: Utc::now(),
+                            outcome,
+                        },
+                    );
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Job '{}' received shutdown signal", name);
+                    break;
+                }
             }
-            Err(_) => None,
         }
     }
 }
 
-/// Status information for a scheduled job
+/// Status information for a registered job
 #[derive(Debug, Clone)]
 pub struct JobStatus {
     pub name: String,

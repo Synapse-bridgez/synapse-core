@@ -126,6 +126,59 @@ mixed_load:
   http_reqs:         XXXXX
 ```
 
+## Per-Release Reliability Scorecard
+
+Load-test thresholds gate CI before merge, but they cannot catch regressions that only appear under real production traffic. After each production release, generate a **per-release reliability scorecard** comparing a window *before* the release against an equivalent window *after* it, so a regression can be attributed to the specific release that introduced it.
+
+### Metrics compared
+
+- Error rate (failed requests / total requests)
+- Latency percentiles: p50, p95, p99
+- Incident / alert count in each window
+
+### Windows and overlap handling
+
+Each release defines a `before` window (ending at the release timestamp) and an `after` window (starting at the release timestamp), both of equal length `W` (default 24h).
+
+When releases happen close together, release B's `before` window can overlap release A's `after` window. Rather than silently producing a misleading comparison, the scorecard must detect the overlap and handle it explicitly:
+
+- If `release_B.timestamp - release_A.timestamp < W`, the windows overlap.
+- In that case, truncate the overlapping windows to the non-overlapping segment (i.e. `before_B` starts at `release_A.timestamp`) and mark the report as `overlap_adjusted: true` with the effective window length recorded.
+- If the non-overlapping segment is shorter than a minimum sample threshold, the report is emitted with `insufficient_data: true` and no regression verdict, instead of a false positive.
+
+### Regression flagging
+
+A change is flagged as a **statistically meaningful regression** (distinct from normal noise) only when both hold:
+
+1. The relative change exceeds a minimum effect size (default: error rate +25%, latency +20%).
+2. The change is statistically significant — the before/after distributions differ beyond expected noise (e.g. a two-proportion z-test for error rate and a percentile bootstrap / Mann-Whitney U test for latency, at `p < 0.05`).
+
+Changes that exceed the effect-size threshold but are not statistically significant are reported as `noise`, not as regressions.
+
+### Triggering
+
+Report generation runs as a **post-release CI/CD step**, immediately after the production deploy completes, using the same trend-analysis approach as the capacity forecasting tool. It is reporting-only: it does **not** roll back the release (automated rollback is tracked separately in issue 40 as a potential future trigger source).
+
+### Scorecard output
+
+```
+release:            v1.2.3
+released_at:        2026-08-28T14:00:00Z
+window:             24h (before) / 24h (after)
+overlap_adjusted:   false
+insufficient_data:  false
+
+metric        before      after       change    verdict
+error_rate    0.08%       0.31%       +287%     REGRESSION
+p50_latency   42ms        45ms        +7%       noise
+p95_latency   180ms       260ms       +44%      REGRESSION
+p99_latency   410ms       430ms       +5%       noise
+incidents     0           2           +2        REGRESSION
+```
+
+### Testing
+
+Comparison and regression-flagging logic is covered by tests against synthetic before/after metric data containing both known regressions and known non-regressions (noise), including the overlapping-window case.
 
 ## Test Environment
 
@@ -306,79 +359,3 @@ Based on test results:
 - **Maximum sustained throughput**: XXX requests/second
 - **Maximum concurrent users**: XXX (before degradation)
 - **Recommended operating capacity**: XXX req/s (70% of max)
-- **Breaking point**: XXX concurrent users / XXX req/s
-
----
-
-## Monitoring During Tests
-
-Use these commands to monitor system resources during load tests:
-
-```bash
-# Monitor container stats
-docker stats synapse-load-app synapse-load-postgres synapse-load-redis
-
-# Monitor PostgreSQL connections
-docker exec synapse-load-postgres psql -U synapse -c "SELECT count(*) FROM pg_stat_activity;"
-
-# Monitor Redis memory
-docker exec synapse-load-redis redis-cli INFO memory
-
-# Check app logs
-docker logs -f synapse-load-app
-```
-
----
-
-## Running the Full Test Suite
-
-```bash
-# Start the infrastructure
-docker-compose -f docker-compose.load.yml up -d app
-
-# Wait for services to be healthy
-sleep 10
-
-# Run all tests sequentially
-docker-compose -f docker-compose.load.yml run --rm k6 run /scripts/callback_load.js
-docker-compose -f docker-compose.load.yml run --rm k6 run /scripts/spike_test.js
-docker-compose -f docker-compose.load.yml run --rm k6 run /scripts/idempotency_test.js
-docker-compose -f docker-compose.load.yml run --rm k6 run /scripts/soak_test.js
-
-# Cleanup
-docker-compose -f docker-compose.load.yml down -v
-```
-
----
-
-## Recommendations for Production
-
-[Fill in after analysis]
-
-1. **Infrastructure Sizing**
-   - [e.g., "Provision 4 CPU cores and 2GB RAM per instance"]
-   - [e.g., "Use connection pooling with max 50 connections"]
-
-2. **Scaling Strategy**
-   - [e.g., "Horizontal scaling recommended above 500 req/s"]
-   - [e.g., "Add load balancer for >2 instances"]
-
-3. **Database Optimization**
-   - [e.g., "Add index on anchor_transaction_id column"]
-   - [e.g., "Increase shared_buffers to 512MB in production"]
-
-4. **Monitoring & Alerts**
-   - [e.g., "Alert on p95 latency > 300ms"]
-   - [e.g., "Alert on error rate > 1%"]
-   - [e.g., "Monitor database connection pool utilization"]
-
----
-
-## Next Steps
-
-- [ ] Run baseline tests and document results
-- [ ] Identify and address critical bottlenecks
-- [ ] Re-run tests after optimizations
-- [ ] Set up continuous load testing in CI/CD
-- [ ] Establish SLOs based on test results
-- [ ] Create runbooks for handling traffic spikes

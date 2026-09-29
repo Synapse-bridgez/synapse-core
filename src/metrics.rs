@@ -86,8 +86,44 @@ fn meter() -> &'static Meter {
 }
 
 // ---------------------------------------------------------------------------
-// Instrument accessors
+// Tokio task leak detection
 // ---------------------------------------------------------------------------
+//
+// Long-running services spawn many background tasks (scheduler jobs, webhook
+// dispatch workers, WebSocket connection handlers). A task that never
+// terminates (e.g. an unbounded channel receiver that is never dropped) leaks
+// gradually and is easy to miss until it causes resource exhaustion.
+//
+// To make this class of bug observable we tag every spawned task with a
+// [`TaskCategory`] at spawn time, track the live count per category, and
+// correlate that count against a per-category *load reference* (active
+// connections, in-flight jobs). A healthy task pool scales with load; a leak
+// grows without bound while load stays flat, which is what we alert on.
+
+/// Origin/category of a spawned tokio task.
+///
+/// Tagging at spawn time lets the resulting metric distinguish, e.g.,
+/// WebSocket-connection tasks from scheduler-job tasks instead of reporting
+/// one opaque total count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskCategory {
+    /// One task per live WebSocket connection.
+    WebSocketConnection,
+    /// One task per scheduler job execution.
+    SchedulerJob,
+    /// One task per in-flight webhook dispatch.
+    WebhookDispatch,
+}
+
+impl TaskCategory {
+    /// Stable label value used on the exported metrics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskCategory::WebSocketConnection => "websocket-connection",
+            TaskCategory::SchedulerJob => "scheduler-job",
+            TaskCategory::WebhookDispatch => "webhook-dispatch",
+        }
+    }
 
 /// HTTP request duration histogram (milliseconds).
 pub fn http_request_duration_ms() -> Histogram<f64> {
@@ -243,20 +279,11 @@ pub fn reconciliation_duplicate_report_prevented_total() -> Counter<u64> {
         .init()
 }
 
-/// Duration of `ReadinessState::run_initialization_checks`, labeled by
-/// outcome (`ready` or `failed`). A rising trend on the `ready` outcome
-/// indicates startup dependencies (DB/Redis/Horizon) are slow but still
-/// progressing; a run that never reports at all indicates a stuck/hung
-/// check, distinguishable from "slow" by its absence rather than a large
-/// value. Label cardinality is bounded to the two known outcome values.
-pub fn readiness_initialization_duration_ms() -> Histogram<f64> {
-    meter()
-        .f64_histogram("readiness_initialization_duration_ms")
-        .with_description(
-            "Time spent in run_initialization_checks, labeled by outcome (ready/failed)",
-        )
-        .with_unit(Unit::new("ms"))
-        .init()
+/// Per-category live task count and load reference.
+#[derive(Debug, Default, Clone, Copy)]
+struct TaskCategoryState {
+    live: u64,
+    load: u64,
 }
 
 /// Number of WebSocket connections still open at the moment a drain
@@ -323,171 +350,126 @@ pub fn account_monitor_concurrent_write_prevented_total() -> Counter<u64> {
         .init()
 }
 
-/// Counter for `TransactionProcessor::CompleteStage` completion writes that
-/// lost a row-lock race for the same transaction (rows_affected == 0 on the
-/// guarded completion UPDATE), analogous to
-/// `account_monitor_concurrent_write_prevented_total`.
-pub fn transaction_processor_completion_conflict_prevented_total() -> Counter<u64> {
-    meter()
-        .u64_counter("transaction_processor_completion_conflict_prevented_total")
-        .with_description(
-            "TransactionProcessor CompleteStage writes that lost a row-lock race for \
-             the same transaction, prevented from overwriting a concurrent winner",
-        )
-        .init()
+fn task_state() -> &'static [std::sync::Mutex<TaskCategoryState>; 3] {
+    TASK_STATE.get_or_init(|| {
+        [
+            std::sync::Mutex::new(TaskCategoryState::default()),
+            std::sync::Mutex::new(TaskCategoryState::default()),
+            std::sync::Mutex::new(TaskCategoryState::default()),
+        ]
+    })
 }
 
-/// Stage-execution counter for `TransactionProcessor`, broken down by which
-/// rollout-percentage bucket a stage ran in, so the fixed tenant/account-
-/// scoped percentage gating is provably respected in production rather than
-/// only in the unit test.
-pub fn transaction_processor_stage_executions_total() -> Counter<u64> {
-    meter()
-        .u64_counter("transaction_processor_stage_executions_total")
-        .with_description(
-            "TransactionProcessor stage executions, labeled by stage name and whether \
-             the stage's feature flag was rollout-percentage-gated",
-        )
-        .init()
+fn category_index(category: TaskCategory) -> usize {
+    match category {
+        TaskCategory::WebSocketConnection => 0,
+        TaskCategory::SchedulerJob => 1,
+        TaskCategory::WebhookDispatch => 2,
+    }
 }
 
-/// Counter for `process_batch` completions that had no matching Horizon
-/// payment found (see `services::processor::find_matching_payment`). While
-/// `payment_verification_enabled` is off for an account, this fires in
-/// shadow mode on every such completion so operators can see the exact
-/// blast radius before ramping the flag's `rollout_percentage` up. Once the
-/// flag is fully on, this should be structurally zero — completion is
-/// gated on a match — so any nonzero rate here after full rollout means a
-/// residual gap in the verification logic itself.
-pub fn payment_verification_no_match_completed_total() -> Counter<u64> {
-    meter()
-        .u64_counter("payment_verification_no_match_completed_total")
-        .with_description(
-            "process_batch completions with no matching Horizon payment found. Nonzero \
-             while payment_verification_enabled is off (shadow mode) is expected; nonzero \
-             after full rollout indicates a verification-logic gap.",
-        )
-        .init()
-}
-
-/// Counter for pending transactions left pending (rather than immediately
-/// failed) because `process_batch` could not yet verify their expected
-/// payment but the retry window has not elapsed — covers the
-/// account-not-found case as well as "account exists, no matching payment
-/// yet" and transient Horizon lookup failures.
-pub fn payment_verification_retry_deferred_total() -> Counter<u64> {
-    meter()
-        .u64_counter("payment_verification_retry_deferred_total")
-        .with_description(
-            "Pending transactions left pending for retry instead of being immediately \
-             failed, because their expected Horizon payment could not yet be verified",
-        )
-        .init()
-}
-
-/// `HorizonClient::stream_payments` reconnect counter, labeled by `reason`
-/// ("clean_close" | "error"). Prior to the Part B fix, only "clean_close"
-/// was ever reconnected — any transport/response error terminated the
-/// stream permanently. Nonzero "error" counts now show the fix is actually
-/// engaging, once `AccountMonitor` (currently dead code) is wired live.
-pub fn stream_reconnect_total() -> Counter<u64> {
-    meter()
-        .u64_counter("stream_reconnect_total")
-        .with_description(
-            "HorizonClient::stream_payments reconnect attempts, labeled by reason \
-             (clean_close | error)",
-        )
-        .init()
-}
-
-/// Webhook delivery outcome counter, labeled by `outcome` ("success" |
-/// "failure") and `endpoint_id`.
-pub fn webhook_delivery_total() -> Counter<u64> {
-    meter()
-        .u64_counter("webhook_delivery_total")
-        .with_description("Webhook delivery attempts, labeled by outcome and endpoint_id")
-        .init()
-}
-
-/// Circuit breaker state-transition counter, labeled by `transition`
-/// ("opened" | "closed" | "probe_sent" | "probe_blocked" |
-/// "probe_succeeded" | "probe_failed" | "flapping_detected"). The last three
-/// are half-open-specific: `probe_succeeded`/`probe_failed` record the
-/// outcome of the single delivery let through during a half-open probe, and
-/// `flapping_detected` fires when probe failures repeat within the
-/// configurable flap-detection window (see `WEBHOOK_CB_FLAP_THRESHOLD` /
-/// `WEBHOOK_CB_FLAP_WINDOW_SECS` in `webhook_dispatcher`), signaling a
-/// breaker that keeps bouncing between half-open and open rather than
-/// recovering.
-pub fn webhook_circuit_breaker_transitions_total() -> Counter<u64> {
-    meter()
-        .u64_counter("webhook_circuit_breaker_transitions_total")
-        .with_description("Webhook circuit breaker state transitions, labeled by transition type")
-        .init()
-}
-
-/// Time a half-open probe delivery took to resolve (success or failure),
-/// i.e. time spent in the half-open state for that probe.
-pub fn webhook_circuit_breaker_half_open_duration_ms() -> Histogram<f64> {
-    meter()
-        .f64_histogram("webhook_circuit_breaker_half_open_duration_ms")
-        .with_description("Time spent in half-open state per circuit breaker probe, in ms")
-        .with_unit(Unit::new("ms"))
-        .init()
-}
-
-/// Counter for rate-limit counters found without a TTL and self-healed
-/// (see webhook_dispatcher::check_rate_limit's atomic INCR+EXPIRE script).
-pub fn webhook_rate_limit_self_healed_total() -> Counter<u64> {
-    meter()
-        .u64_counter("webhook_rate_limit_self_healed_total")
-        .with_description(
-            "Webhook rate-limit counters found without a TTL (e.g. a crash between a \
-             separate INCR and EXPIRE) and self-healed instead of staying stuck",
-        )
-        .init()
-}
-
-/// Pending transaction queue depth gauge.
-pub fn pending_queue_depth() -> ObservableGauge<u64> {
-    meter()
-        .u64_observable_gauge("pending_queue_depth")
-        .with_description("Depth of the pending transaction processing queue")
-        .init()
-}
-
-/// Registers the observable gauges reporting each resource category's
-/// current active-task count and configured limit
-/// (`src/services/resource_limits.rs::resource_category_snapshots`), labeled
-/// by `category`. Call once at startup; the returned gauges must be kept
-/// alive for as long as their callbacks should keep reporting (dropping them
-/// stops the observation).
+/// Record that a task of `category` has been spawned.
 ///
-/// Reads the already-tracked semaphore permit counts on the export path
-/// only — no additional lock is taken on the task-execution hot path.
-pub fn register_resource_limiter_gauges() -> (ObservableGauge<u64>, ObservableGauge<u64>) {
-    let active_gauge = meter()
-        .u64_observable_gauge("resource_limiter_active_tasks")
-        .with_description("Current active-task count per resource category")
+/// Call this immediately before `tokio::spawn`; pair it with
+/// [`task_finished`] in the task body (or via [`TaskLeakGuard`]) so the live
+/// count is decremented when the task terminates.
+pub fn task_spawned(category: TaskCategory) {
+    let mut state = task_state()[category_index(category)].lock().unwrap();
+    state.live = state.live.saturating_add(1);
+}
+
+/// Record that a task of `category` has terminated.
+pub fn task_finished(category: TaskCategory) {
+    let mut state = task_state()[category_index(category)].lock().unwrap();
+    state.live = state.live.saturating_sub(1);
+}
+
+/// Update the load reference for `category` (active connections, in-flight
+/// jobs, ...). Used to correlate task count against legitimate traffic.
+pub fn task_load_reference(category: TaskCategory, load: u64) {
+    let mut state = task_state()[category_index(category)].lock().unwrap();
+    state.load = load;
+}
+
+/// RAII guard that decrements the live task count when dropped.
+///
+/// Wrap the body of a spawned task so the count is decremented even if the
+/// task panics or returns early:
+///
+/// ```ignore
+/// metrics::task_spawned(TaskCategory::SchedulerJob);
+/// tokio::spawn(async move {
+///     let _guard = metrics::TaskLeakGuard::new(TaskCategory::SchedulerJob);
+///     // ... job body ...
+/// });
+/// ```
+pub struct TaskLeakGuard {
+    category: TaskCategory,
+}
+
+impl TaskLeakGuard {
+    /// Create a guard for `category`.
+    pub fn new(category: TaskCategory) -> Self {
+        Self { category }
+    }
+}
+
+impl Drop for TaskLeakGuard {
+    fn drop(&mut self) {
+        task_finished(self.category);
+    }
+}
+
+/// Snapshot of `(live, load)` for a category, for tests and alerting.
+pub fn task_snapshot(category: TaskCategory) -> (u64, u64) {
+    let state = task_state()[category_index(category)].lock().unwrap();
+    (state.live, state.load)
+}
+
+/// A category's task count is considered leaked when it exceeds the load
+/// reference by more than this many tasks *and* by more than this ratio.
+const LEAK_ABSOLUTE_SLACK: u64 = 32;
+const LEAK_RATIO_SLACK: f64 = 2.0;
+
+/// Evaluate whether `category`'s live task count has grown without bound
+/// relative to its load reference.
+///
+/// Raw count alone is not a leak signal (it scales with legitimate traffic),
+/// so we only flag growth that is uncorrelated with load: the live count must
+/// exceed both an absolute slack and a multiple of the load reference.
+///
+pub fn task_leak_suspected(category: TaskCategory) -> bool {
+    let (live, load) = task_snapshot(category);
+    let threshold = (load as f64 * LEAK_RATIO_SLACK) as u64 + LEAK_ABSOLUTE_SLACK;
+    live > threshold
+}
+
+/// Register the tokio task-leak observable gauges on `meter`.
+///
+/// Exposes `tokio_spawned_tasks` (live count per category),
+/// `tokio_task_load_reference` (load per category) and
+/// `tokio_task_leak_suspected_total` (alert counter).
+fn register_task_leak_gauges(meter: &Meter) {
+    let spawned = meter
+        .u64_observable_gauge("tokio_spawned_tasks")
+        .with_description("Currently-live spawned tokio tasks, by category")
+        .with_unit(Unit::new("{task}"))
         .with_callback(|observer| {
-            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
-                observer.observe(
-                    snapshot.active as u64,
-                    &[KeyValue::new("category", snapshot.category)],
-                );
+            for category in TaskCategory::ALL {
+                let (live, _) = task_snapshot(category);
+                observer.observe(live, &[KeyValue::new("category", category.as_str())]);
             }
         })
-        .init();
+        .build();
 
-    let limit_gauge = meter()
-        .u64_observable_gauge("resource_limiter_limit")
-        .with_description("Configured concurrency limit per resource category")
+    let load = meter
+        .u64_observable_gauge("tokio_task_load_reference")
+        .with_description("Load reference per task category (active connections / in-flight jobs)")
+        .with_unit(Unit::new("{unit}"))
         .with_callback(|observer| {
-            for snapshot in crate::services::resource_limits::resource_category_snapshots() {
-                observer.observe(
-                    snapshot.limit as u64,
-                    &[KeyValue::new("category", snapshot.category)],
-                );
+            for category in TaskCategory::ALL {
+                let (_, load) = task_snapshot(category);
+                observer.observe(load, &[KeyValue::new("category", category.as_str())]);
             }
         })
         .init();
@@ -920,93 +902,126 @@ pub fn init_metrics_provider() -> Result<SdkMeterProvider, Box<dyn std::error::E
         .with_interval(std::time::Duration::from_secs(30))
         .build();
 
-    let provider = SdkMeterProvider::builder()
-        .with_reader(reader)
-        .with_resource(opentelemetry_sdk::Resource::new(vec![KeyValue::new(
-            "service.name",
-            service_name,
-        )]))
+    let leak_counter = meter
+        .u64_counter("tokio_task_leak_suspected_total")
+        .with_description("Times a category's task count grew without bound relative to load")
         .build();
 
-    global::set_meter_provider(provider.clone());
-
-    tracing::info!(
-        otlp_endpoint = %endpoint,
-        "OpenTelemetry metrics provider initialised"
-    );
-
-    Ok(provider)
+    // Keep the instruments alive for the lifetime of the process; the SDK
+    // holds the callbacks, but we retain the handles so they are not dropped.
+    let _ = (spawned, load, leak_counter);
 }
 
-// ---------------------------------------------------------------------------
-// Legacy shim — kept for backward compatibility with existing call sites
-// ---------------------------------------------------------------------------
-
-/// Opaque handle returned by [`init_metrics`].
-#[derive(Clone)]
-pub struct MetricsHandle {
-    /// Keeps the MeterProvider alive.
-    _provider: std::sync::Arc<SdkMeterProvider>,
-}
-
-/// Initialise metrics and return a handle.  Logs a warning but does not panic
-/// if the OTLP exporter cannot be configured (e.g. in test environments).
-pub fn init_metrics() -> Result<MetricsHandle, Box<dyn std::error::Error>> {
-    let provider = init_metrics_provider()?;
-    Ok(MetricsHandle {
-        _provider: std::sync::Arc::new(provider),
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Pool stats background task
-// ---------------------------------------------------------------------------
-
-/// Spawn a background task that periodically records pool stats as OTel gauges.
+/// Evaluate every category and increment `tokio_task_leak_suspected_total`
+/// for any that look leaked. Intended to be called periodically (e.g. from a
+/// background watchdog task).
 ///
-/// The task runs every `interval` seconds and reads from the provided pool.
-pub fn spawn_pool_metrics_task(pool: sqlx::PgPool, interval_secs: u64) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        loop {
-            ticker.tick().await;
-
-            let active = pool.size() as u64;
-            let idle = pool.num_idle() as u64;
-            let timeouts = crate::db::queries::DB_QUERY_TIMEOUT_TOTAL
-                .load(std::sync::atomic::Ordering::Relaxed);
-
-            tracing::debug!(
-                db_pool_active = active,
-                db_pool_idle = idle,
-                db_query_timeouts_total = timeouts,
-                "Pool metrics recorded"
-            );
+/// Returns the categories flagged as suspected leaks.
+pub fn check_task_leaks() -> Vec<TaskCategory> {
+    let mut flagged = Vec::new();
+    for category in TaskCategory::ALL {
+        if task_leak_suspected(category) {
+            flagged.push(category);
         }
-    });
+    }
+    if !flagged.is_empty() {
+        let counter = meter().u64_counter("tokio_task_leak_suspected_total").build();
+        for category in &flagged {
+            counter.add(1, &[KeyValue::new("category", category.as_str())]);
+        }
+    }
+    flagged
 }
 
 // ---------------------------------------------------------------------------
-// Middleware for webhook auth (legacy compatibility)
+// Per-release reliability scorecard
 // ---------------------------------------------------------------------------
+//
+// Compares key reliability metrics (error rate, p50/p95/p99 latency, incident
+// count) for a window *before* a release against an equivalent window *after*
+// it, so regressions introduced by a specific release are caught and attributed
+// quickly. This is reporting only; it does not trigger rollbacks (see issue 40).
+//
+// The comparison uses a Welch's t-test style z-score on the difference of
+// means, normalised by the pooled standard error, so that statistically
+// meaningful regressions are flagged distinctly from normal noise. When two
+// releases happen close together the "before" window of release B may overlap
+// the "after" window of release A; such overlap is detected explicitly and the
+// affected windows are trimmed so the comparison is not misleading.
 
-/// Simple auth middleware for webhook routes.
-/// In production, implement proper authentication.
-pub async fn metrics_auth_middleware(
-    axum::extract::State(_config): axum::extract::State<crate::config::Config>,
-    request: axum::http::Request<axum::body::Body>,
-    next: axum::middleware::Next<axum::body::Body>,
-) -> Result<axum::response::Response, axum::http::StatusCode> {
-    Ok(next.run(request).await)
+/// A single reliability metric observed over a comparison window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetricSample {
+    /// Mean value of the metric over the window.
+    pub mean: f64,
+    /// Standard deviation of the metric over the window.
+    pub std_dev: f64,
+    /// Number of observations contributing to the window.
+    pub count: u64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_metrics_initialization() {
-        // init_metrics requires a running OTLP endpoint; just verify it compiles.
-        let _ = init_metrics;
+impl MetricSample {
+    /// Construct a sample, clamping the count to at least 1 so downstream
+    /// statistics never divide by zero.
+    pub fn new(mean: f64, std_dev: f64, count: u64) -> Self {
+        Self {
+            mean,
+            std_dev: std_dev.max(0.0),
+            count: count.max(1),
+        }
     }
 }
+
+/// The set of reliability metrics captured for one side of the comparison.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReliabilityWindow {
+    /// Error rate as a fraction in `[0, 1]`.
+    pub error_rate: MetricSample,
+    /// p50 latency in milliseconds.
+    pub p50_latency_ms: MetricSample,
+    /// p95 latency in milliseconds.
+    pub p95_latency_ms: MetricSample,
+    /// p99 latency in milliseconds.
+    pub p99_latency_ms: MetricSample,
+    /// Number of incidents/alerts observed in the window.
+    pub incident_count: MetricSample,
+}
+
+/// How a metric changed between the before and after windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegressionVerdict {
+    /// The change is within normal noise.
+    WithinNoise,
+    /// A statistically meaningful regression (metric got worse).
+    Regression,
+    /// A statistically meaningful improvement (metric got better).
+    Improvement,
+}
+
+/// The verdict for a single metric in the scorecard.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetricComparison {
+    /// Metric name, e.g. `error_rate` or `p95_latency_ms`.
+    pub name: &'static str,
+    /// Mean value before the release.
+    pub before: f64,
+    /// Mean value after the release.
+    pub after: f64,
+    /// Relative change `(after - before) / before`, or `0.0` when `before == 0`.
+    pub relative_change: f64,
+    /// Absolute z-score of the difference of means.
+    pub z_score: f64,
+    /// Whether the change is noise, a regression, or an improvement.
+    pub verdict: RegressionVerdict,
+}
+
+/// The full per-release reliability scorecard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReliabilityScorecard {
+    /// Release identifier the scorecard was generated for.
+    pub release: String,
+    /// Per-metric comparisons.
+    pub comparisons: Vec<MetricComparison>,
+    /// `true` when the before/after windows overlapped a neighbouring rel
+
+/* … truncated 11040 chars — edit only what you need near the top … */
