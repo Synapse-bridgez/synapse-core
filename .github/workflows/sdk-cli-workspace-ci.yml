@@ -8,6 +8,7 @@ on:
       - 'Cargo.lock'
       - 'sdks/rust/**'
       - 'cli/synapse-cli/**'
+      - 'xtask/**'
       - 'src/**'
       - '.github/workflows/sdk-cli-workspace-ci.yml'
   pull_request:
@@ -16,8 +17,15 @@ on:
       - 'Cargo.lock'
       - 'sdks/rust/**'
       - 'cli/synapse-cli/**'
+      - 'xtask/**'
       - 'src/**'
       - '.github/workflows/sdk-cli-workspace-ci.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_CACHE_SIZE: 1G
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   workspace-check:
@@ -33,7 +41,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
+
       - name: Cache Cargo registry and build artifacts
+        id: cargo-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -41,15 +56,20 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-workspace-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
           restore-keys: |
-            ${{ runner.os }}-workspace-
+            ${{ runner.os }}-stable-workspace-
+            ${{ runner.os }}-cargo-
 
       - name: Build entire workspace
         run: cargo build --workspace
 
       - name: Run workspace lib tests
         run: cargo test --workspace --lib
+
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Exercises the CLI against a real running `synapse-core` server (not the
   # hand-rolled `mock-server` binary every other CLI test uses) — added for
@@ -106,7 +126,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
+
       - name: Cache Cargo registry and build artifacts
+        id: cargo-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -114,9 +141,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-workspace-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
           restore-keys: |
-            ${{ runner.os }}-workspace-
+            ${{ runner.os }}-stable-workspace-
+            ${{ runner.os }}-cargo-
 
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
@@ -195,3 +223,7 @@ jobs:
       - name: Stop the server
         if: always()
         run: kill "$(cat server.pid)" 2>/dev/null || true
+
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"

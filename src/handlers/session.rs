@@ -170,8 +170,26 @@ impl IntoResponse for SessionError {
                 (StatusCode::UNAUTHORIZED, "Invalid or expired session")
             }
             SessionError::MissingHeader => (StatusCode::UNAUTHORIZED, "Missing session ID header"),
+            // Degraded mode (docs/redis-degradation.md): a session cannot be
+            // validated without Redis, so fail closed — but as a retryable
+            // 503, not an opaque 500, and on the shared degraded signal.
             SessionError::RedisError => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Session service error")
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::Session,
+                    crate::cache::degradation::DegradedFallback::FailClosed,
+                    &"session store unreachable",
+                );
+                tracing::warn!("Session error: {:?}", self);
+                let mut response = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Session service temporarily unavailable",
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_static("5"),
+                );
+                return response;
             }
             SessionError::SerializationError | SessionError::DeserializationError => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Session data error")
@@ -312,5 +330,20 @@ mod tests {
         let headers = HeaderMap::new();
         let session_id = headers.get(SESSION_HEADER);
         assert!(session_id.is_none());
+    }
+
+    #[test]
+    fn redis_outage_fails_closed_with_retryable_503() {
+        use crate::cache::degradation::{events_for, RedisComponent};
+        let before = events_for(RedisComponent::Session);
+        let response = SessionError::RedisError.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "5");
+        assert_eq!(events_for(RedisComponent::Session), before + 1);
+        // Auth failures stay 401 — degradation never turns into access.
+        assert_eq!(
+            SessionError::NotFound.into_response().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

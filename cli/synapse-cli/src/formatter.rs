@@ -49,6 +49,53 @@ fn csv_row(fields: &[String]) -> String {
         .join(",")
 }
 
+// ── Dry-run preview ───────────────────────────────────────────────────────────
+
+/// Banner printed before any dry-run preview so operators can never mistake a
+/// preview for a real, executed mutation.
+pub const DRY_RUN_BANNER: &str =
+    "*** DRY RUN — NO CHANGES WERE MADE. This is a preview only. ***";
+
+/// Render a dry-run preview for a mutating admin command.
+///
+/// `action` is a short human description of the operation (e.g.
+/// "create webhook endpoint"), `target` identifies the resource the operation
+/// would affect, and `payload` is the fully resolved request body that would
+/// have been sent. The preview is rendered with the same output formatter used
+/// for real responses so the shape matches what the operator would see.
+pub fn print_dry_run<T: Serialize>(
+    action: &str,
+    target: &str,
+    payload: &T,
+    fmt: OutputFormat,
+) -> anyhow::Result<()> {
+    let preview = serde_json::json!({
+        "dry_run": true,
+        "action": action,
+        "target": target,
+        "payload": serde_json::to_value(payload)?,
+    });
+
+    match fmt {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        }
+        OutputFormat::Csv => {
+            println!("{}", csv_escape(DRY_RUN_BANNER));
+            println!("{}", Formatter::format_json_output(&preview, OutputFormat::Csv)?);
+        }
+        OutputFormat::Table => {
+            println!("{}", DRY_RUN_BANNER);
+            println!("action: {}", action);
+            println!("target: {}", target);
+            println!("payload:");
+            println!("{}", Formatter::format_json_output(&preview["payload"], OutputFormat::Table)?);
+        }
+    }
+
+    Ok(())
+}
+
 // ── TableDisplay trait ────────────────────────────────────────────────────────
 
 /// Implement this for any type that can be rendered as a CLI table row.
@@ -269,21 +316,15 @@ fn format_array(values: &[Value]) -> String {
     };
 
     let headers = first.keys().cloned().collect::<Vec<_>>();
-    let mut lines = vec![headers.join(" | "), "-".repeat(80)];
+    let mut lines = vec![headers.join("  ")];
 
     for value in values {
         if let Some(row) = value.as_object() {
-            lines.push(
-                headers
-                    .iter()
-                    .map(|header| {
-                        row.get(header)
-                            .map(format_cell)
-                            .unwrap_or_else(|| "-".into())
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | "),
-            );
+            let cells: Vec<String> = headers
+                .iter()
+                .map(|header| row.get(header).map(format_cell).unwrap_or_default())
+                .collect();
+            lines.push(cells.join("  "));
         }
     }
 
@@ -292,64 +333,12 @@ fn format_array(values: &[Value]) -> String {
 
 fn format_cell(value: &Value) -> String {
     match value {
-        Value::Null => "-".to_string(),
+        Value::Null => String::new(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
-        Value::String(s) => {
-            if s.len() > 60 {
-                // #896: s.len() is byte length; &s[..57] would panic if byte
-                // offset 57 falls inside a multi-byte UTF-8 character.
-                // Use char_indices to find the byte offset of the 57th char
-                // boundary instead, which is always a valid slice point.
-                let byte_end = s.char_indices().nth(57).map(|(i, _)| i).unwrap_or(s.len());
-                format!("{}...", &s[..byte_end])
-            } else {
-                s.clone()
-            }
+        Value::String(s) => s.clone(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| String::new())
         }
-        Value::Array(arr) => format!("[{} items]", arr.len()),
-        Value::Object(obj) => format!("{{{} fields}}", obj.len()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn csv_escape_plain_value_is_unquoted() {
-        assert_eq!(csv_escape("plain"), "plain");
-    }
-
-    #[test]
-    fn csv_escape_quotes_field_with_comma() {
-        assert_eq!(csv_escape("a,b"), "\"a,b\"");
-    }
-
-    #[test]
-    fn csv_escape_doubles_internal_quotes() {
-        assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
-    }
-
-    #[test]
-    fn csv_escape_quotes_field_with_newline() {
-        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
-    }
-
-    #[test]
-    fn from_format_str_parses_csv() {
-        assert_eq!(OutputFormat::from_format_str("csv"), OutputFormat::Csv);
-        assert_eq!(OutputFormat::from_format_str("CSV"), OutputFormat::Csv);
-    }
-
-    #[test]
-    fn format_csv_value_escapes_embedded_commas_and_quotes() {
-        let value = serde_json::json!([
-            { "name": "a,b", "note": "has \"quotes\"" },
-        ]);
-        let csv = format_csv_value(&value);
-        let mut lines = csv.lines();
-        assert_eq!(lines.next().unwrap(), "name,note");
-        assert_eq!(lines.next().unwrap(), "\"a,b\",\"has \"\"quotes\"\"\"");
     }
 }

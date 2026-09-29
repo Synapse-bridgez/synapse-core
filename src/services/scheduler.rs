@@ -56,6 +56,41 @@ pub enum JobHealthAlert {
     },
 }
 
+impl JobHealthAlert {
+    /// The alert payload for this condition, carrying its runbook link
+    /// (see `crate::alerting`).
+    pub fn to_alert(&self) -> crate::alerting::AlertPayload {
+        use crate::alerting::{names, AlertPayload, AlertSeverity};
+        match self {
+            JobHealthAlert::MissedRun {
+                job_name,
+                last_success,
+                expected_by,
+            } => AlertPayload::new(
+                names::SCHEDULED_JOB_MISSED_RUN,
+                AlertSeverity::Warning,
+                format!("scheduled job '{job_name}' has not completed since it was due"),
+            )
+            .with_label("job_name", job_name)
+            .with_label(
+                "last_success",
+                last_success.map_or_else(|| "never".to_string(), |t| t.to_rfc3339()),
+            )
+            .with_label("expected_by", expected_by.to_rfc3339()),
+            JobHealthAlert::Failed {
+                job_name,
+                failed_at,
+            } => AlertPayload::new(
+                names::SCHEDULED_JOB_FAILED,
+                AlertSeverity::Warning,
+                format!("scheduled job '{job_name}' failed on its last run"),
+            )
+            .with_label("job_name", job_name)
+            .with_label("failed_at", failed_at.to_rfc3339()),
+        }
+    }
+}
+
 /// A job scheduler that manages cron-based recurring tasks
 pub struct JobScheduler {
     jobs: Arc<Mutex<HashMap<String, Arc<dyn Job>>>>,
@@ -104,6 +139,12 @@ impl JobScheduler {
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let jobs = self.jobs.lock().await;
         let active_handles = self.active_handles.clone();
+        // Each registered job owns exactly one loop task (see
+        // telemetry::task_leak::TaskCategory::tasks_per_load).
+        crate::telemetry::task_leak::global().set_load(
+            crate::telemetry::task_leak::TaskCategory::SchedulerJob,
+            jobs.len() as u64,
+        );
 
         for (name, job) in jobs.iter() {
             let job_clone = Arc::clone(job);
@@ -111,15 +152,18 @@ impl JobScheduler {
             let shutdown_rx = self.shutdown_tx.subscribe();
             let active_handles_clone = Arc::clone(&active_handles);
 
-            let handle = tokio::spawn(Self::run_job_loop(
-                name_clone,
-                job_clone,
-                self.shutdown_tx.clone(),
-                shutdown_rx,
-                active_handles_clone,
-                self.last_success.clone(),
-                self.last_run.clone(),
-            ));
+            let handle = crate::telemetry::task_leak::spawn_tracked(
+                crate::telemetry::task_leak::TaskCategory::SchedulerJob,
+                Self::run_job_loop(
+                    name_clone,
+                    job_clone,
+                    self.shutdown_tx.clone(),
+                    shutdown_rx,
+                    active_handles_clone,
+                    self.last_success.clone(),
+                    self.last_run.clone(),
+                ),
+            );
 
             active_handles.lock().await.insert(name.clone(), handle);
         }
@@ -535,5 +579,34 @@ mod tests {
             a,
             JobHealthAlert::MissedRun { job_name, .. } if job_name == "failing_job"
         )));
+    }
+
+    #[test]
+    fn job_health_alerts_carry_runbook_links() {
+        let missed = JobHealthAlert::MissedRun {
+            job_name: "daily_reconciliation".into(),
+            last_success: None,
+            expected_by: Utc::now(),
+        }
+        .to_alert();
+        assert_eq!(
+            missed.alert,
+            crate::alerting::names::SCHEDULED_JOB_MISSED_RUN
+        );
+        assert_eq!(missed.labels["last_success"], "never");
+        assert!(missed
+            .runbook_url
+            .as_deref()
+            .unwrap()
+            .ends_with("#scheduled-job-health-alerts"));
+
+        let failed = JobHealthAlert::Failed {
+            job_name: "daily_reconciliation".into(),
+            failed_at: Utc::now(),
+        }
+        .to_alert();
+        assert_eq!(failed.alert, crate::alerting::names::SCHEDULED_JOB_FAILED);
+        assert_eq!(failed.labels["job_name"], "daily_reconciliation");
+        assert!(failed.runbook_url.is_some());
     }
 }

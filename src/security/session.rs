@@ -221,8 +221,10 @@ mod tests {
         let pre_auth_session_id = Uuid::new_v4();
         let post_auth_session_id = Uuid::new_v4();
 
-        assert_ne!(pre_auth_session_id, post_auth_session_id,
-                   "Session IDs must be different after privilege change");
+        assert_ne!(
+            pre_auth_session_id, post_auth_session_id,
+            "Session IDs must be different after privilege change"
+        );
     }
 
     #[test]
@@ -243,20 +245,26 @@ mod tests {
 
         assert!(validate_session(&session1).is_ok());
         assert!(validate_session(&session2).is_ok());
-        assert_ne!(session1.id, session2.id,
-                   "Different contexts should have different session IDs");
+        assert_ne!(
+            session1.id, session2.id,
+            "Different contexts should have different session IDs"
+        );
     }
 
     #[test]
     fn test_session_boundary_ttl_minimum() {
-        assert!(validate_session_params("user", 1).is_ok(),
-                "TTL of 1 second should be valid");
+        assert!(
+            validate_session_params("user", 1).is_ok(),
+            "TTL of 1 second should be valid"
+        );
     }
 
     #[test]
     fn test_session_boundary_ttl_maximum() {
-        assert!(validate_session_params("user", MAX_SESSION_TTL_SECS).is_ok(),
-                "TTL of max seconds should be valid");
+        assert!(
+            validate_session_params("user", MAX_SESSION_TTL_SECS).is_ok(),
+            "TTL of max seconds should be valid"
+        );
     }
 
     #[test]
@@ -282,10 +290,12 @@ mod tests {
             is_active: true,
         };
 
-        assert!(matches!(
-            validate_session(&session_at_boundary),
-            Err(SessionValidationError::Expired),
+        assert!(
+            matches!(
+                validate_session(&session_at_boundary),
+                Err(SessionValidationError::Expired)
+            ),
             "Session expiring at exact current time should be considered expired"
-        ));
+        );
     }
 }

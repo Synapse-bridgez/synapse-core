@@ -1,82 +1,17 @@
-# Pull Request
-
 ## Description
 
-<!-- Brief description of what this PR does -->
-
-## Related Issue
-
-<!-- Link to the issue this PR addresses -->
-Closes #
-
-## Type of Change
-
-<!-- Mark the relevant option with an 'x' -->
-
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Refactoring (no functional changes)
-- [ ] Performance improvement
-- [ ] Test addition or update
-
-## Changes Made
-
-<!-- List the main changes in this PR -->
-
-- 
-- 
-- 
-
-## Testing
-
-<!-- Describe the tests you ran and how to reproduce them -->
-
-- [ ] Unit tests added/updated
-- [ ] Integration tests added/updated
-- [ ] Manual testing performed
-- [ ] All existing tests pass
-
-## Migration Safety (if applicable)
-
-<!-- For PRs that include database migrations -->
-
-- [ ] Migration safety checker passes (`./scripts/check-migration-safety.sh`)
-- [ ] Migration follows safe patterns (see [docs/migration-safety.md](../docs/migration-safety.md))
-- [ ] Migration tested with rollback
-- [ ] Migration documented in PR description
+<!-- Describe the change and the motivation behind it. -->
 
 ## Checklist
 
-<!-- Mark completed items with an 'x' -->
+- [ ] Tests added/updated for the change
+- [ ] Documentation updated (if applicable)
+- [ ] **OpenAPI spec drift acknowledged** — if this PR changes `utoipa` route annotations in `src/handlers/` (or any other spec-producing surface), the generated OpenAPI spec will drift from the checked-in baseline. Confirm one of the following:
+  - [ ] No spec-affecting changes were made (no route/annotation/schema changes).
+  - [ ] Spec changes are **additive only** (new fields, new endpoints, new optional params). The SDK surface has been updated to reflect them, or a follow-up issue has been filed and linked here.
+  - [ ] Spec changes are **breaking** (removed/renamed fields, changed types, removed endpoints). The SDK surface has been updated in this PR and the breaking change is called out in the description above.
+- [ ] Internal/admin routes that are intentionally undocumented are excluded from the drift check (see `scripts/openapi-drift/`), so their changes are not flagged as SDK-relevant drift.
 
-- [ ] My code follows the style guidelines ([CONTRIBUTING.md](../CONTRIBUTING.md))
-- [ ] I have performed a self-review of my code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
-- [ ] Any dependent changes have been merged and published
+## Related Issues
 
-## Pre-Submission Checks
-
-<!-- All four checks must pass before submitting -->
-
-- [ ] `cargo fmt --all -- --check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo build` succeeds
-- [ ] `cargo test` passes
-
-## Screenshots (if applicable)
-
-<!-- Add screenshots to help explain your changes -->
-
-## Additional Context
-
-<!-- Add any other context about the PR here -->
-
-## Reviewer Notes
-
-<!-- Any specific areas you'd like reviewers to focus on -->
+<!-- Link the issue(s) this PR closes, e.g. Closes #1342 -->

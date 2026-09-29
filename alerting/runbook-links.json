@@ -1,0 +1,36 @@
+{
+  "runbook": "docs/runbook.md",
+  "base_url": "https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md",
+  "alerts": {
+    "DatabasePoolUsageHigh": { "anchor": "symptom-pool-usage-consistently-high-80" },
+    "DatabasePoolExhausted": { "anchor": "pool-exhaustion-response" },
+    "HighErrorRate": { "anchor": "3-high-error-rate" },
+    "HighResponseTime": { "anchor": "symptom-slow-query-performance" },
+    "CircuitBreakerOpen": { "anchor": "5-circuit-breaker-open" },
+    "ReplicationLagHigh": { "anchor": "symptom-high-replication-lag" },
+    "DlqEntriesHigh": { "anchor": "symptom-high-dlq-entry-count" },
+    "DiskUsageHigh": { "anchor": "2-archive-old-partitions" },
+    "ReconciliationDuplicateReportPrevented": { "anchor": "reconciliation-race-near-miss" },
+    "TransactionInsertMissingPartitionBurst": { "anchor": "6-missing-partition-23514-burst-on-transaction-insert" },
+    "Watchdog": {
+      "exempt": {
+        "reason": "Always-firing dead-man's-switch used to prove the alert pipeline is alive; it is never actionable by on-call.",
+        "reviewed_by": "platform-team",
+        "reviewed_on": "2026-09-27"
+      }
+    },
+
+    "ScheduledJobMissedRun": { "anchor": "scheduled-job-health-alerts" },
+    "ScheduledJobFailed": { "anchor": "scheduled-job-health-alerts" },
+    "PipelineLatencyBudgetExceeded": { "anchor": "pipeline-latency-budget-exceeded" },
+    "TokioTaskLeakSuspected": { "anchor": "tokio-task-leak-suspected" },
+    "ReleaseReliabilityRegression": { "anchor": "release-reliability-regression" },
+    "QuotaConfigSplitBrain": {
+      "exempt": {
+        "reason": "Informational drift detector for stale quota:config:* Redis keys; there is no remediation beyond deleting the listed keys, which the alert message itself states.",
+        "reviewed_by": "platform-team",
+        "reviewed_on": "2026-09-27"
+      }
+    }
+  }
+}
