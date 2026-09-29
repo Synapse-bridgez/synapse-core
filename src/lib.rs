@@ -3,6 +3,7 @@ pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod governance;
 pub mod graphql;
 pub mod handlers;
 pub mod health;

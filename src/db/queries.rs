@@ -1512,6 +1512,97 @@ pub async fn get_unique_assets_to_settle(pool: &PgPool) -> Result<Vec<String>> {
 }
 
 // ---------------------------------------------------------------------------
+// Settlement Legs (Split Settlements)
+// ---------------------------------------------------------------------------
+
+pub async fn insert_settlement_leg(
+    executor: &mut SqlxTransaction<'_, Postgres>,
+    settlement_leg: &crate::db::models::SettlementLeg,
+) -> Result<crate::db::models::SettlementLeg> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO settlement_legs ... RETURNING *",
+        sqlx::query_as::<_, crate::db::models::SettlementLeg>(
+            r#"
+        INSERT INTO settlement_legs (
+            id, settlement_id, destination_account, amount, split_type, split_value,
+            sequence_order, status, delivery_attempt_count, last_delivery_error, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING *
+        "#,
+        )
+        .bind(settlement_leg.id)
+        .bind(settlement_leg.settlement_id)
+        .bind(&settlement_leg.destination_account)
+        .bind(&settlement_leg.amount)
+        .bind(&settlement_leg.split_type)
+        .bind(&settlement_leg.split_value)
+        .bind(settlement_leg.sequence_order)
+        .bind(&settlement_leg.status)
+        .bind(settlement_leg.delivery_attempt_count)
+        .bind(&settlement_leg.last_delivery_error)
+        .bind(settlement_leg.created_at)
+        .bind(settlement_leg.updated_at)
+        .fetch_one(&mut **executor),
+    )
+    .await
+}
+
+pub async fn get_settlement_legs(
+    pool: &PgPool,
+    settlement_id: Uuid,
+) -> Result<Vec<crate::db::models::SettlementLeg>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM settlement_legs WHERE settlement_id = $1 ORDER BY sequence_order",
+        sqlx::query_as::<_, crate::db::models::SettlementLeg>(
+            "SELECT * FROM settlement_legs WHERE settlement_id = $1 ORDER BY sequence_order",
+        )
+        .bind(settlement_id)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+pub async fn update_settlement_leg_status(
+    pool: &PgPool,
+    leg_id: Uuid,
+    new_status: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE settlement_legs SET status = $1, last_delivery_error = $2, updated_at = NOW() WHERE id = $3",
+        sqlx::query(
+            "UPDATE settlement_legs SET status = $1, last_delivery_error = $2, updated_at = NOW() WHERE id = $3",
+        )
+        .bind(new_status)
+        .bind(error)
+        .bind(leg_id)
+        .execute(pool),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn increment_settlement_leg_delivery_attempt(
+    pool: &PgPool,
+    leg_id: Uuid,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE settlement_legs SET delivery_attempt_count = delivery_attempt_count + 1, updated_at = NOW() WHERE id = $1",
+        sqlx::query(
+            "UPDATE settlement_legs SET delivery_attempt_count = delivery_attempt_count + 1, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(leg_id)
+        .execute(pool),
+    )
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Transaction Search
 // ---------------------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 pub mod settlement;
 pub mod transaction;
 
-pub use settlement::SettlementQuery;
+pub use settlement::{SettlementQuery, SettlementMutation};
 pub use transaction::{TransactionMutation, TransactionQuery, TransactionSubscription};
 
 use async_graphql::MergedObject;
@@ -10,11 +10,12 @@ use async_graphql::MergedObject;
 pub struct Query(TransactionQuery, SettlementQuery);
 
 pub mod mutation {
+    use super::settlement::SettlementMutation;
     use super::transaction::TransactionMutation;
     use async_graphql::MergedObject;
 
     #[derive(MergedObject, Default)]
-    pub struct Mutation(TransactionMutation);
+    pub struct Mutation(TransactionMutation, SettlementMutation);
 }
 
 pub use mutation::Mutation;
