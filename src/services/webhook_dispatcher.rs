@@ -15,6 +15,21 @@ use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+// ── Granular transaction event types ──────────────────────────────────────
+
+/// Granular transaction lifecycle event types.
+/// These map 1:1 to state machine transitions and allow consumers to
+/// subscribe only to the transitions they care about.
+pub const EVENT_TRANSACTION_CREATED: &str = "transaction.created";
+pub const EVENT_TRANSACTION_MATCHED: &str = "transaction.matched"; // pending -> processing
+pub const EVENT_TRANSACTION_COMPLETED: &str = "transaction.completed";
+pub const EVENT_TRANSACTION_FAILED: &str = "transaction.failed";
+
+/// Legacy generic event type (for backward compatibility).
+/// Existing tenants receive this unless they explicitly opt into granular events
+/// via the filter rules engine.
+pub const EVENT_TRANSACTION_LEGACY: &str = "transaction.update";
+
 const MAX_ATTEMPTS: i32 = 5;
 /// Base delay in seconds for exponential backoff (2^attempt * BASE_DELAY_SECS)
 const BASE_DELAY_SECS: i64 = 10;
@@ -46,6 +61,33 @@ return {current, healed}
 /// that a crashed probe holder doesn't wedge the breaker in "no one may
 /// probe" for long.
 const CB_PROBE_LEASE_MS: i64 = 30_000;
+
+/// Maps a state machine transition to the corresponding granular event type.
+/// Returns the granular event type and a flag indicating whether to also emit
+/// the legacy generic event (for backward compatibility during opt-in period).
+pub fn transition_to_event_type(from_status: &str, to_status: &str) -> (String, bool) {
+    let event_type = match (from_status, to_status) {
+        ("pending", "processing") => EVENT_TRANSACTION_MATCHED.to_string(),
+        ("pending", "completed") => EVENT_TRANSACTION_COMPLETED.to_string(),
+        ("pending", "failed") => EVENT_TRANSACTION_FAILED.to_string(),
+        ("processing", "completed") => EVENT_TRANSACTION_COMPLETED.to_string(),
+        ("processing", "failed") => EVENT_TRANSACTION_FAILED.to_string(),
+        ("failed", "pending") => EVENT_TRANSACTION_MATCHED.to_string(), // requeue/reprocess
+        ("dlq", "pending") => EVENT_TRANSACTION_MATCHED.to_string(),
+        ("pending_review", "completed") => EVENT_TRANSACTION_COMPLETED.to_string(),
+        ("pending_review", "failed") => EVENT_TRANSACTION_FAILED.to_string(),
+        ("pending_review", "pending") => EVENT_TRANSACTION_MATCHED.to_string(),
+        // Same-state transitions are valid but don't generate events
+        (from, to) if from == to => {
+            return (EVENT_TRANSACTION_LEGACY.to_string(), false);
+        }
+        // Unmapped transitions (shouldn't happen if state machine is complete)
+        _ => EVENT_TRANSACTION_LEGACY.to_string(),
+    };
+
+    // Return granular event type and flag to also emit legacy event
+    (event_type, true)
+}
 
 /// Number of half-open probe failures within `cb_flap_window_secs()` that
 /// constitutes "flapping" for alerting purposes. What counts as flapping is
@@ -85,6 +127,25 @@ enum CircuitDecision {
 
 // ── Domain types ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub max_attempts: i32,
+    pub base_delay_secs: i32,
+    pub multiplier: f64,
+    pub max_delay_secs: i32,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay_secs: 10,
+            multiplier: 2.0,
+            max_delay_secs: 300,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct WebhookEndpoint {
     pub id: Uuid,
@@ -97,8 +158,19 @@ pub struct WebhookEndpoint {
     /// Tags for bulk operation filtering (e.g., "eu-region", "staging")
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    pub retry_policy: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
+}
+
+impl WebhookEndpoint {
+    /// Get the retry policy for this endpoint, or the default if not set
+    pub fn get_retry_policy(&self) -> RetryPolicy {
+        self.retry_policy
+            .as_ref()
+            .and_then(|val| serde_json::from_value(val.clone()).ok())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -624,6 +696,7 @@ impl WebhookDispatcher {
                         now,
                         Some(status_code),
                         Some(resp_body),
+                        endpoint,
                     )
                     .await?;
                     Ok(false)
@@ -643,7 +716,7 @@ impl WebhookDispatcher {
                 )
                 .await?;
 
-                self.handle_failure(delivery, new_attempt_count, now, None, Some(err_msg))
+                self.handle_failure(delivery, new_attempt_count, now, None, Some(err_msg), endpoint)
                     .await?;
                 Ok(false)
             }
@@ -691,9 +764,9 @@ impl WebhookDispatcher {
 
     /// Handle a failed delivery attempt.
     ///
-    /// * If `attempt_count < MAX_ATTEMPTS`: schedule a retry with exponential
+    /// * If `attempt_count < endpoint.retry_policy.max_attempts`: schedule a retry with exponential
     ///   backoff and keep the status as `pending`.
-    /// * If `attempt_count >= MAX_ATTEMPTS`: move the delivery to the DLQ table
+    /// * If `attempt_count >= endpoint.retry_policy.max_attempts`: move the delivery to the DLQ table
     ///   with full attempt history, set status to `failed`.
     async fn handle_failure(
         &self,
@@ -702,8 +775,11 @@ impl WebhookDispatcher {
         now: chrono::DateTime<Utc>,
         response_status: Option<i32>,
         response_body: Option<String>,
+        endpoint: &WebhookEndpoint,
     ) -> anyhow::Result<()> {
-        let (new_status, next_attempt_at) = if attempt_count >= MAX_ATTEMPTS {
+        let retry_policy = endpoint.get_retry_policy();
+
+        let (new_status, next_attempt_at) = if attempt_count >= retry_policy.max_attempts {
             tracing::warn!(
                 delivery_id = %delivery.id,
                 endpoint_id = %delivery.endpoint_id,
@@ -712,8 +788,14 @@ impl WebhookDispatcher {
             );
             ("failed", None)
         } else {
-            let base_delay = BASE_DELAY_SECS * (1_i64 << attempt_count);
-            let delay = crate::utils::retry::apply_jitter(base_delay as u64) as i64;
+            // Calculate exponential backoff: base_delay * (multiplier ^ attempt)
+            let base_delay_secs = retry_policy.base_delay_secs as i64;
+            let multiplier = retry_policy.multiplier;
+            let delay_secs = base_delay_secs * (multiplier.powi(attempt_count - 1) as i64);
+
+            // Clamp to max_delay_secs
+            let clamped_delay = delay_secs.min(retry_policy.max_delay_secs as i64);
+            let delay = crate::utils::retry::apply_jitter(clamped_delay as u64) as i64;
             let next = now + chrono::Duration::seconds(delay);
             tracing::warn!(
                 delivery_id = %delivery.id,
@@ -749,7 +831,7 @@ impl WebhookDispatcher {
         .await?;
 
         // Route to DLQ on exhaustion
-        if attempt_count >= MAX_ATTEMPTS {
+        if attempt_count >= retry_policy.max_attempts {
             self.route_to_dlq(delivery, attempt_count, response_status, response_body)
                 .await?;
         }
@@ -2211,4 +2293,69 @@ pub async fn get_endpoint_health(
         latency_p95_ms: latency_p95,
         health_status: health_label.to_string(),
     })
+}
+
+#[cfg(test)]
+mod event_type_tests {
+    use super::*;
+
+    #[test]
+    fn test_transition_to_event_type_pending_to_processing() {
+        let (event_type, emit_legacy) = transition_to_event_type("pending", "processing");
+        assert_eq!(event_type, EVENT_TRANSACTION_MATCHED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_completed() {
+        let (event_type, emit_legacy) = transition_to_event_type("processing", "completed");
+        assert_eq!(event_type, EVENT_TRANSACTION_COMPLETED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_failed() {
+        let (event_type, emit_legacy) = transition_to_event_type("processing", "failed");
+        assert_eq!(event_type, EVENT_TRANSACTION_FAILED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_requeue() {
+        let (event_type, emit_legacy) = transition_to_event_type("failed", "pending");
+        assert_eq!(event_type, EVENT_TRANSACTION_MATCHED);
+        assert!(emit_legacy);
+    }
+
+    #[test]
+    fn test_transition_to_event_type_same_state_no_event() {
+        let (event_type, emit_legacy) = transition_to_event_type("pending", "pending");
+        assert_eq!(event_type, EVENT_TRANSACTION_LEGACY);
+        assert!(!emit_legacy);
+    }
+
+    #[test]
+    fn test_all_state_transitions_mapped() {
+        // Verify that all valid state machine transitions have corresponding event types
+        let transitions = vec![
+            ("pending", "processing"),
+            ("pending", "completed"),
+            ("pending", "failed"),
+            ("processing", "completed"),
+            ("processing", "failed"),
+            ("failed", "pending"),
+            ("dlq", "pending"),
+            ("pending_review", "completed"),
+            ("pending_review", "failed"),
+            ("pending_review", "pending"),
+        ];
+
+        for (from, to) in transitions {
+            let (event_type, emit_legacy) = transition_to_event_type(from, to);
+            // Verify event type is set
+            assert!(!event_type.is_empty(), "Event type should not be empty for {} -> {}", from, to);
+            // Verify we emit legacy events for backward compatibility
+            assert!(emit_legacy, "Should emit legacy event for {} -> {}", from, to);
+        }
+    }
 }
