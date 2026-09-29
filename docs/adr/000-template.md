@@ -1,3 +1,9 @@
+---
+status: Proposed
+topics: []
+related_files: []
+---
+
 # ADR-XXX: [Title]
 
 ## Status

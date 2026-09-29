@@ -27,6 +27,40 @@ Each ADR follows this structure:
 
 See [000-template.md](000-template.md) for the full template.
 
+## Front Matter (Required for Indexing)
+
+Every ADR and RFC must begin with YAML front matter so the decision-log index can be generated automatically. The index is a build/CI artifact derived from this structured metadata — do not hand-maintain it.
+
+```yaml
+---
+status: accepted        # proposed | accepted | deprecated | superseded
+topics: [database, partitioning]
+related_files:
+  - src/db/partition.rs
+superseded_by: null     # e.g. 005-transaction-completion-pipeline-authority.md
+---
+```
+
+- **status** - One of `proposed`, `accepted`, `deprecated`, `superseded`.
+- **topics** - Free-form keyword/topic tags used for keyword and topic search.
+- **related_files** - Repository paths this decision governs. The index flags any ADR whose `related_files` no longer exist as **potentially stale** (ties into the orphaned-module auditing work).
+- **superseded_by** - Path to the replacing ADR when `status: superseded`.
+
+### Legacy Documents
+
+ADRs that predate this convention and lack front matter are **not** silently dropped. The generator marks them as `unindexed-legacy` in the index so they remain visible and can be backfilled incrementally. Backfill minimal metadata (at least `status` and `topics`) when you next touch a legacy ADR.
+
+## Generating the Index
+
+The index is produced by the `xtask` governance subcommand, which scans `docs/adr/` (and future RFC/governance directories) for front matter and emits a searchable, cross-referenced decision log:
+
+```bash
+cargo xtask decision-index            # write the generated index
+cargo xtask decision-index --check    # CI: fail if the index is out of date
+```
+
+Search the generated index by keyword, topic, or status (`accepted` / `superseded` / `deprecated`). Structured metadata search is intentional; a full-text semantic search engine is out of scope.
+
 ## Current ADRs
 
 | ADR | Title | Status | Date |
@@ -38,6 +72,8 @@ See [000-template.md](000-template.md) for the full template.
 | [005](./005-transaction-completion-pipeline-authority.md) | Transaction Completion Pipeline Authority — processor.rs vs. transaction_processor.rs | Proposed | TBD |
 | [006](./006-backup-verification-checksum-only.md) | Backup verification is checksum-only, not restore-and-verify | Accepted | TBD |
 | [007](./007-remove-orphaned-hexagonal-and-payments-modules.md) | Remove Orphaned Hexagonal Transaction Layer and Payments Module | Accepted | TBD |
+
+> The table above is a human-readable summary. The authoritative, searchable index is the generated artifact described in [Generating the Index](#generating-the-index).
 
 ## When to Create an ADR
 
@@ -78,20 +114,22 @@ cp docs/adr/000-template.md docs/adr/XXX-your-title.md
    - Document alternatives considered
    - Include implementation notes
 
-4. **Set status to "Proposed"** initially
+4. **Add the required front matter** (status, topics, related_files) so the ADR is indexed
 
-5. **Open a Pull Request** for discussion
+5. **Set status to "Proposed"** initially
 
-6. **Update status to "Accepted"** after team approval
+6. **Open a Pull Request** for discussion
 
-7. **Update the table above** with the new ADR
+7. **Update status to "Accepted"** after team approval
+
+8. **Regenerate the index** (`cargo xtask decision-index`) and update the table above
 
 ## Updating ADRs
 
 ADRs are **immutable** once accepted. If a decision changes:
 
 1. **Create a new ADR** documenting the new decision
-2. **Update the old ADR's status** to "Superseded by ADR-XXX"
+2. **Update the old ADR's status** to "Superseded by ADR-XXX" and set `superseded_by` in its front matter
 3. **Link between ADRs** for traceability
 
 Example:
