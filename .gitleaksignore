@@ -1,0 +1,67 @@
+# Reviewed gitleaks findings (issue #1315). Every entry was triaged as a
+# placeholder, documentation example, or test fixture, not a live secret.
+# See docs/secret-history-scan.md. Only add entries after the same review.
+14e2da2c97fb2dbc546246ab33d655e518792016:cli/synapse-cli/src/bin/mock-server.rs:generic-api-key:655
+1f98de05fcebb7490b871968e1f544ca2f8cfe36:tests/idempotency_test.rs:generic-api-key:130
+1f98de05fcebb7490b871968e1f544ca2f8cfe36:tests/idempotency_test.rs:generic-api-key:46
+37423efa6a5cd031749d119e277e0c717d943c3c:docs/graphql-data-export.md:curl-auth-header:58
+37423efa6a5cd031749d119e277e0c717d943c3c:docs/graphql-data-export.md:curl-auth-header:72
+37423efa6a5cd031749d119e277e0c717d943c3c:docs/graphql-data-export.md:curl-auth-header:80
+426f7e52a906c2b9ab80317cd3e02da28f4c04a9:tests/tenant_secret_rotation_test.rs:generic-api-key:81
+426f7e52a906c2b9ab80317cd3e02da28f4c04a9:tests/tenant_secret_rotation_test.rs:generic-api-key:82
+43920b30b532a7741713c53d3c9e11e62b369a1f:PR_DESCRIPTION.md:curl-auth-header:148
+43920b30b532a7741713c53d3c9e11e62b369a1f:PR_DESCRIPTION.md:generic-api-key:150
+4dba4dfddeff1b8f24e017c4d1eb1d9dcde6cf1b:docs/api-reference.md:curl-auth-header:548
+4dba4dfddeff1b8f24e017c4d1eb1d9dcde6cf1b:docs/api-reference.md:curl-auth-header:585
+4dba4dfddeff1b8f24e017c4d1eb1d9dcde6cf1b:docs/api-reference.md:curl-auth-header:603
+4dba4dfddeff1b8f24e017c4d1eb1d9dcde6cf1b:docs/api-reference.md:curl-auth-header:627
+4dba4dfddeff1b8f24e017c4d1eb1d9dcde6cf1b:docs/deployment.md:curl-auth-header:119
+4ee4f19bd482a4c522670c296c45b4f2aab33195:cli/synapse-cli/src/bin/mock-server.rs:generic-api-key:171
+7085eaf38cf05e67573cc58ac9947f73b78dafd3:docs/graphql-idempotency.md:curl-auth-header:149
+7085eaf38cf05e67573cc58ac9947f73b78dafd3:docs/graphql-idempotency.md:generic-api-key:15
+7085eaf38cf05e67573cc58ac9947f73b78dafd3:docs/graphql-idempotency.md:generic-api-key:151
+7085eaf38cf05e67573cc58ac9947f73b78dafd3:docs/graphql-idempotency.md:generic-api-key:39
+7085eaf38cf05e67573cc58ac9947f73b78dafd3:docs/graphql-idempotency.md:generic-api-key:44
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/api_examples.sh:curl-auth-header:102
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/api_examples.sh:generic-api-key:8
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:curl-auth-header:243
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:curl-auth-header:249
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:curl-auth-header:259
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:curl-auth-header:263
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:curl-auth-header:272
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:generic-api-key:250
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:generic-api-key:264
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md:generic-api-key:273
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_SUMMARY.md:curl-auth-header:249
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_SUMMARY.md:curl-auth-header:263
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:106
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:114
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:128
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:133
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:141
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:177
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:189
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:196
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:curl-auth-header:73
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:generic-api-key:115
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/QUICKSTART.md:generic-api-key:134
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/README.md:curl-auth-header:115
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/README.md:curl-auth-header:129
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/README.md:curl-auth-header:136
+7abff95c1e941fb0628951cf49eb814bb91d83e5:src/Multi-Tenant Isolation Layer (Architecture)/README.md:generic-api-key:145
+8e478ce7066c33286612723e5c1f12b079a7d029:tests/request_logger_test.rs:generic-api-key:271
+9f7958174196fd63faf05ddde676026b95b38b8a:src/ws/health.rs:generic-api-key:248
+cbe1ac4dcfebbc64de1c25a356dfa82446ac12fa:docs/idempotency.md:curl-auth-header:60
+cbe1ac4dcfebbc64de1c25a356dfa82446ac12fa:docs/idempotency.md:generic-api-key:62
+cfcc6c6d5115182c7641d68c2f632c1b911be260:src/utils/sanitize.rs:stripe-access-token:84
+e9d5e9e8ba50e7a125fc1c5d55e994858f42f369:cli/synapse-cli/src/bin/mock-server.rs:generic-api-key:155
+e9d5e9e8ba50e7a125fc1c5d55e994858f42f369:cli/synapse-cli/src/bin/mock-server.rs:generic-api-key:161
+e9d5e9e8ba50e7a125fc1c5d55e994858f42f369:cli/synapse-cli/src/bin/mock-server.rs:generic-api-key:167
+e9d5e9e8ba50e7a125fc1c5d55e994858f42f369:cli/synapse-cli/src/bin/mock-server.rs:generic-api-key:173
+edbf0ebdd78cf9995da12342a8b46ba7ff69f4df:NEXT_STEPS.md:curl-auth-header:33
+edbf0ebdd78cf9995da12342a8b46ba7ff69f4df:NEXT_STEPS.md:curl-auth-header:42
+edbf0ebdd78cf9995da12342a8b46ba7ff69f4df:NEXT_STEPS.md:generic-api-key:35
+edbf0ebdd78cf9995da12342a8b46ba7ff69f4df:NEXT_STEPS.md:generic-api-key:44
+f3175a84173a9a3256671a4d1214fdda81d1ac71:src/auth/idempotency.md:generic-api-key:97
+f3bde004a9120cd72b2e1e53da66b1ce6937a0b7:src/ws/health.rs:generic-api-key:171
+f966c126e6d874bd3d1168e5d374156625f86264:docs/CLI.md:generic-api-key:127

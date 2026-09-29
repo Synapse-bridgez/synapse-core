@@ -23,10 +23,14 @@ const DENYLISTED_LABELS: &[&str] = &[
 ];
 
 /// `(file, label)` pairs that were reviewed and found to be bounded despite
-/// matching a denylisted substring, or are intentionally exempt. Empty:
-/// no exceptions have been reviewed yet — see
-/// docs/metrics-cardinality-convention.md.
-const ALLOWED_EXCEPTIONS: &[(&str, &str)] = &[];
+/// matching a denylisted substring, or are intentionally exempt — see
+/// "Reviewed exceptions" in docs/metrics-cardinality-convention.md.
+const ALLOWED_EXCEPTIONS: &[(&str, &str)] = &[
+    // #1337: top-K per-tenant latency gauges. Values capped at
+    // max_tracked_tenants (≤ 200) + `_other` + `_unattributed`; enforced by
+    // tenant::latency::tests::cardinality_is_bounded_under_large_synthetic_load.
+    ("src/tenant/latency.rs", "tenant_id"),
+];
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {

@@ -396,7 +396,12 @@ impl ProfilingManager {
 
     /// Completed continuous-profiling rotations currently retained, oldest first.
     pub async fn continuous_sessions(&self) -> Vec<ProfilingSession> {
-        self.continuous_sessions.lock().await.iter().cloned().collect()
+        self.continuous_sessions
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -743,7 +748,7 @@ mod tests {
     #[test]
     fn test_ensure_flamegraph_path_available_allows_matching_completed_session() {
         let session = completed_session("profile-cpu-1");
-        assert!(ensure_flamegraph_path_available(Some(&session), "profile-cpu-1").is_ok());
+        assert!(ensure_flamegraph_path_available(Some(&session), &[], "profile-cpu-1").is_ok());
     }
 
     #[test]
@@ -751,13 +756,13 @@ mod tests {
         // The exact bypass this test guards against: an attacker probing an
         // arbitrary session_id when nothing is running must be denied, not
         // silently allowed through to the filesystem read.
-        assert!(ensure_flamegraph_path_available(None, "profile-cpu-999").is_err());
+        assert!(ensure_flamegraph_path_available(None, &[], "profile-cpu-999").is_err());
     }
 
     #[test]
     fn test_ensure_flamegraph_path_available_denies_mismatched_session_id() {
         let session = completed_session("profile-cpu-1");
-        assert!(ensure_flamegraph_path_available(Some(&session), "profile-cpu-2").is_err());
+        assert!(ensure_flamegraph_path_available(Some(&session), &[], "profile-cpu-2").is_err());
     }
 
     #[test]
@@ -765,6 +770,6 @@ mod tests {
         let mut session = completed_session("profile-cpu-1");
         session.flamegraph_path = None;
         session.status = "running".to_string();
-        assert!(ensure_flamegraph_path_available(Some(&session), "profile-cpu-1").is_err());
+        assert!(ensure_flamegraph_path_available(Some(&session), &[], "profile-cpu-1").is_err());
     }
 }

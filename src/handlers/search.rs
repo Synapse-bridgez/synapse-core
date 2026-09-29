@@ -81,7 +81,7 @@ pub async fn search_transactions(
 
     let (pool, replica_used) = pool_manager.read_pool().await;
     let (total, transactions) = crate::db::queries::search_transactions_for_tenant(
-        pool,
+        &pool,
         params.status.as_deref(),
         params.asset_code.as_deref(),
         min_amount.as_ref(),

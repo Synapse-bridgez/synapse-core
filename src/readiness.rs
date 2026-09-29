@@ -193,6 +193,116 @@ impl ReadinessState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dependency degradation on /ready (#1335, #1336)
+// ---------------------------------------------------------------------------
+
+/// Vault state as reported on `/ready`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct VaultReadiness {
+    /// `not_configured` | `ok` | `degraded_cached_fallback` | `expired`
+    pub status: String,
+    /// How long Vault has been failing, if it is.
+    pub unreachable_for_secs: Option<u64>,
+    /// Time left before cached secrets hit their hard maximum age and start
+    /// being refused.
+    pub fallback_remaining_secs: Option<u64>,
+    pub max_fallback_age_secs: Option<u64>,
+}
+
+/// Redis degraded-mode blast radius as reported on `/ready`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct RedisReadiness {
+    /// `ok` | `degraded`
+    pub status: String,
+    /// Components that degraded around a Redis failure within the last
+    /// minute (see `cache::degradation`).
+    pub degraded_components: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct DependencyReadiness {
+    pub vault: VaultReadiness,
+    pub redis: RedisReadiness,
+}
+
+impl DependencyReadiness {
+    /// Names of degraded dependencies, for the `X-Degraded-Dependencies`
+    /// header and the `degraded` body field.
+    pub fn degraded(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if matches!(
+            self.vault.status.as_str(),
+            "degraded_cached_fallback" | "expired"
+        ) {
+            out.push("vault".to_string());
+        }
+        if self.redis.status == "degraded" {
+            out.push("redis".to_string());
+        }
+        out
+    }
+
+    /// True once cached Vault secrets have passed their hard maximum age.
+    pub fn secrets_expired(&self) -> bool {
+        self.vault.status == "expired"
+    }
+}
+
+/// Builds the dependency section of `/ready`.
+///
+/// Degradation is *reported*, not turned into a 503: a transient Vault or
+/// Redis blip is exactly what the fallbacks exist to ride out, and failing
+/// readiness on every instance at once would turn it into a full outage.
+/// Orchestration-level alerting keys off the header / body (and the
+/// `vault_fallback_active` / `redis_degraded_operations_total` metrics)
+/// instead. Set `READINESS_FAIL_ON_EXPIRED_SECRETS=true` to have `/ready`
+/// return 503 once cached secrets have expired.
+pub fn dependency_readiness(
+    secrets: Option<&crate::secrets::SecretsStore>,
+    now: Instant,
+) -> DependencyReadiness {
+    let vault = match secrets {
+        None => VaultReadiness {
+            status: "not_configured".to_string(),
+            unreachable_for_secs: None,
+            fallback_remaining_secs: None,
+            max_fallback_age_secs: None,
+        },
+        Some(store) => {
+            let v = store.vault_status_at(now);
+            VaultReadiness {
+                status: v.status.to_string(),
+                unreachable_for_secs: v.unreachable_for_secs,
+                fallback_remaining_secs: v.fallback_remaining_secs,
+                max_fallback_age_secs: Some(v.max_fallback_age_secs),
+            }
+        }
+    };
+    let degraded_components: Vec<String> = crate::cache::degradation::active_components()
+        .into_iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
+    let redis = RedisReadiness {
+        status: if degraded_components.is_empty() {
+            "ok"
+        } else {
+            "degraded"
+        }
+        .to_string(),
+        degraded_components,
+    };
+    DependencyReadiness { vault, redis }
+}
+
+/// Whether `/ready` should fail once cached secrets have expired
+/// (`READINESS_FAIL_ON_EXPIRED_SECRETS`, default false).
+pub fn fail_on_expired_secrets() -> bool {
+    std::env::var("READINESS_FAIL_ON_EXPIRED_SECRETS")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 /// Error types for initialization checks
 #[derive(Debug)]
 pub enum InitializationError {
@@ -252,10 +362,16 @@ pub async fn drain_handler(
             drain_close_outcome(connections_open_at_start, ws_pool.active_connections());
         let closed_total = crate::metrics::ws_drain_connections_closed_total();
         if clean > 0 {
-            closed_total.add(clean as u64, &[opentelemetry::KeyValue::new("outcome", "clean")]);
+            closed_total.add(
+                clean as u64,
+                &[opentelemetry::KeyValue::new("outcome", "clean")],
+            );
         }
         if forced > 0 {
-            closed_total.add(forced as u64, &[opentelemetry::KeyValue::new("outcome", "forced")]);
+            closed_total.add(
+                forced as u64,
+                &[opentelemetry::KeyValue::new("outcome", "forced")],
+            );
             tracing::warn!(
                 forced_close_count = forced,
                 "Drain timeout elapsed with connections still open — forcibly closing"
@@ -349,6 +465,62 @@ mod tests {
             "readiness must flip to not-ready as soon as drain starts, not after the timeout"
         );
         assert!(state.is_draining());
+    }
+
+    #[test]
+    fn readiness_without_vault_reports_not_configured() {
+        let r = dependency_readiness(None, Instant::now());
+        assert_eq!(r.vault.status, "not_configured");
+        assert!(!r.degraded().contains(&"vault".to_string()));
+        assert!(!r.secrets_expired());
+    }
+
+    #[test]
+    fn readiness_surfaces_vault_fallback_before_hard_limit() {
+        use crate::secrets::{SecretKind, SecretsStore, VaultFallbackConfig};
+        let store = SecretsStore::with_fallback_config(
+            "a".into(),
+            "b".into(),
+            VaultFallbackConfig::clamped(Some(Duration::from_secs(900)), None),
+        );
+        let t0 = Instant::now();
+        for kind in SecretKind::ALL {
+            store.record_refresh_success(kind, t0);
+            store.record_refresh_failure(kind, t0, &"down");
+        }
+        let during = dependency_readiness(Some(&store), t0 + Duration::from_secs(120));
+        assert_eq!(during.vault.status, "degraded_cached_fallback");
+        assert_eq!(during.vault.fallback_remaining_secs, Some(780));
+        assert_eq!(during.vault.unreachable_for_secs, Some(120));
+        assert!(during.degraded().contains(&"vault".to_string()));
+        assert!(!during.secrets_expired());
+
+        let after = dependency_readiness(Some(&store), t0 + Duration::from_secs(1000));
+        assert_eq!(after.vault.status, "expired");
+        assert!(after.secrets_expired());
+    }
+
+    #[test]
+    fn readiness_lists_redis_degraded_components() {
+        crate::cache::degradation::record_redis_degraded(
+            crate::cache::degradation::RedisComponent::QueryCache,
+            crate::cache::degradation::DegradedFallback::DirectDbRead,
+            &"down",
+        );
+        let r = dependency_readiness(None, Instant::now());
+        assert_eq!(r.redis.status, "degraded");
+        assert!(r
+            .redis
+            .degraded_components
+            .contains(&"query_cache".to_string()));
+        assert!(r.degraded().contains(&"redis".to_string()));
+    }
+
+    #[test]
+    fn fail_on_expired_defaults_off() {
+        if std::env::var("READINESS_FAIL_ON_EXPIRED_SECRETS").is_err() {
+            assert!(!fail_on_expired_secrets());
+        }
     }
 
     /// A migration/dependency check that is slow-but-progressing must keep

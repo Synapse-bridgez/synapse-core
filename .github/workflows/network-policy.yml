@@ -1,0 +1,28 @@
+name: Network Policy
+
+on:
+  pull_request:
+    paths:
+      - deploy/network-policy.yaml
+      - scripts/lint-network-policy.sh
+      - .github/workflows/network-policy.yml
+  push:
+    branches: [main, develop]
+    paths:
+      - deploy/network-policy.yaml
+      - scripts/lint-network-policy.sh
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: instrumenta/kubeval-action@master
+        with:
+          files: deploy/network-policy.yaml
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+      - name: Lint network policy
+        run: bash scripts/lint-network-policy.sh

@@ -455,7 +455,7 @@ pub async fn get_transaction(
 ) -> Result<impl IntoResponse, AppError> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
 
-    let transaction = queries::get_transaction_for_tenant(pool, id, tenant.tenant_id)
+    let transaction = queries::get_transaction_for_tenant(&pool, id, tenant.tenant_id)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => {
@@ -573,7 +573,7 @@ pub async fn list_transactions(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.pool_manager.read_pool().await;
     let mut rows = queries::list_transactions_filtered(
-        pool,
+        &pool,
         fetch_limit,
         decoded_cursor,
         backward,
@@ -666,7 +666,7 @@ pub async fn list_transactions_api(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = app_state.pool_manager.read_pool().await;
     let mut rows = queries::list_transactions_filtered_for_tenant(
-        pool,
+        &pool,
         fetch_limit,
         decoded_cursor,
         backward,

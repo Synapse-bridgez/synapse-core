@@ -59,7 +59,7 @@ pub async fn status_counts(State(state): State<ApiState>) -> Result<impl IntoRes
     }
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    Ok(match crate::db::queries::get_status_counts(pool).await {
+    Ok(match crate::db::queries::get_status_counts(&pool).await {
         Ok(counts) => {
             let _ = state
                 .app_state
@@ -110,7 +110,7 @@ pub async fn daily_totals(
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
     Ok(
-        match crate::db::queries::get_daily_totals(pool, query.days).await {
+        match crate::db::queries::get_daily_totals(&pool, query.days).await {
             Ok(totals) => {
                 let _ = state
                     .app_state
@@ -156,7 +156,7 @@ pub async fn asset_stats(State(state): State<ApiState>) -> Result<impl IntoRespo
     }
 
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    Ok(match crate::db::queries::get_asset_stats(pool).await {
+    Ok(match crate::db::queries::get_asset_stats(&pool).await {
         Ok(stats) => {
             let _ = state
                 .app_state
@@ -199,6 +199,22 @@ pub async fn cache_metrics(State(state): State<ApiState>) -> Result<impl IntoRes
         idempotency_fallback_count: 0,
     };
     Ok((StatusCode::OK, Json(combined_metrics)))
+}
+
+/// `GET /stats/tenant-latency` (admin) — per-tenant rolling-window latency
+/// overview, slowest p95 first, within the exported cardinality bound
+/// (see `tenant::latency`).
+pub async fn tenant_latency_overview() -> impl IntoResponse {
+    Json(crate::tenant::latency::overview(
+        crate::tenant::latency::registry(),
+    ))
+}
+
+/// `GET /usage/latency` (tenant-authenticated) — the calling tenant's own
+/// latency histogram and percentiles for webhook ingestion and GraphQL over
+/// the rolling window. Percentiles are omitted below the minimum sample size.
+pub async fn tenant_latency_usage(tenant: crate::tenant::TenantContext) -> impl IntoResponse {
+    Json(crate::tenant::latency::registry().summary(tenant.tenant_id))
 }
 
 #[cfg(test)]

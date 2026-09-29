@@ -1,7 +1,7 @@
 use crate::services::query_cache::QueryCache;
 use crate::services::webhook_dispatcher::WebhookDispatcher;
 use sqlx::PgPool;
-use tracing::instrument;
+use tracing::{instrument, Instrument};
 
 #[async_trait::async_trait]
 pub trait ProcessingStage: Send + Sync {
@@ -161,7 +161,11 @@ impl TransactionProcessor {
     #[instrument(
         name = "processor.process_transaction",
         skip(self),
-        fields(transaction.id = %tx_id, trace_id = tracing::field::Empty)
+        fields(
+            transaction.id = %tx_id,
+            trace_id = tracing::field::Empty,
+            pipeline.queue_wait_ms = tracing::field::Empty
+        )
     )]
     pub async fn process_transaction(&self, tx_id: uuid::Uuid) -> anyhow::Result<()> {
         // Fetch the transaction first
@@ -179,6 +183,17 @@ impl TransactionProcessor {
         if let Some(trace_id) = &tx.trace_id {
             tracing::Span::current().record("trace_id", &trace_id.as_str());
         }
+
+        // Time the transaction sat pending between ingestion and now; the
+        // latency-budget layer (telemetry::latency_budget) charges it to the
+        // processing stage.
+        let queue_wait_ms = (chrono::Utc::now() - tx.created_at)
+            .num_milliseconds()
+            .max(0);
+        tracing::Span::current().record(
+            crate::telemetry::latency_budget::QUEUE_WAIT_FIELD,
+            queue_wait_ms,
+        );
 
         // Define the pipeline stages
         let mut stages: Vec<Box<dyn ProcessingStage>> = Vec::new();
@@ -225,7 +240,14 @@ impl TransactionProcessor {
             let start = std::time::Instant::now();
             tracing::info!("Starting {} stage for transaction {}", stage_name, tx_id);
 
-            match stage.execute(&tx).await {
+            // Span names feed telemetry::latency_budget: the validate stage
+            // counts toward the validation budget, the rest toward processing.
+            let stage_span = if stage_name == "validate" {
+                tracing::info_span!("processor.stage.validate")
+            } else {
+                tracing::info_span!("processor.stage", stage = stage_name)
+            };
+            match stage.execute(&tx).instrument(stage_span).await {
                 Ok(()) => {
                     let duration = start.elapsed();
                     tracing::info!(

@@ -41,6 +41,28 @@ impl Clone for HorizonError {
     }
 }
 
+/// Maps a Horizon client error onto a scorecard outcome.
+pub(crate) fn classify_horizon_error(
+    e: &HorizonError,
+) -> crate::services::dependency_scorecard::CallOutcome {
+    use crate::services::dependency_scorecard::{classify_reqwest_error, CallOutcome};
+    match e {
+        HorizonError::RequestError(re) => classify_reqwest_error(re),
+        HorizonError::AccountNotFound(_) => CallOutcome::Success,
+        // A 4xx ("Horizon API error: 400 Bad Request") is Horizon answering
+        // a request it considers ours to fix; 5xx statuses and undecodable
+        // bodies are Horizon answering badly.
+        HorizonError::InvalidResponse(msg) => {
+            if msg.starts_with("Horizon API error: 4") {
+                CallOutcome::Success
+            } else {
+                CallOutcome::DependencyFault
+            }
+        }
+        HorizonError::CircuitBreakerOpen(_) => CallOutcome::CircuitRejected,
+    }
+}
+
 /// Response from Horizon /accounts endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountResponse {
@@ -170,6 +192,30 @@ impl HorizonClient {
         }
     }
 
+    /// Feeds one settlement API call's outcome and any circuit-breaker state
+    /// change into the dependency scorecard (#1334). A 404 is the network
+    /// answering normally (an unfunded account), so it counts as available
+    /// here even though the breaker's failure policy counts it.
+    fn record_scorecard<T>(
+        &self,
+        permitted_before: bool,
+        started: std::time::Instant,
+        result: &Result<T, FailsafeError<HorizonError>>,
+    ) {
+        use crate::services::dependency_scorecard::{self as scorecard, CallOutcome, Dependency};
+        let outcome = match result {
+            Ok(_) => CallOutcome::Success,
+            Err(FailsafeError::Rejected) => CallOutcome::CircuitRejected,
+            Err(FailsafeError::Inner(e)) => classify_horizon_error(e),
+        };
+        scorecard::record_call(Dependency::SettlementApi, outcome, started.elapsed());
+        scorecard::record_permitted_change(
+            Dependency::SettlementApi,
+            permitted_before,
+            self.circuit_breaker.is_call_permitted(),
+        );
+    }
+
     /// Returns the current state of the circuit breaker
     pub fn circuit_state(&self) -> String {
         if self.circuit_breaker.is_call_permitted() {
@@ -197,6 +243,8 @@ impl HorizonClient {
         let cx = opentelemetry::Context::current();
         propagator.inject_context(&cx, &mut headers);
 
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
         let result = self
             .circuit_breaker
             .call(async move {
@@ -221,6 +269,7 @@ impl HorizonClient {
             })
             .await;
 
+        self.record_scorecard(permitted_before, started, &result);
         match result {
             Ok(account) => Ok(account),
             Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
@@ -255,6 +304,8 @@ impl HorizonClient {
         let cx = opentelemetry::Context::current();
         propagator.inject_context(&cx, &mut headers);
 
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
         let result = self
             .circuit_breaker
             .call(async move {
@@ -291,6 +342,7 @@ impl HorizonClient {
             })
             .await;
 
+        self.record_scorecard(permitted_before, started, &result);
         match result {
             Ok(payments) => Ok(payments),
             Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(

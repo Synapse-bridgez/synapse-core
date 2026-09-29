@@ -1,0 +1,111 @@
+# Prometheus alerting rules for synapse-core.
+#
+# Mirrors the "Alert Thresholds" table in docs/runbook.md. Every `alert:`
+# here must have an entry in alerting/runbook-links.json (a runbook anchor or
+# a reviewed exemption), and each mapped rule's `runbook_url` annotation must
+# equal `<base_url>#<anchor>` from that file — both enforced in CI by
+# scripts/check-alert-runbook-links.py. Exempt rules must not carry a
+# runbook_url. When adding a rule, add the mapping entry first, then copy
+# the URL the validator tells you to use.
+#
+# Keep `- alert:` and `runbook_url:` each on their own line: the validator
+# reads them with a line-oriented parser so CI needs no YAML dependency.
+
+groups:
+  - name: synapse-core
+    rules:
+      - alert: DatabasePoolUsageHigh
+        expr: db_pool_active_connections / (db_pool_active_connections + db_pool_idle_connections) >= 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Database connection pool usage at or above 80%
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#symptom-pool-usage-consistently-high-80
+
+      - alert: DatabasePoolExhausted
+        expr: db_pool_idle_connections == 0 and db_pool_active_connections > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Database connection pool exhausted
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#pool-exhaustion-response
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_request_duration_ms_count{status=~"5.."}[5m]))
+            / sum(rate(http_request_duration_ms_count[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: HTTP 5xx error rate above 5%
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#3-high-error-rate
+
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_ms_bucket[5m]))) > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: HTTP P95 latency above 2s
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#symptom-slow-query-performance
+
+      - alert: CircuitBreakerOpen
+        expr: increase(webhook_circuit_breaker_transitions_total{transition="opened"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A circuit breaker opened
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#5-circuit-breaker-open
+
+      - alert: ReplicationLagHigh
+        expr: pg_replication_lag_bytes > 10 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Replica more than 10 MB behind primary
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#symptom-high-replication-lag
+
+      - alert: DlqEntriesHigh
+        expr: transaction_dlq_entries > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 100 transactions in the DLQ
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#symptom-high-dlq-entry-count
+
+      - alert: DiskUsageHigh
+        expr: 1 - node_filesystem_avail_bytes / node_filesystem_size_bytes > 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Disk usage above 80%
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#2-archive-old-partitions
+
+      - alert: ReconciliationDuplicateReportPrevented
+        expr: increase(reconciliation_duplicate_report_prevented_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Concurrent reconciliation runs raced for the same period
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#reconciliation-race-near-miss
+
+      - alert: TransactionInsertMissingPartitionBurst
+        expr: increase(transaction_insert_missing_partition_total[10m]) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: Burst of missing-partition (23514) errors on transaction insert
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#6-missing-partition-23514-burst-on-transaction-insert
+
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: Always firing; proves the alerting pipeline is alive
