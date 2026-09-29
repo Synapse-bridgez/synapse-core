@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, Mutex};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
+use crate::telemetry::task_leak::{self, TaskCategory};
 use crate::AppState;
 
 use crate::handlers::ws_error::{validate_message_size, validate_ws_token};
@@ -200,6 +201,11 @@ async fn handle_socket(
         "WebSocket connection opened"
     );
 
+    // One unit of ws_connection load for the life of this connection; its
+    // recv/send tasks below are tagged against it, so task-leak detection
+    // (telemetry::task_leak) can tell a leaked task from normal traffic.
+    let _load = task_leak::track_load(TaskCategory::WsConnection);
+
     let (sender, mut receiver) = socket.split();
     let sender = Arc::new(Mutex::new(sender));
 
@@ -216,7 +222,7 @@ async fn handle_socket(
     let recv_addr = client_addr.clone();
     let recv_sender = Arc::clone(&sender);
     let recv_state = state.clone();
-    let mut recv_task = tokio::spawn(async move {
+    let mut recv_task = task_leak::spawn_tracked(TaskCategory::WsConnection, async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
@@ -246,7 +252,7 @@ async fn handle_socket(
     let dropped_counter = Arc::clone(&messages_dropped_total);
     let send_addr = client_addr.clone();
     let drain_readiness = state.readiness.clone();
-    let mut send_task = tokio::spawn(async move {
+    let mut send_task = task_leak::spawn_tracked(TaskCategory::WsConnection, async move {
         let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         let mut drain_check_interval = tokio::time::interval(Duration::from_secs(2));
 

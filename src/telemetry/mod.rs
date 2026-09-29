@@ -8,8 +8,10 @@ pub mod data_export;
 pub mod error_handling;
 pub mod health_checks;
 pub mod input_validation;
+pub mod latency_budget;
 pub mod metrics_optimization;
 pub mod reconnection;
+pub mod task_leak;
 pub mod webhook;
 
 pub use connection_pool::{ConnectionPool, PoolConfig};

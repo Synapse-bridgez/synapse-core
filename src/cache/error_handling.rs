@@ -56,6 +56,12 @@ impl CacheError {
         )
     }
 
+    /// Alias for [`CacheError::is_degradable`] using the unavailability
+    /// terminology, so callers can express intent either way.
+    pub fn is_unavailability(&self) -> bool {
+        self.is_degradable()
+    }
+
     /// Stable, low-cardinality label used for the shared degraded-mode metric
     /// and log line so operators can see the full blast radius of a Redis
     /// outage across every component.
@@ -68,6 +74,39 @@ impl CacheError {
             CacheError::SerializationError(_) => "serialization_error",
             CacheError::ValidationError(_) => "validation_error",
         }
+    }
+}
+
+/// True when a raw Redis error means Redis is unavailable (see
+/// [`CacheError::is_unavailability`]). Validation / (de)serialization
+/// errors raised on our side are not unavailability.
+pub fn is_redis_unavailable(error: &redis::RedisError) -> bool {
+    if matches!(
+        error.kind(),
+        redis::ErrorKind::TypeError
+            | redis::ErrorKind::ClientError
+            | redis::ErrorKind::InvalidClientConfig
+    ) {
+        return false;
+    }
+    convert_redis_error_ref(error).is_unavailability()
+}
+
+fn convert_redis_error_ref(error: &redis::RedisError) -> CacheError {
+    if error.is_timeout() {
+        return CacheError::Timeout;
+    }
+    match error.kind() {
+        redis::ErrorKind::IoError => {
+            if error.to_string().contains("circuit breaker") {
+                CacheError::CircuitBreakerOpen
+            } else {
+                CacheError::ConnectionFailed(error.to_string())
+            }
+        }
+        _ => CacheError::ConnectionFailed(error.to_string()),
+    }
+}
     }
 }
 
@@ -150,6 +189,31 @@ mod tests {
         let err = CacheError::KeyNotFound;
         // KeyNotFound represents a cache miss, not an error condition
         assert_eq!(err.to_string(), "Key not found in cache");
+    }
+
+    #[test]
+    fn unavailability_classification() {
+        assert!(CacheError::ConnectionFailed("x".into()).is_unavailability());
+        assert!(CacheError::Timeout.is_unavailability());
+        assert!(CacheError::CircuitBreakerOpen.is_unavailability());
+        assert!(!CacheError::KeyNotFound.is_unavailability());
+        assert!(!CacheError::ValidationError("x".into()).is_unavailability());
+        assert!(!CacheError::SerializationError("x".into()).is_unavailability());
+    }
+
+    #[test]
+    fn raw_redis_error_unavailability() {
+        let io = redis::RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        ));
+        assert!(is_redis_unavailable(&io));
+        let open =
+            redis::RedisError::from((redis::ErrorKind::IoError, "Redis circuit breaker is open"));
+        assert!(is_redis_unavailable(&open));
+        let validation =
+            redis::RedisError::from((redis::ErrorKind::TypeError, "cache validation failed"));
+        assert!(!is_redis_unavailable(&validation));
     }
 
     #[test]

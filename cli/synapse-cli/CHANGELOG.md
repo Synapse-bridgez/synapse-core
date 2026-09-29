@@ -53,3 +53,24 @@ Versioning follows the policy described in [VERSIONING.md](./VERSIONING.md).
 - Integration tests using `assert_cmd` and `predicates`.
 - Wired into the root workspace (`Cargo.toml` `[workspace] members`).
 - Scoped CI workflow (`.github/workflows/cli-synapse-ci.yml`): fmt, clippy, tests.
+
+### Deprecated
+
+- Nothing yet. Entries here should be prefixed with `DEPRECATED:` so the
+  migration-guide generator (`xtask migration-guide`) can classify them
+  without manual review.
+
+## Changelog entry conventions
+
+The `xtask migration-guide` generator parses this file to draft upgrade
+notes between two versions. To keep entries machine-classifiable, prefix
+bullets with one of the following markers:
+
+- `BREAKING:` — a change that requires callers to update their code or
+  configuration (e.g. renamed flags, changed auth headers, removed routes).
+- `DEPRECATED:` — a change that still works but is scheduled for removal.
+- `ADDED:` — a new command, flag, or capability. Entries under an
+  `### Added` heading are treated as additive even without the prefix.
+
+Entries that cannot be confidently classified are listed under
+"Needs manual review" in the generated draft rather than being guessed at.

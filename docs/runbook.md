@@ -1,5 +1,26 @@
 # Synapse Core Operational Runbook
 
+## Guided Incident Procedures
+
+Use the checkpointed CLI for the common health, high-error-rate, database
+failure, connection-pool exhaustion, and replica-failover procedures:
+
+```bash
+python scripts/runbook.py health
+python scripts/runbook.py high-error-rate
+python scripts/runbook.py database-failure
+python scripts/runbook.py pool-exhaustion
+python scripts/runbook.py failover
+```
+
+The tool presents each action and waits for an operator acknowledgment. For
+destructive steps, the operator must type `yes` exactly; any other response
+stops the procedure. It displays commands but does not execute them. Every
+start, confirmed/declined action, and completion is appended to
+`runbook-executions.jsonl` (override with `--log-file`). The log records
+operator confirmation, not independent proof that a displayed command
+succeeded.
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -318,6 +339,81 @@ they are independent checks:
 This is detection/alerting only — automatic retry or catch-up of a missed
 run is job-type-specific (see, e.g., the compliance report job's own
 catch-up logic) and out of scope here.
+
+### Alert Runbook Links
+
+Every alert payload carries a `runbook_url` pointing at the section of this
+document that covers it. The mapping lives in
+`alerting/runbook-links.json` and is read by both the service (in-process
+alerts, `src/alerting/`) and CI (`scripts/check-alert-runbook-links.py`),
+which fails the build if a mapped heading is renamed or removed. **If you
+rename a heading in this runbook, update the anchor in
+`alerting/runbook-links.json` (and the matching `runbook_url` in
+`alerting/prometheus-rules.yml`) in the same PR.** Alerts that deliberately
+have no runbook section carry a reviewed `exempt` entry instead.
+
+### Pipeline Latency Budget Exceeded
+
+`PipelineLatencyBudgetExceeded` fires when one pipeline stage (ingestion,
+validation, processing, settlement, reconciliation) has had its P95 latency
+above its allotted share of the end-to-end SLA in most recent evaluation
+windows — see `src/telemetry/latency_budget.rs` and
+`docs/latency-budget.md`. The alert's `stage` label names the stage; the
+`pipeline_stage_budget_utilization{stage}` gauge shows every stage's
+P95 ÷ budget, so you can see which other stages are close behind.
+
+**Operator response:**
+1. Check the `stage` label and `p95_ms` / `budget_ms` labels on the alert.
+2. **ingestion / validation:** look at `http_request_duration_ms` and DB
+   latency for `/callback` — usually DB contention (see
+   [Database Performance Issues](#database-performance-issues)).
+3. **processing:** includes queue wait before the processor picks a
+   transaction up. Check `pending_queue_depth` and processor worker count
+   before looking at per-stage timings.
+4. **settlement / reconciliation:** these are periodic jobs, so their
+   latency is dominated by *time until the next run*. Check
+   [Scheduled Job Health Alerts](#scheduled-job-health-alerts) for a missed
+   or failing run before assuming the job itself got slower.
+5. Rebalancing budgets between stages is a deliberate config change
+   (`LATENCY_BUDGET_*_MS`), not an incident response.
+
+### Tokio Task Leak Suspected
+
+`TokioTaskLeakSuspected` fires when the live-task count for one spawn
+category (e.g. `ws_connection`, `scheduler_job`) has grown over the
+detection window by more than its load (active connections, registered
+jobs) explains — see `src/telemetry/task_leak.rs` and
+`docs/task-leak-detection.md`. Raw task count growing
+with traffic does **not** fire this alert.
+
+**Operator response:**
+1. Compare `tokio_tasks_live{category}` with the category's load gauge
+   (`tokio_tasks_load{category}`) on the dashboard: a leak shows task count
+   climbing while load is flat or falling.
+2. Grab a CPU profile / flamegraph from the profiling endpoints
+   (`docs/profiling-endpoints.md`) to see where the stuck tasks are parked.
+3. Common causes: a channel receiver that is never dropped, a WebSocket
+   send/recv task whose sibling was not aborted, a `select!` with no exit
+   branch on shutdown.
+4. Mitigation is a rolling restart; the root cause is its own follow-up
+   issue.
+
+### Release Reliability Regression
+
+`ReleaseReliabilityRegression` is raised by the post-release scorecard
+(`cargo xtask scorecard`, run by `.github/workflows/release-scorecard.yml`)
+when error rate, P50/P95/P99 latency or incident count after a release is
+worse than before it by a statistically meaningful margin, not just noise.
+See `docs/release-scorecard.md`.
+
+**Operator response:**
+1. Open the scorecard issue/artifact: each metric shows before, after, the
+   p-value and verdict, and the header says whether a comparison window was
+   clipped by an adjacent release.
+2. If the regression is real and user-facing, follow the
+   [Rollback Procedure](#rollback-procedure).
+3. If a window was clipped by an adjacent release, the scorecard says so;
+   treat the attribution to that single release with care.
 
 ---
 

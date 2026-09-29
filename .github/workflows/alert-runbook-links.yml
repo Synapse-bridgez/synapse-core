@@ -1,0 +1,37 @@
+name: Alert Runbook Links
+
+# Fails the build when an alert's runbook link would be dead in production:
+# a docs/runbook.md heading referenced by alerting/runbook-links.json was
+# renamed or removed, an alert (Prometheus rule or in-process, see
+# src/alerting/names.rs) has neither a runbook anchor nor a reviewed
+# exemption, or a rule's runbook_url annotation disagrees with the mapping.
+# See "Alert Runbook Links" in docs/runbook.md.
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    paths:
+      - "docs/runbook.md"
+      - "alerting/**"
+      - "src/alerting/**"
+      - "scripts/check-alert-runbook-links.py"
+      - "scripts/test_check_alert_runbook_links.py"
+      - ".github/workflows/alert-runbook-links.yml"
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validator self-tests
+        run: python3 -m unittest -v scripts/test_check_alert_runbook_links.py
+
+      - name: Validate alert -> runbook mapping
+        run: python3 scripts/check-alert-runbook-links.py

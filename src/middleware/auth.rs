@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use std::net::SocketAddr;
+use tracing::Instrument;
 
 use crate::auth::rate_limiting::{ADMIN_AUTH_RATE_LIMITER, TENANT_AUTH_RATE_LIMITER};
 use crate::secrets::SecretsStore;
@@ -53,7 +54,10 @@ pub async fn api_key_auth(req: Request<Body>, next: Next<Body>) -> Result<Respon
     };
 
     match crate::db::queries::lookup_api_key(&pool, &key).await {
-        Ok(Some(_tenant_id)) => Ok(next.run(req).await),
+        Ok(Some(tenant_id)) => {
+            let span = tracing::info_span!("tenant.request", tenant_id = %tenant_id);
+            Ok(next.run(req).instrument(span).await)
+        }
         Ok(None) => {
             tracing::warn!(source_ip = %source_ip, "API key authentication failed: invalid key");
             rate_limited_unauthorized(&source_ip, "api_key_auth").await

@@ -61,7 +61,7 @@ pub async fn list_settlements(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
     let mut settlements = crate::db::queries::list_settlements_cursor_for_tenant(
-        pool,
+        &pool,
         fetch_limit,
         decoded_cursor,
         backward,
@@ -113,7 +113,7 @@ pub async fn get_settlement(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    let settlement = crate::db::queries::get_settlement_for_tenant(pool, id, tenant.tenant_id)
+    let settlement = crate::db::queries::get_settlement_for_tenant(&pool, id, tenant.tenant_id)
         .await
         .map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) {

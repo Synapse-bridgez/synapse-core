@@ -36,7 +36,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use redis::AsyncCommands;
@@ -71,11 +71,7 @@ impl UpsertFilterRulesRequest {
                         "filter_rules.asset_codes must be an array of strings".into(),
                     ));
                 }
-                let all_strings = codes
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|v| v.is_string());
+                let all_strings = codes.as_array().unwrap().iter().all(|v| v.is_string());
                 if !all_strings {
                     return Err(AppError::BadRequest(
                         "all entries in filter_rules.asset_codes must be strings".into(),
@@ -130,6 +126,11 @@ async fn invalidate_filter_cache(redis_url: &str, endpoint_id: Uuid) {
                 let _: Result<(), _> = conn.del::<_, ()>(&key).await;
             }
             Err(e) => {
+                crate::cache::degradation::record_redis_degraded(
+                    crate::cache::degradation::RedisComponent::WebhookFilterCache,
+                    crate::cache::degradation::DegradedFallback::SkippedBestEffort,
+                    &e,
+                );
                 tracing::warn!(
                     endpoint_id = %endpoint_id,
                     "Failed to get Redis connection for filter cache invalidation: {e}"

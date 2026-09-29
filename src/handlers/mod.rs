@@ -3,6 +3,7 @@ pub mod dlq;
 pub mod export;
 pub mod graphql;
 pub mod idempotency;
+pub mod import;
 pub mod pagination;
 pub mod profiling;
 pub mod search;
@@ -21,7 +22,12 @@ pub use pagination::{
 
 use crate::error::AppError;
 use crate::ApiState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -126,20 +132,32 @@ pub async fn live() -> impl IntoResponse {
     ),
     tag = "Health"
 )]
-pub async fn ready(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
-    if state.app_state.readiness.is_ready() {
-        let response = ReadinessResponse {
-            status: "ready".to_string(),
-            draining: state.app_state.readiness.is_draining(),
-        };
-        Ok((StatusCode::OK, Json(response)))
+pub async fn ready(State(state): State<ApiState>) -> Result<Response, AppError> {
+    let dependencies = crate::readiness::dependency_readiness(
+        state.app_state.secrets_store.as_ref(),
+        std::time::Instant::now(),
+    );
+    let degraded = dependencies.degraded();
+    let is_ready = state.app_state.readiness.is_ready()
+        && !(dependencies.secrets_expired() && crate::readiness::fail_on_expired_secrets());
+    let response = ReadinessResponse {
+        status: if is_ready { "ready" } else { "not_ready" }.to_string(),
+        draining: state.app_state.readiness.is_draining(),
+        degraded: degraded.clone(),
+        dependencies: Some(dependencies),
+    };
+    let code = if is_ready {
+        StatusCode::OK
     } else {
-        let response = ReadinessResponse {
-            status: "not_ready".to_string(),
-            draining: state.app_state.readiness.is_draining(),
-        };
-        Ok((StatusCode::SERVICE_UNAVAILABLE, Json(response)))
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let mut resp = (code, Json(response)).into_response();
+    if !degraded.is_empty() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&degraded.join(",")) {
+            resp.headers_mut().insert("X-Degraded-Dependencies", v);
+        }
     }
+    Ok(resp)
 }
 
 /// Health check endpoint — aggregates dependency status and reports service health.
@@ -217,6 +235,14 @@ pub struct ReadinessResponse {
     pub status: String,
     /// true if the service is in graceful shutdown mode (/admin/drain was called)
     pub draining: bool,
+    /// Dependencies currently running in degraded mode (`vault`, `redis`).
+    /// Degradation is reported here without failing readiness — see
+    /// `readiness::dependency_readiness`.
+    #[serde(default)]
+    pub degraded: Vec<String>,
+    /// Per-dependency degraded-mode detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<crate::readiness::DependencyReadiness>,
 }
 
 /// Response from the health check endpoint (/health).
@@ -289,6 +315,8 @@ mod tests {
         let ready = ReadinessResponse {
             status: "ready".to_string(),
             draining: false,
+            degraded: vec![],
+            dependencies: None,
         };
         assert_eq!(ready.status, "ready");
         assert!(!ready.draining);
@@ -296,6 +324,8 @@ mod tests {
         let not_ready = ReadinessResponse {
             status: "not_ready".to_string(),
             draining: true,
+            degraded: vec!["vault".to_string()],
+            dependencies: None,
         };
         assert_eq!(not_ready.status, "not_ready");
         assert!(not_ready.draining);

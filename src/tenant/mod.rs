@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::{error::AppError, AppState};
 
+pub mod latency;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TenantConfig {
     pub tenant_id: Uuid,
@@ -16,6 +18,12 @@ pub struct TenantConfig {
     pub stellar_account: String,
     pub rate_limit_per_minute: i32,
     pub is_active: bool,
+    #[serde(default = "default_idempotency_ttl")]
+    pub idempotency_ttl_seconds: i64,
+}
+
+fn default_idempotency_ttl() -> i64 {
+    86400 // 24 hours by default
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +226,12 @@ where
 
         if !config.is_active {
             return Err(AppError::Unauthorized("tenant inactive".to_string()));
+        }
+
+        // Let a wrapping tenant-latency middleware (#1337) attribute this
+        // request to the tenant that actually authenticated.
+        if let Some(slot) = parts.extensions.get::<latency::TenantAttribution>() {
+            slot.set(tenant_id);
         }
 
         Ok(TenantContext::new(tenant_id, config))

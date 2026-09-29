@@ -1,8 +1,10 @@
+pub mod alerting;
 pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod governance;
 pub mod graphql;
 pub mod handlers;
 pub mod health;
@@ -166,6 +168,18 @@ pub fn create_app(app_state: AppState) -> Router {
     // IpFilterLayer is outermost among these three so a request from a
     // non-whitelisted source is rejected before quota/signature validation
     // spend any work on it.
+    // Per-tenant latency histograms (#1337) wrap the whole ingestion
+    // pipeline (IP filter, signature, validation, quota, handler), so they
+    // are applied last — i.e. outermost — on each ingestion route group.
+    let ingestion_latency = crate::tenant::latency::TenantLatencyLayer {
+        app_state: app_state.clone(),
+        route: crate::tenant::latency::RouteClass::WebhookIngestion,
+    };
+    let graphql_latency = crate::tenant::latency::TenantLatencyLayer {
+        app_state: app_state.clone(),
+        route: crate::tenant::latency::RouteClass::GraphQl,
+    };
+
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
@@ -183,6 +197,10 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(crate::middleware::ip_filter::IpFilterLayer::new(
             app_state.allowed_ips.clone(),
             app_state.trusted_proxy_depth,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            ingestion_latency.clone(),
+            crate::tenant::latency::tenant_latency_middleware,
         ));
 
     // Webhook route with signature verification + validation + quota middleware
@@ -198,6 +216,10 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::webhook_signature::verify_anchor_signature,
+        ))
+        .layer(axum_middleware::from_fn_with_state(
+            ingestion_latency,
+            crate::tenant::latency::tenant_latency_middleware,
         ));
 
     // Tenant-scoped data routes. These previously had zero auth of any kind —
@@ -226,7 +248,9 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
-        );
+        )
+        // Tenant-facing usage: the caller's own latency histograms (#1337).
+        .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
 
     // core_routes intentionally does NOT layer api_key_auth across the board:
     // callback_routes/webhook_routes authenticate inbound anchor calls via
@@ -271,6 +295,23 @@ pub fn create_app(app_state: AppState) -> Router {
     // covered these) — see "Also fixes" in the PR description.
     let mut admin_only_routes = Router::new()
         .route(
+            "/admin/canary",
+            get(handlers::admin::get_canary_dashboard),
+        )
+        .route(
+            "/admin/canary/:release_name",
+            get(handlers::admin::get_canary_release)
+                .post(handlers::admin::create_canary_release),
+        )
+        .route(
+            "/admin/canary/:release_name/step",
+            post(handlers::admin::step_canary_release),
+        )
+        .route(
+            "/admin/canary/:release_name/error-rate",
+            post(handlers::admin::record_canary_error_rate),
+        )
+        .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
         )
@@ -278,13 +319,40 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/transactions/bulk-status/jobs/:id",
             get(handlers::admin::bulk_status::get_job_status),
         )
-        .route("/graphql", post(handlers::graphql::graphql_handler))
+        .route(
+            "/graphql",
+            post(handlers::graphql::graphql_handler).layer(axum_middleware::from_fn_with_state(
+                graphql_latency,
+                crate::tenant::latency::tenant_latency_middleware,
+            )),
+        )
         .route("/export", get(handlers::export::export_transactions))
+        .route(
+            "/admin/config/export",
+            get(handlers::admin::config_export::export_config),
+        )
         // Stats endpoints
         .route("/stats/status", get(handlers::stats::status_counts))
         .route("/stats/daily", get(handlers::stats::daily_totals))
         .route("/stats/assets", get(handlers::stats::asset_stats))
         .route("/cache/metrics", get(handlers::stats::cache_metrics))
+        .route(
+            "/stats/tenant-latency",
+            get(handlers::stats::tenant_latency_overview),
+        )
+        // Admin: dependency health scorecard (#1334)
+        .route(
+            "/admin/dependencies/scorecard",
+            get(handlers::admin::dependency_scorecard::get_scorecard),
+        )
+        .route(
+            "/admin/dependencies/scorecard/raw",
+            get(handlers::admin::dependency_scorecard::get_raw_rollups),
+        )
+        .route(
+            "/admin/dependencies/scorecard/dashboard",
+            get(handlers::admin::dependency_scorecard::get_dashboard),
+        )
         // Admin: webhook endpoint health scores
         .route(
             "/admin/webhooks/health",
@@ -311,6 +379,12 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/quotas/:tenant_id/reset",
             axum::routing::delete(handlers::admin::quota::reset_tenant_quota),
         )
+        // Admin: per-tenant data quota (storage + row-count) (#1287)
+        .route(
+            "/admin/quotas/:tenant_id/data",
+            axum::routing::put(handlers::admin::quota::set_tenant_data_quota)
+                .get(handlers::admin::quota::get_tenant_data_quota),
+        )
         // Admin: tenant secret rotation and revocation
         .route(
             "/admin/tenants/:tenant_id/rotate-secret",
@@ -336,6 +410,15 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/audit/search",
             get(handlers::admin::audit::search_audit_logs_handler),
         )
+        // Admin: cold-storage unified audit log query (#1285)
+        .route(
+            "/admin/audit/unified",
+            get(handlers::admin::audit::query_unified_audit_logs_handler),
+        )
+        .route(
+            "/admin/audit/cold/pointers",
+            get(handlers::admin::audit::list_cold_pointers_handler),
+        )
         // Admin: compliance report generation/listing — same gap as audit
         // search above.
         .route(
@@ -358,6 +441,33 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
         )
+        // Admin: transaction notes API (#1257)
+        .route(
+            "/admin/transactions/:id/notes",
+            post(handlers::admin::transaction_notes::create_transaction_note)
+                .get(handlers::admin::transaction_notes::get_transaction_notes),
+        )
+        // Admin: webhook retry policy configuration (#1258)
+        .route(
+            "/admin/webhooks/endpoints/:id/retry-policy",
+            post(handlers::admin::webhook_retry_policy::update_webhook_retry_policy)
+                .get(handlers::admin::webhook_retry_policy::get_webhook_retry_policy),
+        )
+        // Admin: webhook endpoint redirects for migrations (#1259)
+        .route(
+            "/admin/webhooks/endpoints/:id/redirects",
+            post(handlers::admin::webhook_redirects::create_webhook_redirect)
+                .get(handlers::admin::webhook_redirects::list_active_redirects),
+        )
+        .route(
+            "/admin/webhooks/redirects/:id/cancel",
+            post(handlers::admin::webhook_redirects::cancel_webhook_redirect),
+        )
+        // Admin: asset processing rules dry-run/preview mode (#1260)
+        .route(
+            "/admin/rules/preview",
+            post(handlers::admin::rules_preview::preview_rules),
+        )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     // SecretsStore must be the outermost layer here (axum applies the *last*
@@ -368,6 +478,26 @@ pub fn create_app(app_state: AppState) -> Router {
     if let Some(store) = &app_state.secrets_store {
         admin_only_routes = admin_only_routes.layer(axum::Extension(store.clone()));
     }
+
+    // #1288: Blue-green deployment admin routes.
+    // These are mounted separately from admin_only_routes because they use a
+    // different state type (BlueGreenState, not ApiState).  They are still
+    // protected by admin_auth via their own layer.
+    let bg_url_blue = std::env::var("BLUE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let bg_url_green = std::env::var("GREEN_URL")
+        .unwrap_or_else(|_| "http://localhost:3001".to_string());
+    let bg_rollback_secs = std::env::var("BLUE_GREEN_ROLLBACK_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60);
+    let bg_state = services::BlueGreenState::new(
+        bg_url_blue,
+        bg_url_green,
+        std::time::Duration::from_secs(bg_rollback_secs),
+    );
+    let blue_green_admin_routes = services::blue_green::blue_green_routes(bg_state)
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
     public_health_routes
         // Unversioned routes default to V2 behaviour
@@ -397,6 +527,11 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/ws", get(handlers::ws::ws_handler))
                 .with_state(app_state),
         )
+        // #1288: Blue-green deployment control plane.
+        // blue_green_admin_routes is Router<()> (state already baked in via
+        // with_state(bg_state)); merge after with_state(api_state) so both
+        // sides of the merge are Router<()>.
+        .merge(blue_green_admin_routes)
         // NOTE: axum applies the *last* `.layer()` call as the *outermost* wrapper,
         // so it runs first on the request path and last on the response path.
         // `request_logger` must stay outermost relative to `error_enrichment`:

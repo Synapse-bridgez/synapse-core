@@ -129,6 +129,13 @@ impl CircuitBreaker {
                 } else {
                     // Fast-fail: the request never reached the dependency, so this
                     // is a partition on our own side, not a dependency outage.
+                    if let Some(dep) = self.scorecard_dependency() {
+                        crate::services::dependency_scorecard::record_call(
+                            dep,
+                            crate::services::dependency_scorecard::CallOutcome::CircuitRejected,
+                            std::time::Duration::ZERO,
+                        );
+                    }
                     drop(state);
                     self.record_sample(false, 0, true).await;
                     return Err(Box::new(CircuitBreakerError::Open));
@@ -148,6 +155,14 @@ impl CircuitBreaker {
         let mut state = self.state.lock().await;
         match &result {
             Ok(_) => {
+                if !matches!(state.state, CircuitState::Closed) {
+                    if let Some(dep) = self.scorecard_dependency() {
+                        crate::services::dependency_scorecard::record_circuit_transition(
+                            dep,
+                            crate::services::dependency_scorecard::CircuitTransition::Closed,
+                        );
+                    }
+                }
                 state.failure_count = 0;
                 state.state = CircuitState::Closed;
                 state.opened_at = None;
@@ -157,6 +172,15 @@ impl CircuitBreaker {
                 state.failure_count += 1;
                 state.last_error = Some(e.to_string());
                 if state.failure_count >= self.failure_threshold {
+                    // Re-opening from half-open is a new open period, too.
+                    if !matches!(state.state, CircuitState::Open) {
+                        if let Some(dep) = self.scorecard_dependency() {
+                            crate::services::dependency_scorecard::record_circuit_transition(
+                                dep,
+                                crate::services::dependency_scorecard::CircuitTransition::Opened,
+                            );
+                        }
+                    }
                     state.state = CircuitState::Open;
                     state.opened_at = Some(Utc::now());
                     // Persist
@@ -214,6 +238,12 @@ impl CircuitBreaker {
             .query_async(&mut conn)
             .await?;
         Ok(())
+    }
+
+    /// The scorecard dependency this breaker guards, if it guards one of the
+    /// tracked dependencies (see `services::dependency_scorecard`).
+    fn scorecard_dependency(&self) -> Option<crate::services::dependency_scorecard::Dependency> {
+        crate::services::dependency_scorecard::Dependency::from_service_name(&self.service_name)
     }
 
     pub async fn get_state(&self) -> CircuitBreakerState {

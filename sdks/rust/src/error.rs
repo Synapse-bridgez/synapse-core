@@ -213,32 +213,4 @@ pub(crate) fn parse_api_error(body: &str) -> (Option<String>, String) {
     }
 }
 
-/// Map an HTTP status + optional catalog code to a typed [`SynapseError`].
-///
-/// `code` is the raw `code` field parsed from the response body (see
-/// [`parse_api_error`]), if present; it is threaded into [`ErrorCode`] on the
-/// [`SynapseError::Api`] variant for statuses that don't already get one of
-/// the dedicated named variants below.
-pub fn map_status_to_error(status: u16, message: String, code: Option<String>) -> SynapseError {
-    match status {
-        401 => SynapseError::Unauthorized(message),
-        403 => SynapseError::Forbidden(message),
-        404 => SynapseError::NotFound(message),
-        429 => SynapseError::RateLimited,
-        _ => SynapseError::Api {
-            status,
-            message,
-            code: code.map(|c| ErrorCode::from_code(&c)),
-        },
-    }
-}
-
-/// Parses `body` for a catalog `code` and maps it, with `status`, to a typed
-/// [`SynapseError`]. Convenience wrapper around [`parse_api_error`] +
-/// [`map_status_to_error`] for call sites that don't otherwise need the
-/// intermediate catalog-description lookup that [`map_status_to_error`]'s
-/// only other caller performs.
-pub fn build_api_error(status: u16, body: String) -> SynapseError {
-    let (code, message) = parse_api_error(&body);
-    map_status_to_error(status, message, code)
-}
+/// Map an HTTP status + optional catalog code 

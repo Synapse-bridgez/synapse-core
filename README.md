@@ -199,3 +199,14 @@ See the [open issues](https://github.com/synapse-bridgez/synapse-core/issues) fo
 
 📄 License
 This project is licensed under the MIT License. See the LICENSE file for details.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1356 -->
+- #1356: [High] Add an audit-log tailing command to the CLI
+<!-- handsoff-issue-1345 -->
+- #1345: [High] Add SDK request/response logging with secret redaction
+<!-- handsoff-issue-1341 -->
+- #1341: [High] Build a Go SDK with parity to the Rust SDK
+<!-- handsoff-issue-1351 -->
+- #1351: [High] Add typed GraphQL codegen for the Rust SDK from the live schema
