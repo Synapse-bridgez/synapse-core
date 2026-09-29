@@ -9,7 +9,7 @@ use crate::validation::{
 };
 use crate::{ApiState, AppState};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -22,6 +22,7 @@ use tracing::instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use utoipa::ToSchema;
 use uuid::Uuid;
+use crate::middleware::synthetic_probe::SyntheticProbe;
 
 /// Payload received from the Stellar Anchor Platform callback endpoint.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -324,6 +325,24 @@ fn validate_memo_type(memo_type: &Option<String>) -> Result<(), AppError> {
     }
 }
 
+fn callback_transaction(payload: CallbackPayload) -> Result<Transaction, AppError> {
+    validate_memo_type(&payload.memo_type)?;
+    let amount = BigDecimal::from_str(&payload.amount)
+        .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
+
+    Ok(Transaction::new(
+        payload.stellar_account,
+        amount,
+        payload.asset_code,
+        payload.anchor_transaction_id,
+        payload.callback_type,
+        payload.callback_status,
+        payload.memo,
+        payload.memo_type,
+        payload.metadata,
+    ))
+}
+
 /// Receive a fiat deposit callback from the Stellar Anchor Platform.
 ///
 /// Applies back-pressure when the pending queue exceeds `MAX_PENDING_QUEUE`
@@ -374,28 +393,37 @@ pub async fn callback(
         return Ok(response.into_response());
     }
 
-    validate_memo_type(&payload.memo_type)?;
-
-    let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
-        .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
-
-    let tx = Transaction::new(
-        payload.stellar_account,
-        amount,
-        payload.asset_code,
-        payload.anchor_transaction_id,
-        payload.callback_type,
-        payload.callback_status,
-        payload.memo,
-        payload.memo_type,
-        payload.metadata,
-    );
+    let tx = callback_transaction(payload)?;
 
     let inserted =
         queries::insert_transaction(&state.app_state.db, &tx, Some(&state.app_state.query_cache))
             .await?;
 
     Ok((StatusCode::CREATED, Json(inserted)).into_response())
+}
+
+/// Synthetic callback probe. Exercises callback validation and database
+/// connectivity but deliberately never persists a transaction.
+#[instrument(name = "synthetic_probe.callback", skip(state, payload, probe), fields(synthetic_probe = true))]
+pub async fn synthetic_callback(
+    Extension(probe): Extension<SyntheticProbe>,
+    State(state): State<ApiState>,
+    Json(payload): Json<CallbackPayload>,
+) -> Result<impl IntoResponse, AppError> {
+    let _validated = callback_transaction(payload)?;
+    let _: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&state.app_state.db)
+        .await?;
+    tracing::info!(
+        synthetic_probe = true,
+        counts_toward_customer_traffic = probe.counts_toward_customer_traffic(),
+        "Synthetic callback path is available"
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "accepted", "synthetic": true})),
+    )
+        .into_response())
 }
 
 /// Generic webhook receiver for event-driven integrations.

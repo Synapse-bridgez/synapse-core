@@ -6,6 +6,8 @@
     "DatabasePoolExhausted": { "anchor": "pool-exhaustion-response" },
     "HighErrorRate": { "anchor": "3-high-error-rate" },
     "HighResponseTime": { "anchor": "symptom-slow-query-performance" },
+    "SyntheticProbeFailed": { "anchor": "synthetic-probe-failure" },
+    "SyntheticProbeStale": { "anchor": "synthetic-probe-failure" },
     "CircuitBreakerOpen": { "anchor": "5-circuit-breaker-open" },
     "ReplicationLagHigh": { "anchor": "symptom-high-replication-lag" },
     "DlqEntriesHigh": { "anchor": "symptom-high-dlq-entry-count" },
