@@ -43,6 +43,18 @@ services:
     environment:
       ADMINER_DEFAULT_SERVER: postgres
 
+  vault:
+    image: hashicorp/vault:latest
+    container_name: synapse-vault-dev
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: server -dev
+
   app:
     image: rust:latest
     container_name: synapse-app-dev
@@ -52,23 +64,40 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      vault:
+        condition: service_started
     environment:
       APP_ENV: development
       SERVER_PORT: 3000
       # Restricted, non-superuser role — see scripts/db-init/01-create-app-role.sql.
       DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
+      DATABASE_URL_TEMPLATE: postgres://synapse_app:{password}@postgres:5432/synapse
+      BACKUP_DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
       STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      VAULT_ADDR: http://vault:8200
+      VAULT_ROLE_ID: ""
+      VAULT_SECRET_ID: ""
       REDIS_URL: redis://redis:6379
       ANCHOR_WEBHOOK_SECRET: dev-secret
       RUST_LOG: debug
       LOG_FORMAT: text
-      # Relaxed limits for development
+      # Keep development parity with production defaults while allowing local debugging.
       DEFAULT_RATE_LIMIT: "10000"
       WHITELIST_RATE_LIMIT: "100000"
+      DB_MIN_CONNECTIONS: "2"
+      DB_MAX_CONNECTIONS: "10"
+      DB_IDLE_TIMEOUT_SECS: "30"
+      DB_STATEMENT_TIMEOUT_MS: "30000"
+      DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS: "120000"
     ports:
       - "3000:3000"
       # Debug port for IDE debugger attachment (lldb-server / rust-gdb)
       - "9229:9229"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
     volumes:
       - ./src:/app/src
       - ./migrations:/app/migrations

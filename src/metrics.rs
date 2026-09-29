@@ -31,6 +31,11 @@
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
 //! | `readiness_initialization_duration_ms` | Histogram | Time spent in `run_initialization_checks`, labeled by outcome (ready/failed) |
 //! | `settlement_transactions_total`   | Counter    | Transactions settled via settle_asset, labeled by asset_code |
+//! | `tokio_tasks_live` / `tokio_tasks_load` | Gauge | Live tagged tokio tasks and the load explaining them, by category (task leak detection) |
+//! | `tokio_runtime_alive_tasks`       | Gauge      | All alive tasks on the runtime (tagged or not) |
+//! | `tokio_task_leak_suspected_total` | Counter    | Load-uncorrelated task growth detections, by category |
+//! | `pipeline_stage_latency_ms`       | Histogram  | Latency attributed to each pipeline stage (latency budget) |
+//! | `pipeline_stage_budget_utilization` | Gauge    | Stage P95 / stage budget, by stage |
 //!
 //! ## Configuration
 //!
@@ -127,6 +132,22 @@ pub fn db_pool_idle_connections() -> ObservableGauge<u64> {
         .init()
 }
 
+/// Maximum configured DB pool size gauge.
+pub fn db_pool_max_connections() -> ObservableGauge<u64> {
+    meter()
+        .u64_observable_gauge("db_pool_max_connections")
+        .with_description("Configured maximum size of the database pool")
+        .init()
+}
+
+/// Database pool saturation ratio: active connections divided by configured max.
+pub fn db_pool_saturation_ratio() -> ObservableGauge<f64> {
+    meter()
+        .f64_observable_gauge("db_pool_saturation_ratio")
+        .with_description("Fraction of the configured database pool currently in use")
+        .init()
+}
+
 /// DB query timeout counter (mirrors `DB_QUERY_TIMEOUT_TOTAL` atomic).
 pub fn db_query_timeout_total() -> Counter<u64> {
     meter()
@@ -219,6 +240,56 @@ pub fn readiness_initialization_duration_ms() -> Histogram<f64> {
             "Time spent in run_initialization_checks, labeled by outcome (ready/failed)",
         )
         .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Number of WebSocket connections still open at the moment a drain
+/// (`POST /admin/drain`) began. A single observation is recorded per drain.
+pub fn ws_drain_connections_open_at_start() -> Histogram<f64> {
+    meter()
+        .f64_histogram("ws_drain_connections_open_at_start")
+        .with_description("WebSocket connections still open when a drain began")
+        .init()
+}
+
+/// Wall-clock duration of a drain, from `start_drain` to process exit, in
+/// milliseconds.
+pub fn ws_drain_duration_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("ws_drain_duration_ms")
+        .with_description("Time from drain start to process exit")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// WebSocket connections closed during a drain, labeled by `outcome`:
+/// `"clean"` (closed itself in response to the drain signal before the
+/// deadline) or `"forced"` (still open when the drain timeout elapsed and
+/// the process exited anyway). A `forced` count above zero on a routine
+/// deployment indicates connections are not draining within the configured
+/// window and is worth alerting on.
+pub fn ws_drain_connections_closed_total() -> Counter<u64> {
+    meter()
+        .u64_counter("ws_drain_connections_closed_total")
+        .with_description(
+            "WebSocket connections closed during drain, labeled by outcome \
+             (clean = closed before the deadline, forced = still open when \
+             the drain timeout elapsed)",
+        )
+        .init()
+}
+
+/// Compliance-classified report export events, labeled by `report_type`
+/// (e.g. `"compliance_report"`, `"reconciliation_report"`). Distinct from
+/// the routine `admin_*_report_requests_total` counters so a compliance
+/// export is never conflated with a routine one in dashboards or alerts.
+pub fn compliance_export_events_total() -> Counter<u64> {
+    meter()
+        .u64_counter("compliance_export_events_total")
+        .with_description(
+            "Compliance-classified report exports, labeled by report_type, \
+             kept distinct from routine export telemetry",
+        )
         .init()
 }
 
@@ -545,6 +616,182 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
         .u64_counter("admin_compliance_report_requests_total")
         .with_description("Requests to the admin compliance report endpoints, labeled by operation")
         .init()
+}
+
+/// Replication lag measurement histogram (milliseconds), labeled by `replica`.
+/// A value of -1 indicates the replica is unreachable.
+pub fn replica_lag_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("replica_lag_ms")
+        .with_description("Replication lag on read replicas in milliseconds, labeled by replica name")
+        .with_unit(crate::metrics::Unit::new("ms"))
+        .init()
+}
+
+/// Replica lag alert counter, labeled by `replica` and `reason` ("threshold_exceeded" | "unreachable").
+pub fn replica_lag_alert_total() -> Counter<u64> {
+    meter()
+        .u64_counter("replica_lag_alert_total")
+        .with_description("Alerts triggered when replica lag exceeds threshold or replica becomes unreachable")
+        .init()
+}
+
+/// ANALYZE staleness ratio histogram (0.0-1.0), labeled by `table` (schema.table).
+/// Ratio = n_mod_since_analyze / estimate_live_rows.
+pub fn analyze_staleness_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("analyze_staleness_ratio")
+        .with_description("Ratio of modifications since last ANALYZE relative to estimated live rows")
+        .init()
+}
+
+/// Count of tables flagged as stale (n_mod_since_analyze exceeding configured threshold).
+pub fn stale_tables_total() -> Counter<u64> {
+    meter()
+        .u64_counter("stale_tables_total")
+        .with_description("Number of tables with stale ANALYZE statistics relative to write volume")
+        .init()
+}
+
+/// Table bloat ratio as a percentage, labeled by `schema` and `table`
+pub fn table_bloat_ratio() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_ratio")
+        .with_description("Estimated table bloat ratio as percentage of wasted space, labeled by schema and table")
+        .init()
+}
+
+/// Estimated table bloat size in megabytes, labeled by `schema` and `table`
+pub fn table_bloat_size_mb() -> Histogram<f64> {
+    meter()
+        .f64_histogram("table_bloat_size_mb")
+        .with_description("Estimated table bloat size in MB, labeled by schema and table")
+        .init()
+}
+
+/// Registers the observable gauges for tokio task leak detection
+/// (`src/telemetry/task_leak.rs`): `tokio_tasks_live{category}` and
+/// `tokio_tasks_load{category}` from the tagged-spawn registry, plus
+/// `tokio_runtime_alive_tasks` from tokio's own runtime metrics, which also
+/// counts untagged tasks. Call once at startup from inside the runtime and
+/// keep the returned gauges alive.
+pub fn register_task_leak_gauges() -> Vec<ObservableGauge<u64>> {
+    use crate::telemetry::task_leak;
+
+    let live = meter()
+        .u64_observable_gauge("tokio_tasks_live")
+        .with_description("Live tokio tasks per spawn category")
+        .with_callback(|observer| {
+            for s in task_leak::global().snapshots() {
+                observer.observe(s.live, &[KeyValue::new("category", s.category.as_str())]);
+            }
+        })
+        .init();
+
+    let load = meter()
+        .u64_observable_gauge("tokio_tasks_load")
+        .with_description(
+            "Load that should explain each category's task count \
+             (open WebSocket connections, registered scheduler jobs)",
+        )
+        .with_callback(|observer| {
+            for s in task_leak::global().snapshots() {
+                observer.observe(s.load, &[KeyValue::new("category", s.category.as_str())]);
+            }
+        })
+        .init();
+
+    let spawned = meter()
+        .u64_observable_gauge("tokio_tasks_spawned_total")
+        .with_description("Tasks ever spawned per category (monotonic)")
+        .with_callback(|observer| {
+            for s in task_leak::global().snapshots() {
+                observer.observe(
+                    s.spawned_total,
+                    &[KeyValue::new("category", s.category.as_str())],
+                );
+            }
+        })
+        .init();
+
+    let runtime = tokio::runtime::Handle::current();
+    let alive = meter()
+        .u64_observable_gauge("tokio_runtime_alive_tasks")
+        .with_description("All alive tasks on the runtime, tagged or not")
+        .with_callback(move |observer| {
+            observer.observe(runtime.metrics().num_alive_tasks() as u64, &[]);
+        })
+        .init();
+
+    vec![live, load, spawned, alive]
+}
+
+/// Times [`crate::telemetry::task_leak::LeakDetector`] flagged a category,
+/// labeled by `category`.
+pub fn tokio_task_leak_suspected_total() -> Counter<u64> {
+    meter()
+        .u64_counter("tokio_task_leak_suspected_total")
+        .with_description("Load-uncorrelated task growth detections, by category")
+        .init()
+}
+
+/// Per-transaction latency attributed to one pipeline stage, labeled by
+/// `stage` (`src/telemetry/latency_budget.rs`). For the periodic stages
+/// (settlement, reconciliation) each observation is one run's expected
+/// per-transaction contribution: run duration plus mean wait for the run.
+pub fn pipeline_stage_latency_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("pipeline_stage_latency_ms")
+        .with_description("Latency attributed to each pipeline stage")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Registers `pipeline_stage_latency_p95_ms`, `pipeline_stage_budget_ms` and
+/// `pipeline_stage_budget_utilization` (P95 / budget), each labeled by
+/// `stage`, read from the latest latency-budget evaluation. Keep the returned
+/// gauges alive.
+pub fn register_latency_budget_gauges() -> Vec<ObservableGauge<f64>> {
+    use crate::telemetry::latency_budget;
+
+    let p95 = meter()
+        .f64_observable_gauge("pipeline_stage_latency_p95_ms")
+        .with_description("P95 stage latency in the last evaluation window")
+        .with_unit(Unit::new("ms"))
+        .with_callback(|observer| {
+            for r in latency_budget::global().latest() {
+                if let Some(p95) = r.p95_ms {
+                    observer.observe(p95, &[KeyValue::new("stage", r.stage.as_str())]);
+                }
+            }
+        })
+        .init();
+
+    let budget = meter()
+        .f64_observable_gauge("pipeline_stage_budget_ms")
+        .with_description("Configured latency budget per stage")
+        .with_unit(Unit::new("ms"))
+        .with_callback(|observer| {
+            for r in latency_budget::global().latest() {
+                observer.observe(r.budget_ms, &[KeyValue::new("stage", r.stage.as_str())]);
+            }
+        })
+        .init();
+
+    let utilization = meter()
+        .f64_observable_gauge("pipeline_stage_budget_utilization")
+        .with_description("P95 stage latency divided by its budget (>1 = over budget)")
+        .with_callback(|observer| {
+            for r in latency_budget::global().latest() {
+                if let Some(u) = r.utilization() {
+                    observer.observe(u, &[KeyValue::new("stage", r.stage.as_str())]);
+                }
+            }
+        })
+        .init();
+
+    vec![p95, budget, utilization]
+}
 }
 
 // ---------------------------------------------------------------------------

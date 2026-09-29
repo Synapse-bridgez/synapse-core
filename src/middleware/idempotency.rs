@@ -235,6 +235,7 @@ impl IdempotencyService {
         &self,
         tenant_id: &str,
         key: &str,
+        ttl_seconds: i64,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
         let cache_key = _cache_key(tenant_id, key);
         let lock_key = _lock_key(tenant_id, key);
@@ -319,7 +320,7 @@ impl IdempotencyService {
                 );
                 self.fallback_count.fetch_add(1, Ordering::Relaxed);
 
-                self.check_idempotency_db(tenant_id, key).await
+                self.check_idempotency_db(tenant_id, key, ttl_seconds).await
             }
         }
     }
@@ -328,6 +329,7 @@ impl IdempotencyService {
         &self,
         tenant_id: &str,
         key: &str,
+        ttl_seconds: i64,
     ) -> Result<IdempotencyStatus, Box<dyn std::error::Error + Send + Sync>> {
         use chrono::{Duration, Utc};
 
@@ -336,7 +338,7 @@ impl IdempotencyService {
             Ok(db_key_to_status(db_key))
         } else {
             // Key doesn't exist, try to insert as processing
-            let expires_at = Utc::now() + Duration::hours(24);
+            let expires_at = Utc::now() + Duration::seconds(ttl_seconds);
             crate::db::queries::insert_idempotency_key(
                 &self.pool,
                 tenant_id,
@@ -356,6 +358,7 @@ impl IdempotencyService {
         key: &str,
         response: CachedResponse,
         lock_token: Option<&str>,
+        ttl_seconds: i64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if lock_token.is_none() {
             return self.store_response_db(tenant_id, key, &response).await;
@@ -374,7 +377,7 @@ impl IdempotencyService {
                     .key(&lock_key)
                     .key(&cache_key)
                     .arg(lock_token.expect("checked above"))
-                    .arg(86400)
+                    .arg(ttl_seconds)
                     .arg(&data)
                     .invoke_async::<_, u32>(&mut conn)
                     .await?;

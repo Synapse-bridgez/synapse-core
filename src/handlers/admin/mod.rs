@@ -1,11 +1,18 @@
 pub mod audit;
 pub mod bulk_status;
 pub mod compliance;
+pub mod config_export;
 pub mod locks;
 pub mod quota;
 pub mod reconciliation;
+pub mod rules_preview;
+pub mod tenant_secret;
+pub mod transaction_notes;
+pub mod webhook_endpoints;
 pub mod webhook_filter_rules;
+pub mod webhook_redirects;
 pub mod webhook_replay;
+pub mod webhook_retry_policy;
 
 use crate::error::AppError;
 use crate::validation::{validate_max_len, validate_required};
@@ -28,6 +35,25 @@ pub struct UpdateFlagRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateWebhookRateLimitRequest {
     pub max_delivery_rate: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CanaryReleaseRequest {
+    pub flag_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CanaryStepRequest {
+    pub dimension: crate::services::CanaryDimension,
+    pub percentage: i32,
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CanaryErrorRateRequest {
+    pub dimension: crate::services::CanaryDimension,
+    pub error_rate: f64,
+    pub actor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +118,14 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
         )
 }
 
+/// Create webhook endpoint management routes
+pub fn webhook_endpoints_routes() -> Router<sqlx::PgPool> {
+    Router::new().route(
+        "/webhooks/endpoints/batch",
+        post(webhook_endpoints::batch_webhook_operations),
+    )
+}
+
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
 pub async fn list_active_instances(
     State(state): State<crate::ApiState>,
@@ -114,6 +148,85 @@ pub async fn list_active_instances(
 pub async fn get_flags(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let flags = state.feature_flags.get_all().await?;
     Ok((StatusCode::OK, Json(flags)))
+}
+
+pub async fn get_canary_dashboard(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let dashboard = crate::services::CanaryController::new(state.db.clone())
+        .dashboard()
+        .await?;
+    Ok((StatusCode::OK, Json(dashboard)))
+}
+
+pub async fn create_canary_release(
+    State(state): State<AppState>,
+    Path(release_name): Path<String>,
+    Json(payload): Json<CanaryReleaseRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_required("release_name", &release_name)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    validate_required("flag_name", &payload.flag_name)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let release = crate::services::CanaryController::new(state.db.clone())
+        .upsert_release(&release_name, &payload.flag_name, "admin")
+        .await?;
+    Ok((StatusCode::OK, Json(release)))
+}
+
+pub async fn get_canary_release(
+    State(state): State<AppState>,
+    Path(release_name): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let release = crate::services::CanaryController::new(state.db.clone())
+        .status(&release_name)
+        .await?;
+    Ok((StatusCode::OK, Json(release)))
+}
+
+pub async fn step_canary_release(
+    State(state): State<AppState>,
+    Path(release_name): Path<String>,
+    Json(payload): Json<CanaryStepRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let actor = payload.actor.unwrap_or_else(|| "admin".to_string());
+    let controller = crate::services::CanaryController::new(state.db.clone());
+    let release = controller
+        .set_percentage(crate::services::CanaryUpdate {
+            release_name,
+            dimension: payload.dimension,
+            percentage: payload.percentage,
+            actor,
+        })
+        .await?;
+    if matches!(payload.dimension, crate::services::CanaryDimension::Flag) {
+        state
+            .feature_flags
+            .update_rollout_percentage(&release.flag_name, release.flag_rollout_percentage)
+            .await?;
+    }
+    Ok((StatusCode::OK, Json(release)))
+}
+
+pub async fn record_canary_error_rate(
+    State(state): State<AppState>,
+    Path(release_name): Path<String>,
+    Json(payload): Json<CanaryErrorRateRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let actor = payload.actor.unwrap_or_else(|| "monitor".to_string());
+    let controller = crate::services::CanaryController::new(state.db.clone());
+    let release = controller
+        .record_error_rate(&release_name, payload.dimension, payload.error_rate, &actor)
+        .await?;
+    if matches!(payload.dimension, crate::services::CanaryDimension::Flag)
+        && release.flag_rollback_active
+    {
+        state
+            .feature_flags
+            .update_rollout_percentage(&release.flag_name, 0)
+            .await?;
+    }
+    Ok((StatusCode::OK, Json(release)))
 }
 
 pub async fn update_flag(
@@ -410,8 +523,14 @@ mod tests {
     #[test]
     fn test_admin_endpoint_access_control_matrix_defined() {
         let matrix = admin_endpoint_matrix();
-        assert!(!matrix.is_empty(), "Access control matrix must not be empty");
-        assert!(matrix.len() >= 11, "Matrix should cover all documented endpoints");
+        assert!(
+            !matrix.is_empty(),
+            "Access control matrix must not be empty"
+        );
+        assert!(
+            matrix.len() >= 11,
+            "Matrix should cover all documented endpoints"
+        );
     }
 
     #[test]

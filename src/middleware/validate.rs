@@ -44,18 +44,34 @@ pub async fn validate_with_schema(
         }
     };
 
+    if let Err(rejection) = check_payload(schema, &bytes) {
+        return *rejection;
+    }
+
+    // Reconstruct request with original body (convert Bytes to Vec<u8>)
+    let request = Request::from_parts(parts, Body::from(bytes.to_vec()));
+    next.run(request).await
+}
+
+/// Parses and schema-checks the body. Synchronous and separately spanned
+/// (`webhook.validate`) so `telemetry::latency_budget` can time the
+/// validation stage apart from body reading and the handler it guards.
+#[tracing::instrument(name = "webhook.validate", skip_all)]
+fn check_payload(schema: &JSONSchema, bytes: &[u8]) -> Result<(), Box<Response>> {
     // Parse JSON
-    let payload: Value = match serde_json::from_slice(&bytes) {
+    let payload: Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Invalid JSON",
-                    "details": [{"field": "body", "message": e.to_string()}]
-                })),
-            )
-                .into_response();
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "Invalid JSON",
+                        "details": [{"field": "body", "message": e.to_string()}]
+                    })),
+                )
+                    .into_response(),
+            ));
         }
     };
 
@@ -68,19 +84,19 @@ pub async fn validate_with_schema(
             })
             .collect();
 
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ValidationErrorResponse {
-                error: "Payload validation failed".to_string(),
-                details,
-            }),
-        )
-            .into_response();
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ValidationErrorResponse {
+                    error: "Payload validation failed".to_string(),
+                    details,
+                }),
+            )
+                .into_response(),
+        ));
     }
 
-    // Reconstruct request with original body (convert Bytes to Vec<u8>)
-    let request = Request::from_parts(parts, Body::from(bytes.to_vec()));
-    next.run(request).await
+    Ok(())
 }
 
 /// Middleware factory for callback endpoint validation

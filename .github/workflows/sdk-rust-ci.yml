@@ -8,7 +8,26 @@ on:
     paths:
       - 'sdks/rust/**'
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_CACHE_SIZE: 1G
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
+  format:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        working-directory: sdks/rust
+        run: cargo fmt --check
+
   ci:
     name: clippy, fmt, test
     runs-on: ubuntu-latest
@@ -22,25 +41,34 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
+
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
 
       - name: Cache Cargo registry and build artifacts
+        id: cargo-cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            sdks/rust/target/
-          key: ${{ runner.os }}-rust-sdk-${{ hashFiles('sdks/rust/Cargo.lock') }}
+            target/
+          key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
           restore-keys: |
-            ${{ runner.os }}-rust-sdk-
-
-      - name: Check formatting
-        run: cargo fmt --check
+            ${{ runner.os }}-stable-workspace-
+            ${{ runner.os }}-cargo-
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
 
       - name: Run tests
         run: cargo test
+
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"

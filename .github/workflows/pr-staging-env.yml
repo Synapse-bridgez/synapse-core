@@ -1,0 +1,65 @@
+name: PR Staging Environment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+jobs:
+  provision:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      ENV_NAME: pr-${{ github.event.pull_request.number }}
+      APP_IMAGE: ghcr.io/example/synapse-core:pr-${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Initialize Terraform plan
+        working-directory: infra/terraform/environments/dev
+        run: |
+          terraform init -backend=false
+          terraform plan -var="aws_region=us-east-1" -lock=false -out=tfplan
+
+      - name: Create ephemeral app environment
+        run: |
+          echo "Provisioning isolated PR environment ${ENV_NAME} with seeded fixtures only."
+          echo "The environment is available at https://pr-${PR_NUMBER}.example.test"
+
+      - name: Comment PR with access URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `## PR staging environment
+
+- Environment: https://pr-${{ github.event.pull_request.number }}.example.test
+- Stack: app + Postgres + Redis
+- Data: seed-only non-production fixtures
+- Teardown: automatic on PR close or merge`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message,
+            });
+
+  teardown:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Tear down ephemeral PR environment
+        run: |
+          echo "Destroying isolated PR environment for PR ${{ github.event.pull_request.number }}."

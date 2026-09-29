@@ -1,0 +1,44 @@
+{
+  "expected_divergences": {
+    "environment": {
+      "dev": "development",
+      "staging": "staging",
+      "prod": "production"
+    },
+    "settings.database.read_timeout_secs": {
+      "dev": "30",
+      "staging": "10",
+      "prod": "5"
+    },
+    "settings.database.statement_timeout_ms": {
+      "dev": "60000",
+      "staging": "30000",
+      "prod": "30000"
+    },
+    "settings.database.write_timeout_secs": {
+      "dev": "60",
+      "staging": "20",
+      "prod": "10"
+    },
+    "settings.logging.format": {
+      "dev": "text",
+      "staging": "json",
+      "prod": "json"
+    },
+    "settings.logging.level": {
+      "dev": "debug",
+      "staging": "info",
+      "prod": "warn"
+    },
+    "settings.rate_limits.default_per_minute": {
+      "dev": "10000",
+      "staging": "500",
+      "prod": "100"
+    },
+    "settings.rate_limits.whitelist_per_minute": {
+      "dev": "100000",
+      "staging": "5000",
+      "prod": "1000"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+services:
+  app:
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOG_FORMAT: json
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: ${FLUENTD_ADDRESS:-127.0.0.1:24224}
+        fluentd-async-connect: "true"
+        fluentd-buffer-limit: "1048576"
+        tag: synapse.core
+
+  fluent-bit:
+    image: fluent/fluent-bit:3.2
+    container_name: synapse-fluent-bit
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      LOKI_HOST: ${LOKI_HOST:?Set LOKI_HOST to the existing Loki service hostname}
+      LOKI_PORT: ${LOKI_PORT:-3100}
+    ports:
+      - "127.0.0.1:24224:24224"
+    volumes:
+      - ./observability/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./observability/parsers.conf:/fluent-bit/etc/parsers.conf:ro
