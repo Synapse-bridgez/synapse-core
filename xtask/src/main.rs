@@ -52,6 +52,9 @@ enum Commands {
     /// Compares the schema produced by replaying all migrations against the live schema,
     /// catching drift caused by manual out-of-band changes.
     SchemaDrift(commands::schema_drift::SchemaDriftArgs),
+
+    /// Analyze connection pool utilization and recommend sizing.
+    PoolAdvisor(commands::pool_advisor::PoolAdvisorArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -65,5 +68,6 @@ fn main() -> anyhow::Result<()> {
         Commands::CompatMatrix(args) => commands::compat::run(args),
         Commands::AuditIndexes(args) => commands::audit_indexes::run(args),
         Commands::SchemaDrift(args) => commands::schema_drift::run(args),
+        Commands::PoolAdvisor(args) => commands::pool_advisor::run(args),
     }
 }

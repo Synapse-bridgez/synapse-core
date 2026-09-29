@@ -7,6 +7,28 @@ use std::collections::{HashMap, HashSet};
 use tracing::info;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetReconciliation {
+    pub asset_code: String,
+    pub db_transactions: usize,
+    pub chain_payments: usize,
+    pub missing_on_chain_count: usize,
+    pub orphaned_payments_count: usize,
+    pub amount_mismatches_count: usize,
+    pub late_payments_count: usize,
+    pub status: ReconciliationStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReconciliationStatus {
+    #[serde(rename = "reconciled")]
+    Reconciled,
+    #[serde(rename = "partial")]
+    Partial,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReconciliationReport {
     pub generated_at: DateTime<Utc>,
@@ -26,6 +48,12 @@ pub struct ReconciliationReport {
     /// `reconciliation_reports` summary column (see `store_report`).
     #[serde(default)]
     pub late_payments: Vec<LatePayment>,
+    /// Per-asset reconciliation subtotals and status for multi-asset settlements
+    #[serde(default)]
+    pub asset_reconciliations: Vec<AssetReconciliation>,
+    /// Overall reconciliation status: 'reconciled', 'partial' (one or more assets failed), or 'failed'
+    #[serde(default)]
+    pub overall_status: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +90,9 @@ pub struct AmountMismatch {
     pub db_amount: String,
     pub chain_amount: String,
     pub memo: Option<String>,
+    /// Asset code for multi-asset reconciliation filtering
+    #[serde(default)]
+    pub asset_code: String,
     /// See [`MissingTransaction::trace_id`].
     #[serde(default)]
     pub trace_id: Option<String>,
@@ -77,6 +108,9 @@ pub struct LatePayment {
     pub failed_amount: String,
     pub chain_amount: String,
     pub memo: Option<String>,
+    /// Asset code for multi-asset reconciliation filtering
+    #[serde(default)]
+    pub asset_code: String,
     /// See [`MissingTransaction::trace_id`].
     #[serde(default)]
     pub trace_id: Option<String>,
@@ -168,6 +202,7 @@ impl ReconciliationService {
                             db_amount: tx.amount.clone(),
                             chain_amount: payment.amount.clone(),
                             memo: Some(memo.clone()),
+                            asset_code: tx.asset_code.clone(),
                             trace_id: tx.trace_id.clone(),
                         });
                     }
@@ -221,11 +256,25 @@ impl ReconciliationService {
                         failed_amount: tx.amount.clone(),
                         chain_amount: payment.amount.clone(),
                         memo: Some(memo.clone()),
+                        asset_code: tx.asset_code.clone(),
                         trace_id: tx.trace_id.clone(),
                     });
                 }
             }
         }
+
+        // Calculate per-asset reconciliation subtotals
+        let asset_reconciliations = self.calculate_asset_reconciliations(
+            &db_txs,
+            &chain_payments,
+            &missing_on_chain,
+            &orphaned_payments,
+            &amount_mismatches,
+            &late_payments,
+        );
+
+        // Determine overall status
+        let overall_status = self.calculate_overall_status(&asset_reconciliations);
 
         let report = ReconciliationReport {
             generated_at: Utc::now(),
@@ -237,6 +286,8 @@ impl ReconciliationService {
             orphaned_payments,
             amount_mismatches,
             late_payments,
+            asset_reconciliations,
+            overall_status,
         };
 
         info!(
@@ -361,6 +412,99 @@ impl ReconciliationService {
 }
 
 impl ReconciliationService {
+    fn calculate_asset_reconciliations(
+        &self,
+        db_txs: &[DbTransaction],
+        chain_payments: &[ChainPayment],
+        missing_on_chain: &[MissingTransaction],
+        orphaned_payments: &[OrphanedPayment],
+        amount_mismatches: &[AmountMismatch],
+        late_payments: &[LatePayment],
+    ) -> Vec<AssetReconciliation> {
+        let mut asset_stats: HashMap<String, AssetReconciliation> = HashMap::new();
+
+        // Collect all unique assets from both sources
+        let mut assets = HashSet::new();
+        for tx in db_txs {
+            assets.insert(tx.asset_code.clone());
+        }
+        for payment in chain_payments {
+            assets.insert(payment.asset_code.clone());
+        }
+
+        // Initialize reconciliation records for each asset
+        for asset in assets {
+            let db_count = db_txs.iter().filter(|t| t.asset_code == asset).count();
+            let chain_count = chain_payments
+                .iter()
+                .filter(|p| p.asset_code == asset)
+                .count();
+
+            let missing_count = missing_on_chain
+                .iter()
+                .filter(|m| m.asset_code == asset)
+                .count();
+            let orphaned_count = orphaned_payments
+                .iter()
+                .filter(|o| o.asset_code == asset)
+                .count();
+            let mismatch_count = amount_mismatches
+                .iter()
+                .filter(|m| m.asset_code == asset)
+                .count();
+            let late_count = late_payments.iter().filter(|l| l.asset_code == asset).count();
+
+            let status = if missing_count == 0 && orphaned_count == 0 && mismatch_count == 0 {
+                ReconciliationStatus::Reconciled
+            } else if late_count > 0 {
+                ReconciliationStatus::Partial
+            } else if missing_count > 0 || orphaned_count > 0 {
+                ReconciliationStatus::Failed
+            } else {
+                ReconciliationStatus::Partial
+            };
+
+            asset_stats.insert(
+                asset.clone(),
+                AssetReconciliation {
+                    asset_code: asset,
+                    db_transactions: db_count,
+                    chain_payments: chain_count,
+                    missing_on_chain_count: missing_count,
+                    orphaned_payments_count: orphaned_count,
+                    amount_mismatches_count: mismatch_count,
+                    late_payments_count: late_count,
+                    status,
+                },
+            );
+        }
+
+        let mut result: Vec<_> = asset_stats.into_values().collect();
+        result.sort_by(|a, b| a.asset_code.cmp(&b.asset_code));
+        result
+    }
+
+    fn calculate_overall_status(&self, asset_reconciliations: &[AssetReconciliation]) -> String {
+        if asset_reconciliations.is_empty() {
+            return "reconciled".to_string();
+        }
+
+        let has_failed = asset_reconciliations
+            .iter()
+            .any(|a| matches!(a.status, ReconciliationStatus::Failed));
+        let has_partial = asset_reconciliations
+            .iter()
+            .any(|a| matches!(a.status, ReconciliationStatus::Partial));
+
+        if has_failed {
+            "failed".to_string()
+        } else if has_partial {
+            "partial".to_string()
+        } else {
+            "reconciled".to_string()
+        }
+    }
+
     /// Persist a reconciliation report to the database.
     ///
     /// Relies on the `reconciliation_reports_period_unique` constraint on

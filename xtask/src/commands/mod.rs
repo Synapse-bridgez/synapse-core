@@ -1,6 +1,7 @@
 pub mod audit_indexes;
 pub mod compat;
 pub mod lint;
+pub mod pool_advisor;
 pub mod release;
 pub mod schema_drift;
 pub mod setup;

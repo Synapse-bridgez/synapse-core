@@ -180,6 +180,160 @@ impl ComplianceService {
 
         Ok(reports)
     }
+
+    /// Get a specific report by ID
+    pub async fn get_report(&self, report_id: Uuid) -> Result<ComplianceReport, AppError> {
+        sqlx::query_as::<_, ComplianceReport>(
+            "SELECT * FROM compliance_reports WHERE id = $1",
+        )
+        .bind(report_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound("Compliance report not found".to_string()))
+    }
+
+    /// Approve a compliance report (reviewer sign-off)
+    pub async fn approve_report(
+        &self,
+        report_id: Uuid,
+        reviewer_id: Uuid,
+        reviewer_notes: Option<String>,
+    ) -> Result<ComplianceReport, AppError> {
+        // Check if report exists and is in pending_review status
+        let report = self.get_report(report_id).await?;
+
+        if let Some(ref status) = report.status {
+            if status != "pending_review" {
+                return Err(AppError::Validation(
+                    format!("Cannot approve a report with status: {}", status),
+                ));
+            }
+        }
+
+        // Audit log the approval
+        self.log_audit(
+            report_id,
+            "compliance_report_approved",
+            Some(serde_json::json!({
+                "reviewer_id": reviewer_id,
+                "notes": reviewer_notes
+            })),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to log compliance report approval audit: {}", e);
+            e
+        })?;
+
+        // Update the report status
+        sqlx::query_as::<_, ComplianceReport>(
+            "UPDATE compliance_reports
+             SET status = 'approved',
+                 reviewed_by = $2,
+                 reviewed_at = $3,
+                 reviewer_notes = $4,
+                 updated_at = NOW()
+             WHERE id = $1
+             RETURNING *",
+        )
+        .bind(report_id)
+        .bind(reviewer_id)
+        .bind(Utc::now())
+        .bind(reviewer_notes)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))
+    }
+
+    /// Reject a compliance report (reviewer rejects)
+    pub async fn reject_report(
+        &self,
+        report_id: Uuid,
+        reviewer_id: Uuid,
+        reason: String,
+    ) -> Result<ComplianceReport, AppError> {
+        // Check if report exists and is in pending_review status
+        let report = self.get_report(report_id).await?;
+
+        if let Some(ref status) = report.status {
+            if status != "pending_review" {
+                return Err(AppError::Validation(
+                    format!("Cannot reject a report with status: {}", status),
+                ));
+            }
+        }
+
+        // Audit log the rejection
+        self.log_audit(
+            report_id,
+            "compliance_report_rejected",
+            Some(serde_json::json!({
+                "reviewer_id": reviewer_id,
+                "reason": reason
+            })),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to log compliance report rejection audit: {}", e);
+            e
+        })?;
+
+        // Update the report status
+        sqlx::query_as::<_, ComplianceReport>(
+            "UPDATE compliance_reports
+             SET status = 'rejected',
+                 reviewed_by = $2,
+                 reviewed_at = $3,
+                 reviewer_notes = $4,
+                 updated_at = NOW()
+             WHERE id = $1
+             RETURNING *",
+        )
+        .bind(report_id)
+        .bind(reviewer_id)
+        .bind(Utc::now())
+        .bind(Some(reason))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))
+    }
+
+    /// Invalidate report approval when report is regenerated
+    pub async fn invalidate_approvals_for_period(&self, period: &str) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            "UPDATE compliance_reports
+             SET status = 'pending_review',
+                 reviewed_by = NULL,
+                 reviewed_at = NULL,
+                 reviewer_notes = NULL,
+                 updated_at = NOW()
+             WHERE period = $1 AND status = 'approved'",
+        )
+        .bind(period)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
+
+    async fn log_audit(
+        &self,
+        report_id: Uuid,
+        action: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(), AppError> {
+        // This uses the audit logging infrastructure - delegate to audit service
+        // For now, just log to tracing
+        tracing::info!(
+            action = action,
+            report_id = %report_id,
+            metadata = ?metadata,
+            "Compliance report audit event"
+        );
+        Ok(())
+    }
 }
 
 fn period_bounds(

@@ -58,8 +58,86 @@ This document outlines the disaster recovery procedures for the application, res
 
 ## Monitoring Alerts and Escalation Procedures
 
-## 6. Scheduled Disaster-Recovery Drill
+## 6. Point-in-Time Recovery (PITR)
+**Estimated Recovery Time:** 30-60 minutes (depending on WAL file size and recovery distance)
+
+### Overview
+Point-in-Time Recovery allows restoration of the database to **any specific moment in time** between the base backup and the latest archived WAL file. This is essential for recovering from data corruption, accidental deletes, or bad migrations.
+
+### Prerequisites
+- Base backup created with `pg_dump` (stored in `backup_dir`)
+- Complete WAL file archive (stored in `wal_archive_dir`)
+- Recovery target timestamp within WAL retention period
+
+### Configuration
+```
+# In postgresql.conf:
+archive_mode = on
+archive_command = 'cp %p /path/to/wal_archive/%f'
+archive_timeout = 300
+
+# In synapse config:
+pitr_config = PITRConfig {
+    backup_dir: "/data/backups",
+    wal_archive_dir: "/data/wal_archive",
+    wal_retention_days: 30,
+}
+```
+
+### Procedure
+1. **Verify PITR Readiness**
+   ```bash
+   curl http://localhost:8000/health/pitr
+   ```
+   Check that WAL archiving is enabled and WAL files are available.
+
+2. **Determine Recovery Target Time**
+   - Identify the exact moment of data corruption/issue
+   - Choose a timestamp 1-5 minutes before the issue
+   - Format: ISO8601 (e.g., `2025-06-15T14:30:00Z`)
+
+3. **Create Recovery Script**
+   ```bash
+   ./scripts/pitr_restore.sh "2025-06-15T14:30:00Z"
+   ```
+
+4. **Validate Recovery**
+   ```bash
+   # Connect to recovered database
+   psql -c "SELECT COUNT(*) FROM affected_table;"
+   # Verify data is in expected state
+   ```
+
+5. **Promote Recovered Database**
+   - Run integration tests
+   - Update application connection strings if needed
+   - Resume application traffic
+
+### Verifying WAL Continuity
+Before initiating PITR, verify WAL files are complete:
+```bash
+# Check WAL archive
+ls -la /data/wal_archive/ | head -20
+
+# Verify no gaps
+ls /data/wal_archive/ | wc -l  # Should be continuous
+```
+
+### Storage Growth Estimation
+WAL files grow based on write volume:
+- 1000 TPS × 300s checkpoint = ~30GB per day
+- Retention of 30 days = ~900GB of WAL storage
+
+## 7. Scheduled Disaster-Recovery Drill
 Run a documented recovery drill at least once per quarter and after any major backup, failover, or schema workflow change. Record the drill date, operator, restore source, measured recovery time, and follow-up actions in the incident tracker.
+
+### PITR Testing
+Include monthly PITR test to verify:
+```bash
+# Test restore to 7 days ago
+TARGET=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+./scripts/test_pitr.sh "$TARGET"
+```
 
 ### Key Alerts:
 * **Database Connection Failure:** Triggered when DB does not respond to ping attempts > 30s.

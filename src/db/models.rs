@@ -159,6 +159,13 @@ pub struct Settlement {
     pub original_total_amount: Option<BigDecimal>,
     pub reviewed_by: Option<String>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    pub sla_priority: Option<String>,
+    pub sla_duration_minutes: Option<i32>,
+    pub sla_deadline: Option<DateTime<Utc>>,
+    pub sla_breached: Option<bool>,
+    pub sla_breach_notified_at: Option<DateTime<Utc>>,
+    pub parent_settlement_id: Option<Uuid>,
+    pub destination_account: Option<String>,
 }
 
 #[async_graphql::Object]
@@ -189,6 +196,62 @@ impl Settlement {
     }
     async fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
+    }
+    async fn parent_settlement_id(&self) -> Option<String> {
+        self.parent_settlement_id.map(|id| id.to_string())
+    }
+    async fn destination_account(&self) -> Option<&str> {
+        self.destination_account.as_deref()
+    }
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SettlementLeg {
+    pub id: Uuid,
+    pub settlement_id: Uuid,
+    pub destination_account: String,
+    pub amount: BigDecimal,
+    pub split_type: String, // 'fixed' or 'percentage'
+    pub split_value: Option<BigDecimal>, // percentage (0-100) or amount for fixed splits
+    pub sequence_order: i32,
+    pub status: String, // pending, delivering, delivered, failed
+    pub delivery_attempt_count: i32,
+    pub last_delivery_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[async_graphql::Object]
+impl SettlementLeg {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn settlement_id(&self) -> String {
+        self.settlement_id.to_string()
+    }
+    async fn destination_account(&self) -> &str {
+        &self.destination_account
+    }
+    async fn amount(&self) -> String {
+        self.amount.to_string()
+    }
+    async fn split_type(&self) -> &str {
+        &self.split_type
+    }
+    async fn split_value(&self) -> Option<String> {
+        self.split_value.as_ref().map(|v| v.to_string())
+    }
+    async fn sequence_order(&self) -> i32 {
+        self.sequence_order
+    }
+    async fn status(&self) -> &str {
+        &self.status
+    }
+    async fn delivery_attempt_count(&self) -> i32 {
+        self.delivery_attempt_count
+    }
+    async fn last_delivery_error(&self) -> Option<&str> {
+        self.last_delivery_error.as_deref()
     }
 }
 
@@ -407,6 +470,11 @@ pub struct ComplianceReport {
     pub volume_by_asset: serde_json::Value,
     pub top_accounts: serde_json::Value,
     pub created_at: DateTime<Utc>,
+    pub status: Option<String>,
+    pub reviewed_by: Option<Uuid>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub reviewer_notes: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 // Minimal Asset struct for asset cache functionality
