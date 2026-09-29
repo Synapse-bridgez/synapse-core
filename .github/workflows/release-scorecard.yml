@@ -1,0 +1,85 @@
+name: Release Scorecard
+
+# Post-release reliability scorecard (docs/release-scorecard.md).
+#
+# A release's "after" window needs time to fill with production traffic, so
+# this does not run on the release event itself: an hourly schedule scores
+# every release whose after-window (default 24 h, or up to the next release
+# if that came sooner) closed in the last hour. workflow_dispatch scores one
+# tag on demand. Reporting only — nothing is rolled back.
+#
+# Secrets: PROMETHEUS_URL (required), PROMETHEUS_BEARER_TOKEN (optional).
+
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release tag to score (e.g. v1.4.0)
+        required: true
+      window_hours:
+        description: Comparison window length in hours
+        default: "24"
+  pull_request:
+    paths:
+      - "xtask/**"
+      - ".github/workflows/release-scorecard.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Unit tests for the comparison / regression-flagging logic.
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p xtask
+
+  scorecard:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # release tags and their dates
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate scorecard
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+          PROMETHEUS_BEARER_TOKEN: ${{ secrets.PROMETHEUS_BEARER_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            cargo xtask scorecard --release "${{ inputs.release }}" --window-hours "${{ inputs.window_hours }}"
+          else
+            cargo xtask scorecard --due --lookback-hours 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-scorecard-${{ github.run_id }}
+          path: scorecard/
+          if-no-files-found: ignore
+
+      - name: Open an issue for each regression
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create release-scorecard --color B60205 \
+            --description "Post-release reliability regression" --force >/dev/null
+          for tag in $(jq -r '.regressions[]' scorecard/summary.json); do
+            safe=$(echo "$tag" | tr '/\\' '__')
+            title="Reliability regression after release $tag"
+            existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body-file "scorecard/$safe.md"
+            else
+              gh issue create --title "$title" --body-file "scorecard/$safe.md" --label "release-scorecard"
+            fi
+          done

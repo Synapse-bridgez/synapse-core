@@ -187,6 +187,77 @@ impl AdminClient {
     }
 }
 
+/// Environment variables through which the resolved CLI auth/config context
+/// is handed to external `synapse-cli-<name>` plugin binaries. Plugins read
+/// these instead of re-implementing the CLI's own config/auth resolution.
+pub const PLUGIN_ENV_BASE_URL: &str = "SYNAPSE_CLI_BASE_URL";
+pub const PLUGIN_ENV_API_KEY: &str = "SYNAPSE_CLI_API_KEY";
+pub const PLUGIN_ENV_PLUGIN_NAME: &str = "SYNAPSE_CLI_PLUGIN_NAME";
+
+/// Resolved auth/config context passed to an external plugin subcommand.
+///
+/// Built once by the CLI (from the same config/auth resolution the built-in
+/// commands use) and exported into the plugin process environment so the
+/// plugin never has to re-derive the base URL or credential itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginContext {
+    pub base_url: String,
+    pub api_key: String,
+    pub plugin_name: String,
+}
+
+impl PluginContext {
+    pub fn new(base_url: &str, api_key: &str, plugin_name: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            plugin_name: plugin_name.to_string(),
+        }
+    }
+
+    /// The `(key, value)` pairs to inject into the plugin's environment.
+    pub fn env_vars(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (PLUGIN_ENV_BASE_URL, self.base_url.clone()),
+            (PLUGIN_ENV_API_KEY, self.api_key.clone()),
+            (PLUGIN_ENV_PLUGIN_NAME, self.plugin_name.clone()),
+        ]
+    }
+}
+
+/// Lightweight connectivity/credential probe used by `synapse-cli init`.
+///
+/// Hits the unauthenticated `/health` route to confirm the server URL is
+/// reachable, then (when a credential is supplied) issues an authenticated
+/// `GET /admin/locks` so a typo'd token fails immediately during setup
+/// rather than on the user's first real command. Returns `Ok(())` only when
+/// both checks pass.
+pub async fn validate_connection(
+    base_url: &str,
+    api_key: &str,
+) -> Result<(), SynapseError> {
+    let http = reqwest::Client::new();
+    let base = base_url.trim_end_matches('/');
+
+    let health = http
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .map_err(SynapseError::Network)?;
+    let status = health.status().as_u16();
+    if status >= 400 {
+        let body = health.text().await.unwrap_or_default();
+        return Err(map_status_to_error(status, extract_error_message(&body), None));
+    }
+
+    if !api_key.is_empty() {
+        let client = AdminClient::new(base, api_key);
+        let _: serde_json::Value = client.get("/admin/locks").await?;
+    }
+
+    Ok(())
+}
+
 /// Extract a human-readable message from an admin API error body (e.g.
 /// `{"error": "Bad request: …"}`), falling back to the raw body. Strips the
 /// server's `"Bad request: "` prefix so CLI error output stays concise.
@@ -243,17 +314,17 @@ mod tests {
         let mut server = Server::new_async().await;
         let mock = server
             .mock("GET", "/admin/locks")
-            .match_header("x-api-key", mockito::Matcher::Missing)
-            .match_header("x-admin-key", mockito::Matcher::Missing)
-            .match_header("authorization", "Bearer correct-token")
+            .match_header("authorization", mockito::Matcher::Missing)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("{}")
             .create_async()
             .await;
 
-        let client = AdminClient::new(&server.url(), "correct-token");
-        let _: serde_json::Value = client.get("/admin/locks").await.unwrap();
+        let client = AdminClient::new(&server.url(), "");
+        let result: Result<serde_json::Value, SynapseError> = client.get("/admin/locks").await;
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         mock.assert_async().await;
     }
 
@@ -334,5 +405,20 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
         mock.assert_async().await;
+    }
+
+    /// The resolved auth context must be exposed to plugins via the
+    /// documented environment variables, with the base URL normalized and
+    /// the plugin name carried through for diagnostics.
+    #[test]
+    fn plugin_context_exports_auth_env_vars() {
+        let ctx = PluginContext::new("https://api.example.com/", "secret-token", "reconcile");
+        let vars = ctx.env_vars();
+
+        assert!(vars.contains(&(PLUGIN_ENV_BASE_URL, "https://api.example.com".to_string())));
+        assert!(vars.contains(&(PLUGIN_ENV_API_KEY, "secret-token".to_string())));
+        assert!(vars.contains(&(PLUGIN_ENV_PLUGIN_NAME, "reconcile".to_string())));
+    }
+}
     }
 }

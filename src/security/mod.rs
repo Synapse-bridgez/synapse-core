@@ -1,5 +1,7 @@
 /// Security module — rate limiting, session validation, and connection pooling.
 pub mod connection_pool;
+#[cfg(test)]
+mod csrf_audit;
 pub mod error;
 pub mod session;
 

@@ -89,6 +89,7 @@ pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>)
             Err(_) => {
                 tracing::warn!(
                     correlation_id = %correlation_id,
+                    request_id = %correlation_id,
                     method = %method,
                     path = %uri.path(),
                     "Request body too large or failed to read"
@@ -108,6 +109,7 @@ pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>)
 
         tracing::info!(
             correlation_id = %correlation_id,
+            request_id = %correlation_id,
             method = %method,
             path = %uri.path(),
             client_ip = %client_ip,
@@ -121,6 +123,7 @@ pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>)
         request_body_size = 0;
         tracing::info!(
             correlation_id = %correlation_id,
+            request_id = %correlation_id,
             method = %method,
             path = %uri.path(),
             client_ip = %client_ip,

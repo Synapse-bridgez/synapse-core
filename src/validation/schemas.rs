@@ -23,7 +23,7 @@ impl SchemaRegistry {
 pub static SCHEMAS: Lazy<SchemaRegistry> = Lazy::new(SchemaRegistry::new);
 
 /// JSON schema for callback payload (v1)
-fn callback_schema_v1() -> serde_json::Value {
+pub(crate) fn callback_schema_v1() -> serde_json::Value {
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -81,7 +81,7 @@ fn callback_schema_v1() -> serde_json::Value {
 }
 
 /// JSON schema for webhook payload (v1)
-fn webhook_schema_v1() -> serde_json::Value {
+pub(crate) fn webhook_schema_v1() -> serde_json::Value {
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",

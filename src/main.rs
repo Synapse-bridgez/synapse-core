@@ -80,12 +80,14 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().json())
+                .with(synapse_core::telemetry::latency_budget::layer())
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
+                .with(synapse_core::telemetry::latency_budget::layer())
                 .init();
         }
     }
@@ -200,15 +202,22 @@ async fn serve(
     // Initialize partition manager (runs every 24 hours). Startup-time assertion:
     // fail loudly rather than silently regress to the dead-cache-warming bug this
     // fixes if a future refactor reintroduces the construction-order mistake.
-    let partition_manager =
-        db::partition::PartitionManager::new(pool.clone(), 24, Some(query_cache.clone()));
+    let partition_manager = db::partition::PartitionManager::with_lookahead(
+        pool.clone(),
+        24,
+        Some(query_cache.clone()),
+        config.partition_lookahead_months,
+    );
     assert!(
         partition_manager.has_cache(),
         "PartitionManager must be constructed with a cache so create_partition's \
          warming path actually runs; see query_cache initialization above"
     );
     partition_manager.start();
-    tracing::info!("Partition manager started");
+    tracing::info!(
+        lookahead_months = config.partition_lookahead_months,
+        "Partition manager started with configurable lookahead"
+    );
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -297,6 +306,43 @@ async fn serve(
     tracing::info!("Metrics initialized successfully");
     metrics::spawn_pool_metrics_task(pool.clone(), 30);
 
+    // Dependency health scorecard (#1334): flush per-minute samples into
+    // dependency_health_rollups and expose rolling-window gauges.
+    let _scorecard_flush =
+        synapse_core::services::dependency_scorecard::spawn_flush_task(pool.clone());
+    let _scorecard_gauges =
+        synapse_core::services::dependency_scorecard::register_scorecard_gauges();
+    // Per-tenant latency histograms (#1337), top-K bounded.
+    let _tenant_latency_gauges = synapse_core::tenant::latency::register_tenant_latency_gauges();
+
+    // Tokio task leak detection (telemetry::task_leak): per-category live
+    // task / load gauges, plus a monitor that alerts on task growth the load
+    // doesn't explain.
+    let _task_leak_gauges = metrics::register_task_leak_gauges();
+    tokio::spawn(synapse_core::telemetry::task_leak::run_leak_monitor(
+        std::sync::Arc::clone(synapse_core::telemetry::task_leak::global()),
+        synapse_core::telemetry::task_leak::LeakDetectorConfig::from_env(),
+        std::time::Duration::from_secs(
+            std::env::var("TASK_LEAK_SAMPLE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+        ),
+    ));
+
+    // End-to-end latency budget (telemetry::latency_budget): stage samples
+    // come from the tracing layer installed above; evaluate them per window.
+    let _latency_budget_gauges = metrics::register_latency_budget_gauges();
+    tokio::spawn(synapse_core::telemetry::latency_budget::run_evaluator(
+        std::sync::Arc::clone(synapse_core::telemetry::latency_budget::global()),
+        std::time::Duration::from_secs(
+            std::env::var("LATENCY_BUDGET_EVAL_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+        ),
+    ));
+
     // Initialize rate limiting
     tracing::info!(
         "Rate limiting configured: {} req/min (default), {} req/min (whitelisted)",
@@ -340,8 +386,25 @@ async fn serve(
                 let anchor_secret = manager.get_anchor_secret().await?;
                 let admin_key = manager.get_admin_api_key().await?;
                 let store = SecretsStore::new(anchor_secret, admin_key);
+                if let (Ok(role), Ok(template)) = (
+                    std::env::var("VAULT_DATABASE_ROLE"),
+                    std::env::var("VAULT_DATABASE_URL_TEMPLATE"),
+                ) {
+                    manager.start_database_rotation_task(
+                        pool_manager.clone(),
+                        role,
+                        template,
+                    );
+                    tracing::info!("Vault database lease renewal and credential rotation enabled");
+                }
                 manager.start_refresh_task(store.clone(), config.redis_url.clone());
-                tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
+                // Leaked deliberately: the gauges must live for the process.
+                std::mem::forget(store.register_vault_gauges());
+                tracing::info!(
+                    fallback_max_age_secs = store.fallback_config().max_age.as_secs(),
+                    "Secrets rotation enabled: refreshing from Vault every 5 minutes; \
+                     bounded last-known-good fallback during Vault outages"
+                );
                 Some(store)
             }
             Err(e) => {
@@ -538,6 +601,16 @@ async fn serve(
         .await
     {
         tracing::warn!("Failed to register audit log retention job: {}", e);
+    }
+
+    // #1287: Register the tenant data quota measurement job (runs every 15 minutes).
+    let tenant_data_quota_job =
+        synapse_core::services::TenantDataQuotaJob::new(pool.clone());
+    if let Err(e) = scheduler
+        .register_job(Box::new(tenant_data_quota_job))
+        .await
+    {
+        tracing::warn!("Failed to register tenant data quota job: {}", e);
     }
 
     if let Err(e) = scheduler.start().await {

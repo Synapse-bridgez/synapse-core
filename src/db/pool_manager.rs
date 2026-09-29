@@ -1,10 +1,12 @@
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use arc_swap::ArcSwap;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct PoolManager {
     primary: PgPool,
+    active_primary: Arc<ArcSwap<PgPool>>,
     replica: Option<PgPool>,
     failover_state: Arc<RwLock<FailoverState>>,
 }
@@ -30,8 +32,10 @@ impl PoolManager {
             None
         };
 
+        let active_primary = Arc::new(ArcSwap::from_pointee(primary.clone()));
         Ok(Self {
             primary,
+            active_primary,
             replica,
             failover_state: Arc::new(RwLock::new(FailoverState {
                 primary_healthy: true,
@@ -48,25 +52,37 @@ impl PoolManager {
         self.replica.as_ref()
     }
 
-    pub async fn read_pool(&self) -> (&PgPool, bool) {
+    pub async fn read_pool(&self) -> (PgPool, bool) {
         let state = self.failover_state.read().await;
 
         if let Some(replica) = &self.replica {
             if state.replica_healthy {
                 tracing::info!("Routing read query to replica database");
-                return (replica, true);
+                return (replica.clone(), true);
             }
         }
 
-        (&self.primary, false)
+        (self.active_primary.load_full().as_ref().clone(), false)
     }
 
     pub async fn get_read_pool(&self) -> &PgPool {
-        self.read_pool().await.0
+        &self.primary
     }
 
     pub async fn get_write_pool(&self) -> &PgPool {
         &self.primary
+    }
+
+    /// Build a pool with new credentials before switching traffic. Existing
+    /// requests retain the old PgPool handle and are drained normally.
+    pub async fn rotate_primary(&self, database_url: &str) -> Result<(), sqlx::Error> {
+        let replacement = build_pool(database_url, self.primary.options().get_max_connections()).await?;
+        let previous = self.active_primary.swap(Arc::new(replacement));
+        tokio::spawn(async move {
+            crate::db::graceful_shutdown(previous.as_ref()).await;
+        });
+        tracing::info!("Database credentials rotated without restarting the service");
+        Ok(())
     }
 
     /// Mark the replica as unhealthy so subsequent `read_pool()` calls fall
@@ -111,7 +127,11 @@ impl PoolManager {
     /// `PoolManager`'s pools are drained on process shutdown alongside the
     /// application's main pool, instead of being dropped mid-query.
     pub async fn graceful_shutdown(&self) {
-        crate::db::graceful_shutdown(&self.primary).await;
+        let active = self.active_primary.load_full();
+        crate::db::graceful_shutdown(active.as_ref()).await;
+        if !std::ptr::eq(active.as_ref(), &self.primary) {
+            crate::db::graceful_shutdown(&self.primary).await;
+        }
         if let Some(replica) = &self.replica {
             crate::db::graceful_shutdown(replica).await;
         }

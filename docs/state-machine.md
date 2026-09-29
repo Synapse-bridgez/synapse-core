@@ -136,6 +136,35 @@ Invalid transitions return `AppError::InvalidStatusTransition` (HTTP 400, code `
 
 ---
 
+## Model Checking
+
+`src/validation/state_machine_model.rs` (issue #1316) derives the state set
+and guarded edges from `TRANSACTION_TRANSITIONS` and checks the real
+`validate_status_transition` guard in `cargo test --lib`:
+
+- **Exhaustive:** the guard accepts exactly the table's edges plus same-state
+  no-ops for every pair of known states and a set of non-states (`""`,
+  `"PENDING"`, `"cancelled"`, ...).
+- **Reachability:** from `pending`, exactly `pending`, `processing`,
+  `pending_review`, `completed` and `failed` are reachable. `dlq` has an outgoing edge (requeue
+  to `pending`) but no incoming one, so rows only enter it through DLQ
+  tooling outside this state machine.
+- **Terminal state:** `completed` is absorbing.
+- **Random sequences (proptest):** arbitrary sequences of requested targets
+  never leave the state set or leave `completed`.
+- **Interleavings (proptest):** several writers each act on a stale read. With
+  a compare-and-set write (`UPDATE ... WHERE id = $id AND status = $read`),
+  every persisted change is a valid edge.
+
+**Counterexample (pinned as a regression test):** a read-validate-write
+*without* the status guard can persist an invalid change. Two workers read
+`pending`; one writes `completed`; the other, still acting on its stale read,
+validates `pending -> failed` and overwrites the row, so the database records
+`completed -> failed`. `db::queries::bulk_update_transaction_status`
+currently follows that unguarded pattern (it `SELECT`s statuses, validates,
+then `UPDATE ... WHERE id = ANY($2)` without a `status` condition), so it is
+exposed to this race when it runs concurrently with the processor.
+
 ## Code References
 
 ### Validation Function

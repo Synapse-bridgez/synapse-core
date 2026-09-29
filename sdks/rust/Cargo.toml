@@ -22,3 +22,7 @@ async-stream = "0.3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
+
+[[bench]]
+name = "pooling"
+harness = false

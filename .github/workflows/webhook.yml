@@ -1,5 +1,11 @@
 name: Webhook Handlers
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_CACHE_SIZE: 1G
+  SCCACHE_GHA_ENABLED: "true"
+
 on:
   repository_dispatch:
     types: [webhook_event]
@@ -41,9 +47,16 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
+
       # Cache Cargo dependencies to reduce repeated download requests to crates.io
       # Avoids rate limit errors from excessive dependency downloads on webhook events
       - name: Cache Cargo artifacts
+        id: cargo-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -51,9 +64,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-stable-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
           restore-keys: |
-            ${{ runner.os }}-stable-cargo-
+            ${{ runner.os }}-stable-workspace-
             ${{ runner.os }}-cargo-
 
       - name: Build
@@ -61,3 +74,7 @@ jobs:
 
       - name: Run webhook-related tests
         run: cargo test --lib webhook -- --nocapture --test-threads=1
+
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"

@@ -77,6 +77,55 @@ Delays use decorrelated jitter — each retry draws a random value in
 `[base_delay, prev_delay * 3]`, capped at 10 s — so concurrent callers spread
 their retries instead of retrying in lockstep.
 
+### Connection pooling
+
+The SDK reuses HTTP connections through an underlying `reqwest` client. For
+high-throughput services (many SDK calls per second) you can tune the pool
+instead of relying on the defaults. All options are set on the same builder:
+
+```rust,no_run
+use std::time::Duration;
+use synapse_sdk::client::SynapseClient;
+
+let client = SynapseClient::builder("https://api.example.com", "pk_live_...")
+    // Max idle connections kept alive per host (default: 32).
+    .pool_max_idle_per_host(64)
+    // How long an idle connection may sit in the pool before being closed
+    // (default: 90 s).
+    .pool_idle_timeout(Duration::from_secs(30))
+    // TCP keep-alive probes on pooled connections (default: 60 s).
+    .tcp_keepalive(Duration::from_secs(30))
+    .build();
+```
+
+| Builder method            | Default | Purpose                                             |
+|---------------------------|---------|-----------------------------------------------------|
+| `pool_max_idle_per_host`  | `32`    | Idle connections retained per host for reuse        |
+| `pool_idle_timeout`       | `90 s`  | Max time an idle connection stays in the pool       |
+| `tcp_keepalive`           | `60 s`  | TCP keep-alive interval for pooled connections      |
+
+**Recommended high-throughput configuration.** For a service issuing many
+concurrent calls, raise the idle pool to match your expected concurrency and
+keep idle connections short-lived so stale sockets are recycled quickly:
+
+```rust,no_run
+use std::time::Duration;
+use synapse_sdk::client::SynapseClient;
+
+let client = SynapseClient::builder("https://api.example.com", "pk_live_...")
+    .pool_max_idle_per_host(128)
+    .pool_idle_timeout(Duration::from_secs(30))
+    .tcp_keepalive(Duration::from_secs(30))
+    .build();
+```
+
+**Interaction with retries.** Retries reuse the same pooled connection. A
+connection is only returned to the pool after a request completes; connections
+that fail mid-request (network errors, resets) are discarded rather than
+reused, so a retry never picks up a known-bad socket. Keep `pool_idle_timeout`
+below your load balancer's idle timeout to avoid reusing connections the
+server has already closed.
+
 ### Fetching a resource
 
 Use `client.get::<T>(path)` for any endpoint that returns JSON:

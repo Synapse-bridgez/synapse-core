@@ -42,20 +42,24 @@
 //! - See [database reconnection logic](../../docs/database-reconnection-logic.md)
 //!   for design, security, and recovery guidance
 
-use crate::config::Config;
+use crate::config::{Config, EndpointClass};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::sync::Arc;
 use std::time::Duration;
 
 pub mod audit;
+pub mod cold_storage;
 pub mod cron;
 pub mod models;
 pub mod partition;
+pub mod partition_migration;
 pub mod pool_manager;
 pub mod queries;
+pub mod replica_lag_monitor;
 pub mod session;
 pub mod slow_query;
 pub mod webhook;
+pub mod timeout;
 
 /// Maximum time to wait for in-flight queries to finish during graceful shutdown.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);

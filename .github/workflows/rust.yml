@@ -55,6 +55,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
+  SCCACHE_GHA_ENABLED: "true"
   LOAD_TEST_P95_THRESHOLD_MS: "500"
   LOAD_TEST_ERROR_RATE_THRESHOLD_PERCENT: "5"
   # Regex used by cargo-llvm-cov to exclude generated/test files from coverage
@@ -131,6 +132,7 @@ jobs:
       run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
+      id: cargo-cache
       uses: actions/cache@v4
       with:
         path: |
@@ -138,9 +140,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
         restore-keys: |
-          ${{ runner.os }}-${{ matrix.rust }}-cargo-
+          ${{ runner.os }}-stable-workspace-
           ${{ runner.os }}-cargo-
 
     - name: Check formatting
@@ -297,6 +299,10 @@ jobs:
         echo "::error::Unit tests failed. Run 'cargo test --lib --bins' locally to debug."
         exit 1
 
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -356,6 +362,7 @@ jobs:
       run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
+      id: cargo-cache
       uses: actions/cache@v4
       with:
         path: |
@@ -363,9 +370,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
         restore-keys: |
-          ${{ runner.os }}-${{ matrix.rust }}-cargo-
+          ${{ runner.os }}-stable-workspace-
           ${{ runner.os }}-cargo-
 
     - name: Install sqlx-cli
@@ -503,6 +510,10 @@ jobs:
         echo "::error::Run 'cargo test --test webhook_concurrent_delivery_test -- --ignored' locally to debug."
         exit 1
 
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+
 
   coverage:
     runs-on: ubuntu-latest
@@ -561,6 +572,7 @@ jobs:
       run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
+      id: cargo-cache
       uses: actions/cache@v4
       with:
         path: |
@@ -568,9 +580,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-coverage-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
         restore-keys: |
-          ${{ runner.os }}-coverage-cargo-
+          ${{ runner.os }}-stable-workspace-
           ${{ runner.os }}-cargo-
 
     - name: Install sqlx-cli
@@ -748,6 +760,10 @@ jobs:
         echo "::error::Coverage threshold enforcement failed. Increase test coverage to meet minimum requirements."
         exit 1
 
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+
   # ── Job: supply-chain-audit ─────────────────────────────────────────────
   # Enforces deny.toml's [advisories]/[licenses]/[bans]/[sources] policy.
   # deny.toml existed in the repo before this job did but was never wired
@@ -871,6 +887,26 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+
+      - name: Start sccache session
+        run: sccache --start-server || true
+
+      - name: Cache Cargo registry and build artifacts
+        id: cargo-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-stable-workspace-
+            ${{ runner.os }}-cargo-
+
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
         with:
@@ -918,6 +954,10 @@ jobs:
           path: target/criterion/
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ── Job: docker-image-security ──────────────────────────────────────────
   # Builds the production image from `dockerfile` and fails if it doesn't
