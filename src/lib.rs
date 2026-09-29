@@ -3,6 +3,7 @@ pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod governance;
 pub mod graphql;
 pub mod handlers;
 pub mod health;
@@ -372,6 +373,33 @@ pub fn create_app(app_state: AppState) -> Router {
         .nest(
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
+        )
+        // Admin: transaction notes API (#1257)
+        .route(
+            "/admin/transactions/:id/notes",
+            post(handlers::admin::transaction_notes::create_transaction_note)
+                .get(handlers::admin::transaction_notes::get_transaction_notes),
+        )
+        // Admin: webhook retry policy configuration (#1258)
+        .route(
+            "/admin/webhooks/endpoints/:id/retry-policy",
+            post(handlers::admin::webhook_retry_policy::update_webhook_retry_policy)
+                .get(handlers::admin::webhook_retry_policy::get_webhook_retry_policy),
+        )
+        // Admin: webhook endpoint redirects for migrations (#1259)
+        .route(
+            "/admin/webhooks/endpoints/:id/redirects",
+            post(handlers::admin::webhook_redirects::create_webhook_redirect)
+                .get(handlers::admin::webhook_redirects::list_active_redirects),
+        )
+        .route(
+            "/admin/webhooks/redirects/:id/cancel",
+            post(handlers::admin::webhook_redirects::cancel_webhook_redirect),
+        )
+        // Admin: asset processing rules dry-run/preview mode (#1260)
+        .route(
+            "/admin/rules/preview",
+            post(handlers::admin::rules_preview::preview_rules),
         )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 

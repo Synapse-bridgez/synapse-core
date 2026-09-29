@@ -31,3 +31,15 @@ Instead, report it privately using one of the following channels:
 This includes, but is not limited to: authentication/authorization bypass,
 tenant data isolation issues, secret/credential exposure, and financial data
 integrity issues (Stellar/fiat conversion paths).
+
+## Secret scanning guardrails
+
+The repository runs a secret-pattern scan in both local development and CI:
+
+- `scripts/scan-secrets.sh` performs the repository scan.
+- `.pre-commit-config.yaml` installs the hook for local commits.
+- `.github/workflows/secrets-scan.yml` runs the same scanner in GitHub Actions.
+
+Known false positives may be added to `.secrets-allowlist.txt`, but each entry
+must be justified and kept minimal. This provides a documented, reviewable allowlist
+mechanism without disabling the guardrail for real credentials.
