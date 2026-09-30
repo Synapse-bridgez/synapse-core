@@ -138,9 +138,17 @@ impl TelemetryWebhookHandler {
     pub fn process(&self, body: &[u8], signature: &str) -> Result<WebhookResult, TelemetryError> {
         // 1. Size check — before any allocation-heavy work.
         if body.len() > MAX_PAYLOAD_BYTES {
+            let size_band = if body.len() <= MAX_PAYLOAD_BYTES.saturating_mul(2) {
+                "up_to_2x_limit"
+            } else {
+                "over_2x_limit"
+            };
             tracing::warn!(
+                endpoint = TELEMETRY_WEBHOOK_ROUTE,
+                reason = "payload_too_large",
                 size = body.len(),
                 max = MAX_PAYLOAD_BYTES,
+                size_band,
                 "Telemetry webhook rejected: payload too large"
             );
             return Err(TelemetryError::PayloadTooLarge(MAX_PAYLOAD_BYTES));
@@ -234,7 +242,20 @@ impl TelemetryWebhookHandler {
         let too_new = timestamp_ms.saturating_sub(now_ms) > skew_ms;
 
         if too_old || too_new {
+            let skew_direction = if too_old { "past" } else { "future" };
+            let skew_seconds = now_ms.abs_diff(timestamp_ms) / 1_000;
+            let skew_band = if skew_seconds <= MAX_TIMESTAMP_SKEW_SECS * 2 {
+                "up_to_2x_window"
+            } else {
+                "over_2x_window"
+            };
             tracing::warn!(
+                endpoint = TELEMETRY_WEBHOOK_ROUTE,
+                reason = "timestamp_outside_window",
+                skew_direction,
+                skew_seconds,
+                skew_band,
+                max_skew_seconds = MAX_TIMESTAMP_SKEW_SECS,
                 timestamp_ms,
                 now_ms,
                 "Telemetry webhook rejected: timestamp outside allowed window"

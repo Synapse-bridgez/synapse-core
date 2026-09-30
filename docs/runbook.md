@@ -267,6 +267,36 @@ See [Database Failover](database_failover.md) for detailed procedures.
 | DLQ entries | >100 | Warning | Investigate failed transactions |
 | Disk usage | >80% | Warning | Archive old partitions |
 | `reconciliation_duplicate_report_prevented_total` rate | >0 | Warning | See "Reconciliation Race Near-Miss" below |
+| Telemetry errors by error kind | ≥20 in 5 min for 6 min | Warning | Inspect error kind, error count, threshold, and exporter/backend health |
+| Oversized telemetry webhook payloads | ≥10 in 5 min for 6 min | Warning | Check payload size band and sender request configuration |
+| Telemetry webhook timestamp skew | ≥10 in 5 min for 6 min | Warning | Check sender clock and the past/future skew band |
+
+### Telemetry Silent-Failure Log Alerts
+
+The Loki ruler rules in `alerting/loki-rules.yml` detect repeated telemetry
+errors that are handled with graceful degradation, oversized telemetry
+webhook requests, and webhook timestamps outside the accepted five-minute
+window. Each rule requires its rolling event threshold to remain exceeded for
+six minutes, longer than the query window, avoiding pages for isolated
+failures or one-time bursts.
+
+The alert includes the environment, event count, and bounded failure context:
+telemetry error kind, payload size band, or timestamp direction and skew band.
+The corresponding structured events also carry telemetry `error_count` and
+`threshold`, or webhook endpoint, configured limit, and measured size/skew.
+These rules group only on bounded fields; request IDs and raw timestamps are
+not promoted to Loki alert labels.
+
+**Operator response:**
+1. For telemetry errors, use the `error_kind` to check exporter configuration,
+   backend availability, or validation/pool failures. The handler may continue
+   after errors and degrade telemetry without failing application requests.
+2. For oversized webhook payloads, confirm the sender is posting to
+   `/telemetry/webhook` and is within the 65,536-byte limit.
+3. For timestamp skew, compare sender clock synchronization with the reported
+   past/future direction and skew band; the accepted clock skew is 300 seconds.
+4. Review the alert's five-minute event count and environment before changing
+   retry behavior or paging the upstream owner.
 
 #### Reconciliation Race Near-Miss
 
@@ -379,14 +409,14 @@ disabled workflow, lost GitHub schedule, or missing Pushgateway series.
 
 ### Alert Runbook Links
 
-Every alert payload carries a `runbook_url` pointing at the section of this
-document that covers it. The mapping lives in
+Every Prometheus or Loki alert payload carries a `runbook_url` pointing at the
+section of this document that covers it. The mapping lives in
 `alerting/runbook-links.json` and is read by both the service (in-process
 alerts, `src/alerting/`) and CI (`scripts/check-alert-runbook-links.py`),
 which fails the build if a mapped heading is renamed or removed. **If you
 rename a heading in this runbook, update the anchor in
-`alerting/runbook-links.json` (and the matching `runbook_url` in
-`alerting/prometheus-rules.yml`) in the same PR.** Alerts that deliberately
+`alerting/runbook-links.json` (and the matching `runbook_url` in the relevant
+file under `alerting/`) in the same PR.** Alerts that deliberately
 have no runbook section carry a reviewed `exempt` entry instead.
 
 ### Pipeline Latency Budget Exceeded

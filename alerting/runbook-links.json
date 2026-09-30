@@ -27,6 +27,9 @@
     "PipelineLatencyBudgetExceeded": { "anchor": "pipeline-latency-budget-exceeded" },
     "TokioTaskLeakSuspected": { "anchor": "tokio-task-leak-suspected" },
     "ReleaseReliabilityRegression": { "anchor": "release-reliability-regression" },
+    "TelemetryErrorsSustained": { "anchor": "telemetry-silent-failure-log-alerts" },
+    "TelemetryWebhookOversizedPayloadBurst": { "anchor": "telemetry-silent-failure-log-alerts" },
+    "TelemetryWebhookTimestampSkewBurst": { "anchor": "telemetry-silent-failure-log-alerts" },
     "QuotaConfigSplitBrain": {
       "exempt": {
         "reason": "Informational drift detector for stale quota:config:* Redis keys; there is no remediation beyond deleting the listed keys, which the alert message itself states.",

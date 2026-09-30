@@ -105,6 +105,26 @@ pub enum TelemetryError {
     BufferOverflow,
 }
 
+impl TelemetryError {
+    fn error_kind(&self) -> &'static str {
+        match self {
+            Self::InitializationError(_) => "initialization",
+            Self::ExporterConfigError(_) => "exporter_config",
+            Self::ExportError(_) => "export",
+            Self::ShutdownError(_) => "shutdown",
+            Self::InvalidEndpoint(_) => "invalid_endpoint",
+            Self::ConnectionError(_) => "connection",
+            Self::ValidationError(_) => "validation",
+            Self::PoolExhausted(_) => "pool_exhausted",
+            Self::PoolConfigError(_) => "pool_config",
+            Self::CircuitBreakerOpen => "circuit_breaker_open",
+            Self::Timeout(_) => "timeout",
+            Self::PayloadTooLarge(_) => "payload_too_large",
+            Self::BufferOverflow => "buffer_overflow",
+        }
+    }
+}
+
 /// Result type for telemetry operations
 pub type TelemetryResult<T> = Result<T, TelemetryError>;
 
@@ -186,6 +206,7 @@ impl ErrorHandler {
         // Log the error
         tracing::warn!(
             error = %error,
+            error_kind = error.error_kind(),
             error_count = self.error_count,
             threshold = self.error_threshold,
             "Telemetry error occurred"

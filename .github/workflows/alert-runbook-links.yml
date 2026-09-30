@@ -15,8 +15,11 @@ on:
       - "docs/runbook.md"
       - "alerting/**"
       - "src/alerting/**"
+      - "src/telemetry/error_handling.rs"
+      - "src/telemetry/webhook.rs"
       - "scripts/check-alert-runbook-links.py"
       - "scripts/test_check_alert_runbook_links.py"
+      - "scripts/test_loki_log_alert_rules.py"
       - ".github/workflows/alert-runbook-links.yml"
   workflow_dispatch: {}
 
@@ -31,7 +34,9 @@ jobs:
           python-version: "3.12"
 
       - name: Validator self-tests
-        run: python3 -m unittest -v scripts/test_check_alert_runbook_links.py
+        run: |
+          python3 -m unittest -v scripts/test_check_alert_runbook_links.py
+          python3 -m unittest -v scripts/test_loki_log_alert_rules.py
 
       - name: Validate alert -> runbook mapping
         run: python3 scripts/check-alert-runbook-links.py
