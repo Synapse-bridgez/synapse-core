@@ -16,6 +16,8 @@ enum Command {
 	CapacityForecast(commands::capacity_forecast::CapacityForecastArgs),
 	/// Compare production reliability metrics around a release.
 	Scorecard(commands::scorecard::ScorecardArgs),
+	/// Generate a postmortem draft from alert, metric, and deployment history.
+	Postmortem(commands::postmortem::PostmortemArgs),
 }
 
 fn main() -> Result<()> {
@@ -23,5 +25,6 @@ fn main() -> Result<()> {
 	match cli.command {
 		Command::CapacityForecast(args) => commands::capacity_forecast::run(args),
 		Command::Scorecard(args) => commands::scorecard::run(args),
+		Command::Postmortem(args) => commands::postmortem::run(args),
 	}
 }
