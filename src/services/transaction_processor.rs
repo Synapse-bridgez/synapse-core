@@ -1,7 +1,10 @@
 use crate::services::query_cache::QueryCache;
 use crate::services::webhook_dispatcher::WebhookDispatcher;
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::TraceContextExt;
 use sqlx::PgPool;
 use tracing::{instrument, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Overall end-to-end SLA target for the webhook-to-reconciliation pipeline.
 pub const END_TO_END_SLA_TARGET: Duration = Duration::from_secs(30);
@@ -397,6 +400,17 @@ impl TransactionProcessor {
                 .bind(tx_id)
                 .fetch_one(&self.pool)
                 .await?;
+
+        if let Some(traceparent) = &tx.trace_id {
+            let parent_context = opentelemetry::global::get_text_map_propagator(|propagator| {
+                let mut carrier = std::collections::HashMap::new();
+                carrier.insert("traceparent".to_owned(), traceparent.clone());
+                propagator.extract(&carrier)
+            });
+            if parent_context.span().span_context().is_valid() {
+                tracing::Span::current().set_parent(parent_context);
+            }
+        }
 
         // Record the trace ID (propagated from the inbound webhook that
         // created this transaction, see `handlers/webhook.rs`) onto this

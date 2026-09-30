@@ -544,4 +544,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
         ))
+        .layer(axum_middleware::from_fn(
+            middleware::trace_context::trace_context_middleware,
+        ))
 }

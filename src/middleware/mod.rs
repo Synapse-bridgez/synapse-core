@@ -6,6 +6,7 @@ pub mod panic_recovery;
 pub mod quota;
 pub mod request_logger;
 pub mod tenant;
+pub mod trace_context;
 pub mod validate;
 pub mod versioning;
 pub mod webhook_signature;

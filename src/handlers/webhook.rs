@@ -19,6 +19,7 @@ use sqlx::types::BigDecimal;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use tracing::instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -143,7 +144,7 @@ pub async fn transaction_callback(
     // Extract trace context from the current OpenTelemetry context.
     let trace_id = opentelemetry::global::get_text_map_propagator(|propagator| {
         let mut carrier = std::collections::HashMap::new();
-        propagator.inject_context(&opentelemetry::Context::current(), &mut carrier);
+        propagator.inject_context(&tracing::Span::current().context(), &mut carrier);
         carrier.get("traceparent").cloned()
     });
 

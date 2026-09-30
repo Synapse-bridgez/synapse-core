@@ -38,6 +38,7 @@ pub use webhook::{TelemetryWebhookHandler, WebhookPayload, WebhookResult};
 
 use std::time::Duration;
 
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,
@@ -56,6 +57,7 @@ pub const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// exposes a structured shutdown path for graceful tracer teardown.
 pub struct TracerManager {
     provider: TracerProvider,
+    service_name: String,
 }
 
 impl TracerManager {
@@ -77,7 +79,11 @@ impl TracerManager {
                     .build_span_exporter()?;
 
                 let provider = sdktrace::TracerProvider::builder()
-                    .with_config(sdktrace::Config::default().with_resource(resource))
+                    .with_config(
+                        sdktrace::Config::default()
+                            .with_sampler(sdktrace::Sampler::AlwaysOn)
+                            .with_resource(resource),
+                    )
                     .with_batch_exporter(exporter, runtime::Tokio)
                     .build();
 
@@ -86,7 +92,11 @@ impl TracerManager {
             }
             None => {
                 let provider = sdktrace::TracerProvider::builder()
-                    .with_config(sdktrace::Config::default().with_resource(resource))
+                    .with_config(
+                        sdktrace::Config::default()
+                            .with_sampler(sdktrace::Sampler::AlwaysOff)
+                            .with_resource(resource),
+                    )
                     .build();
 
                 tracing::info!("No OTLP_ENDPOINT set — OpenTelemetry running in no-op mode");
@@ -98,7 +108,15 @@ impl TracerManager {
         // works anywhere in the codebase.
         opentelemetry::global::set_tracer_provider(provider.clone());
 
-        Ok(Self { provider })
+        Ok(Self {
+            provider,
+            service_name: service_name.to_owned(),
+        })
+    }
+
+    /// Create a tracer backed by this manager's provider.
+    pub fn tracer(&self) -> sdktrace::Tracer {
+        self.provider.tracer(&self.service_name)
     }
 
     /// Shut down the tracer and flush any buffered spans.
@@ -194,10 +212,17 @@ pub fn init_tracer_non_fatal(service_name: &str, otlp_endpoint: Option<&str>) ->
                 opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
             ]);
             let provider = sdktrace::TracerProvider::builder()
-                .with_config(sdktrace::Config::default().with_resource(resource))
+                .with_config(
+                    sdktrace::Config::default()
+                        .with_sampler(sdktrace::Sampler::AlwaysOff)
+                        .with_resource(resource),
+                )
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
-            TracerManager { provider }
+            TracerManager {
+                provider,
+                service_name: service_name.to_owned(),
+            }
         }
     }
 }
@@ -206,7 +231,11 @@ pub fn init_tracer_non_fatal(service_name: &str, otlp_endpoint: Option<&str>) ->
 mod tests {
     use super::*;
     use opentelemetry::global;
-    use opentelemetry::trace::{Span, Tracer};
+    use opentelemetry::trace::{
+        SamplingDecision, Span, SpanContext, SpanId, SpanKind, TraceContextExt, TraceFlags,
+        TraceId, Tracer,
+    };
+    use opentelemetry_sdk::trace::ShouldSample;
 
     #[test]
     fn flush_timeout_defaults_to_constant() {
@@ -258,5 +287,37 @@ mod tests {
     fn test_shutdown_tracer_drops_provider_without_error() {
         let manager = init_tracer("test-service", None).expect("failed to init tracer");
         manager.shutdown();
+    }
+
+    #[test]
+    fn always_on_sampler_records_child_of_unsampled_remote_parent() {
+        let parent = opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
+            TraceId::from(1u128),
+            SpanId::from(2u64),
+            TraceFlags::default(),
+            true,
+            Default::default(),
+        ));
+        let sampler = sdktrace::Sampler::AlwaysOn;
+
+        let result = sampler.should_sample(
+            Some(&parent),
+            TraceId::from(3u128),
+            "downstream-error",
+            &SpanKind::Internal,
+            &[],
+            &[],
+        );
+
+        assert_eq!(result.decision, SamplingDecision::RecordAndSample);
+    }
+
+    #[test]
+    fn collector_tail_sampling_policies_are_configured_independently() {
+        let config = include_str!("../../observability/tail-sampling-collector.yaml");
+
+        assert!(config.contains("status_codes: [ERROR]"));
+        assert!(config.contains("threshold_ms: ${env:OTEL_TAIL_SAMPLING_LATENCY_MS}"));
+        assert!(config.contains("sampling_percentage: ${env:OTEL_TAIL_SAMPLING_PERCENTAGE}"));
     }
 }

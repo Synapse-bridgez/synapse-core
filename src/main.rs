@@ -74,11 +74,15 @@ async fn main() -> anyhow::Result<()> {
     let tracer_manager =
         synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
             .expect("failed to initialise OpenTelemetry tracer");
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer_manager.tracer())
+        .with_error_events_to_status(true);
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json())
                 .with(synapse_core::telemetry::latency_budget::layer())
                 .init();
@@ -86,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
+                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer())
                 .with(synapse_core::telemetry::latency_budget::layer())
                 .init();
