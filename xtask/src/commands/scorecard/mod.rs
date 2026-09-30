@@ -265,6 +265,7 @@ pub trait MetricSource {
 pub struct Prometheus {
     pub url: String,
     pub token: Option<String>,
+    pub max_source_resolution: Option<String>,
 }
 
 impl MetricSource for Prometheus {
@@ -279,6 +280,10 @@ impl MetricSource for Prometheus {
             .arg(format!("end={}", window.end.timestamp()))
             .arg("--data-urlencode")
             .arg(format!("step={step_secs}"));
+        if let Some(resolution) = &self.max_source_resolution {
+            cmd.arg("--data-urlencode")
+                .arg(format!("max_source_resolution={resolution}"));
+        }
         if let Some(token) = &self.token {
             cmd.arg("-H").arg(format!("Authorization: Bearer {token}"));
         }
@@ -371,6 +376,7 @@ pub struct MetricDef {
     pub name: &'static str,
     pub unit: &'static str,
     pub query: &'static str,
+    pub long_term_query: &'static str,
     /// Changes smaller than this are never flagged, however significant.
     pub min_absolute_change: f64,
 }
@@ -381,6 +387,7 @@ pub const METRICS: &[MetricDef] = &[
         name: "Error rate (5xx)",
         unit: "%",
         query: r#"100 * sum(rate(http_request_duration_ms_count{status=~"5.."}[5m])) / sum(rate(http_request_duration_ms_count[5m]))"#,
+        long_term_query: "100 * synapse:http_5xx_error_ratio:rate5m",
         min_absolute_change: 0.1,
     },
     MetricDef {
@@ -388,6 +395,7 @@ pub const METRICS: &[MetricDef] = &[
         name: "Latency P50",
         unit: "ms",
         query: "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_ms_bucket[5m])))",
+        long_term_query: "synapse:http_request_duration_ms:p50_rate5m",
         min_absolute_change: 5.0,
     },
     MetricDef {
@@ -395,6 +403,7 @@ pub const METRICS: &[MetricDef] = &[
         name: "Latency P95",
         unit: "ms",
         query: "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_ms_bucket[5m])))",
+        long_term_query: "synapse:http_request_duration_ms:p95_rate5m",
         min_absolute_change: 10.0,
     },
     MetricDef {
@@ -402,6 +411,7 @@ pub const METRICS: &[MetricDef] = &[
         name: "Latency P99",
         unit: "ms",
         query: "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_ms_bucket[5m])))",
+        long_term_query: "synapse:http_request_duration_ms:p99_rate5m",
         min_absolute_change: 20.0,
     },
 ];
@@ -409,6 +419,9 @@ pub const METRICS: &[MetricDef] = &[
 /// Firing alerts, excluding the always-on dead-man's switch.
 pub const INCIDENT_QUERY: &str =
     r#"ALERTS{alertstate="firing", alertname!="Watchdog", severity=~"warning|critical"}"#;
+
+const RAW_RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
+const LONG_TERM_STEP_SECS: i64 = 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MetricResult {
@@ -423,6 +436,7 @@ pub struct MetricResult {
 pub struct Scorecard {
     pub release: Release,
     pub windows: Windows,
+    pub data_resolution: String,
     pub metrics: Vec<MetricResult>,
     pub generated_at: DateTime<Utc>,
 }
@@ -442,6 +456,7 @@ pub struct ScoreConfig {
     pub block_size: usize,
     pub alpha: f64,
     pub min_relative_change: f64,
+    pub force_raw: bool,
 }
 
 fn values(series: &[Series]) -> Vec<f64> {
@@ -460,20 +475,36 @@ pub fn score_release(
     now: DateTime<Utc>,
 ) -> anyhow::Result<Scorecard> {
     let windows = compute_windows(releases, idx, cfg.window, now);
+    let long_term = !cfg.force_raw && cfg.window.num_seconds() > RAW_RETENTION_SECS;
+    let step_secs = if long_term {
+        cfg.step_secs.max(LONG_TERM_STEP_SECS)
+    } else {
+        cfg.step_secs
+    };
+    let block_size = if long_term && cfg.block_size == 12 {
+        1
+    } else {
+        cfg.block_size
+    };
     // At least a quarter of the configured window, and 3 blocks, per side.
-    let window_blocks =
-        (cfg.window.num_seconds() / cfg.step_secs.max(1)) as usize / cfg.block_size.max(1);
+    let window_blocks = (cfg.window.num_seconds() / step_secs.max(1)) as usize
+        / block_size.max(1);
     let min_blocks = (window_blocks / 4).max(3);
 
     let mut metrics = Vec::new();
     for def in METRICS {
+        let query = if long_term {
+            def.long_term_query
+        } else {
+            def.query
+        };
         let before = stats::block_means(
-            &values(&source.range(def.query, &windows.before, cfg.step_secs)?),
-            cfg.block_size,
+            &values(&source.range(query, &windows.before, step_secs)?),
+            block_size,
         );
         let after = stats::block_means(
-            &values(&source.range(def.query, &windows.after, cfg.step_secs)?),
-            cfg.block_size,
+            &values(&source.range(query, &windows.after, step_secs)?),
+            block_size,
         );
         let comparison = stats::compare_continuous(
             &before,
@@ -494,12 +525,12 @@ pub fn score_release(
     }
 
     let incidents_before = count_episodes(
-        &source.range(INCIDENT_QUERY, &windows.before, cfg.step_secs)?,
-        cfg.step_secs,
+        &source.range(INCIDENT_QUERY, &windows.before, step_secs)?,
+        step_secs,
     );
     let incidents_after = count_episodes(
-        &source.range(INCIDENT_QUERY, &windows.after, cfg.step_secs)?,
-        cfg.step_secs,
+        &source.range(INCIDENT_QUERY, &windows.after, step_secs)?,
+        step_secs,
     );
     let mut incidents = stats::compare_counts(
         incidents_before,
@@ -521,6 +552,11 @@ pub fn score_release(
     Ok(Scorecard {
         release: releases[idx].clone(),
         windows,
+        data_resolution: if long_term {
+            "1h downsampled".to_string()
+        } else {
+            "raw 5m".to_string()
+        },
         metrics,
         generated_at: now,
     })
@@ -538,9 +574,10 @@ fn fmt_value(v: Option<f64>, unit: &str) -> String {
 pub fn render_markdown(card: &Scorecard) -> String {
     let w = &card.windows;
     let mut md = format!(
-        "## Reliability scorecard: `{}`\n\nDeployed {} · before `{}` → `{}` · after `{}` → `{}` ({:.1} h each)\n\n",
+        "## Reliability scorecard: `{}`\n\nDeployed {} · source resolution `{}` · before `{}` → `{}` · after `{}` → `{}` ({:.1} h each)\n\n",
         card.release.tag,
         card.release.deployed_at.to_rfc3339(),
+        card.data_resolution,
         w.before.start.to_rfc3339(),
         w.before.end.to_rfc3339(),
         w.after.start.to_rfc3339(),
@@ -648,6 +685,8 @@ pub fn run(args: ScorecardArgs) -> anyhow::Result<()> {
             .clone()
             .context("PROMETHEUS_URL / --prometheus-url is required")?,
         token: args.prometheus_token.clone(),
+        max_source_resolution: (window.num_seconds() > RAW_RETENTION_SECS)
+            .then(|| "1h".to_string()),
     };
     let cfg = ScoreConfig {
         window,
@@ -655,6 +694,7 @@ pub fn run(args: ScorecardArgs) -> anyhow::Result<()> {
         block_size: args.block_size,
         alpha: args.alpha,
         min_relative_change: args.min_relative_change,
+        force_raw: false,
     };
     let cards = indices
         .into_iter()
@@ -855,7 +895,141 @@ mod tests {
         block_size: 12,
         alpha: 0.01,
         min_relative_change: 0.10,
+        force_raw: false,
     };
+
+    struct ResolutionParitySource {
+        release_ts: i64,
+        observed: std::sync::Mutex<Vec<(String, i64)>>,
+    }
+
+    impl ResolutionParitySource {
+        fn value(&self, query: &str, timestamp: i64) -> f64 {
+            let base = if query.contains("p95") || query.contains("0.95") {
+                200.0
+            } else if query.contains("p99") || query.contains("0.99") {
+                400.0
+            } else if query.contains("p50") || query.contains("0.50") {
+                50.0
+            } else {
+                0.5
+            };
+            let within_hour = timestamp.rem_euclid(3600) as f64;
+            let cycle = 1.0 + 0.2 * (timestamp as f64 / 86_400.0).sin();
+            let scrape_wave = 1.0 + 0.02 * (within_hour / 3600.0 * std::f64::consts::TAU).sin();
+            let factor = if timestamp >= self.release_ts
+                && (query.contains("p95") || query.contains("0.95"))
+            {
+                1.4
+            } else {
+                1.0
+            };
+            base * cycle * scrape_wave * factor
+        }
+    }
+
+    impl MetricSource for ResolutionParitySource {
+        fn range(&self, query: &str, window: &Window, step: i64) -> anyhow::Result<Vec<Series>> {
+            self.observed
+                .lock()
+                .unwrap()
+                .push((query.to_string(), step));
+            if query == INCIDENT_QUERY {
+                return Ok(vec![Series {
+                    labels: BTreeMap::new(),
+                    points: vec![(window.start.timestamp(), 1.0)],
+                }]);
+            }
+            let mut points = Vec::new();
+            let mut timestamp = window.start.timestamp();
+            while timestamp < window.end.timestamp() {
+                let value = if step == 3600 {
+                    (0..12)
+                        .map(|sample| self.value(query, timestamp + sample * 300))
+                        .sum::<f64>()
+                        / 12.0
+                } else {
+                    self.value(query, timestamp)
+                };
+                points.push((timestamp, value));
+                timestamp += step;
+            }
+            Ok(vec![Series {
+                labels: BTreeMap::new(),
+                points,
+            }])
+        }
+    }
+
+    #[test]
+    fn downsampled_hourly_scorecard_matches_raw_trend_verdict() {
+        let releases = vec![rel("v1", -1000), rel("v2", 0)];
+        let raw_source = ResolutionParitySource {
+            release_ts: t(0).timestamp(),
+            observed: std::sync::Mutex::new(Vec::new()),
+        };
+        let downsampled_source = ResolutionParitySource {
+            release_ts: t(0).timestamp(),
+            observed: std::sync::Mutex::new(Vec::new()),
+        };
+        let cfg = ScoreConfig {
+            window: Duration::days(30),
+            step_secs: 300,
+            block_size: 12,
+            force_raw: true,
+            ..CFG
+        };
+        let raw = score_release(&raw_source, &releases, 1, cfg, t(2000)).unwrap();
+        let downsampled_cfg = ScoreConfig {
+            force_raw: false,
+            ..cfg
+        };
+        let downsampled =
+            score_release(&downsampled_source, &releases, 1, downsampled_cfg, t(2000)).unwrap();
+        assert_eq!(raw.data_resolution, "raw 5m");
+        assert_eq!(downsampled.data_resolution, "1h downsampled");
+        let metric = |card: &Scorecard, key: &str| {
+            card.metrics.iter().find(|metric| metric.key == key).unwrap()
+        };
+
+        assert_eq!(
+            metric(&raw, "latency_p95_ms").comparison.verdict,
+            Verdict::Regression
+        );
+        assert_eq!(
+            metric(&raw, "latency_p95_ms").comparison.verdict,
+            metric(&downsampled, "latency_p95_ms").comparison.verdict
+        );
+        let raw_after = metric(&raw, "latency_p95_ms").comparison.after.unwrap();
+        let downsampled_after = metric(&downsampled, "latency_p95_ms")
+            .comparison
+            .after
+            .unwrap();
+        assert!((raw_after - downsampled_after).abs() / raw_after < 0.01);
+
+        let observed = downsampled_source.observed.lock().unwrap();
+        assert!(observed.iter().any(|(query, step)| {
+            query == "synapse:http_request_duration_ms:p95_rate5m" && *step == 3600
+        }));
+    }
+
+    #[test]
+    fn short_scorecard_windows_keep_raw_promql_queries() {
+        let source = ResolutionParitySource {
+            release_ts: t(0).timestamp(),
+            observed: std::sync::Mutex::new(Vec::new()),
+        };
+        let releases = vec![rel("v1", -100), rel("v2", 0)];
+        let card = score_release(&source, &releases, 1, CFG, t(1000)).unwrap();
+        assert_eq!(card.data_resolution, "raw 5m");
+        let observed = source.observed.lock().unwrap();
+        assert!(observed.iter().any(|(query, step)| {
+            query.contains("histogram_quantile(0.95") && *step == 300
+        }));
+        assert!(!observed
+            .iter()
+            .any(|(query, _)| query == "synapse:http_request_duration_ms:p95_rate5m"));
+    }
 
     #[test]
     fn scorecard_flags_known_regression_only() {

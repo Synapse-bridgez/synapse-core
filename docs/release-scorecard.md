@@ -13,6 +13,11 @@ cargo xtask scorecard --due --lookback-hours 1   # what CI runs hourly
 Code: `xtask/src/commands/scorecard/`. Automation:
 `.github/workflows/release-scorecard.yml`.
 
+The scorecard uses raw 5-minute queries for windows up to 14 days and switches
+to the recorded hourly gauges for longer windows when queried through Thanos.
+See [metrics retention policy](metrics-retention-policy.md) for the storage
+tiers, required recording rules, and downsampled-data validation.
+
 ## What is compared
 
 | Metric | Source (Prometheus) |

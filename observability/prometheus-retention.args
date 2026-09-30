@@ -1,0 +1,3 @@
+--storage.tsdb.retention.time=14d
+--storage.tsdb.min-block-duration=2h
+--storage.tsdb.max-block-duration=2h

@@ -1,0 +1,3 @@
+--http-address=0.0.0.0:9090
+--endpoint=thanos-sidecar:10901
+--query.auto-downsampling
