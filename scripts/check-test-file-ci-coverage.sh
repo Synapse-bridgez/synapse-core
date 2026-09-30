@@ -22,7 +22,18 @@
 # stale the next time someone adds a file.
 #
 # Usage: ./scripts/check-test-file-ci-coverage.sh
+#        ./scripts/check-test-file-ci-coverage.sh --list-missing
+#
+# With `--list-missing`, instead of failing, print the stem of each tests/*.rs
+# file that is not covered by any CI `cargo test` invocation (one per line).
+# This is consumed by `cargo xtask good-first-issue` as a candidate source for
+# onboarding-friendly issues; it does not change the default pass/fail check.
 set -euo pipefail
+
+LIST_MISSING=false
+if [[ "${1:-}" == "--list-missing" ]]; then
+  LIST_MISSING=true
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKFLOWS_DIR="$REPO_ROOT/.github/workflows"
@@ -49,6 +60,9 @@ while IFS= read -r inv; do
 done < "$INVOCATIONS_FILE"
 
 if [[ "$has_wildcard_invocation" == true ]]; then
+  if [[ "$LIST_MISSING" == true ]]; then
+    exit 0
+  fi
   echo "Found an unrestricted 'cargo test' invocation in .github/workflows/*.yml — it covers every file in tests/, present and future."
   echo "check-test-file-ci-coverage: passed."
   exit 0
@@ -58,7 +72,9 @@ fi
 # this script was written) — fall back to requiring every tests/*.rs file
 # be named explicitly via `--test <stem>` somewhere, or listed in the
 # documented exclusion table.
-echo "::warning::No unrestricted 'cargo test' invocation found in any workflow — falling back to per-file --test flag matching. This is more fragile; consider restoring a wildcard invocation. See docs/ci-test-file-coverage.md."
+if [[ "$LIST_MISSING" != true ]]; then
+  echo "::warning::No unrestricted 'cargo test' invocation found in any workflow — falling back to per-file --test flag matching. This is more fragile; consider restoring a wildcard invocation. See docs/ci-test-file-coverage.md."
+fi
 
 MISSING=()
 for file in "$TESTS_DIR"/*.rs; do
@@ -78,6 +94,13 @@ for file in "$TESTS_DIR"/*.rs; do
     MISSING+=("$stem")
   fi
 done
+
+if [[ "$LIST_MISSING" == true ]]; then
+  for m in "${MISSING[@]:-}"; do
+    [[ -n "$m" ]] && echo "$m"
+  done
+  exit 0
+fi
 
 if [[ "${#MISSING[@]}" -gt 0 ]]; then
   echo "::error::The following tests/ files are not referenced by any 'cargo test' invocation in .github/workflows/*.yml, and are not listed in docs/ci-test-file-coverage.md as intentionally excluded:"

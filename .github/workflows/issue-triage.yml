@@ -1,0 +1,67 @@
+name: Issue Triage
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Classify and label issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const rulesPath = path.join(process.env.GITHUB_WORKSPACE, '.github', 'triage-rules.json');
+            const rules = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
+
+            const issue = context.payload.issue;
+            const title = (issue.title || '').toLowerCase();
+            const body = (issue.body || '').toLowerCase();
+            const haystack = `${title}\n${body}`;
+
+            const matched = new Set();
+            for (const rule of rules.categories) {
+              const hit = rule.keywords.some((kw) => haystack.includes(kw.toLowerCase()));
+              if (hit) matched.add(rule.label);
+            }
+
+            const labels = [];
+            if (matched.size === 0) {
+              labels.push(rules.fallbackLabel);
+            } else {
+              labels.push(...matched);
+            }
+
+            // Conservative, bot-attributed priority labeling only when a single
+            // category is confidently matched and the issue is clearly a bug.
+            const isBug = matched.has('bug');
+            if (isBug && matched.size === 1) {
+              labels.push(rules.priorityLabel);
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels,
+            });
+
+            if (matched.size === 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: rules.fallbackComment,
+              });
+            }
