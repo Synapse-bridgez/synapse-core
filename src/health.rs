@@ -253,6 +253,176 @@ impl VaultChecker {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphHealthStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+    Unknown,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct HealthGraphObservation {
+    pub id: String,
+    pub status: GraphHealthStatus,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct HealthGraphNode {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub status: GraphHealthStatus,
+    pub own_status: GraphHealthStatus,
+    pub dependency_status: GraphHealthStatus,
+    pub dependencies: Vec<String>,
+    pub affected_by: Vec<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct HealthGraphEdge {
+    pub source: String,
+    pub target: String,
+    pub critical: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct HealthGraphResponse {
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub status: GraphHealthStatus,
+    pub nodes: Vec<HealthGraphNode>,
+    pub edges: Vec<HealthGraphEdge>,
+}
+
+const HEALTH_GRAPH_EDGES: &[(&str, &str, bool)] = &[
+    ("service", "postgres", true),
+    ("service", "redis", false),
+    ("service", "vault", false),
+    ("service", "settlement_network", false),
+];
+
+/// Combine live dependency observations with the declared service topology.
+///
+/// `own_status` describes the service itself (readiness/draining); dependency
+/// failures are kept in separate fields so a healthy process is not confused
+/// with the upstream failure that is degrading it.
+pub fn build_health_graph(
+    own_status: GraphHealthStatus,
+    own_detail: Option<String>,
+    observations: impl IntoIterator<Item = HealthGraphObservation>,
+) -> HealthGraphResponse {
+    let observations: HashMap<String, HealthGraphObservation> = observations
+        .into_iter()
+        .map(|observation| (observation.id.clone(), observation))
+        .collect();
+
+    let edges: Vec<HealthGraphEdge> = HEALTH_GRAPH_EDGES
+        .iter()
+        .map(|(source, target, critical)| HealthGraphEdge {
+            source: (*source).to_string(),
+            target: (*target).to_string(),
+            critical: *critical,
+        })
+        .collect();
+    let dependency_ids: Vec<String> = HEALTH_GRAPH_EDGES
+        .iter()
+        .map(|(_, target, _)| (*target).to_string())
+        .collect();
+
+    let affected_by: Vec<String> = dependency_ids
+        .iter()
+        .filter(|id| {
+            observations
+                .get(*id)
+                .is_some_and(|observation| observation.status != GraphHealthStatus::Healthy
+                    && observation.status != GraphHealthStatus::Unknown)
+        })
+        .cloned()
+        .collect();
+    let dependency_statuses: Vec<GraphHealthStatus> = dependency_ids
+        .iter()
+        .map(|id| {
+            observations
+                .get(id)
+                .map_or(GraphHealthStatus::Unknown, |observation| observation.status)
+        })
+        .collect();
+    let dependency_status = if dependency_statuses.contains(&GraphHealthStatus::Unhealthy) {
+        GraphHealthStatus::Unhealthy
+    } else if dependency_statuses.contains(&GraphHealthStatus::Degraded) {
+        GraphHealthStatus::Degraded
+    } else if dependency_statuses.contains(&GraphHealthStatus::Unknown) {
+        GraphHealthStatus::Unknown
+    } else {
+        GraphHealthStatus::Healthy
+    };
+    let critical_dependency_failed = HEALTH_GRAPH_EDGES
+        .iter()
+        .filter(|(_, _, critical)| *critical)
+        .any(|(_, target, _)| {
+            observations
+                .get(*target)
+                .is_some_and(|observation| observation.status == GraphHealthStatus::Unhealthy)
+        });
+    let status = if own_status == GraphHealthStatus::Unhealthy || critical_dependency_failed {
+        GraphHealthStatus::Unhealthy
+    } else if own_status == GraphHealthStatus::Degraded
+        || dependency_status == GraphHealthStatus::Degraded
+        || dependency_status == GraphHealthStatus::Unhealthy
+    {
+        GraphHealthStatus::Degraded
+    } else if own_status == GraphHealthStatus::Unknown
+        || dependency_status == GraphHealthStatus::Unknown
+    {
+        GraphHealthStatus::Unknown
+    } else {
+        GraphHealthStatus::Healthy
+    };
+
+    let mut nodes = vec![HealthGraphNode {
+        id: "service".to_string(),
+        name: "Synapse Core".to_string(),
+        kind: "service".to_string(),
+        status,
+        own_status,
+        dependency_status,
+        dependencies: dependency_ids,
+        affected_by,
+        detail: own_detail,
+    }];
+    for (id, name) in [
+        ("postgres", "Postgres"),
+        ("redis", "Redis"),
+        ("vault", "Vault"),
+        ("settlement_network", "Settlement network API"),
+    ] {
+        let observation = observations.get(id);
+        let node_status = observation
+            .map_or(GraphHealthStatus::Unknown, |observation| observation.status);
+        nodes.push(HealthGraphNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind: "dependency".to_string(),
+            status: node_status,
+            own_status: node_status,
+            dependency_status: GraphHealthStatus::Healthy,
+            dependencies: Vec::new(),
+            affected_by: Vec::new(),
+            detail: observation.and_then(|observation| observation.detail.clone()),
+        });
+    }
+
+    HealthGraphResponse {
+        generated_at: chrono::Utc::now(),
+        status,
+        nodes,
+        edges,
+    }
+}
+
 pub async fn check_health(
     postgres: PostgresChecker,
     redis: RedisChecker,
@@ -326,5 +496,140 @@ fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) ->
         "degraded".to_string()
     } else {
         "healthy".to_string()
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+
+    fn observations(
+        overrides: &[(&str, GraphHealthStatus)],
+    ) -> Vec<HealthGraphObservation> {
+        ["postgres", "redis", "vault", "settlement_network"]
+            .into_iter()
+            .map(|id| HealthGraphObservation {
+                id: id.to_string(),
+                status: overrides
+                    .iter()
+                    .find(|(override_id, _)| *override_id == id)
+                    .map_or(GraphHealthStatus::Healthy, |(_, status)| *status),
+                detail: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn healthy_dependencies_produce_expected_edges() {
+        let graph = build_health_graph(
+            GraphHealthStatus::Healthy,
+            None,
+            observations(&[]),
+        );
+
+        assert_eq!(graph.status, GraphHealthStatus::Healthy);
+        assert_eq!(graph.nodes.len(), 5);
+        assert_eq!(graph.edges.len(), 4);
+        assert_eq!(graph.nodes[0].dependencies.len(), 4);
+        assert!(graph.edges.iter().any(|edge| {
+            edge.source == "service" && edge.target == "postgres" && edge.critical
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.source == "service" && edge.target == "settlement_network" && !edge.critical
+        }));
+        let json = serde_json::to_value(&graph).unwrap();
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["nodes"][0]["own_status"], "healthy");
+        assert_eq!(json["nodes"][0]["dependency_status"], "healthy");
+        assert_eq!(json["edges"][0]["source"], "service");
+        assert_eq!(json["edges"][0]["target"], "postgres");
+    }
+
+    #[test]
+    fn dependency_failure_is_distinct_from_service_health() {
+        let graph = build_health_graph(
+            GraphHealthStatus::Healthy,
+            None,
+            observations(&[("redis", GraphHealthStatus::Unhealthy)]),
+        );
+        let service = &graph.nodes[0];
+
+        assert_eq!(graph.status, GraphHealthStatus::Degraded);
+        assert_eq!(service.own_status, GraphHealthStatus::Healthy);
+        assert_eq!(service.dependency_status, GraphHealthStatus::Unhealthy);
+        assert_eq!(service.affected_by, vec!["redis".to_string()]);
+        assert_eq!(graph.nodes[2].status, GraphHealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn critical_postgres_failure_makes_service_unhealthy() {
+        let graph = build_health_graph(
+            GraphHealthStatus::Healthy,
+            None,
+            observations(&[("postgres", GraphHealthStatus::Unhealthy)]),
+        );
+
+        assert_eq!(graph.status, GraphHealthStatus::Unhealthy);
+        assert_eq!(graph.nodes[0].own_status, GraphHealthStatus::Healthy);
+        assert_eq!(graph.nodes[0].dependency_status, GraphHealthStatus::Unhealthy);
+        assert_eq!(graph.nodes[0].affected_by, vec!["postgres".to_string()]);
+    }
+
+    #[test]
+    fn missing_dependency_observation_is_reported_unknown() {
+        let mut observations = observations(&[]);
+        observations.retain(|observation| observation.id != "vault");
+        let graph = build_health_graph(
+            GraphHealthStatus::Healthy,
+            None,
+            observations,
+        );
+
+        assert_eq!(graph.status, GraphHealthStatus::Unknown);
+        assert_eq!(graph.nodes[0].own_status, GraphHealthStatus::Healthy);
+        assert_eq!(graph.nodes[0].dependency_status, GraphHealthStatus::Unknown);
+        assert_eq!(graph.nodes[3].status, GraphHealthStatus::Unknown);
+    }
+
+    #[test]
+    fn degraded_dependency_degrades_service_without_marking_it_unhealthy() {
+        let graph = build_health_graph(
+            GraphHealthStatus::Healthy,
+            None,
+            observations(&[("vault", GraphHealthStatus::Degraded)]),
+        );
+
+        assert_eq!(graph.status, GraphHealthStatus::Degraded);
+        assert_eq!(graph.nodes[0].own_status, GraphHealthStatus::Healthy);
+        assert_eq!(graph.nodes[0].dependency_status, GraphHealthStatus::Degraded);
+        assert_eq!(graph.nodes[0].affected_by, vec!["vault".to_string()]);
+    }
+
+    #[test]
+    fn service_degradation_is_not_attributed_to_dependencies() {
+        let graph = build_health_graph(
+            GraphHealthStatus::Degraded,
+            Some("Service is draining".to_string()),
+            observations(&[]),
+        );
+
+        assert_eq!(graph.status, GraphHealthStatus::Degraded);
+        assert_eq!(graph.nodes[0].own_status, GraphHealthStatus::Degraded);
+        assert_eq!(graph.nodes[0].dependency_status, GraphHealthStatus::Healthy);
+        assert!(graph.nodes[0].affected_by.is_empty());
+    }
+
+    #[test]
+    fn unhealthy_service_is_distinct_from_healthy_dependencies() {
+        let graph = build_health_graph(
+            GraphHealthStatus::Unhealthy,
+            Some("Service initialization failed".to_string()),
+            observations(&[]),
+        );
+
+        assert_eq!(graph.status, GraphHealthStatus::Unhealthy);
+        assert_eq!(graph.nodes[0].own_status, GraphHealthStatus::Unhealthy);
+        assert_eq!(graph.nodes[0].dependency_status, GraphHealthStatus::Healthy);
+        assert!(graph.nodes[0].affected_by.is_empty());
     }
 }
