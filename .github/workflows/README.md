@@ -5,6 +5,36 @@ The primary pipeline is [`rust.yml`](./rust.yml), which runs formatting, migrati
 safety checks, clippy, builds, unit tests, integration tests, coverage collection,
 and coverage threshold enforcement.
 
+## Roadmap Sync
+
+The [`roadmap-sync.yml`](./roadmap-sync.yml) workflow keeps the public roadmap
+view synchronized with actual GitHub issue and milestone state. GitHub milestones
+and labels are the single source of truth; the generated roadmap is a derived
+artifact that is regenerated on every sync.
+
+### Source Of Truth
+
+- Milestones and labels on GitHub issues define roadmap placement. Maintainers
+  decide what goes into milestones; this workflow only reflects that state.
+- `docs/roadmap.md` is generated output. Do **not** hand-edit it. Any manual edit
+  is overwritten on the next sync, so changes must be made to the underlying
+  issues, milestones, or labels instead.
+- Issues without a milestone are excluded cleanly rather than being bucketed
+  into an arbitrary column.
+
+### Schedule And Staleness
+
+The workflow runs on a schedule (and on manual dispatch). Every generated
+roadmap includes a `Last synced` timestamp so staleness is never ambiguous. If
+the timestamp looks old, check the workflow run history for failures before
+trusting the roadmap contents.
+
+### Columns
+
+The roadmap is published as now/next/later columns derived from milestone and
+label state. Column mapping is defined in the sync script and covered by tests
+against fixture issue/milestone data.
+
 ## Session Management
 
 In this CI/CD module, a session is one isolated GitHub Actions job execution:
@@ -165,29 +195,3 @@ source, so cache reuse cannot bypass verification.
 - The lockfile hash bounds cache growth by invalidating only when dependencies
   change. The `SCCACHE_CACHE_SIZE=1G` environment variable bounds compiler cache
   usage during the job.
-- The workflow grants `id-token: write` only to the coverage job because Codecov
-  upload may require OIDC. Other jobs run with default read-only source access.
-
-### Change Checklist
-
-When editing `.github/workflows/rust.yml`:
-
-- Keep cache keys deterministic and secret-free.
-- Add a new namespace when a cache serves a materially different job or tool.
-- Prefer dependency or configuration hashes over commit-specific keys.
-- Verify a cold run still succeeds if every cache restore misses.
-- Run `cargo test` locally before committing workflow documentation or behavior
-  changes.
-
-### Validation
-
-For documentation-only changes, verify that the workflow still matches this
-contract by checking the cache keys in `.github/workflows/rust.yml` and running:
-
-```sh
-cargo test
-```
-
-For workflow behavior changes, also trigger a pull request run and confirm that
-the pipeline passes when cache restore misses occur. Cache misses should make the
-run slower, not less correct.
