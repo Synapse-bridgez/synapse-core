@@ -8,9 +8,9 @@ into the service binary by src/alerting/runbook.rs) and fails if:
     heading was renamed or removed),
   * an entry has both or neither of `anchor` / `exempt`,
   * an exemption is missing its reason or reviewer,
-  * an alert defined in alerting/prometheus-rules.yml or in the in-process
-    catalog src/alerting/names.rs has no mapping entry,
-  * a Prometheus rule's `runbook_url` annotation disagrees with the mapping,
+    * an alert defined in alerting/prometheus-rules.yml,
+        alerting/loki-rules.yml, or in the in-process catalog has no mapping entry,
+    * a rule's `runbook_url` annotation disagrees with the mapping,
     or an exempt rule carries one.
 
 Standard library only, so the CI job needs no dependencies.
@@ -58,7 +58,7 @@ def heading_anchors(markdown):
     return anchors
 
 
-def prometheus_rules(text):
+def alert_rules(text):
     """Return {alert_name: runbook_url or None} from a rules file.
 
     Line-oriented on purpose (see the header of prometheus-rules.yml)."""
@@ -74,6 +74,11 @@ def prometheus_rules(text):
         if m and current is not None:
             rules[current] = m.group(1)
     return rules
+
+
+def prometheus_rules(text):
+    """Backward-compatible name for parsing Prometheus rule files."""
+    return alert_rules(text)
 
 
 def in_process_alerts(rust_source):
@@ -105,7 +110,7 @@ def validate(mapping, runbook_md, rules, in_process):
     for name, url in sorted(rules.items()):
         entry = alerts.get(name)
         if entry is None:
-            problems.append(f"{name}: Prometheus rule has no runbook link or exemption in the mapping")
+            problems.append(f"{name}: alert rule has no runbook link or exemption in the mapping")
             continue
         if "anchor" in entry and "exempt" not in entry:
             expected = f"{base_url}#{entry['anchor']}"
@@ -129,7 +134,10 @@ def main(argv=None):
 
     mapping = json.loads((root / "alerting/runbook-links.json").read_text())
     runbook_md = (root / mapping["runbook"]).read_text()
-    rules = prometheus_rules((root / "alerting/prometheus-rules.yml").read_text())
+    rules = {
+        **alert_rules((root / "alerting/prometheus-rules.yml").read_text()),
+        **alert_rules((root / "alerting/loki-rules.yml").read_text()),
+    }
     in_process = in_process_alerts((root / "src/alerting/names.rs").read_text())
 
     problems = validate(mapping, runbook_md, rules, in_process)

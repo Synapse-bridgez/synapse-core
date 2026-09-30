@@ -1,0 +1,45 @@
+# Loki ruler alerts for repeated structured-log failures without metric signals.
+# Load this file through the existing Loki ruler configuration; all selectors
+# use low-cardinality Loki labels and bounded JSON fields for alert grouping.
+groups:
+  - name: synapse-core-silent-failures
+    interval: 1m
+    rules:
+      - alert: TelemetryErrorsSustained
+        expr: |
+          sum by (service, environment, error_kind) (
+            count_over_time({service="synapse-core"} | json message="fields.message", error_kind="fields.error_kind" | message="Telemetry error occurred" | error_kind!="" [5m])
+          ) >= 20
+        for: 6m
+        labels:
+          severity: warning
+        annotations:
+          summary: Repeated telemetry {{ $labels.error_kind }} errors
+          description: '{{ $value }} telemetry errors of kind {{ $labels.error_kind }} in 5m; errors are handled with graceful degradation and each structured event includes error_count and threshold. Environment: {{ $labels.environment }}.'
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#telemetry-silent-failure-log-alerts
+
+      - alert: TelemetryWebhookOversizedPayloadBurst
+        expr: |
+          sum by (service, environment, size_band) (
+            count_over_time({service="synapse-core"} | json message="fields.message", reason="fields.reason", size_band="fields.size_band" | message="Telemetry webhook rejected: payload too large" | reason="payload_too_large" [5m])
+          ) >= 10
+        for: 6m
+        labels:
+          severity: warning
+        annotations:
+          summary: Repeated oversized payloads rejected by {{ $labels.service }}
+          description: '{{ $value }} POST /telemetry/webhook payloads exceeded the 65536-byte limit in 5m; observed size band: {{ $labels.size_band }}. Environment: {{ $labels.environment }}.'
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#telemetry-silent-failure-log-alerts
+
+      - alert: TelemetryWebhookTimestampSkewBurst
+        expr: |
+          sum by (service, environment, skew_direction, skew_band) (
+            count_over_time({service="synapse-core"} | json message="fields.message", reason="fields.reason", skew_direction="fields.skew_direction", skew_band="fields.skew_band" | message="Telemetry webhook rejected: timestamp outside allowed window" | reason="timestamp_outside_window" [5m])
+          ) >= 10
+        for: 6m
+        labels:
+          severity: warning
+        annotations:
+          summary: Repeated {{ $labels.skew_direction }}-dated webhook events rejected
+          description: '{{ $value }} POST /telemetry/webhook timestamp rejects in 5m; direction: {{ $labels.skew_direction }}, skew band: {{ $labels.skew_band }}, allowed skew: 300s. Environment: {{ $labels.environment }}.'
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#telemetry-silent-failure-log-alerts

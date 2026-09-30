@@ -38,3 +38,21 @@ The request middleware emits both the legacy `correlation_id` and
 search-friendly `request_id`. Trace and verified tenant fields emitted by
 instrumented tracing spans are retained in downstream JSON events. Application secrets and
 connection strings are not added to the forwarding configuration.
+
+## Loki Ruler Alerts
+
+The targeted silent-failure rules are in `alerting/loki-rules.yml`. Install
+this file in the rule storage used by the existing Loki ruler and configure
+the ruler's notification client to reach the deployment's Alertmanager (or
+other supported notifier). The rules query the `service="synapse-core"`
+stream and expect the `environment` Loki label plus `message` and context
+fields nested under the tracing JSON `fields` object, which each rule extracts
+explicitly. They require
+repeated matches in a five-minute range to remain above threshold for six
+minutes, longer than the range window; a one-time burst ages out before the
+pending interval ends.
+
+The rule groups only on bounded event categories and size/skew bands. Do not
+add `request_id`, tenant identifiers, raw error strings, payload sizes, or
+timestamps as Loki alert labels; those remain available in the structured log
+records for follow-up investigation.

@@ -84,6 +84,7 @@ class ValidateTests(unittest.TestCase):
         expr: vector(1)
 """
         self.assertEqual(check.prometheus_rules(text), {"A": "https://x#a", "B": None})
+        self.assertEqual(check.alert_rules(text), {"A": "https://x#a", "B": None})
 
     def test_in_process_parser(self):
         src = 'pub const FOO: &str = "Foo";\npub const ALL: &[&str] = &[FOO];\n'
