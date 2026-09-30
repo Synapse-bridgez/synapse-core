@@ -284,7 +284,11 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))
-        .route("/errors", get(handlers::error_catalog));
+        .route("/errors", get(handlers::error_catalog))
+        .route(
+            "/health/graph",
+            get(handlers::admin::health_graph::get_health_graph_view),
+        );
 
     // Admin-only routes. `admin_auth` exists in src/middleware/auth.rs but,
     // before this fix, had zero callers anywhere in the router — every route
@@ -294,6 +298,10 @@ pub fn create_app(app_state: AppState) -> Router {
     // than what the tracked issue described (it assumed admin_auth already
     // covered these) — see "Also fixes" in the PR description.
     let mut admin_only_routes = Router::new()
+        .route(
+            "/admin/health/graph",
+            get(handlers::admin::health_graph::get_health_graph),
+        )
         .route(
             "/admin/canary",
             get(handlers::admin::get_canary_dashboard),
