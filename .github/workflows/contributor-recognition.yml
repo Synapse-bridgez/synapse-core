@@ -1,0 +1,49 @@
+name: Contributor Recognition
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: contributor-recognition
+  cancel-in-progress: false
+
+jobs:
+  recognize:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Update contributor leaderboard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python .github/scripts/contributor_recognition.py
+
+      - name: Commit updated leaderboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/contributors/leaderboard.md docs/contributors/records.json docs/contributors/needs-review.md
+          if git diff --cached --quiet; then
+            echo "No leaderboard changes to commit."
+          else
+            git commit -m "chore: update contributor recognition leaderboard [skip ci]"
+            git push
+          fi
