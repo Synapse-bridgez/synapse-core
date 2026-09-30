@@ -1,0 +1,28 @@
+{{ define "synapse.group.subject" -}}
+{{- if .CommonLabels.root_cause -}}
+Root cause {{ .CommonLabels.root_cause }}: {{ len .Alerts.Firing }} firing alert(s)
+{{- else -}}
+{{ .CommonLabels.alertname }}: {{ len .Alerts.Firing }} firing alert(s)
+{{- end -}}
+{{- end }}
+
+{{ define "synapse.group.body" -}}
+Alert group: {{ template "synapse.group.subject" . }}
+Group key: root_cause={{ .CommonLabels.root_cause }}, environment={{ .CommonLabels.environment }}, cluster={{ .CommonLabels.cluster }}
+
+{{ if .Alerts.Firing }}FIRING ALERTS ({{ len .Alerts.Firing }})
+{{ range .Alerts.Firing }}
+- {{ .Labels.alertname }} [{{ .Labels.severity }}]
+  Started: {{ .StartsAt }}
+  Labels: {{ range $name, $value := .Labels }}{{ $name }}={{ $value }} {{ end }}
+  Annotations: {{ range $name, $value := .Annotations }}{{ $name }}={{ $value }} {{ end }}
+{{ end }}{{ end }}
+{{ if .Alerts.Resolved }}RESOLVED ALERTS ({{ len .Alerts.Resolved }})
+{{ range .Alerts.Resolved }}
+- {{ .Labels.alertname }} [{{ .Labels.severity }}]
+  Started: {{ .StartsAt }}
+  Resolved: {{ .EndsAt }}
+  Labels: {{ range $name, $value := .Labels }}{{ $name }}={{ $value }} {{ end }}
+  Annotations: {{ range $name, $value := .Annotations }}{{ $name }}={{ $value }} {{ end }}
+{{ end }}{{ end }}
+{{- end }}

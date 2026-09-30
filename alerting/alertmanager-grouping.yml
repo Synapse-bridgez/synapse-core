@@ -1,0 +1,15 @@
+# Merge these route fields into the existing Alertmanager top-level route.
+# Configure the root receiver in the deployment-owned Alertmanager config.
+# Unclassified alerts deduplicate only within their own alert/instance/dependency.
+group_by: [alertname, instance, environment, dependency]
+group_wait: 30s
+group_interval: 5m
+repeat_interval: 4h
+routes:
+  - matchers:
+      - root_cause=~".+"
+    group_by: [root_cause, environment, cluster]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    continue: false

@@ -1,0 +1,13 @@
+{
+  "root_cause_groups": {
+    "postgres": {
+      "depends_from": "service",
+      "alerts": [
+        "DatabasePoolUsageHigh",
+        "DatabasePoolExhausted",
+        "ReplicationLagHigh",
+        "TransactionInsertMissingPartitionBurst"
+      ]
+    }
+  }
+}

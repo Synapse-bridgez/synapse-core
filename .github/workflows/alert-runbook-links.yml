@@ -17,9 +17,11 @@ on:
       - "src/alerting/**"
       - "src/telemetry/error_handling.rs"
       - "src/telemetry/webhook.rs"
+      - "src/health.rs"
       - "scripts/check-alert-runbook-links.py"
       - "scripts/test_check_alert_runbook_links.py"
       - "scripts/test_loki_log_alert_rules.py"
+      - "scripts/test_alert_grouping.py"
       - ".github/workflows/alert-runbook-links.yml"
   workflow_dispatch: {}
 
@@ -37,6 +39,7 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_alert_runbook_links.py
           python3 -m unittest -v scripts/test_loki_log_alert_rules.py
+          python3 -m unittest -v scripts/test_alert_grouping.py
 
       - name: Validate alert -> runbook mapping
         run: python3 scripts/check-alert-runbook-links.py
