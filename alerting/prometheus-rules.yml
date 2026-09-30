@@ -19,6 +19,7 @@ groups:
         for: 2m
         labels:
           severity: warning
+          root_cause: postgres
         annotations:
           summary: Database connection pool usage at or above 80%
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#symptom-pool-usage-consistently-high-80
@@ -28,6 +29,7 @@ groups:
         for: 1m
         labels:
           severity: critical
+          root_cause: postgres
         annotations:
           summary: Database connection pool exhausted
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#pool-exhaustion-response
@@ -90,6 +92,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          root_cause: postgres
         annotations:
           summary: Replica more than 10 MB behind primary
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#symptom-high-replication-lag
@@ -124,6 +127,7 @@ groups:
         expr: increase(transaction_insert_missing_partition_total[10m]) > 10
         labels:
           severity: warning
+          root_cause: postgres
         annotations:
           summary: Burst of missing-partition (23514) errors on transaction insert
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#6-missing-partition-23514-burst-on-transaction-insert
