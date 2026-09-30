@@ -1,0 +1,7 @@
+--data-dir=/var/lib/thanos/compact
+--objstore.config-file=/etc/thanos/objstore.yml
+--wait
+--wait-interval=5m
+--retention.resolution-raw=14d
+--retention.resolution-5m=180d
+--retention.resolution-1h=730d

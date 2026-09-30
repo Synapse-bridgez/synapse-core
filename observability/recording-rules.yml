@@ -1,0 +1,26 @@
+# Include this file from the Prometheus rule_files configuration.
+# These bounded recording series preserve the release-scorecard signals after
+# source counter/histogram samples age out of raw retention.
+groups:
+  - name: synapse-core-long-term-scorecard
+    interval: 5m
+    rules:
+      - record: synapse:http_5xx_error_ratio:rate5m
+        expr: |
+          sum(rate(http_request_duration_ms_count{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_request_duration_ms_count[5m])), 1e-12)
+
+      - record: synapse:http_request_duration_ms:p50_rate5m
+        expr: histogram_quantile(0.50, sum by (le) (rate(http_request_duration_ms_bucket[5m])))
+
+      - record: synapse:http_request_duration_ms:p95_rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_ms_bucket[5m])))
+
+      - record: synapse:http_request_duration_ms:p99_rate5m
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_ms_bucket[5m])))
+
+      - record: synapse:db_pool_saturation_ratio:avg5m
+        expr: avg_over_time(db_pool_saturation_ratio[5m])
+
+      - record: synapse:pending_queue_depth:avg5m
+        expr: avg_over_time(pending_queue_depth[5m])

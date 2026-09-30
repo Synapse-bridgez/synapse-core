@@ -93,6 +93,11 @@ The health endpoint can be scraped by monitoring tools like:
 - New Relic
 - CloudWatch
 
+For long-term metric retention and downsampled capacity trends, see the
+[Prometheus metrics retention policy](metrics-retention-policy.md). The
+current `xtask pool-advisor` command still uses synthetic data and is not a
+production Prometheus forecasting consumer.
+
 Example Prometheus alert rule:
 ```yaml
 - alert: DatabasePoolHighUsage
