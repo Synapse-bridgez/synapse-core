@@ -516,6 +516,11 @@ pub async fn rate_limit_middleware(
     req: Request<Body>,
     next: Next<Body>,
 ) -> Response {
+    if !should_apply_quota(&req) {
+        tracing::info!(synthetic_probe = true, "Synthetic request excluded from tenant quota");
+        return next.run(req).await;
+    }
+
     // Derive a quota key: prefer API key, then tenant-id header, then "anon".
     let quota_key = req
         .headers()
@@ -646,6 +651,13 @@ pub async fn rate_limit_middleware(
     response
 }
 
+fn should_apply_quota(req: &Request<Body>) -> bool {
+    !req
+        .extensions()
+        .get::<crate::middleware::synthetic_probe::SyntheticProbe>()
+        .is_some_and(|probe| !probe.counts_toward_customer_traffic())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +667,16 @@ mod tests {
         assert_eq!(canonical_quota_key("abc"), "tenant:abc");
         assert_eq!(canonical_quota_key("tenant:abc"), "tenant:abc");
         assert_eq!(canonical_quota_key("tenant:tenant:abc"), "tenant:abc");
+    }
+
+    #[test]
+    fn synthetic_probe_does_not_consume_customer_quota() {
+        let mut request = Request::new(Body::empty());
+        request
+            .extensions_mut()
+            .insert(crate::middleware::synthetic_probe::SyntheticProbe);
+
+        assert!(!should_apply_quota(&request));
     }
 
     #[test]

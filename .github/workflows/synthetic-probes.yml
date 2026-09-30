@@ -1,0 +1,50 @@
+name: External Synthetic Probes
+
+# GitHub-hosted runners execute outside the application network and therefore
+# exercise public DNS, TLS termination, ingress/load balancer routing, and app auth.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tests/synthetic/**"
+      - ".github/workflows/synthetic-probes.yml"
+      - "src/middleware/synthetic_probe.rs"
+      - "src/handlers/webhook.rs"
+      - "src/handlers/graphql.rs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: external-synthetic-probes
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: python -m unittest discover -s tests/synthetic -v
+
+  probes:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Probe public webhook and GraphQL flows
+        env:
+          SYNTHETIC_BASE_URL: ${{ secrets.SYNTHETIC_BASE_URL }}
+          SYNTHETIC_PROBE_SECRET: ${{ secrets.SYNTHETIC_PROBE_SECRET }}
+          SYNTHETIC_PUSHGATEWAY_URL: ${{ secrets.SYNTHETIC_PUSHGATEWAY_URL }}
+          SYNTHETIC_PUSHGATEWAY_TOKEN: ${{ secrets.SYNTHETIC_PUSHGATEWAY_TOKEN }}
+        run: python tests/synthetic/probe.py

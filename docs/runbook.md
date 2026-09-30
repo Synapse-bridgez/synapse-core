@@ -340,6 +340,43 @@ This is detection/alerting only — automatic retry or catch-up of a missed
 run is job-type-specific (see, e.g., the compliance report job's own
 catch-up logic) and out of scope here.
 
+### Synthetic Probe Failure
+
+`SyntheticProbeFailed` means the external GitHub-hosted runner could not
+complete one customer-facing flow over public HTTPS. `SyntheticProbeStale`
+means no successful probe has been recorded for 15 minutes or the Pushgateway
+series has never appeared. Both alerts carry `probe_type="synthetic"`,
+distinguishing edge-path failures from the in-cluster `/health` and readiness
+alerts while routing through the existing Alertmanager notification policy.
+
+The 5-minute `External Synthetic Probes` workflow checks the callback payload
+validation/database read path and the production GraphQL handler. Its callback
+route uses signed synthetic-only auth, validates the real callback schema,
+executes `SELECT 1`, and intentionally skips quota consumption and transaction
+insertion; therefore it cannot enter reconciliation or transaction reporting.
+The GraphQL route allows only `{ __typename }` so its separate probe secret
+cannot expose tenant or platform-admin data.
+
+1. Check the two probe series in Prometheus, grouped by `flow`, and inspect the
+   failing workflow run for its HTTP status, DNS, TLS, timeout, or response-body
+   error.
+2. Compare the probe URL with the configured public load balancer/ingress URL;
+   verify DNS resolution and certificate validity from outside the cluster.
+3. Check ingress routing, WAF/IP restrictions, and service availability for
+   `POST /__synthetic/callback` or `POST /__synthetic/graphql`.
+4. For callback failures, check database connectivity and the configured
+   `SYNTHETIC_PROBE_SECRET`. For GraphQL failures, check the public route and
+   schema initialization. Never replace the probe with a normal callback: it
+   would create customer-visible transaction and reconciliation data.
+
+Required workflow secrets are `SYNTHETIC_BASE_URL` (public HTTPS origin),
+`SYNTHETIC_PROBE_SECRET` (HMAC key), and `SYNTHETIC_PUSHGATEWAY_URL`; configure
+`SYNTHETIC_PUSHGATEWAY_TOKEN` when the Pushgateway requires bearer auth. The
+Prometheus server must scrape the Pushgateway and load
+`alerting/prometheus-rules.yml`; its existing Alertmanager routing sends these
+critical alerts to the on-call channel. A stale-probe alert also covers a
+disabled workflow, lost GitHub schedule, or missing Pushgateway series.
+
 ### Alert Runbook Links
 
 Every alert payload carries a `runbook_url` pointing at the section of this

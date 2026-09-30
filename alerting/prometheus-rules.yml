@@ -32,6 +32,31 @@ groups:
           summary: Database connection pool exhausted
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#pool-exhaustion-response
 
+      - alert: SyntheticProbeFailed
+        expr: synapse_synthetic_probe_success{probe_type="synthetic"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          probe_type: synthetic
+        annotations:
+          summary: External synthetic {{ $labels.flow }} flow is failing
+          description: The public customer-facing {{ $labels.flow }} probe has failed for at least 2 minutes.
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#synthetic-probe-failure
+
+      - alert: SyntheticProbeStale
+        expr: |
+          ((time() - synapse_synthetic_probe_last_success_timestamp_seconds{probe_type="synthetic"} > 900)
+            and on(job, flow, probe_type) synapse_synthetic_probe_success{probe_type="synthetic"} != 0)
+            or absent(synapse_synthetic_probe_success{probe_type="synthetic"})
+        for: 2m
+        labels:
+          severity: critical
+          probe_type: synthetic
+        annotations:
+          summary: External synthetic probes have stopped reporting
+          description: No successful external probe has been recorded in the last 15 minutes, or no probe series exists.
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#synthetic-probe-failure
+
       - alert: HighErrorRate
         expr: |
           sum(rate(http_request_duration_ms_count{status=~"5.."}[5m]))

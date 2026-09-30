@@ -222,6 +222,51 @@ pub fn create_app(app_state: AppState) -> Router {
             crate::tenant::latency::tenant_latency_middleware,
         ));
 
+    // Signed external probes use no tenant identity and never write business
+    // data. The authentication layer attaches SyntheticProbe before quota runs,
+    // allowing the quota middleware to exclude only authenticated probe traffic.
+    let synthetic_callback_routes = Router::new()
+        .route(
+            "/__synthetic/callback",
+            post(handlers::webhook::synthetic_callback),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::validate::validate_callback,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::synthetic_probe::authorize_synthetic_probe,
+        ))
+        .layer(crate::middleware::ip_filter::IpFilterLayer::new(
+            app_state.allowed_ips.clone(),
+            app_state.trusted_proxy_depth,
+        ))
+        .with_state(api_state.clone());
+
+    let synthetic_graphql_routes = Router::new()
+        .route(
+            "/__synthetic/graphql",
+            post(handlers::graphql::graphql_handler),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::quota::rate_limit_middleware,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::synthetic_probe::validate_synthetic_graphql,
+        ))
+        .layer(axum_middleware::from_fn(
+            crate::middleware::synthetic_probe::authorize_synthetic_probe,
+        ))
+        .layer(crate::middleware::ip_filter::IpFilterLayer::new(
+            app_state.allowed_ips.clone(),
+            app_state.trusted_proxy_depth,
+        ))
+        .with_state(api_state.clone());
+
     // Tenant-scoped data routes. These previously had zero auth of any kind —
     // core_routes was built on a bare `Router::new()` with no `.layer()` of
     // its own, so the version-header middleware applied at each mount point
@@ -532,6 +577,8 @@ pub fn create_app(app_state: AppState) -> Router {
         // with_state(bg_state)); merge after with_state(api_state) so both
         // sides of the merge are Router<()>.
         .merge(blue_green_admin_routes)
+        .merge(synthetic_callback_routes)
+        .merge(synthetic_graphql_routes)
         // NOTE: axum applies the *last* `.layer()` call as the *outermost* wrapper,
         // so it runs first on the request path and last on the response path.
         // `request_logger` must stay outermost relative to `error_enrichment`:
