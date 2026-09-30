@@ -10,6 +10,7 @@ Thank you for your interest in contributing to Synapse Core! This guide will hel
 - [Testing Requirements](#testing-requirements)
 - [Pull Request Process](#pull-request-process)
 - [Architecture Decision Records](#architecture-decision-records)
+- [Maintainer Rotation & On-Call](#maintainer-rotation--on-call)
 - [Communication](#communication)
 
 ## Getting Started
@@ -361,231 +362,69 @@ sqlx::query_as!(
 .await?
 ```
 
-#### Logging
+## Testing Requirements
 
-Use `tracing` for structured logging:
+### Test Coverage
 
-```rust
-use tracing::{debug, info, warn, error, instrument};
+All new code must include tests. We aim for:
 
-#[instrument(skip(pool))]
-pub async fn process_transaction(pool: &PgPool, tx_id: Uuid) -> Result<()> {
-    info!("Processing transaction");
-    
-    match save_transaction(pool, tx_id).await {
-        Ok(_) => {
-            debug!(transaction_id = %tx_id, "Transaction saved successfully");
-            Ok(())
-        }
-        Err(e) => {
-            error!(error = %e, transaction_id = %tx_id, "Failed to save transaction");
-            Err(e)
-        }
-    }
-}
-```
+- **Unit tests** for business logic
+- **Integration tests** for API endpoints
+- **Property-based tests** for critical paths (using `proptest`)
 
-**Log levels:**
-- `error!` - Errors that require immediate attention
-- `warn!` - Potential issues that should be investigated
-- `info!` - Important business events (transaction created, webhook received)
-- `debug!` - Detailed diagnostic information
-- `trace!` - Very verbose debugging (query parameters, response bodies)
-
-#### Documentation
-
-**Document public APIs:**
-
-```rust
-/// Processes a transaction and updates its status.
-///
-/// # Arguments
-///
-/// * `pool` - Database connection pool
-/// * `transaction_id` - UUID of the transaction to process
-///
-/// # Returns
-///
-/// Returns `Ok(())` if successful, or an `AppError` if:
-/// - Transaction not found
-/// - Database connection fails
-/// - Stellar verification fails
-///
-/// # Examples
-///
-/// ```
-/// let result = process_transaction(&pool, transaction_id).await?;
-/// ```
-pub async fn process_transaction(pool: &PgPool, transaction_id: Uuid) -> Result<(), AppError> {
-    // Implementation
-}
-```
-
-**Add inline comments for complex logic:**
-
-```rust
-// Calculate exponential backoff with jitter to prevent thundering herd
-let base_delay = Duration::from_secs(2_u64.pow(attempt));
-let jitter = rand::random::<u64>() % 1000;
-let delay = base_delay + Duration::from_millis(jitter);
-```
-
-### Testing Patterns
-
-#### Unit Tests
-
-Place unit tests in the same file as the code:
+### Writing Tests
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    #[test]
-    fn test_transaction_status_transition() {
-        let mut tx = Transaction::new();
-        assert_eq!(tx.status, TransactionStatus::Pending);
-        
-        tx.mark_processing();
-        assert_eq!(tx.status, TransactionStatus::Processing);
-    }
-    
+
     #[tokio::test]
-    async fn test_save_transaction() {
-        let pool = setup_test_pool().await;
-        let tx = Transaction::new();
+    async fn test_process_transaction_success() {
+        let pool = setup_test_db().await;
+        let tx = create_test_transaction();
         
-        let result = save_transaction(&pool, &tx).await;
+        let result = process_transaction(&pool, tx).await;
+        
         assert!(result.is_ok());
     }
-}
-```
 
-#### Integration Tests
-
-Place integration tests in `tests/` directory:
-
-```rust
-// tests/transaction_api_test.rs
-use synapse_core::*;
-
-#[tokio::test]
-async fn test_create_transaction_endpoint() {
-    let app = setup_test_app().await;
-    
-    let response = app
-        .post("/api/transactions")
-        .header("X-API-Key", "test_key")
-        .json(&json!({
-            "external_id": "test_001",
-            "amount": "100.00",
-            "asset_code": "USDC"
-        }))
-        .send()
-        .await;
-    
-    assert_eq!(response.status(), StatusCode::CREATED);
-}
-```
-
-#### Property-Based Tests
-
-Use `proptest` for property-based testing:
-
-```rust
-use proptest::prelude::*;
-
-proptest! {
-    #[test]
-    fn test_amount_always_positive(amount in 0.0..1000000.0f64) {
-        let tx = Transaction::new_with_amount(amount);
-        assert!(tx.amount > BigDecimal::zero());
+    #[tokio::test]
+    async fn test_process_transaction_invalid_amount() {
+        let pool = setup_test_db().await;
+        let mut tx = create_test_transaction();
+        tx.amount = -100;
+        
+        let result = process_transaction(&pool, tx).await;
+        
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
     }
 }
 ```
 
-## Testing Requirements
-
-### Test Coverage
-
-We maintain a minimum test coverage of **40%** (enforced in CI) with a target of **60%**.
-
-**Check coverage locally:**
+### Running Tests
 
 ```bash
-cargo install cargo-llvm-cov
-cargo llvm-cov --html
-open target/llvm-cov/html/index.html
+# Run all tests
+cargo test
+
+# Run specific test
+cargo test test_process_transaction
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run tests in a specific module
+cargo test --lib transactions::
 ```
 
-### Test Categories
+### Test Database
 
-1. **Unit Tests** - Test individual functions and modules
-   - Run with: `cargo test --lib`
-   - Should be fast (<1ms per test)
-   - Mock external dependencies
+Tests use a separate database. Set it up with:
 
-2. **Integration Tests** - Test API endpoints and workflows
-   - Run with: `cargo test --test '*'`
-   - Use real database (test database)
-   - Clean up after each test
-
-3. **Ignored Tests** - Long-running or external dependency tests
-   - Run with: `cargo test -- --ignored`
-   - Include load tests, external API tests
-   - May take several minutes
-
-4. **Benchmarks** - Performance regression tests
-   - Run with: `cargo bench`
-   - Located in `benches/`
-   - Compare against baseline
-
-### Writing Good Tests
-
-**Test naming:**
-
-```rust
-#[test]
-fn test_<what>_<condition>_<expected_result>() {
-    // Example: test_transaction_creation_with_valid_data_succeeds
-}
-```
-
-**Arrange-Act-Assert pattern:**
-
-```rust
-#[tokio::test]
-async fn test_transaction_status_update() {
-    // Arrange
-    let pool = setup_test_pool().await;
-    let tx = create_test_transaction(&pool).await;
-    
-    // Act
-    let result = update_transaction_status(&pool, tx.id, TransactionStatus::Completed).await;
-    
-    // Assert
-    assert!(result.is_ok());
-    let updated_tx = get_transaction(&pool, tx.id).await.unwrap();
-    assert_eq!(updated_tx.status, TransactionStatus::Completed);
-}
-```
-
-**Clean up test data:**
-
-```rust
-#[tokio::test]
-async fn test_with_cleanup() {
-    let pool = setup_test_pool().await;
-    let tx_id = create_test_transaction(&pool).await.id;
-    
-    // Test logic here
-    
-    // Cleanup
-    sqlx::query!("DELETE FROM transactions WHERE id = $1", tx_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-}
+```bash
+export DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test
+sqlx migrate run
 ```
 
 ## Pull Request Process
@@ -601,165 +440,68 @@ cargo build
 cargo test
 ```
 
-2. **Check migration safety (if applicable):**
+2. **Update documentation** if you changed public APIs
 
-```bash
-./scripts/check-migration-safety.sh
+3. **Add tests** for new functionality
+
+4. **Update CHANGELOG.md** if applicable
+
+### PR Guidelines
+
+- **Keep PRs focused:** One feature or fix per PR
+- **Write clear descriptions:** Explain what and why, not just how
+- **Reference issues:** Use `Fixes #123` or `Closes #123`
+- **Respond to feedback:** Address review comments promptly
+- **Squash commits:** We use squash-merge, so keep commits clean
+
+### PR Title Format
+
 ```
+<type>: <description>
 
-3. **Update documentation:**
-   - Add/update doc comments for public APIs
-   - Update relevant docs in `docs/` directory
-   - Update CHANGELOG.md (if applicable)
-
-4. **Commit your changes:**
-
-```bash
-git add .
-git commit -m "feat: add transaction retry mechanism"
+Examples:
+feat: Add transaction batching endpoint
+fix: Resolve race condition in webhook delivery
+docs: Update API authentication guide
 ```
-
-Commit message format:
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `docs:` - Documentation changes
-- `refactor:` - Code refactoring
-- `test:` - Test additions/updates
-- `chore:` - Maintenance tasks
-
-5. **Push to your fork:**
-
-```bash
-git push origin feat/your-feature-name
-```
-
-### Creating the Pull Request
-
-1. **Open a PR against `develop` branch** (not `main`)
-
-2. **Fill out the PR template:**
-
-```markdown
-## Description
-Brief description of what this PR does.
-
-## Related Issue
-Closes #123
-
-## Changes Made
-- Added transaction retry mechanism
-- Updated error handling
-- Added integration tests
-
-## Testing
-- [ ] Unit tests added/updated
-- [ ] Integration tests added/updated
-- [ ] Manual testing performed
-- [ ] Migration safety checked (if applicable)
-
-## Checklist
-- [ ] Code follows style guidelines
-- [ ] All tests pass
-- [ ] Documentation updated
-- [ ] No breaking changes (or documented)
-```
-
-3. **Request review** from maintainers
 
 ### Review Process
 
-**What reviewers look for:**
+1. **Automated checks** run on every PR (CI, clippy, tests)
+2. **At least one maintainer review** is required
+3. **Address feedback** and push updates
+4. **Maintainer merges** once approved and CI passes
 
-1. **Correctness** - Does the code work as intended?
-2. **Security** - Are there any security vulnerabilities?
-3. **Performance** - Are there any performance concerns?
-4. **Maintainability** - Is the code easy to understand and modify?
-5. **Testing** - Are there adequate tests?
-6. **Documentation** - Is the code well-documented?
-
-**Responding to feedback:**
-
-- Address all comments (or explain why you disagree)
-- Push additional commits to the same branch
-- Mark conversations as resolved when addressed
-- Be respectful and open to suggestions
-
-### Merging
-
-Once approved:
-
-1. Ensure CI passes
-2. Squash commits if requested
-3. Maintainer will merge to `develop`
-4. Delete your feature branch
+See [Maintainer Rotation & On-Call](#maintainer-rotation--on-call) to find the current reviewer.
 
 ## Architecture Decision Records
 
-We document significant architectural decisions in ADRs. See [docs/adr/](docs/adr/) for existing records.
+Significant architectural decisions are documented as ADRs in [`docs/rfcs/`](docs/rfcs/). If your change alters system architecture, add or update an ADR following the [template](docs/rfcs/000-template.md).
 
-**Key ADRs:**
+## Maintainer Rotation & On-Call
 
-- [ADR-001: Database Partitioning Strategy](docs/adr/001-database-partitioning.md)
-- [ADR-002: Circuit Breaker Pattern](docs/adr/002-circuit-breaker.md)
-- [ADR-003: Multi-Tenant Isolation](docs/adr/003-multi-tenant-isolation.md)
+The project uses a version-controlled rotation schedule so contributors always know who is responsible for triage, review, and incident response.
 
-**When to create an ADR:**
-
-- Choosing between architectural patterns
-- Selecting third-party libraries
-- Defining system boundaries
-- Making security decisions
-- Establishing performance targets
-
-**ADR template:** See [docs/adr/000-template.md](docs/adr/000-template.md)
+- **Schedule source of truth:** [`docs/governance/rotation.md`](docs/governance/rotation.md) — a structured, human-editable table of `who`, `role`, and `period` (start/end dates).
+- **Published view:** the current and upcoming rotation is generated from that schedule and surfaced in the governance docs and the scheduled publish workflow under `.github/workflows/`.
+- **Swaps & coverage:** because the schedule is just a file, requesting a swap or coverage is a normal pull request editing the relevant entry. Open a PR titled `chore(rotation): swap <date> <role>` and tag the incoming maintainer.
+- **Gaps:** if no maintainer is assigned for the current period, the published view explicitly reports a rotation gap rather than silently falling back to an unspecified default. If you see a gap, open a PR to fill it.
 
 ## Communication
 
+- **GitHub Issues:** Bug reports and feature requests
+- **GitHub Discussions:** Questions and design discussions
+- **Discord:** Real-time chat ([invite link](https://discord.gg/synapse))
+- **Weekly sync:** Thursdays at 15:00 UTC
+
 ### Getting Help
 
-- **GitHub Issues** - Bug reports and feature requests
-- **GitHub Discussions** - Questions and general discussion
-- **Pull Request Comments** - Code-specific questions
+If you're stuck:
 
-### Reporting Bugs
-
-Use the bug report template and include:
-
-1. **Description** - What happened?
-2. **Expected Behavior** - What should have happened?
-3. **Steps to Reproduce** - How can we reproduce it?
-4. **Environment** - OS, Rust version, etc.
-5. **Logs** - Relevant error messages or logs
-
-### Suggesting Features
-
-Use the feature request template and include:
-
-1. **Problem Statement** - What problem does this solve?
-2. **Proposed Solution** - How should it work?
-3. **Alternatives** - What other approaches did you consider?
-4. **Additional Context** - Any other relevant information
-
-## Code of Conduct
-
-We are committed to providing a welcoming and inclusive environment. Please:
-
-- Be respectful and considerate
-- Welcome newcomers and help them learn
-- Focus on what is best for the community
-- Show empathy towards other community members
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
-
-## Additional Resources
-
-- [Rust Book](https://doc.rust-lang.org/book/)
-- [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
-- [Axum Documentation](https://docs.rs/axum/)
-- [SQLx Documentation](https://docs.rs/sqlx/)
-- [Tokio Tutorial](https://tokio.rs/tokio/tutorial)
+1. Check existing [documentation](docs/)
+2. Search [GitHub Issues](https://github.com/synapse-core/synapse-core/issues)
+3. Ask in Discord `#dev-help`
+4. Tag a maintainer in your PR (see [Maintainer Rotation & On-Call](#maintainer-rotation--on-call))
 
 ---
 
