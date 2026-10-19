@@ -72,6 +72,12 @@ impl PartitionManager {
             .execute(&self.pool)
             .await?;
 
+        // Same lookahead window for the swap tables
+        sqlx::query("SELECT ensure_swap_partitions($1)")
+            .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+
         // Check if future partitions are below the configured lookahead threshold
         // and alert if needed
         self.check_partition_health().await?;
