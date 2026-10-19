@@ -60,6 +60,8 @@ DATABASE_URL – PostgresSQL connection string (e.g., postgres://synapse:synapse
 SERVER_PORT – Port for the web server (default 3000)
 STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.stellar.org)
 REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
+QUOTE_CACHE_TTL_SECS – TTL for cached swap quotes in seconds (default 10)
+QUOTE_CACHE_MAX_STALENESS_SECS – Max age of the price snapshot a cached quote may be served from, in seconds (default 5)
 ```
 
 3. Start PostgresSQL Using Docker (recommended for development):

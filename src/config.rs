@@ -228,6 +228,11 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Swap quote cache
+    /// TTL for cached swap quotes, in seconds. Default: 10
+    pub quote_cache_ttl_secs: u64,
+    /// Max age of the price snapshot a cached quote was derived from, in seconds. Default: 5
+    pub quote_cache_max_staleness_secs: u64,
 }
 
 pub mod assets;
@@ -407,6 +412,12 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            quote_cache_ttl_secs: env::var("QUOTE_CACHE_TTL_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+            quote_cache_max_staleness_secs: env::var("QUOTE_CACHE_MAX_STALENESS_SECS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()?,
         })
     }
 }
