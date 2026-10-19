@@ -2,7 +2,9 @@ use crate::secrets::SecretsManager;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
+use sqlx::types::BigDecimal;
 use std::env;
+use std::str::FromStr;
 
 /// Active environment profile
 #[derive(Debug, Clone, PartialEq)]
@@ -437,4 +439,121 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
         "json" => Ok(LogFormat::Json),
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
     }
+}
+
+/// Pre-trade risk limits for swap orders, evaluated by
+/// [`crate::swap::risk::RiskPolicy`].
+///
+/// Loaded once via [`SwapRiskConfig::from_env`]. Every limit except the
+/// kill switch and the allow/deny lists is required, and any value that is
+/// missing or unparseable is a startup error (fail closed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapRiskConfig {
+    /// `SWAP_KILL_SWITCH`: when `true`, every swap order is rejected. Default `false`.
+    pub kill_switch: bool,
+    /// `SWAP_ALLOWED_PAIRS` (e.g. `USDC>XLM,XLM>USDC`): the only permitted
+    /// source/target asset pairs. Required and non-empty.
+    pub allowed_pairs: Vec<(String, String)>,
+    /// `SWAP_MAX_ORDER_AMOUNT`: maximum amount of a single order, in source-asset units.
+    pub max_order_amount: BigDecimal,
+    /// `SWAP_MAX_ACCOUNT_VOLUME`: maximum rolling volume per account over the window.
+    pub max_account_volume: BigDecimal,
+    /// `SWAP_MAX_TENANT_VOLUME`: maximum rolling volume per tenant over the window.
+    pub max_tenant_volume: BigDecimal,
+    /// `SWAP_ROLLING_WINDOW_SECS`: length of the rolling volume window, in seconds.
+    pub rolling_window_secs: i64,
+    /// `SWAP_ACCOUNT_ALLOWLIST`: optional. When non-empty, only listed accounts may swap.
+    pub account_allowlist: Vec<String>,
+    /// `SWAP_ACCOUNT_DENYLIST`: optional. Listed accounts are always rejected, even if allowlisted.
+    pub account_denylist: Vec<String>,
+}
+
+impl SwapRiskConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let kill_switch = match env::var("SWAP_KILL_SWITCH") {
+            Ok(v) => parse_bool("SWAP_KILL_SWITCH", &v)?,
+            Err(_) => false,
+        };
+
+        let allowed_pairs = parse_pairs(&required_env("SWAP_ALLOWED_PAIRS")?)?;
+        let max_order_amount = parse_positive_decimal(
+            "SWAP_MAX_ORDER_AMOUNT",
+            &required_env("SWAP_MAX_ORDER_AMOUNT")?,
+        )?;
+        let max_account_volume = parse_positive_decimal(
+            "SWAP_MAX_ACCOUNT_VOLUME",
+            &required_env("SWAP_MAX_ACCOUNT_VOLUME")?,
+        )?;
+        let max_tenant_volume = parse_positive_decimal(
+            "SWAP_MAX_TENANT_VOLUME",
+            &required_env("SWAP_MAX_TENANT_VOLUME")?,
+        )?;
+
+        let rolling_window_secs: i64 = required_env("SWAP_ROLLING_WINDOW_SECS")?
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("SWAP_ROLLING_WINDOW_SECS must be an integer: {e}"))?;
+        if rolling_window_secs <= 0 {
+            anyhow::bail!("SWAP_ROLLING_WINDOW_SECS must be greater than 0");
+        }
+
+        Ok(Self {
+            kill_switch,
+            allowed_pairs,
+            max_order_amount,
+            max_account_volume,
+            max_tenant_volume,
+            rolling_window_secs,
+            account_allowlist: parse_list(&env::var("SWAP_ACCOUNT_ALLOWLIST").unwrap_or_default()),
+            account_denylist: parse_list(&env::var("SWAP_ACCOUNT_DENYLIST").unwrap_or_default()),
+        })
+    }
+}
+
+fn required_env(key: &str) -> anyhow::Result<String> {
+    env::var(key).map_err(|_| anyhow::anyhow!("{key} is required"))
+}
+
+fn parse_bool(key: &str, raw: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => anyhow::bail!("{key} must be 'true' or 'false'"),
+    }
+}
+
+fn parse_positive_decimal(key: &str, raw: &str) -> anyhow::Result<BigDecimal> {
+    let value = BigDecimal::from_str(raw.trim())
+        .map_err(|e| anyhow::anyhow!("{key} must be a decimal number: {e}"))?;
+    if value <= BigDecimal::from(0) {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(value)
+}
+
+fn parse_pairs(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let pairs = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('>') {
+            Some((source, target)) if !source.trim().is_empty() && !target.trim().is_empty() => {
+                Ok((source.trim().to_string(), target.trim().to_string()))
+            }
+            _ => anyhow::bail!("SWAP_ALLOWED_PAIRS entries must be 'SOURCE>TARGET', got '{entry}'"),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if pairs.is_empty() {
+        anyhow::bail!("SWAP_ALLOWED_PAIRS must list at least one pair");
+    }
+    Ok(pairs)
+}
+
+fn parse_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
 }

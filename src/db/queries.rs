@@ -2381,6 +2381,63 @@ pub async fn get_status_counts(pool: &PgPool) -> Result<Vec<StatusCount>> {
         .collect())
 }
 
+/// Rolling swap volume for one account in one asset since `since`, excluding
+/// failed transactions. Filters on `stellar_account` (indexed by
+/// `idx_transactions_stellar_account`) and `created_at` so the partitioned
+/// table is pruned to the window.
+pub async fn get_account_rolling_volume(
+    pool: &PgPool,
+    stellar_account: &str,
+    asset_code: &str,
+    since: DateTime<Utc>,
+) -> Result<BigDecimal> {
+    let row = sqlx::query(
+        r#"
+        SELECT COALESCE(SUM(amount), 0) AS total
+        FROM transactions
+        WHERE stellar_account = $1
+          AND asset_code = $2
+          AND created_at >= $3
+          AND status <> 'failed'
+        "#,
+    )
+    .bind(stellar_account)
+    .bind(asset_code)
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.get("total"))
+}
+
+/// Rolling swap volume for one tenant in one asset since `since`, excluding
+/// failed transactions. Filters on `tenant_id` and `created_at` so the
+/// partitioned table is pruned to the window.
+pub async fn get_tenant_rolling_volume(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    asset_code: &str,
+    since: DateTime<Utc>,
+) -> Result<BigDecimal> {
+    let row = sqlx::query(
+        r#"
+        SELECT COALESCE(SUM(amount), 0) AS total
+        FROM transactions
+        WHERE tenant_id = $1
+          AND asset_code = $2
+          AND created_at >= $3
+          AND status <> 'failed'
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(asset_code)
+    .bind(since)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.get("total"))
+}
+
 pub async fn get_daily_totals(pool: &PgPool, days: i32) -> Result<Vec<DailyTotal>> {
     let end = Utc::now();
     let start = end - chrono::Duration::days(days.into());

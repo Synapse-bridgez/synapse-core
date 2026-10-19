@@ -23,6 +23,9 @@ use std::fmt;
 use crate::db::models::Transaction;
 use crate::services::feature_flags::FeatureFlagService;
 
+pub mod error;
+pub mod risk;
+
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
 
