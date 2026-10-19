@@ -31,7 +31,7 @@
 //! - Sensitive data (passwords, tokens) never logged; only query structure logged
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Settlement, Transaction};
+use crate::db::models::{Settlement, SwapSettlement, Transaction};
 use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
@@ -1233,6 +1233,116 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
         sqlx::query_as::<_, Settlement>("SELECT * FROM settlements WHERE id = $1")
             .bind(id)
             .fetch_one(pool),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Swap Settlement Queries
+// ---------------------------------------------------------------------------
+
+/// Insert the settlement row for a swap hand-off, or return the row that
+/// already exists for `idempotency_key`. Re-delivered hand-offs never create a
+/// second row.
+pub async fn upsert_swap_settlement(
+    pool: &PgPool,
+    idempotency_key: &str,
+    transaction_id: Uuid,
+    tenant_id: Option<Uuid>,
+    stellar_account: &str,
+    asset_code: &str,
+    amount: &BigDecimal,
+) -> Result<SwapSettlement> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_settlements ... ON CONFLICT (idempotency_key) DO UPDATE ... RETURNING *",
+        sqlx::query_as::<_, SwapSettlement>(
+            r#"
+        INSERT INTO swap_settlements (
+            idempotency_key, transaction_id, tenant_id, stellar_account, asset_code, amount
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+        RETURNING *
+        "#,
+        )
+        .bind(idempotency_key)
+        .bind(transaction_id)
+        .bind(tenant_id)
+        .bind(stellar_account)
+        .bind(asset_code)
+        .bind(amount)
+        .fetch_one(pool),
+    )
+    .await
+}
+
+pub async fn get_swap_settlement(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<Option<SwapSettlement>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_settlements WHERE idempotency_key = $1",
+        sqlx::query_as::<_, SwapSettlement>(
+            "SELECT * FROM swap_settlements WHERE idempotency_key = $1",
+        )
+        .bind(idempotency_key)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+/// Settlements that have not reached a terminal state, oldest first. Used by
+/// the reconciliation routine after a restart.
+pub async fn list_open_swap_settlements(pool: &PgPool, limit: i64) -> Result<Vec<SwapSettlement>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_settlements WHERE status IN ('pending', 'settlement_pending') ORDER BY created_at ASC LIMIT $1",
+        sqlx::query_as::<_, SwapSettlement>(
+            r#"
+        SELECT * FROM swap_settlements
+        WHERE status IN ('pending', 'settlement_pending')
+        ORDER BY created_at ASC
+        LIMIT $1
+        "#,
+        )
+        .bind(limit)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+/// Compare-and-set status transition. Returns `None` when the row is not in
+/// `from_status` (already advanced by another worker, or terminal), so callers
+/// never move a `settled` row again.
+pub async fn transition_swap_settlement(
+    pool: &PgPool,
+    idempotency_key: &str,
+    from_status: &str,
+    to_status: &str,
+    settlement_ref: Option<&str>,
+    last_error: Option<&str>,
+) -> Result<Option<SwapSettlement>> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_settlements SET status = ... WHERE idempotency_key = $1 AND status = $2 RETURNING *",
+        sqlx::query_as::<_, SwapSettlement>(
+            r#"
+        UPDATE swap_settlements
+        SET status = $3,
+            settlement_ref = COALESCE($4, settlement_ref),
+            last_error = $5,
+            updated_at = NOW()
+        WHERE idempotency_key = $1 AND status = $2
+        RETURNING *
+        "#,
+        )
+        .bind(idempotency_key)
+        .bind(from_status)
+        .bind(to_status)
+        .bind(settlement_ref)
+        .bind(last_error)
+        .fetch_optional(pool),
     )
     .await
 }

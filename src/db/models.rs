@@ -168,6 +168,24 @@ pub struct Settlement {
     pub destination_account: Option<String>,
 }
 
+/// Settlement state for one executed swap hand-off (`swap_settlements` row).
+/// `status` is one of `pending`, `settlement_pending`, `settled`, `failed`.
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapSettlement {
+    pub id: Uuid,
+    pub idempotency_key: String,
+    pub transaction_id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub stellar_account: String,
+    pub asset_code: String,
+    pub amount: BigDecimal,
+    pub status: String,
+    pub settlement_ref: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[async_graphql::Object]
 impl Settlement {
     async fn id(&self) -> String {
