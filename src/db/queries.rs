@@ -32,6 +32,7 @@
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::swap::quote::{QuoteCandidate, SwapQuote};
 use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
@@ -1928,6 +1929,70 @@ pub async fn search_transactions_for_tenant(
         },
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Swap quotes (src/swap/quote.rs)
+// ---------------------------------------------------------------------------
+
+/// Persist a swap quote unless its request key is already taken, and return the
+/// quote stored for that key. Concurrent inserts with the same key converge on
+/// one row, so the caller always gets the same quote back.
+pub async fn insert_swap_quote_or_get(pool: &PgPool, quote: &SwapQuote) -> Result<SwapQuote> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO swap_quotes
+            (id, request_key, base_asset, quote_asset, amount, fee_bps, candidates, issued_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (request_key) DO UPDATE SET request_key = EXCLUDED.request_key
+        RETURNING id, request_key, base_asset, quote_asset, amount, fee_bps, candidates, issued_at, expires_at
+        "#,
+    )
+    .bind(quote.id)
+    .bind(&quote.request_key)
+    .bind(&quote.base_asset)
+    .bind(&quote.quote_asset)
+    .bind(&quote.amount)
+    .bind(quote.fee_bps as i32)
+    .bind(sqlx::types::Json(&quote.candidates))
+    .bind(quote.issued_at)
+    .bind(quote.expires_at)
+    .fetch_one(pool)
+    .await?;
+
+    swap_quote_from_row(&row)
+}
+
+/// Fetch an issued swap quote by id.
+pub async fn get_swap_quote(pool: &PgPool, id: Uuid) -> Result<Option<SwapQuote>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, request_key, base_asset, quote_asset, amount, fee_bps, candidates, issued_at, expires_at
+        FROM swap_quotes
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.as_ref().map(swap_quote_from_row).transpose()
+}
+
+fn swap_quote_from_row(row: &sqlx::postgres::PgRow) -> Result<SwapQuote> {
+    let fee_bps: i32 = row.try_get("fee_bps")?;
+    let candidates: sqlx::types::Json<Vec<QuoteCandidate>> = row.try_get("candidates")?;
+    Ok(SwapQuote {
+        id: row.try_get("id")?,
+        request_key: row.try_get("request_key")?,
+        base_asset: row.try_get("base_asset")?,
+        quote_asset: row.try_get("quote_asset")?,
+        amount: row.try_get("amount")?,
+        fee_bps: u32::try_from(fee_bps).map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        issued_at: row.try_get("issued_at")?,
+        expires_at: row.try_get("expires_at")?,
+        candidates: candidates.0,
+    })
 }
 
 // ---------------------------------------------------------------------------

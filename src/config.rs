@@ -438,3 +438,73 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
     }
 }
+
+/// Settings for the swap quoting engine (`src/swap/quote.rs`).
+///
+/// Kept separate from [`Config`] so the quoting layer can be built and tested
+/// without the full application configuration.
+#[derive(Debug, Clone)]
+pub struct SwapQuoteConfig {
+    /// Platform fee in basis points, charged on the output after source spread.
+    /// `SWAP_FEE_BPS`, default `0`, must be within `0..=10000`.
+    pub fee_bps: u32,
+    /// How long an issued quote stays executable. `SWAP_QUOTE_TTL_SECONDS`,
+    /// default `30`, must be greater than zero.
+    pub quote_ttl_seconds: u64,
+    /// Per-source timeout applied to each price fan-out call.
+    /// `SWAP_SOURCE_TIMEOUT_MS`, default `2000`.
+    pub source_timeout_ms: u64,
+    /// Smallest accepted order, in base-asset units. `SWAP_MIN_ORDER_SIZE`, default `1`.
+    pub min_order_size: sqlx::types::BigDecimal,
+    /// Largest accepted order, in base-asset units. `SWAP_MAX_ORDER_SIZE`, default `1000000`.
+    pub max_order_size: sqlx::types::BigDecimal,
+    /// Maximum number of ranked candidates persisted per quote.
+    /// `SWAP_MAX_QUOTE_CANDIDATES`, default `10`, must be at least one.
+    pub max_candidates: usize,
+}
+
+impl SwapQuoteConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let config = Self {
+            fee_bps: env::var("SWAP_FEE_BPS")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()?,
+            quote_ttl_seconds: env::var("SWAP_QUOTE_TTL_SECONDS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()?,
+            source_timeout_ms: env::var("SWAP_SOURCE_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()?,
+            min_order_size: env::var("SWAP_MIN_ORDER_SIZE")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            max_order_size: env::var("SWAP_MAX_ORDER_SIZE")
+                .unwrap_or_else(|_| "1000000".to_string())
+                .parse()?,
+            max_candidates: env::var("SWAP_MAX_QUOTE_CANDIDATES")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.fee_bps > 10_000 {
+            anyhow::bail!("SWAP_FEE_BPS must be within 0..=10000");
+        }
+        if self.quote_ttl_seconds == 0 {
+            anyhow::bail!("SWAP_QUOTE_TTL_SECONDS must be greater than zero");
+        }
+        if self.max_candidates == 0 {
+            anyhow::bail!("SWAP_MAX_QUOTE_CANDIDATES must be at least one");
+        }
+        let zero = sqlx::types::BigDecimal::from(0);
+        if self.min_order_size <= zero || self.min_order_size > self.max_order_size {
+            anyhow::bail!(
+                "SWAP_MIN_ORDER_SIZE must be positive and not exceed SWAP_MAX_ORDER_SIZE"
+            );
+        }
+        Ok(())
+    }
+}
