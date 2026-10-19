@@ -1,0 +1,58 @@
+name: Fuzz Swap Engine Invariants
+
+on:
+  schedule:
+    # Run nightly at 03:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: 'Maximum fuzzing duration in seconds'
+        required: false
+        default: '180'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz_swap_requests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo-fuzz binary
+        uses: actions/cache@v4
+        id: cache-cargo-fuzz
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: ${{ runner.os }}-cargo-fuzz-0.12.0
+
+      - name: Install cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Run Swap Requests Fuzzer
+        run: |
+          MAX_TIME="${{ github.event.inputs.max_total_time || '180' }}"
+          cargo +nightly fuzz run fuzz_swap_requests -- -max_total_time=${MAX_TIME} -timeout=15
+
+      - name: Upload Crash Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      - name: Upload Seed Corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-seed-corpus
+          path: fuzz/corpus/

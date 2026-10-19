@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = [".", "sdks/rust", "cli/synapse-cli", "xtask"]
+members = [".", "sdks/rust", "cli/synapse-cli", "xtask", "crates/swap-invariants"]
+exclude = ["fuzz"]
 
 [package]
 name = "synapse-core"

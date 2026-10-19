@@ -1,6 +1,8 @@
 /target
 sdks/rust/target
 cli/synapse-cli/target
+fuzz/target
+fuzz/artifacts
 node_modules
 .env
 .env.example
