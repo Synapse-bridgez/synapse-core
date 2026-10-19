@@ -10,6 +10,10 @@
 //! See `docs/state-machine.md` (`### swap_ready`, "Phase 2 hand-off") for how
 //! this fits the existing transaction pipeline.
 //!
+//! The persisted swap order and its lifecycle live in
+//! [`SwapOrderStatus`](crate::db::models::SwapOrderStatus) and
+//! `db::queries::transition_swap_order`, independent of any liquidity venue.
+//!
 //! Nothing in Phase 1 constructs a [`SwapHandoff`] or calls a [`SwapEngine`]
 //! yet. The default wiring is [`NoopSwapEngine`], which is inert, and
 //! [`swap_enabled_for`] returns `false` unless a tenant explicitly opts in via

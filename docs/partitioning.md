@@ -23,6 +23,14 @@ The `transactions` table has been converted to a partitioned table using Postgre
 3. Retention policy to detach partitions older than 12 months
 4. Background cron job runs every 24 hours
 
+### Swap Orders
+The `swap_orders` table (`migrations/20261019000000_swap_orders.sql`) follows the
+same strategy: monthly range partitioning by `created_at`, composite primary key
+`(id, created_at)`, and partitions named `swap_orders_y{YYYY}m{MM}`. Initial
+partitions cover 2026-10 through 2026-12. The scheduled partition maintenance
+currently only extends `transactions`, so `swap_orders` partitions must be
+added before they are needed.
+
 ## Database Functions
 
 ### `create_monthly_partition()`

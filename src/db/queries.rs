@@ -31,7 +31,7 @@
 //! - Sensitive data (passwords, tokens) never logged; only query structure logged
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Settlement, Transaction};
+use crate::db::models::{Settlement, SwapOrder, SwapOrderStatus, Transaction};
 use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
@@ -1928,6 +1928,145 @@ pub async fn search_transactions_for_tenant(
         },
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Swap orders (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`transition_swap_order`].
+#[derive(Debug)]
+pub enum SwapOrderTransitionError {
+    /// The edge is not allowed by [`SwapOrderStatus::can_transition_to`].
+    Invalid {
+        from: SwapOrderStatus,
+        to: SwapOrderStatus,
+    },
+    /// The order changed since it was read (or no longer exists). Re-fetch and retry.
+    Conflict,
+    /// Database failure, or a stored status that does not parse.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for SwapOrderTransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwapOrderTransitionError::Invalid { from, to } => {
+                write!(f, "cannot transition swap order from '{from}' to '{to}'")
+            }
+            SwapOrderTransitionError::Conflict => write!(f, "swap order was modified concurrently"),
+            SwapOrderTransitionError::Db(e) => write!(f, "swap order database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SwapOrderTransitionError {}
+
+pub async fn insert_swap_order(pool: &PgPool, order: &SwapOrder) -> Result<SwapOrder> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_orders ... RETURNING *",
+        sqlx::query_as::<_, SwapOrder>(
+            r#"
+            INSERT INTO swap_orders (
+                id, tenant_id, stellar_account, source_asset, destination_asset,
+                amount, quoted_amount, quote_id, status, version, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING *
+            "#,
+        )
+        .bind(order.id)
+        .bind(order.tenant_id)
+        .bind(&order.stellar_account)
+        .bind(&order.source_asset)
+        .bind(&order.destination_asset)
+        .bind(&order.amount)
+        .bind(&order.quoted_amount)
+        .bind(&order.quote_id)
+        .bind(&order.status)
+        .bind(order.version)
+        .bind(order.created_at)
+        .bind(order.updated_at)
+        .fetch_one(pool),
+    )
+    .await
+}
+
+pub async fn get_swap_order(pool: &PgPool, id: Uuid) -> Result<Option<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE id = $1",
+        sqlx::query_as::<_, SwapOrder>("SELECT * FROM swap_orders WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool),
+    )
+    .await
+}
+
+/// Newest-first orders for a tenant, capped at `limit`.
+pub async fn get_swap_orders_for_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+        sqlx::query_as::<_, SwapOrder>(
+            "SELECT * FROM swap_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+/// Move `order` to `to` using a compare-and-set on `version`.
+///
+/// Same-state is a no-op that returns the order unchanged. An illegal edge
+/// returns [`SwapOrderTransitionError::Invalid`] without touching the row. If
+/// another writer bumped `version` since `order` was read, returns
+/// [`SwapOrderTransitionError::Conflict`]. `created_at` is in the predicate so
+/// the update prunes to the owning partition.
+pub async fn transition_swap_order(
+    pool: &PgPool,
+    order: &SwapOrder,
+    to: SwapOrderStatus,
+) -> std::result::Result<SwapOrder, SwapOrderTransitionError> {
+    let from: SwapOrderStatus = order
+        .status
+        .parse()
+        .map_err(|e: String| SwapOrderTransitionError::Db(sqlx::Error::Decode(e.into())))?;
+
+    if from == to {
+        return Ok(order.clone());
+    }
+    if !from.can_transition_to(to) {
+        return Err(SwapOrderTransitionError::Invalid { from, to });
+    }
+
+    let updated = with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_orders SET status = ... WHERE id = $2 AND created_at = $3 AND version = $4 RETURNING *",
+        sqlx::query_as::<_, SwapOrder>(
+            r#"
+            UPDATE swap_orders
+            SET status = $1, version = version + 1, updated_at = NOW()
+            WHERE id = $2 AND created_at = $3 AND version = $4
+            RETURNING *
+            "#,
+        )
+        .bind(to.to_string())
+        .bind(order.id)
+        .bind(order.created_at)
+        .bind(order.version)
+        .fetch_optional(pool),
+    )
+    .await
+    .map_err(SwapOrderTransitionError::Db)?;
+
+    updated.ok_or(SwapOrderTransitionError::Conflict)
 }
 
 // ---------------------------------------------------------------------------

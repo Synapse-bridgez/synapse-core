@@ -508,3 +508,114 @@ impl Asset {
         Ok(exists)
     }
 }
+
+/// Lifecycle of a Phase 2 swap order. Persisted as snake_case text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapOrderStatus {
+    SwapReady,
+    Quoting,
+    Quoted,
+    Executing,
+    Settled,
+    Failed,
+    Cancelled,
+}
+
+impl SwapOrderStatus {
+    /// Whether an order may move from `self` to `to`. Same-state is always
+    /// allowed (idempotent). `failed` and `cancelled` are terminal, and an
+    /// order can no longer be cancelled once it is executing.
+    pub fn can_transition_to(self, to: SwapOrderStatus) -> bool {
+        use SwapOrderStatus::*;
+        self == to
+            || matches!(
+                (self, to),
+                (SwapReady, Quoting | Cancelled)
+                    | (Quoting, Quoted | Failed | Cancelled)
+                    | (Quoted, Executing | Failed | Cancelled)
+                    | (Executing, Settled | Failed)
+            )
+    }
+}
+
+impl std::fmt::Display for SwapOrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwapOrderStatus::SwapReady => write!(f, "swap_ready"),
+            SwapOrderStatus::Quoting => write!(f, "quoting"),
+            SwapOrderStatus::Quoted => write!(f, "quoted"),
+            SwapOrderStatus::Executing => write!(f, "executing"),
+            SwapOrderStatus::Settled => write!(f, "settled"),
+            SwapOrderStatus::Failed => write!(f, "failed"),
+            SwapOrderStatus::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+impl FromStr for SwapOrderStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "swap_ready" => Ok(SwapOrderStatus::SwapReady),
+            "quoting" => Ok(SwapOrderStatus::Quoting),
+            "quoted" => Ok(SwapOrderStatus::Quoted),
+            "executing" => Ok(SwapOrderStatus::Executing),
+            "settled" => Ok(SwapOrderStatus::Settled),
+            "failed" => Ok(SwapOrderStatus::Failed),
+            "cancelled" => Ok(SwapOrderStatus::Cancelled),
+            _ => Err(format!("Invalid swap order status: {}", s)),
+        }
+    }
+}
+
+/// A Phase 2 swap intent. Amounts are fixed-point `BigDecimal`, never floats.
+/// `status` is stored as text; parse it with [`SwapOrder::status`].
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub stellar_account: String,
+    pub source_asset: String,
+    pub destination_asset: String,
+    pub amount: BigDecimal,
+    pub quoted_amount: Option<BigDecimal>,
+    pub quote_id: Option<String>,
+    pub status: String,
+    pub version: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl SwapOrder {
+    /// New order in `swap_ready`, not yet persisted.
+    pub fn new(
+        tenant_id: Uuid,
+        stellar_account: String,
+        source_asset: String,
+        destination_asset: String,
+        amount: BigDecimal,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            tenant_id,
+            stellar_account,
+            source_asset,
+            destination_asset,
+            amount,
+            quoted_amount: None,
+            quote_id: None,
+            status: SwapOrderStatus::SwapReady.to_string(),
+            version: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Parsed lifecycle status. Errors only if the stored text is unknown.
+    pub fn status(&self) -> Result<SwapOrderStatus, String> {
+        self.status.parse()
+    }
+}
