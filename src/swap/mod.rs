@@ -66,6 +66,27 @@ impl SwapHandoff {
             metadata: tx.metadata.clone(),
         }
     }
+
+    /// Boundary checks every swap engine must run before acting on a hand-off.
+    /// Rejects non-positive amounts, empty account/asset fields, and an
+    /// idempotency key not derived from `transaction_id` (a re-keyed or forged
+    /// hand-off would otherwise bypass replay deduplication).
+    pub fn validate(&self) -> Result<(), SwapError> {
+        if self.amount <= BigDecimal::from(0) {
+            return Err(SwapError::InvalidHandoff("amount must be positive".into()));
+        }
+        if self.stellar_account.trim().is_empty() || self.source_asset.trim().is_empty() {
+            return Err(SwapError::InvalidHandoff(
+                "account and asset must be non-empty".into(),
+            ));
+        }
+        if self.idempotency_key != format!("swap:{}", self.transaction_id) {
+            return Err(SwapError::InvalidHandoff(
+                "idempotency key does not match transaction".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Outcome of handing a transaction to the swap engine.
@@ -107,7 +128,8 @@ impl std::error::Error for SwapError {}
 /// Transport-agnostic: an implementation may run in-process, call out to a
 /// separate microservice, or drive an on-chain contract. It is handed a
 /// [`SwapHandoff`] and reports a [`SwapOutcome`]. Implementations must be
-/// idempotent on `handoff.idempotency_key`.
+/// idempotent on `handoff.idempotency_key`, and must call
+/// [`SwapHandoff::validate`] before acting on a hand-off.
 #[async_trait]
 pub trait SwapEngine: Send + Sync {
     /// Short identifier for logs/metrics (e.g. `"noop"`, `"in-process-v1"`).
