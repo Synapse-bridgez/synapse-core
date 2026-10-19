@@ -212,7 +212,8 @@ async fn serve(
         24,
         Some(query_cache.clone()),
         config.partition_lookahead_months,
-    );
+    )
+    .with_swap_retention_months(config.swap_retention_months);
     assert!(
         partition_manager.has_cache(),
         "PartitionManager must be constructed with a cache so create_partition's \

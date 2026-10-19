@@ -226,6 +226,8 @@ pub struct Config {
     pub partition_lookahead_months: u32,
     pub partition_lookahead_min: u32,
     pub partition_lookahead_max: u32,
+    // Months of swap order/quote/fill/event partitions to retain before detaching
+    pub swap_retention_months: i32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
 }
@@ -373,6 +375,9 @@ impl Config {
                 .unwrap_or_else(|_| "1".to_string())
                 .parse()?,
             partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
+            swap_retention_months: env::var("SWAP_RETENTION_MONTHS")
                 .unwrap_or_else(|_| "12".to_string())
                 .parse()?,
             partition_lookahead_months: {
