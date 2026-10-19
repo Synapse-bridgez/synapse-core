@@ -132,6 +132,23 @@ pub mod codes {
         400,
         "Query exceeds depth, complexity, or alias limits",
     );
+
+    // Swap order errors
+    pub const SWAP_001: (&str, u16, &str) = (
+        "ERR_SWAP_001",
+        409,
+        "Swap order is not in a cancellable state",
+    );
+    pub const SWAP_002: (&str, u16, &str) = (
+        "ERR_SWAP_002",
+        409,
+        "Swap request conflicts with an existing order",
+    );
+    pub const SWAP_003: (&str, u16, &str) = (
+        "ERR_SWAP_003",
+        400,
+        "Deposit transaction is not eligible for a swap",
+    );
 }
 
 /// Get all error codes as a vector for catalog generation
@@ -252,6 +269,21 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             http_status: codes::QUERY_COMPLEXITY_001.1,
             description: codes::QUERY_COMPLEXITY_001.2,
         },
+        ErrorCode {
+            code: codes::SWAP_001.0,
+            http_status: codes::SWAP_001.1,
+            description: codes::SWAP_001.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_002.0,
+            http_status: codes::SWAP_002.1,
+            description: codes::SWAP_002.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_003.0,
+            http_status: codes::SWAP_003.1,
+            description: codes::SWAP_003.2,
+        },
     ]
 }
 
@@ -327,6 +359,15 @@ pub enum AppError {
     #[error("Insufficient permissions: {0}")]
     InsufficientPermissions(String),
 
+    #[error("Swap order not cancellable: {0}")]
+    SwapNotCancellable(String),
+
+    #[error("Swap conflict: {0}")]
+    SwapConflict(String),
+
+    #[error("Deposit not eligible for swap: {0}")]
+    SwapDepositIneligible(String),
+
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
 
@@ -360,6 +401,9 @@ impl AppError {
             AppError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
+            AppError::SwapNotCancellable(_) => StatusCode::CONFLICT,
+            AppError::SwapConflict(_) => StatusCode::CONFLICT,
+            AppError::SwapDepositIneligible(_) => StatusCode::BAD_REQUEST,
             AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -392,6 +436,9 @@ impl AppError {
             AppError::RateLimitExceeded => codes::RATE_LIMIT_001.0,
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
+            AppError::SwapNotCancellable(_) => codes::SWAP_001.0,
+            AppError::SwapConflict(_) => codes::SWAP_002.0,
+            AppError::SwapDepositIneligible(_) => codes::SWAP_003.0,
             AppError::Redis(_) => codes::REDIS_001.0,
             AppError::Anyhow(_) => codes::INTERNAL_001.0,
         }

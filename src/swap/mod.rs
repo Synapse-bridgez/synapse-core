@@ -3,9 +3,10 @@
 //! This repository is Phase 1 of Synapse Bridge (transaction preparation). A
 //! future swap engine - in this repo, a separate service, or an external
 //! contract-based system - takes over once a transaction reaches the
-//! [`swap_ready`](crate::validation) state. This module defines **only** the
-//! hand-off contract and the trait that a swap-engine implementation must
-//! satisfy; it contains no swap or DEX-routing logic.
+//! [`swap_ready`](crate::validation) state. This module defines the hand-off
+//! contract and the trait that a swap-engine implementation must satisfy, plus
+//! the [`orders`] lifecycle behind the REST `/swaps` endpoints. It contains no
+//! swap or DEX-routing logic.
 //!
 //! See `docs/state-machine.md` (`### swap_ready`, "Phase 2 hand-off") for how
 //! this fits the existing transaction pipeline.
@@ -22,6 +23,8 @@ use std::fmt;
 
 use crate::db::models::Transaction;
 use crate::services::feature_flags::FeatureFlagService;
+
+pub mod orders;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";

@@ -31,7 +31,7 @@
 //! - Sensitive data (passwords, tokens) never logged; only query structure logged
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Settlement, Transaction};
+use crate::db::models::{Settlement, SwapOrder, Transaction};
 use crate::services::query_cache::QueryCache;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
@@ -2888,6 +2888,137 @@ pub async fn get_transaction_notes(
                 cursor: next_cursor,
             })
         },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Swap orders (REST /swaps)
+// ---------------------------------------------------------------------------
+
+/// Insert a pending swap order. Returns `None` when `(tenant_id, idempotency_key)`
+/// already exists, so the caller can replay the original order.
+pub async fn insert_swap_order(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    idempotency_key: &str,
+    deposit_transaction_id: Option<Uuid>,
+    source_asset: &str,
+    target_asset: &str,
+    amount: &BigDecimal,
+) -> Result<Option<SwapOrder>> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_orders",
+        sqlx::query_as::<_, SwapOrder>(
+            "INSERT INTO swap_orders \
+                 (tenant_id, idempotency_key, deposit_transaction_id, source_asset, target_asset, amount) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING \
+             RETURNING *",
+        )
+        .bind(tenant_id)
+        .bind(idempotency_key)
+        .bind(deposit_transaction_id)
+        .bind(source_asset)
+        .bind(target_asset)
+        .bind(amount)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+/// Tenant-scoped swap order lookup by id. Missing and other-tenant orders both
+/// surface as `RowNotFound`, which `From<sqlx::Error> for AppError` maps to 404.
+pub async fn get_swap_order_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<SwapOrder> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT swap_orders BY id",
+        sqlx::query_as::<_, SwapOrder>(
+            "SELECT * FROM swap_orders WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_one(pool),
+    )
+    .await
+}
+
+/// Tenant-scoped lookup by client idempotency key.
+pub async fn get_swap_order_by_idempotency_key(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    idempotency_key: &str,
+) -> Result<Option<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT swap_orders BY idempotency_key",
+        sqlx::query_as::<_, SwapOrder>(
+            "SELECT * FROM swap_orders WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(tenant_id)
+        .bind(idempotency_key)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+/// One page of a tenant's swap orders, newest first.
+pub async fn list_swap_orders_for_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT swap_orders page",
+        sqlx::query_as::<_, SwapOrder>(
+            "SELECT * FROM swap_orders WHERE tenant_id = $1 \
+             ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+/// Total number of swap orders for a tenant, for pagination.
+pub async fn count_swap_orders_for_tenant(pool: &PgPool, tenant_id: Uuid) -> Result<i64> {
+    with_timeout(
+        QueryTier::Read,
+        "COUNT swap_orders",
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM swap_orders WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_one(pool),
+    )
+    .await
+}
+
+/// Move a `pending` order to `cancelled`. Returns `None` when no pending order
+/// matches, so the caller can tell "not found" apart from "not cancellable".
+pub async fn cancel_swap_order(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Option<SwapOrder>> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_orders SET status = 'cancelled'",
+        sqlx::query_as::<_, SwapOrder>(
+            "UPDATE swap_orders SET status = 'cancelled', updated_at = now() \
+             WHERE id = $1 AND tenant_id = $2 AND status = 'pending' \
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool),
     )
     .await
 }

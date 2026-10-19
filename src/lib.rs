@@ -294,6 +294,13 @@ pub fn create_app(app_state: AppState) -> Router {
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
         )
+        // Swap orders (#1423): tenant-scoped, TenantContext-authenticated.
+        .route(
+            "/swaps",
+            get(handlers::swaps::list_swap_orders).post(handlers::swaps::create_swap_order),
+        )
+        .route("/swaps/:id", get(handlers::swaps::get_swap_order))
+        .route("/swaps/:id/cancel", post(handlers::swaps::cancel_swap_order))
         // Tenant-facing usage: the caller's own latency histograms (#1337).
         .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
 

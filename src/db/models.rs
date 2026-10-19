@@ -508,3 +508,20 @@ impl Asset {
         Ok(exists)
     }
 }
+
+/// A swap order row (`swap_orders`). Created via `POST /swaps`.
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub idempotency_key: String,
+    pub deposit_transaction_id: Option<Uuid>,
+    pub source_asset: String,
+    pub target_asset: String,
+    pub amount: BigDecimal,
+    pub status: String,
+    pub quote: Option<serde_json::Value>,
+    pub execution: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
