@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use synapse_cli::commands::{
-    doctor, events, graphql, health, settlements, stats, transactions, Cli, Commands,
+    doctor, events, graphql, health, settlements, stats, swap, transactions, Cli, Commands,
 };
 use synapse_cli::profile::{self, ProfileStore};
 
@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         }
         Commands::Health(cmd) => health::run(cmd, &base_url, &api_key).await,
         Commands::Stats(cmd) => stats::run(cmd, &base_url, &api_key).await,
+        Commands::Swap(cmd) => swap::run(cmd.command, &base_url, &api_key).await,
         Commands::Settlements(cmd) => settlements::run(cmd.command, &base_url, &api_key).await,
         Commands::Transactions(cmd) => transactions::run(cmd.command, &base_url, &api_key).await,
         Commands::Graphql(cmd) => graphql::run(cmd.command, &base_url, &api_key).await,
@@ -183,7 +184,7 @@ fn prompt(label: &str, default: &str) -> Result<String> {
 fn is_mutating(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Admin(_) | Commands::Settlements(_) | Commands::Transactions(_)
+        Commands::Admin(_) | Commands::Settlements(_) | Commands::Swap(_) | Commands::Transactions(_)
     )
 }
 }
