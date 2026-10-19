@@ -200,3 +200,32 @@ Result: Task B gets 409 Conflict
 | Duplicate rule definitions eliminated | 2 |
 | New error variants | 1 |
 | Test cases added | 10+ |
+
+## Swap Order Execution (#1436)
+
+Status is governed by `SWAP_ORDER_TRANSITIONS` in `src/swap/order.rs`; every change goes
+through `execution::transition_order` (guard + conditional `WHERE status = from AND lease_owner = me`).
+
+```
+quoted ──► executing ──► filled
+   │          ├──► partially_filled ──► filled
+   │          └──► reconciling  (venue timeout / unknown outcome)
+   │                 └──► filled / partially_filled
+   └──► failed  (also from executing / partially_filled / reconciling:
+                 permanent venue error, retries exhausted)
+```
+
+Flow per attempt (events in `swap_order_events`: started, submitted, partially_filled, filled, failed):
+
+1. Worker leases orders with `FOR UPDATE SKIP LOCKED`, setting `lease_owner`/`lease_expires_at`
+   (visibility timeout; crashed workers' orders are reclaimed once the lease expires).
+2. `quoted → executing`, then `ExecutionVenue::submit` with idempotency key `swap-order:<order_id>`,
+   so a crash mid-submission re-submits the same key and the venue dedupes.
+3. Fills are inserted into `swap_fills` (unique on `order_id, venue_fill_id`, so replays are no-ops)
+   and the total is reconciled from the table; total >= amount → `filled`, else `partially_filled`.
+4. `Transient` → lease released with exponential backoff, up to `max_attempts`, then `failed`
+   (`RETRIES_EXHAUSTED`). `Permanent` → `failed` (`VENUE_REJECTED`).
+5. `Unknown` (timeout) → `reconciling`; later attempts only call `ExecutionVenue::lookup`, never
+   `submit`. Exhaustion → `failed` (`RECONCILIATION_FAILED`).
+
+The worker is started in `main.rs` only when `SWAP_ENGINE_ENABLED=true`.

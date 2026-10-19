@@ -486,6 +486,25 @@ async fn serve(
         pool_monitor_task(monitor_pool).await;
     });
 
+    // Swap order execution worker (#1436), opt-in via SWAP_ENGINE_ENABLED.
+    // Orders for a venue with no registration here are released back to the
+    // queue (never failed) so a replica that has the venue can pick them up.
+    if std::env::var("SWAP_ENGINE_ENABLED")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+    {
+        let venues: std::collections::HashMap<
+            String,
+            Arc<dyn synapse_core::swap::execution::ExecutionVenue>,
+        > = std::collections::HashMap::new();
+        tokio::spawn(synapse_core::swap::execution::run_worker(
+            pool.clone(),
+            venues,
+            synapse_core::swap::execution::ExecutionConfig::default(),
+        ));
+        tracing::info!("Swap execution worker started");
+    }
+
     // Background task: alert if the dead quota:config:* Redis key space
     // (see handlers::admin::quota::set_tenant_quota and
     // middleware::quota::QuotaManager::scan_stale_quota_configs) is
