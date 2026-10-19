@@ -52,6 +52,12 @@
 //! | `tokio_task_leak_suspected_total` | Counter    | Load-uncorrelated task growth detections, by category |
 //! | `pipeline_stage_latency_ms`       | Histogram  | Latency attributed to each pipeline stage (latency budget) |
 //! | `pipeline_stage_budget_utilization` | Gauge    | Stage P95 / stage budget, by stage |
+//! | `swap_orders_total`               | Counter    | Swap order lifecycle events, labeled by event (created, quoted, executed, settled, failed, rejected) and engine |
+//! | `swap_stage_latency_ms`           | Histogram  | Latency per swap stage (quote, execute, settle, handoff), labeled by stage and outcome |
+//! | `swap_orders_in_flight`           | UpDownCounter | Swap hand-offs currently awaiting a result from the swap engine |
+//!
+//! Swap metrics never carry `order_id` or `tenant_id` labels: those belong in
+//! logs and trace spans (see `docs/metrics-cardinality-convention.md`).
 //!
 //! ## Configuration
 //!
@@ -62,7 +68,7 @@
 
 use opentelemetry::{
     global,
-    metrics::{Counter, Histogram, Meter, ObservableGauge, Unit},
+    metrics::{Counter, Histogram, Meter, ObservableGauge, Unit, UpDownCounter},
     KeyValue,
 };
 use opentelemetry_otlp::WithExportConfig;
@@ -347,6 +353,37 @@ pub fn account_monitor_concurrent_write_prevented_total() -> Counter<u64> {
             "AccountMonitor completion writes that lost a row-lock race for the same \
              candidate transaction, prevented from overwriting a concurrent winner",
         )
+        .init()
+}
+
+/// Swap order lifecycle counter, labeled by `event` (`created`, `quoted`,
+/// `executed`, `settled`, `failed`, `rejected`) and `engine`. Both label sets
+/// are closed: `event` is an enum and `engine` is the configured
+/// `SwapEngine::name()`.
+pub fn swap_orders_total() -> Counter<u64> {
+    meter()
+        .u64_counter("swap_orders_total")
+        .with_description("Swap order lifecycle events, labeled by event and engine")
+        .init()
+}
+
+/// Per-stage swap latency histogram (milliseconds), labeled by `stage`
+/// (`quote`, `execute`, `settle`, `handoff`) and `outcome` (`ok`, `error`,
+/// `skipped`, `deferred`).
+pub fn swap_stage_latency_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("swap_stage_latency_ms")
+        .with_description("Latency of each swap stage in milliseconds")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Swap hand-offs currently in flight at the swap engine. A value that never
+/// returns to zero indicates stuck hand-offs.
+pub fn swap_orders_in_flight() -> UpDownCounter<i64> {
+    meter()
+        .i64_up_down_counter("swap_orders_in_flight")
+        .with_description("Swap hand-offs currently awaiting a result from the swap engine")
         .init()
 }
 
