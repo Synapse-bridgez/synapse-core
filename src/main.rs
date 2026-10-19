@@ -135,6 +135,12 @@ async fn serve(
     config: config::Config,
     tracer_manager: synapse_core::telemetry::TracerManager,
 ) -> anyhow::Result<()> {
+    // The Phase 2 swap engine registers no routes or background tasks yet;
+    // this only records that the flag is on so operators can see it at boot.
+    if config.swap.engine_enabled {
+        tracing::info!("Swap engine enabled via SWAP_ENGINE_ENABLED; no swap routes or workers are registered yet");
+    }
+
     let pool = db::create_pool(&config).await?;
 
     // Initialize pool manager for multi-region failover.

@@ -31,6 +31,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use crate::swap::SwapError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -132,6 +133,11 @@ pub mod codes {
         400,
         "Query exceeds depth, complexity, or alias limits",
     );
+
+    // Swap engine (Phase 2) errors
+    pub const SWAP_001: (&str, u16, &str) = ("ERR_SWAP_001", 503, "Swap engine unavailable");
+    pub const SWAP_002: (&str, u16, &str) = ("ERR_SWAP_002", 400, "Invalid swap hand-off");
+    pub const SWAP_003: (&str, u16, &str) = ("ERR_SWAP_003", 500, "Swap engine internal error");
 }
 
 /// Get all error codes as a vector for catalog generation
@@ -252,6 +258,21 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             http_status: codes::QUERY_COMPLEXITY_001.1,
             description: codes::QUERY_COMPLEXITY_001.2,
         },
+        ErrorCode {
+            code: codes::SWAP_001.0,
+            http_status: codes::SWAP_001.1,
+            description: codes::SWAP_001.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_002.0,
+            http_status: codes::SWAP_002.1,
+            description: codes::SWAP_002.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_003.0,
+            http_status: codes::SWAP_003.1,
+            description: codes::SWAP_003.2,
+        },
     ]
 }
 
@@ -330,6 +351,9 @@ pub enum AppError {
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
 
+    #[error("Swap error: {0}")]
+    Swap(#[from] SwapError),
+
     #[error("Internal error: {0}")]
     Anyhow(#[from] anyhow::Error),
 }
@@ -361,6 +385,9 @@ impl AppError {
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
             AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Swap(SwapError::Unavailable) => StatusCode::SERVICE_UNAVAILABLE,
+            AppError::Swap(SwapError::InvalidHandoff(_)) => StatusCode::BAD_REQUEST,
+            AppError::Swap(SwapError::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -393,6 +420,9 @@ impl AppError {
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
             AppError::Redis(_) => codes::REDIS_001.0,
+            AppError::Swap(SwapError::Unavailable) => codes::SWAP_001.0,
+            AppError::Swap(SwapError::InvalidHandoff(_)) => codes::SWAP_002.0,
+            AppError::Swap(SwapError::Internal(_)) => codes::SWAP_003.0,
             AppError::Anyhow(_) => codes::INTERNAL_001.0,
         }
     }
@@ -415,6 +445,7 @@ impl AppError {
                 "A database error occurred".to_string()
             }
             AppError::Redis(_) => "A backend service error occurred".to_string(),
+            AppError::Swap(SwapError::Internal(_)) => "A swap engine error occurred".to_string(),
             AppError::Anyhow(_) => "An internal error occurred".to_string(),
             other => other.to_string(),
         }
@@ -436,6 +467,9 @@ impl AppError {
             }
             AppError::Redis(e) => {
                 tracing::error!(context, cause = %e, "redacting raw error cause from client response")
+            }
+            AppError::Swap(SwapError::Internal(raw)) => {
+                tracing::error!(context, cause = %raw, "redacting raw error cause from client response")
             }
             AppError::Anyhow(e) => {
                 tracing::error!(context, cause = %e, "redacting raw error cause from client response")

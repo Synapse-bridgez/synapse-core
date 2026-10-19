@@ -2,7 +2,9 @@ use crate::secrets::SecretsManager;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
+use sqlx::types::BigDecimal;
 use std::env;
+use std::str::FromStr;
 
 /// Active environment profile
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +162,58 @@ impl PerClassTimeoutConfig {
     }
 }
 
+/// Phase 2 swap engine settings. All variables are optional; the engine is
+/// disabled by default and nothing in `src/swap` is wired while it is off.
+#[derive(Debug, Clone)]
+pub struct SwapConfig {
+    /// Master switch for the swap engine (`SWAP_ENGINE_ENABLED`). Default: false
+    pub engine_enabled: bool,
+    /// Largest order accepted, in source-asset units (`SWAP_MAX_ORDER_AMOUNT`). Default: 10000
+    pub max_order_amount: BigDecimal,
+    /// Engine fee in basis points, 1 bp = 0.01% (`SWAP_FEE_BPS`). Default: 0
+    pub fee_bps: u32,
+    /// Lifetime of an issued quote in seconds (`SWAP_QUOTE_TTL_SECONDS`). Default: 30
+    pub quote_ttl_seconds: u64,
+}
+
+impl Default for SwapConfig {
+    fn default() -> Self {
+        Self {
+            engine_enabled: false,
+            max_order_amount: BigDecimal::from(10_000),
+            fee_bps: 0,
+            quote_ttl_seconds: 30,
+        }
+    }
+}
+
+impl SwapConfig {
+    /// Load swap settings from the environment, falling back to
+    /// [`SwapConfig::default`] for any variable that is unset. Invalid values
+    /// fail startup and name the offending variable.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        let config = Self {
+            engine_enabled: parse_bool_env("SWAP_ENGINE_ENABLED", defaults.engine_enabled)?,
+            max_order_amount: parse_env_or("SWAP_MAX_ORDER_AMOUNT", defaults.max_order_amount)?,
+            fee_bps: parse_env_or("SWAP_FEE_BPS", defaults.fee_bps)?,
+            quote_ttl_seconds: parse_env_or("SWAP_QUOTE_TTL_SECONDS", defaults.quote_ttl_seconds)?,
+        };
+
+        if config.max_order_amount <= BigDecimal::from(0) {
+            anyhow::bail!("SWAP_MAX_ORDER_AMOUNT must be greater than 0");
+        }
+        if config.fee_bps > 10_000 {
+            anyhow::bail!("SWAP_FEE_BPS must be between 0 and 10000 (100%)");
+        }
+        if config.quote_ttl_seconds == 0 {
+            anyhow::bail!("SWAP_QUOTE_TTL_SECONDS must be greater than 0");
+        }
+
+        Ok(config)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -228,6 +282,8 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Phase 2 swap engine (disabled by default)
+    pub swap: SwapConfig,
 }
 
 pub mod assets;
@@ -407,6 +463,7 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            swap: SwapConfig::from_env()?,
         })
     }
 }
@@ -429,6 +486,36 @@ fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
     }
 
     Ok(AllowedIps::Cidrs(cidrs))
+}
+
+/// Parse an optional env var, returning `default` when it is unset. A bad value
+/// is reported with the variable name so startup failures are easy to trace.
+fn parse_env_or<T>(key: &str, default: T) -> anyhow::Result<T>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    match env::var(key) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<T>()
+            .map_err(|e| anyhow::anyhow!("{key} has invalid value '{raw}': {e}")),
+        Err(_) => Ok(default),
+    }
+}
+
+/// Parse an optional boolean env var. Only `true`/`false` and `1`/`0`
+/// (case-insensitive) are accepted; anything else is rejected at startup
+/// rather than guessed at.
+fn parse_bool_env(key: &str, default: bool) -> anyhow::Result<bool> {
+    match env::var(key) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => anyhow::bail!("{key} must be 'true', 'false', '1' or '0' (got '{raw}')"),
+        },
+        Err(_) => Ok(default),
+    }
 }
 
 fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {

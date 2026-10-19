@@ -3,9 +3,23 @@
 //! This repository is Phase 1 of Synapse Bridge (transaction preparation). A
 //! future swap engine - in this repo, a separate service, or an external
 //! contract-based system - takes over once a transaction reaches the
-//! [`swap_ready`](crate::validation) state. This module defines **only** the
-//! hand-off contract and the trait that a swap-engine implementation must
-//! satisfy; it contains no swap or DEX-routing logic.
+//! [`swap_ready`](crate::validation) state. This module defines the hand-off
+//! contract, the engine trait, and the typed boundaries the engine is built
+//! from. It contains no swap or DEX-routing logic.
+//!
+//! Submodules, each owning one stage of the engine:
+//!
+//! - [`quote`]: [`QuoteSource`](quote::QuoteSource) - prices a request.
+//! - [`order`]: [`SwapOrder`](order::SwapOrder) - the engine's order record.
+//! - [`risk`]: [`RiskDecision`](risk::RiskDecision) - approve or reject an order.
+//! - [`execution`]: [`ExecutionVenue`](execution::ExecutionVenue) - runs an order.
+//! - [`settlement`]: [`SettlementAdapter`](settlement::SettlementAdapter) - delivers the output.
+//! - [`events`]: [`SwapEvent`](events::SwapEvent) - lifecycle events.
+//! - [`error`]: [`SwapError`] - the error type shared by all of the above.
+//!
+//! Engine settings live in [`SwapConfig`](crate::config::SwapConfig). The
+//! engine is disabled by default (`SWAP_ENGINE_ENABLED=false`) and registers
+//! no routes or background tasks while disabled.
 //!
 //! See `docs/state-machine.md` (`### swap_ready`, "Phase 2 hand-off") for how
 //! this fits the existing transaction pipeline.
@@ -16,12 +30,21 @@
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
 
+pub mod error;
+pub mod events;
+pub mod execution;
+pub mod order;
+pub mod quote;
+pub mod risk;
+pub mod settlement;
+
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
-use std::fmt;
 
 use crate::db::models::Transaction;
 use crate::services::feature_flags::FeatureFlagService;
+
+pub use error::SwapError;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
@@ -78,29 +101,6 @@ pub enum SwapOutcome {
     /// The engine accepted the hand-off and started a swap.
     Routed { swap_id: String },
 }
-
-/// Error returned by a [`SwapEngine`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwapError {
-    /// The engine is unreachable or not ready.
-    Unavailable,
-    /// The hand-off is malformed or references data the engine cannot use.
-    InvalidHandoff(String),
-    /// The engine failed internally.
-    Internal(String),
-}
-
-impl fmt::Display for SwapError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SwapError::Unavailable => write!(f, "swap engine unavailable"),
-            SwapError::InvalidHandoff(m) => write!(f, "invalid swap hand-off: {m}"),
-            SwapError::Internal(m) => write!(f, "swap engine internal error: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for SwapError {}
 
 /// The interface a Phase 2 swap-engine implementation must satisfy.
 ///
