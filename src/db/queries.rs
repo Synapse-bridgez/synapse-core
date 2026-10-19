@@ -31,8 +31,9 @@
 //! - Sensitive data (passwords, tokens) never logged; only query structure logged
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Settlement, Transaction};
+use crate::db::models::{Settlement, SwapOrder, Transaction};
 use crate::services::query_cache::QueryCache;
+use crate::swap::execution::SwapExecutionRecord;
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -1235,6 +1236,84 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
             .fetch_one(pool),
     )
     .await
+}
+
+/// Atomically moves a `quoted` swap order to `executing`. Returns `None` when the
+/// order is missing or no longer `quoted`, which is how concurrent execution
+/// attempts on the same order are rejected.
+pub async fn claim_quoted_swap_order(pool: &PgPool, id: Uuid) -> Result<Option<SwapOrder>> {
+    sqlx::query_as::<_, SwapOrder>(
+        "UPDATE swap_orders SET status = 'executing', updated_at = NOW() \
+         WHERE id = $1 AND status = 'quoted' RETURNING *",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Moves an `executing` swap order to the terminal `status` and inserts its
+/// execution record in one transaction. Returns `false` if the order was not
+/// `executing`, in which case nothing is written.
+pub async fn finish_swap_order(
+    pool: &PgPool,
+    status: &str,
+    record: &SwapExecutionRecord,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    let updated = sqlx::query(
+        "UPDATE swap_orders SET status = $2, updated_at = NOW() \
+         WHERE id = $1 AND status = 'executing'",
+    )
+    .bind(record.order_id)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    if updated == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    sqlx::query(
+        "INSERT INTO swap_executions (order_id, idempotency_key, venue, executed_amount_in, \
+         executed_amount_out, fee, venue_reference, attempts, failure_reason, failure_detail, \
+         started_at, completed_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(record.order_id)
+    .bind(&record.idempotency_key)
+    .bind(&record.venue)
+    .bind(&record.executed_amount_in)
+    .bind(&record.executed_amount_out)
+    .bind(&record.fee)
+    .bind(&record.venue_reference)
+    .bind(record.attempts)
+    .bind(record.failure_reason.map(|reason| reason.as_str()))
+    .bind(&record.failure_detail)
+    .bind(record.started_at)
+    .bind(record.completed_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Returns swap orders left in `executing` since before `older_than` (for
+/// example after a crash mid-execution) to `quoted` so they can be retried.
+/// Retrying is safe because venues dedupe on the order's idempotency key.
+pub async fn requeue_stale_swap_orders(pool: &PgPool, older_than: DateTime<Utc>) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE swap_orders SET status = 'quoted', updated_at = NOW() \
+         WHERE status = 'executing' AND updated_at < $1",
+    )
+    .bind(older_than)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 /// Tenant-scoped settlement lookup used by GET /settlements/:id.

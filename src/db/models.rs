@@ -168,6 +168,21 @@ pub struct Settlement {
     pub destination_account: Option<String>,
 }
 
+/// A Phase 2 swap order. `status` is one of `quoted`, `executing`, `settled`,
+/// `failed` (see `swap_orders` in migrations).
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub transaction_id: Uuid,
+    pub source_asset: String,
+    pub target_asset: String,
+    pub amount: BigDecimal,
+    pub minimum_output: BigDecimal,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[async_graphql::Object]
 impl Settlement {
     async fn id(&self) -> String {
