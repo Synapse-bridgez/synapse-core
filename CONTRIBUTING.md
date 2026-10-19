@@ -9,6 +9,7 @@ Thank you for your interest in contributing to Synapse Core! This guide will hel
 - [Code Style Guide](#code-style-guide)
 - [Testing Requirements](#testing-requirements)
 - [Pull Request Process](#pull-request-process)
+- [Documentation Translations](#documentation-translations)
 - [Architecture Decision Records](#architecture-decision-records)
 - [Maintainer Rotation & On-Call](#maintainer-rotation--on-call)
 - [Communication](#communication)
@@ -473,6 +474,26 @@ docs: Update API authentication guide
 4. **Maintainer merges** once approved and CI passes
 
 See [Maintainer Rotation & On-Call](#maintainer-rotation--on-call) to find the current reviewer.
+
+## Documentation Translations
+
+Translations of the key onboarding docs (`README.md`, `CONTRIBUTING.md`, `docs/QUICK_START.md`) are welcome. They must be written by a human fluent in the target language; machine-translated content will not be merged.
+
+1. **Open an issue first** (or comment on an existing one) so two people don't translate the same file.
+2. **Copy the English source** to `docs/i18n/<lang>/`, using the BCP 47 language tag as the directory name (`es`, `pt-BR`, `zh-Hans`). Keep the file name of the source: `README.md`, `CONTRIBUTING.md`, or `QUICK_START.md`.
+3. **Add front matter** at the very top of the file that records what the translation reflects:
+
+   ```markdown
+   ---
+   source: docs/QUICK_START.md
+   source_commit: <full SHA of the last commit that changed the source file>
+   ---
+   ```
+
+   Get the SHA with `git log -1 --format=%H -- docs/QUICK_START.md`. `source` must be one of the three key docs above, relative to the repo root.
+4. **Translate and open a PR** with the `docs` label.
+
+Every PR runs `scripts/check-i18n-staleness.py`. A translation is **stale** when its source file has changed between `source_commit` and `HEAD`; the check posts a warning annotation for each stale file. Stale translations are not deleted, but they must be brought up to date (or the `source_commit` bumped after a review of the source changes) before the next release. See [`docs/i18n/README.md`](docs/i18n/README.md) for the full process and the list of available languages.
 
 ## Architecture Decision Records
 
