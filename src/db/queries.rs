@@ -32,7 +32,9 @@
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::db::outbox;
 use crate::services::query_cache::QueryCache;
+use crate::swap::events::{EVENT_TRANSACTION_CREATED, EVENT_TRANSACTION_STATUS_CHANGED};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -788,7 +790,7 @@ async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
 ) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+    let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
@@ -813,7 +815,10 @@ async fn persist_transaction(
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
     .fetch_one(&mut **db_tx)
-    .await
+    .await?;
+
+    outbox::enqueue_transaction_event(db_tx, result.id, EVENT_TRANSACTION_CREATED).await?;
+    Ok(result)
 }
 
 async fn audit_transaction_creation(
@@ -2307,6 +2312,9 @@ pub async fn bulk_update_transaction_status(
         .await?;
 
     for &id in &valid_ids {
+        outbox::enqueue_transaction_event(&mut db_tx, id, EVENT_TRANSACTION_STATUS_CHANGED)
+            .await?;
+
         let old_status = old_statuses
             .get(&id)
             .map(|s| s.as_str())

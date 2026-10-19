@@ -550,6 +550,15 @@ async fn serve(
     }
     let processor_shutdown = processor_pool.start();
 
+    // Outbox publisher for lifecycle events. Local dev uses the log sink; deployed
+    // environments should pass a broker-backed `EventPublisher` here.
+    let (outbox_shutdown, outbox_shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(synapse_core::db::outbox::run_outbox_worker(
+        pool.clone(),
+        Arc::new(synapse_core::db::outbox::LogEventPublisher),
+        outbox_shutdown_rx,
+    ));
+
     // Register and start scheduled jobs
     let scheduler = synapse_core::services::JobScheduler::new();
     let stellar_account = std::env::var("RECONCILIATION_ACCOUNT").ok();
@@ -710,6 +719,7 @@ async fn serve(
     // Stop background workers from claiming new work *before* draining DB
     // connections, so in-flight queries aren't force-cut when the pool closes.
     let _ = processor_shutdown.send(true);
+    let _ = outbox_shutdown.send(true);
     if let Err(e) = scheduler.stop().await {
         tracing::warn!("Error stopping job scheduler: {}", e);
     }
