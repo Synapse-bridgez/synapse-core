@@ -188,6 +188,46 @@ Result: Task B gets 409 Conflict
 | Concurrent settlement mod | `StaleTransition` | 409 | **SETTLEMENT_003** |
 | Settlement not found | `NotFound` | 404 | NOT_FOUND_001 |
 
+## Swap Order State Machine
+
+Phase 2 (`src/swap/order.rs`). Pure domain logic: `SwapState::transition_to`
+enforces the table below, and `SwapOrder` applies it with caller-supplied UTC
+timestamps and actor metadata.
+
+```
+swap_ready → quote_requested → quoted → order_created → executing → executed → settlement_pending → settled
+
+Off-path exits:
+  quoted → expired                  (quote TTL elapsed)
+  any non-terminal state → failed
+  swap_ready / quote_requested / quoted / order_created → cancelled
+
+Terminal states: settled, failed, cancelled, expired (no outgoing edges)
+```
+
+Valid transitions (`SwapState::allowed_next`):
+
+| From | To |
+|------|----|
+| `swap_ready` | `quote_requested`, `cancelled`, `failed` |
+| `quote_requested` | `quoted`, `cancelled`, `failed` |
+| `quoted` | `order_created`, `expired`, `cancelled`, `failed` |
+| `order_created` | `executing`, `cancelled`, `failed` |
+| `executing` | `executed`, `failed` |
+| `executed` | `settlement_pending`, `failed` |
+| `settlement_pending` | `settled`, `failed` |
+
+Guards:
+
+- Self-transitions (`X → X`) are rejected with `SelfTransition`. Unlike the
+  transaction states above, swap states are not idempotent.
+- `quoted` is entered only via `SwapOrder::record_quote`, which rejects a quote
+  for another pair or one already expired.
+- `order_created` requires an unexpired quote at the transition instant.
+  An expired quote is rejected with `QuoteExpired` and the state is unchanged;
+  the order may only move forward to `expired`, never back to `quoted`.
+- Stable string names (`as_str`, serde, `FromStr`) match the snake_case names above.
+
 ## Summary Statistics
 
 | Metric | Count |
