@@ -228,6 +228,9 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    /// How often the asset registry reloads from Postgres, in seconds.
+    /// Failed reloads keep the last known good registry.
+    pub asset_registry_refresh_secs: u64,
 }
 
 pub mod assets;
@@ -407,6 +410,9 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            asset_registry_refresh_secs: env::var("ASSET_REGISTRY_REFRESH_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()?,
         })
     }
 }

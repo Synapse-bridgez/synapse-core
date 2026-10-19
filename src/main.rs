@@ -427,9 +427,12 @@ async fn serve(
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
         config.processor_min_batch as u64,
     ));
-    // Initialize asset registry cache (refreshes every 5 minutes)
-    let _asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+    // Initialize asset registry cache (refresh interval: ASSET_REGISTRY_REFRESH_SECS)
+    let _asset_cache = synapse_core::AssetCache::start(
+        pool.clone(),
+        std::time::Duration::from_secs(config.asset_registry_refresh_secs),
+    )
+    .await;
     tracing::info!("Asset registry cache initialized");
     let app_state = AppState {
         db: pool.clone(),
