@@ -853,12 +853,12 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
 }
 
 /// Tenant-scoped equivalent of [`get_transaction`] used by GET
-/// /transactions/:id. `tenant_id IS NULL` rows are legacy/pre-migration data
-/// and remain visible to every tenant, matching the RLS policy in
-/// migrations/20260501000000_tenant_rls.sql — this is an application-level
-/// mirror of that policy (defense in depth), not a substitute for it: RLS
-/// still applies underneath regardless of whether this WHERE clause is
-/// present, since the connected role no longer bypasses it.
+/// /transactions/:id. Partitioning is strict: rows with `tenant_id IS NULL`
+/// are not visible to any tenant (they are admin-only), matching the RLS
+/// policy redefined in migrations/20260928000000_strict_tenant_partition.sql.
+/// This is an application-level mirror of that policy (defense in depth), not
+/// a substitute for it: RLS still applies underneath regardless of whether
+/// this WHERE clause is present, since the connected role no longer bypasses it.
 pub async fn get_transaction_for_tenant(
     pool: &PgPool,
     id: Uuid,
@@ -866,9 +866,9 @@ pub async fn get_transaction_for_tenant(
 ) -> Result<Transaction> {
     with_timeout(
         QueryTier::Read,
-        "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        "SELECT * FROM transactions WHERE id = $1 AND tenant_id = $2",
         sqlx::query_as::<_, Transaction>(
-            "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+            "SELECT * FROM transactions WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
         .bind(tenant_id)
@@ -1015,8 +1015,8 @@ pub async fn list_transactions_filtered(
 }
 
 /// Tenant-scoped equivalent of [`list_transactions_filtered`] used by GET
-/// /transactions. See [`get_transaction_for_tenant`] for the NULL-tenant and
-/// defense-in-depth notes — identical rules apply here.
+/// /transactions. See [`get_transaction_for_tenant`] for the strict-partition
+/// and defense-in-depth notes — identical rules apply here.
 pub async fn list_transactions_filtered_for_tenant(
     pool: &PgPool,
     limit: i64,
@@ -1059,7 +1059,7 @@ pub async fn list_transactions_filtered_for_tenant(
                 bind_idx += 1;
             }
 
-            conditions.push(format!("(tenant_id = ${} OR tenant_id IS NULL)", bind_idx));
+            conditions.push(format!("tenant_id = ${}", bind_idx));
             bind_idx += 1;
 
             let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -1244,8 +1244,8 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
 /// `SettlementService::settle_asset` groups unsettled transactions by
 /// `asset_code` only (see migrations/20260824000001_settlement_rls.sql for
 /// the full reasoning). A settlement is visible to `tenant_id` if at least
-/// one of its transactions belongs to that tenant (or is a legacy row with
-/// no tenant_id) — this mirrors the RLS policy's own EXISTS check so
+/// one of its transactions belongs to that tenant — this mirrors the RLS
+/// policy's own EXISTS check so
 /// behavior is identical whether or not RLS is what actually enforces it on
 /// a given connection.
 pub async fn get_settlement_for_tenant(
@@ -1263,7 +1263,7 @@ pub async fn get_settlement_for_tenant(
               AND EXISTS (
                   SELECT 1 FROM transactions t
                   WHERE t.settlement_id = settlements.id
-                    AND (t.tenant_id IS NULL OR t.tenant_id = $2)
+                    AND t.tenant_id = $2
               )
             "#,
         )
@@ -1353,7 +1353,7 @@ pub async fn list_settlements_cursor_for_tenant(
                 EXISTS (
                     SELECT 1 FROM transactions t
                     WHERE t.settlement_id = settlements.id
-                      AND (t.tenant_id IS NULL OR t.tenant_id = $TENANT_PARAM)
+                      AND t.tenant_id = $TENANT_PARAM
                 )
             "#;
 
@@ -1775,7 +1775,7 @@ pub async fn search_transactions(
 
 /// Tenant-scoped equivalent of [`search_transactions`] used by GET
 /// /transactions/search. See [`get_transaction_for_tenant`] for the
-/// NULL-tenant and defense-in-depth notes — identical rules apply here.
+/// strict-partition and defense-in-depth notes — identical rules apply here.
 #[allow(clippy::too_many_arguments)]
 pub async fn search_transactions_for_tenant(
     pool: &PgPool,
@@ -1844,10 +1844,7 @@ pub async fn search_transactions_for_tenant(
 
             // Unconditional tenant scope — always present, unlike the filters above.
             let tenant_param = param_count;
-            conditions.push(format!(
-                "(tenant_id = ${} OR tenant_id IS NULL)",
-                tenant_param
-            ));
+            conditions.push(format!("tenant_id = ${}", tenant_param));
             param_count += 1;
 
             let where_clause = format!("WHERE {}", conditions.join(" AND "));
