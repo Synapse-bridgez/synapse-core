@@ -3,9 +3,10 @@
 //! This repository is Phase 1 of Synapse Bridge (transaction preparation). A
 //! future swap engine - in this repo, a separate service, or an external
 //! contract-based system - takes over once a transaction reaches the
-//! [`swap_ready`](crate::validation) state. This module defines **only** the
-//! hand-off contract and the trait that a swap-engine implementation must
-//! satisfy; it contains no swap or DEX-routing logic.
+//! [`swap_ready`](crate::validation) state. This module defines the hand-off
+//! contract and the trait that a swap-engine implementation must satisfy. The
+//! [`quoting`] submodule prices swaps across configured liquidity sources; it
+//! does not execute or settle them.
 //!
 //! See `docs/state-machine.md` (`### swap_ready`, "Phase 2 hand-off") for how
 //! this fits the existing transaction pipeline.
@@ -15,6 +16,9 @@
 //! [`swap_enabled_for`] returns `false` unless a tenant explicitly opts in via
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
+
+pub mod quoting;
+pub mod sources;
 
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;

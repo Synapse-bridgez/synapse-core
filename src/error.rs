@@ -532,6 +532,33 @@ pub struct ErrorCatalogResponse {
     pub version: String,
 }
 
+/// Errors produced by the swap quoting layer (`crate::swap::quoting`).
+///
+/// These are internal to the Phase 2 swap engine and are not yet mapped to
+/// HTTP responses. Source-level details (`SourceUnavailable`) may carry raw
+/// transport errors, so they must be redacted before reaching a client.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum QuoteError {
+    #[error("quote amount must be positive")]
+    InvalidAmount,
+    #[error("source and destination assets must be distinct, non-empty codes")]
+    InvalidAssetPair,
+    #[error("asset pair is not supported by any liquidity source")]
+    UnsupportedPair,
+    #[error("liquidity source {0} timed out")]
+    SourceTimeout(String),
+    #[error("liquidity source {0} is unavailable: {1}")]
+    SourceUnavailable(String, String),
+    #[error("liquidity source {0} returned an invalid quote")]
+    InvalidSourceQuote(String),
+    #[error("no liquidity source returned a usable quote")]
+    NoQuotes,
+    #[error("best quote is below the configured slippage tolerance")]
+    SlippageExceeded,
+    #[error("quote has expired; re-quote before executing")]
+    Expired,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

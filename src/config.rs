@@ -228,6 +228,33 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Phase 2 swap quoting
+    pub swap_quote: SwapQuoteConfig,
+}
+
+/// A liquidity venue polled for quotes, parsed from `SWAP_LIQUIDITY_SOURCES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiquiditySourceEndpoint {
+    /// Stable identifier used in logs and on the selected quote.
+    pub id: String,
+    /// Quote endpoint of the venue.
+    pub url: String,
+}
+
+/// Swap quoting configuration (`crate::swap::quoting`).
+#[derive(Debug, Clone)]
+pub struct SwapQuoteConfig {
+    /// Venues polled in parallel for quotes. Format: `id=url,id=url`.
+    pub liquidity_sources: Vec<LiquiditySourceEndpoint>,
+    /// Optional bearer token sent to every liquidity source.
+    pub liquidity_api_key: Option<String>,
+    /// Per-source timeout in milliseconds. Default: 2000
+    pub source_timeout_ms: u64,
+    /// Validity window of a quote in seconds. Default: 30
+    pub quote_ttl_secs: u64,
+    /// Maximum tolerated shortfall against a reference amount, in basis points
+    /// (1 bps = 0.01%). Quotes below the floor are hard-rejected. Default: 100
+    pub max_slippage_bps: u32,
 }
 
 pub mod assets;
@@ -407,8 +434,49 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            swap_quote: load_swap_quote_config()?,
         })
     }
+}
+
+fn load_swap_quote_config() -> anyhow::Result<SwapQuoteConfig> {
+    let max_slippage_bps: u32 = env::var("SWAP_QUOTE_MAX_SLIPPAGE_BPS")
+        .unwrap_or_else(|_| "100".to_string())
+        .parse()?;
+    if max_slippage_bps > 10_000 {
+        anyhow::bail!("SWAP_QUOTE_MAX_SLIPPAGE_BPS ({max_slippage_bps}) cannot exceed 10000");
+    }
+
+    Ok(SwapQuoteConfig {
+        liquidity_sources: parse_liquidity_sources(
+            &env::var("SWAP_LIQUIDITY_SOURCES").unwrap_or_default(),
+        )?,
+        liquidity_api_key: env::var("SWAP_LIQUIDITY_API_KEY").ok(),
+        source_timeout_ms: env::var("SWAP_QUOTE_SOURCE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "2000".to_string())
+            .parse()?,
+        quote_ttl_secs: env::var("SWAP_QUOTE_TTL_SECS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()?,
+        max_slippage_bps,
+    })
+}
+
+fn parse_liquidity_sources(raw: &str) -> anyhow::Result<Vec<LiquiditySourceEndpoint>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (id, url) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("SWAP_LIQUIDITY_SOURCES entry '{entry}' must be id=url")
+            })?;
+            url::Url::parse(url.trim())?;
+            Ok(LiquiditySourceEndpoint {
+                id: id.trim().to_string(),
+                url: url.trim().to_string(),
+            })
+        })
+        .collect()
 }
 
 fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
