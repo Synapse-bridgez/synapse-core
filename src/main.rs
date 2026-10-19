@@ -431,6 +431,10 @@ async fn serve(
     let _asset_cache =
         synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     tracing::info!("Asset registry cache initialized");
+    synapse_core::swap::circuit_breaker::init_swap_gate(
+        config.swap_accepting_orders,
+        config.swap_breaker,
+    );
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
