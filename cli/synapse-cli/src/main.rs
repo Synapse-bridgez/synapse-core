@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use synapse_cli::commands::{
-    doctor, events, graphql, health, settlements, stats, transactions, Cli, Commands,
+    doctor, events, graphql, health, settlements, stats, transactions, webhook_listen, Cli,
+    Commands,
 };
 use synapse_cli::profile::{self, ProfileStore};
 
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
         Commands::Stats(cmd) => stats::run(cmd, &base_url, &api_key).await,
         Commands::Settlements(cmd) => settlements::run(cmd.command, &base_url, &api_key).await,
         Commands::Transactions(cmd) => transactions::run(cmd.command, &base_url, &api_key).await,
+        Commands::Webhooks(cmd) => webhook_listen::run(cmd.command, &base_url, &api_key).await,
         Commands::Graphql(cmd) => graphql::run(cmd.command, &base_url, &api_key).await,
         Commands::Profile(cmd) => profile::run(cmd, &mut ProfileStore::load()?),
         Commands::Completions { shell } => print_completions(&shell),
@@ -183,7 +185,7 @@ fn prompt(label: &str, default: &str) -> Result<String> {
 fn is_mutating(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Admin(_) | Commands::Settlements(_) | Commands::Transactions(_)
+        Commands::Admin(_) | Commands::Webhooks(_) | Commands::Settlements(_) | Commands::Transactions(_)
     )
 }
 }

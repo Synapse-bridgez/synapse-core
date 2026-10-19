@@ -20,6 +20,29 @@ synapse-cli <command> [options]
 | --- | --- |
 | `init` | Initialize a new local configuration. |
 | `doctor` | Diagnose local environment and configuration issues. |
+| `webhooks listen` | Tunnel real webhook deliveries to a local port for development. |
+
+## `webhooks listen`
+
+`synapse webhooks listen --port 4000 --path /hooks/synapse` lets you develop a
+webhook handler locally, similar to `stripe listen`. It:
+
+1. Starts a public tunnel to `localhost:<port>` using an existing tool
+   (`cloudflared` quick tunnels by default; override with `--tunnel-cmd`, where
+   `{port}` is substituted, or reuse a running tunnel with `--tunnel-url`).
+2. Registers the tunnel URL as a temporary webhook endpoint through the normal
+   admin API (`POST /admin/webhooks/endpoints/batch`) and prints the endpoint ID
+   and signing secret (`--secret` / `SYNAPSE_WEBHOOK_SECRET` to supply your own).
+3. Disables the temporary endpoint and stops the tunnel when you press Ctrl-C,
+   on SIGTERM, or if the tunnel exits.
+
+Deliveries go straight through the tunnel, so the original
+`X-Webhook-Timestamp` and `X-Webhook-Signature` headers and raw body reach your
+handler unchanged; verify them with the printed secret as described in
+`docs/webhook-authentication.md`.
+
+`SIGKILL` cannot be handled. If the CLI is killed that way, disable the endpoint
+manually using the ID printed at startup.
 
 ## `doctor`
 
