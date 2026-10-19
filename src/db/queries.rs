@@ -2565,6 +2565,162 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+// --- Swap Lifecycle Guards (Issue #1437) ---
+//
+// Retention:
+// - External event dedupe records (`idempotency_keys`) live for
+//   `EXTERNAL_EVENT_RETENTION_HOURS` and are removed by
+//   `cleanup_expired_idempotency_keys`.
+// - Outbox rows are kept until dispatched, then removed by
+//   `delete_dispatched_outbox_events` after `OUTBOX_RETENTION_DAYS`.
+
+pub const EXTERNAL_EVENT_RETENTION_HOURS: i64 = 24;
+pub const OUTBOX_RETENTION_DAYS: i64 = 7;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OutboxEvent {
+    pub id: i64,
+    pub tenant_id: Option<Uuid>,
+    pub aggregate_id: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Compare-and-set a transaction's status. Returns the new version, or `None`
+/// when `expected_version` no longer matches, meaning another writer changed
+/// the row after the caller read it. The status change and its outbox row
+/// commit atomically.
+pub async fn update_transaction_status_versioned(
+    pool: &PgPool,
+    id: Uuid,
+    expected_version: i64,
+    new_status: &str,
+) -> Result<Option<i64>> {
+    let mut db_tx = pool.begin().await?;
+
+    let row = sqlx::query(
+        "UPDATE transactions SET status = $1, updated_at = NOW() \
+         WHERE id = $2 AND version = $3 RETURNING version, tenant_id",
+    )
+    .bind(new_status)
+    .bind(id)
+    .bind(expected_version)
+    .fetch_optional(&mut *db_tx)
+    .await?;
+
+    let Some(row) = row else {
+        db_tx.rollback().await?;
+        return Ok(None);
+    };
+    let version: i64 = row.get("version");
+    let tenant_id: Option<Uuid> = row.get("tenant_id");
+
+    insert_outbox_event(
+        &mut db_tx,
+        tenant_id,
+        &id.to_string(),
+        "transaction.status_changed",
+        &json!({ "status": new_status, "version": version }),
+    )
+    .await?;
+
+    db_tx.commit().await?;
+    Ok(Some(version))
+}
+
+/// Append an event to the outbox within the caller's DB transaction.
+pub async fn insert_outbox_event(
+    db_tx: &mut SqlxTransaction<'_, Postgres>,
+    tenant_id: Option<Uuid>,
+    aggregate_id: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO event_outbox (tenant_id, aggregate_id, event_type, payload) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tenant_id)
+    .bind(aggregate_id)
+    .bind(event_type)
+    .bind(payload)
+    .execute(&mut **db_tx)
+    .await?;
+    Ok(())
+}
+
+/// Oldest undispatched outbox events first, so consumers see per-aggregate order.
+pub async fn fetch_pending_outbox_events(pool: &PgPool, limit: i64) -> Result<Vec<OutboxEvent>> {
+    sqlx::query_as::<_, OutboxEvent>(
+        "SELECT id, tenant_id, aggregate_id, event_type, payload, created_at \
+         FROM event_outbox WHERE dispatched_at IS NULL ORDER BY id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Call only after the event has been successfully published.
+pub async fn mark_outbox_event_dispatched(pool: &PgPool, id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE event_outbox SET dispatched_at = NOW() WHERE id = $1 AND dispatched_at IS NULL",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_dispatched_outbox_events(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM event_outbox WHERE dispatched_at IS NOT NULL \
+         AND dispatched_at < NOW() - make_interval(days => $1)",
+    )
+    .bind(OUTBOX_RETENTION_DAYS as i32)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Record that an external event (already hashed to `event_key` by the caller)
+/// has been consumed for `tenant_id`. Returns `false` when a live record already
+/// exists, i.e. the event is a duplicate delivery. An expired record is
+/// reclaimed.
+pub async fn claim_external_event(
+    pool: &PgPool,
+    tenant_id: &str,
+    event_key: &str,
+) -> Result<bool> {
+    let expires_at = Utc::now() + chrono::Duration::hours(EXTERNAL_EVENT_RETENTION_HOURS);
+    let result = sqlx::query(
+        "INSERT INTO idempotency_keys (tenant_id, key, status, expires_at) \
+         VALUES ($1, $2, 'claimed', $3) \
+         ON CONFLICT (tenant_id, key) DO UPDATE \
+         SET status = 'claimed', response = NULL, created_at = NOW(), expires_at = EXCLUDED.expires_at \
+         WHERE idempotency_keys.expires_at <= NOW()",
+    )
+    .bind(tenant_id)
+    .bind(event_key)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Release a claim taken by [`claim_external_event`] when processing failed, so
+/// the sender's retry is not rejected as a duplicate.
+pub async fn release_external_event(pool: &PgPool, tenant_id: &str, event_key: &str) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM idempotency_keys WHERE tenant_id = $1 AND key = $2 AND status = 'claimed'",
+    )
+    .bind(tenant_id)
+    .bind(event_key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // --- Webhook Endpoint Redirects (Issue #1259) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
