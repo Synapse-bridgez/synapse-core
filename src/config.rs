@@ -226,6 +226,11 @@ pub struct Config {
     pub partition_lookahead_months: u32,
     pub partition_lookahead_min: u32,
     pub partition_lookahead_max: u32,
+    // Stuck-transaction watchdog (src/swap/recovery.rs)
+    pub stuck_processing_threshold_secs: u64,
+    pub watchdog_interval_secs: u64,
+    pub dlq_depth_alert_threshold: i64,
+    pub dlq_age_alert_secs: u64,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
 }
@@ -396,6 +401,18 @@ impl Config {
                 }
                 lookahead
             },
+            stuck_processing_threshold_secs: env::var("STUCK_PROCESSING_THRESHOLD_SECS")
+                .unwrap_or_else(|_| "900".to_string())
+                .parse()?,
+            watchdog_interval_secs: env::var("WATCHDOG_INTERVAL_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()?,
+            dlq_depth_alert_threshold: env::var("DLQ_DEPTH_ALERT_THRESHOLD")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()?,
+            dlq_age_alert_secs: env::var("DLQ_AGE_ALERT_SECS")
+                .unwrap_or_else(|_| "3600".to_string())
+                .parse()?,
             per_class_timeout_config: PerClassTimeoutConfig {
                 interactive_timeout_ms: env::var("DB_TIMEOUT_INTERACTIVE_MS")
                     .unwrap_or_else(|_| "5000".to_string())

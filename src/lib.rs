@@ -494,6 +494,19 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
         )
+        // Admin: stuck-transaction DLQ interventions (#1446)
+        .route(
+            "/admin/transactions/:id/dlq/retry",
+            post(handlers::dlq::retry_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-complete",
+            post(handlers::dlq::force_complete_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-cancel",
+            post(handlers::dlq::force_cancel_dlq_transaction),
+        )
         // Admin: transaction notes API (#1257)
         .route(
             "/admin/transactions/:id/notes",

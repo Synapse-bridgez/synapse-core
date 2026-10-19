@@ -841,6 +841,36 @@ async fn audit_transaction_creation(
     .await
 }
 
+/// IDs of transactions left in `processing` for longer than `threshold_secs`.
+/// Bounded by `limit` and served by `idx_transactions_status_updated_at`.
+pub async fn find_stale_processing_ids(
+    pool: &PgPool,
+    threshold_secs: f64,
+    limit: i64,
+) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM transactions \
+         WHERE status = 'processing' AND updated_at < NOW() - make_interval(secs => $1) \
+         ORDER BY updated_at LIMIT $2",
+    )
+    .bind(threshold_secs)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Unresolved DLQ depth and the moved-at time of the oldest unresolved entry.
+/// An entry is unresolved while its transaction is still in `dlq`.
+pub async fn dlq_depth_and_oldest(pool: &PgPool) -> Result<(i64, Option<DateTime<Utc>>)> {
+    sqlx::query_as(
+        "SELECT COUNT(*), MIN(d.moved_to_dlq_at) \
+         FROM transaction_dlq d JOIN transactions t ON t.id = d.transaction_id \
+         WHERE t.status = 'dlq'",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     with_timeout(
         QueryTier::Read,

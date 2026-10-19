@@ -219,6 +219,9 @@ async fn serve(
          warming path actually runs; see query_cache initialization above"
     );
     partition_manager.start();
+
+    // Stuck-transaction watchdog and DLQ depth/age alerting (#1446)
+    synapse_core::swap::recovery::spawn_watchdog(pool.clone(), &config);
     tracing::info!(
         lookahead_months = config.partition_lookahead_months,
         "Partition manager started with configurable lookahead"
