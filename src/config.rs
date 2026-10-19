@@ -160,6 +160,74 @@ impl PerClassTimeoutConfig {
     }
 }
 
+/// Market-data ingestion settings for swap quoting (see `swap::market_data`).
+///
+/// Freshness: a cached price is usable for quoting only while its source
+/// timestamp is at most `max_age_secs` old. `cache_ttl_secs` bounds how long a
+/// fresh cache entry lives; a last-known copy is kept beyond it for stale fallback.
+#[derive(Debug, Clone)]
+pub struct MarketDataConfig {
+    /// Base URL of the HTTP price source (`PRICE_SOURCE_URL`). Unset disables HTTP ingestion.
+    pub source_url: Option<String>,
+    /// Per-request timeout in milliseconds (`PRICE_SOURCE_TIMEOUT_MS`). Default: 2000
+    pub source_timeout_ms: u64,
+    /// Retries after the first failed attempt (`PRICE_SOURCE_MAX_RETRIES`). Default: 2, max 10
+    pub source_max_retries: u32,
+    /// Base backoff between retries, doubled per attempt (`PRICE_SOURCE_RETRY_BACKOFF_MS`). Default: 200
+    pub source_retry_backoff_ms: u64,
+    /// Interval between scheduled ingestion runs (`PRICE_INGESTION_INTERVAL_SECS`). Default: 10
+    pub ingestion_interval_secs: u64,
+    /// TTL of the fresh snapshot cache entry (`PRICE_CACHE_TTL_SECS`). Default: 30
+    pub cache_ttl_secs: u64,
+    /// Maximum snapshot age accepted for quoting (`PRICE_MAX_AGE_SECS`). Default: 15
+    pub max_age_secs: u64,
+}
+
+impl MarketDataConfig {
+    fn from_env() -> anyhow::Result<Self> {
+        let config = Self {
+            source_url: env::var("PRICE_SOURCE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            source_timeout_ms: env::var("PRICE_SOURCE_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()?,
+            source_max_retries: env::var("PRICE_SOURCE_MAX_RETRIES")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()?,
+            source_retry_backoff_ms: env::var("PRICE_SOURCE_RETRY_BACKOFF_MS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()?,
+            ingestion_interval_secs: env::var("PRICE_INGESTION_INTERVAL_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+            cache_ttl_secs: env::var("PRICE_CACHE_TTL_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()?,
+            max_age_secs: env::var("PRICE_MAX_AGE_SECS")
+                .unwrap_or_else(|_| "15".to_string())
+                .parse()?,
+        };
+
+        if let Some(url) = &config.source_url {
+            url::Url::parse(url)?;
+        }
+        anyhow::ensure!(config.source_timeout_ms > 0, "PRICE_SOURCE_TIMEOUT_MS must be > 0");
+        anyhow::ensure!(
+            config.source_max_retries <= 10,
+            "PRICE_SOURCE_MAX_RETRIES must be <= 10"
+        );
+        anyhow::ensure!(
+            config.ingestion_interval_secs > 0,
+            "PRICE_INGESTION_INTERVAL_SECS must be > 0"
+        );
+        anyhow::ensure!(config.cache_ttl_secs > 0, "PRICE_CACHE_TTL_SECS must be > 0");
+        anyhow::ensure!(config.max_age_secs > 0, "PRICE_MAX_AGE_SECS must be > 0");
+
+        Ok(config)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -228,6 +296,8 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Market data ingestion for swap quoting
+    pub market_data: MarketDataConfig,
 }
 
 pub mod assets;
@@ -407,6 +477,7 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            market_data: MarketDataConfig::from_env()?,
         })
     }
 }
