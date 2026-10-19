@@ -1,4 +1,5 @@
 use crate::secrets::SecretsManager;
+use crate::swap::fees::{FeeConfig, FeeRule};
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
@@ -228,6 +229,8 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Swap fee defaults (per-tenant/pair overrides are layered on at runtime)
+    pub swap_fees: FeeConfig,
 }
 
 pub mod assets;
@@ -406,6 +409,20 @@ impl Config {
                 background_job_timeout_ms: env::var("DB_TIMEOUT_BACKGROUND_JOB_MS")
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
+            },
+            swap_fees: FeeConfig {
+                default: FeeRule {
+                    percentage_bps: env::var("SWAP_FEE_PERCENTAGE_BPS")
+                        .unwrap_or_else(|_| "0".to_string())
+                        .parse()?,
+                    flat: env::var("SWAP_FEE_FLAT")
+                        .unwrap_or_else(|_| "0".to_string())
+                        .parse()?,
+                    spread_bps: env::var("SWAP_SPREAD_BPS")
+                        .unwrap_or_else(|_| "0".to_string())
+                        .parse()?,
+                },
+                ..Default::default()
             },
         })
     }
