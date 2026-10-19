@@ -1931,6 +1931,181 @@ pub async fn search_transactions_for_tenant(
 }
 
 // ---------------------------------------------------------------------------
+// Swap quotes and orders (#1440). Every query is scoped by tenant_id.
+// ---------------------------------------------------------------------------
+
+pub async fn insert_swap_quote(pool: &PgPool, q: &crate::swap::quote::SwapQuote) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_quotes",
+        sqlx::query(
+            "INSERT INTO swap_quotes (id, tenant_id, source_asset, dest_asset, source_amount, \
+             dest_amount, rate, fee_bps, expires_at, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(q.id)
+        .bind(q.tenant_id)
+        .bind(&q.source_asset)
+        .bind(&q.dest_asset)
+        .bind(&q.source_amount)
+        .bind(&q.dest_amount)
+        .bind(&q.rate)
+        .bind(q.fee_bps)
+        .bind(q.expires_at)
+        .bind(q.created_at)
+        .execute(pool),
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn get_swap_quote_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Option<crate::swap::quote::SwapQuote>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_quotes WHERE id = $1 AND tenant_id = $2",
+        sqlx::query_as::<_, crate::swap::quote::SwapQuote>(
+            "SELECT * FROM swap_quotes WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+/// Inserts an order; returns `None` when a unique constraint (tenant +
+/// idempotency key, or quote) already holds a row.
+pub async fn insert_swap_order(
+    pool: &PgPool,
+    o: &crate::swap::execution::SwapOrder,
+) -> Result<Option<crate::swap::execution::SwapOrder>> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_orders ON CONFLICT DO NOTHING",
+        sqlx::query_as::<_, crate::swap::execution::SwapOrder>(
+            "INSERT INTO swap_orders (id, tenant_id, quote_id, source_asset, dest_asset, \
+             source_amount, dest_amount, status, idempotency_key, request_hash, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             ON CONFLICT DO NOTHING RETURNING *",
+        )
+        .bind(o.id)
+        .bind(o.tenant_id)
+        .bind(o.quote_id)
+        .bind(&o.source_asset)
+        .bind(&o.dest_asset)
+        .bind(&o.source_amount)
+        .bind(&o.dest_amount)
+        .bind(&o.status)
+        .bind(&o.idempotency_key)
+        .bind(&o.request_hash)
+        .bind(o.created_at)
+        .bind(o.updated_at)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+pub async fn get_swap_order_for_tenant(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Option<crate::swap::execution::SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE id = $1 AND tenant_id = $2",
+        sqlx::query_as::<_, crate::swap::execution::SwapOrder>(
+            "SELECT * FROM swap_orders WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+pub async fn get_swap_order_by_key_for_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    idempotency_key: &str,
+) -> Result<Option<crate::swap::execution::SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE tenant_id = $1 AND idempotency_key = $2",
+        sqlx::query_as::<_, crate::swap::execution::SwapOrder>(
+            "SELECT * FROM swap_orders WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(tenant_id)
+        .bind(idempotency_key)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+/// Keyset-paginated listing, newest first. The `(created_at, id)` row
+/// comparison matches the `(tenant_id, created_at DESC, id DESC)` indexes.
+pub async fn list_swap_orders_for_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    status: Option<&str>,
+    created_from: Option<DateTime<Utc>>,
+    created_to: Option<DateTime<Utc>>,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    limit: i64,
+) -> Result<Vec<crate::swap::execution::SwapOrder>> {
+    let (cursor_ts, cursor_id) = match cursor {
+        Some((ts, id)) => (Some(ts), Some(id)),
+        None => (None, None),
+    };
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE tenant_id = $1 keyset page",
+        sqlx::query_as::<_, crate::swap::execution::SwapOrder>(
+            "SELECT * FROM swap_orders \
+             WHERE tenant_id = $1 \
+               AND ($2::text IS NULL OR status = $2) \
+               AND ($3::timestamptz IS NULL OR created_at >= $3) \
+               AND ($4::timestamptz IS NULL OR created_at < $4) \
+               AND ($5::timestamptz IS NULL OR (created_at, id) < ($5, $6)) \
+             ORDER BY created_at DESC, id DESC \
+             LIMIT $7",
+        )
+        .bind(tenant_id)
+        .bind(status)
+        .bind(created_from)
+        .bind(created_to)
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(limit)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+/// Moves a `pending` order to `canceled`; `None` if it is no longer pending.
+pub async fn cancel_swap_order(
+    pool: &PgPool,
+    id: Uuid,
+    tenant_id: Uuid,
+) -> Result<Option<crate::swap::execution::SwapOrder>> {
+    with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_orders SET status = 'canceled' WHERE status = 'pending'",
+        sqlx::query_as::<_, crate::swap::execution::SwapOrder>(
+            "UPDATE swap_orders SET status = 'canceled', updated_at = NOW() \
+             WHERE id = $1 AND tenant_id = $2 AND status = 'pending' RETURNING *",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
