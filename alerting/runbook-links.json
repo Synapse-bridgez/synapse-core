@@ -27,6 +27,7 @@
     "PipelineLatencyBudgetExceeded": { "anchor": "pipeline-latency-budget-exceeded" },
     "TokioTaskLeakSuspected": { "anchor": "tokio-task-leak-suspected" },
     "ReleaseReliabilityRegression": { "anchor": "release-reliability-regression" },
+    "SwapOrderHeld": { "anchor": "swap-order-held-by-risk-gate" },
     "TelemetryErrorsSustained": { "anchor": "telemetry-silent-failure-log-alerts" },
     "TelemetryWebhookOversizedPayloadBurst": { "anchor": "telemetry-silent-failure-log-alerts" },
     "TelemetryWebhookTimestampSkewBurst": { "anchor": "telemetry-silent-failure-log-alerts" },

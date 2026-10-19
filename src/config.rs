@@ -2,6 +2,7 @@ use crate::secrets::SecretsManager;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
+use sqlx::types::BigDecimal;
 use std::env;
 
 /// Active environment profile
@@ -129,6 +130,22 @@ impl Default for DbTimeoutConfig {
     }
 }
 
+/// Pre-execution limits enforced by the swap risk gate (`crate::swap::risk`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskLimits {
+    /// Largest single order, in source-asset units. Larger orders are held.
+    pub max_order_size: BigDecimal,
+    /// Per-tenant cap on accepted order volume per UTC day.
+    pub tenant_daily_exposure_limit: BigDecimal,
+    /// Maximum accepted orders per tenant within `velocity_window_secs`.
+    pub velocity_max_orders: u32,
+    pub velocity_window_secs: u32,
+    /// When non-empty, only these asset codes may be swapped.
+    pub allowed_assets: Vec<String>,
+    /// Asset codes that are held until an operator approves them.
+    pub denied_assets: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PerClassTimeoutConfig {
     /// Interactive endpoint timeout in milliseconds (default: 5000ms)
@@ -228,6 +245,8 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Swap risk gate limits
+    pub swap_risk_limits: RiskLimits,
 }
 
 pub mod assets;
@@ -407,8 +426,53 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            swap_risk_limits: parse_swap_risk_limits()?,
         })
     }
+}
+
+fn parse_swap_risk_limits() -> anyhow::Result<RiskLimits> {
+    let limits = RiskLimits {
+        max_order_size: env::var("SWAP_RISK_MAX_ORDER_SIZE")
+            .unwrap_or_else(|_| "10000".to_string())
+            .parse()?,
+        tenant_daily_exposure_limit: env::var("SWAP_RISK_TENANT_DAILY_LIMIT")
+            .unwrap_or_else(|_| "100000".to_string())
+            .parse()?,
+        velocity_max_orders: env::var("SWAP_RISK_VELOCITY_MAX_ORDERS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse()?,
+        velocity_window_secs: env::var("SWAP_RISK_VELOCITY_WINDOW_SECS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()?,
+        allowed_assets: parse_asset_list(
+            &env::var("SWAP_RISK_ALLOWED_ASSETS").unwrap_or_default(),
+        ),
+        denied_assets: parse_asset_list(
+            &env::var("SWAP_RISK_DENIED_ASSETS").unwrap_or_default(),
+        ),
+    };
+
+    // Zero or negative limits would silently hold every order (or none), so
+    // treat them as configuration errors and refuse to start.
+    if limits.max_order_size <= BigDecimal::from(0)
+        || limits.tenant_daily_exposure_limit <= BigDecimal::from(0)
+    {
+        anyhow::bail!("SWAP_RISK_MAX_ORDER_SIZE and SWAP_RISK_TENANT_DAILY_LIMIT must be greater than zero");
+    }
+    if limits.velocity_max_orders == 0 || limits.velocity_window_secs == 0 {
+        anyhow::bail!("SWAP_RISK_VELOCITY_MAX_ORDERS and SWAP_RISK_VELOCITY_WINDOW_SECS must be greater than zero");
+    }
+
+    Ok(limits)
+}
+
+fn parse_asset_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_uppercase)
+        .collect()
 }
 
 fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {

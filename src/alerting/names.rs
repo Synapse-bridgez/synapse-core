@@ -15,6 +15,7 @@ pub const PIPELINE_LATENCY_BUDGET_EXCEEDED: &str = "PipelineLatencyBudgetExceede
 pub const TOKIO_TASK_LEAK_SUSPECTED: &str = "TokioTaskLeakSuspected";
 pub const RELEASE_RELIABILITY_REGRESSION: &str = "ReleaseReliabilityRegression";
 pub const QUOTA_CONFIG_SPLIT_BRAIN: &str = "QuotaConfigSplitBrain";
+pub const SWAP_ORDER_HELD: &str = "SwapOrderHeld";
 
 /// All in-process alert names, for exhaustive checks.
 pub const ALL: &[&str] = &[
@@ -24,4 +25,5 @@ pub const ALL: &[&str] = &[
     TOKIO_TASK_LEAK_SUSPECTED,
     RELEASE_RELIABILITY_REGRESSION,
     QUOTA_CONFIG_SPLIT_BRAIN,
+    SWAP_ORDER_HELD,
 ];
