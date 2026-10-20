@@ -645,6 +645,19 @@ async fn serve(
         });
     }
 
+    // Reconcile swap orders stuck in settlement_pending (status checks only, never re-submits).
+    {
+        use synapse_core::swap::settlement::{
+            run_reconciliation_loop, HorizonSettlementAdapter, SettlementConfig, SettlementService,
+        };
+        let service = SettlementService::new(
+            pool.clone(),
+            HorizonSettlementAdapter::new(config.stellar_horizon_url.clone()),
+            SettlementConfig::from_env(),
+        );
+        tokio::spawn(run_reconciliation_loop(service));
+    }
+
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =
         app.merge(SwaggerUi::new("/api/docs").url("/api/docs/openapi.json", ApiDoc::openapi()));
