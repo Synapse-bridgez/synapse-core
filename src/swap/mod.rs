@@ -16,6 +16,11 @@
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
 
+pub mod events;
+pub mod path_payment;
+pub mod pricing;
+pub mod rbac;
+
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
 use std::fmt;
