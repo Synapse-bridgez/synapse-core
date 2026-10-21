@@ -61,3 +61,53 @@ safe:
 share rounds down, and the leftover units go one at a time to the largest
 remainders (ties to the lowest index). The parts always sum to the input and
 the split is deterministic.
+
+## Routing
+
+`swap::routing::Router` lets the engine quote pairs that no single provider
+trades directly. For each quote it:
+
+1. **Builds a graph** of directed pairs from every registered
+   `LiquidityProvider` (one edge per provider per pair; assets unknown to
+   the `AssetRegistry` are ignored; a provider whose pair discovery fails is
+   skipped).
+2. **Discovers** simple paths (no asset visited twice), shortest first, up
+   to `max_hops` legs (default 3) and `max_candidates` paths (default 32).
+   Assets and providers are visited in sorted order, so enumeration is
+   deterministic.
+3. **Prices** each candidate by quoting each leg with the previous leg's
+   output. A candidate with an unpriceable leg is dropped.
+4. **Scores** a route as its expected output reduced by `hop_penalty_bps`
+   (default 5) per leg beyond the first, a stand-in for the extra
+   execution risk of every additional leg.
+5. **Selects** the highest score; ties go to fewer hops, then to the
+   smallest route key (`USDC>XLM@lp-a|XLM>EURC@lp-b`).
+
+### Quote → execution
+
+`swap::engine::SwapService` returns the chosen route inside the quote
+(`route.hops[]` with provider, assets, per-leg amounts and fees; `route.path`;
+`route.score`) together with `candidates_considered` / `candidates_priced`.
+
+`execute` runs **exactly that route** — it never re-routes. Each leg's
+actual fill becomes the next leg's input. If a leg fails, every filled leg is
+reversed newest-first and the swap ends `compensated` (or
+`compensation_failed`, which needs an operator). Executing a quote twice
+returns the original swap; an expired quote is rejected with `410`.
+
+### HTTP
+
+`swap::http::router(service)` exposes:
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/swap/quotes` | `{"source_asset","destination_asset","amount_in"}` |
+| GET | `/swap/quotes/:id` | |
+| POST | `/swap/executions` | `{"quote_id"}` |
+| GET | `/swap/executions/:id` | swap record with per-leg status |
+| GET | `/swap/executions/:id/events` | ordered event log |
+
+Errors are `{"error":{"code","message"}}`: `400` invalid request / amount /
+unknown asset, `404` unknown quote or swap, `410` expired quote, `422` no
+route. The router is not mounted in `create_app` yet; Phase 1 still
+defaults to `NoopSwapEngine`.
