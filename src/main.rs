@@ -219,6 +219,11 @@ async fn serve(
          warming path actually runs; see query_cache initialization above"
     );
     partition_manager.start();
+
+    // Swap Phase 2 background jobs (#1505, #1506, #1508); each is opt-in via env.
+    synapse_core::swap::compliance::surveillance::spawn(pool.clone());
+    synapse_core::swap::analytics::spawn(pool.clone());
+    synapse_core::swap::market_data::spawn_maintenance(pool.clone(), None);
     tracing::info!(
         lookahead_months = config.partition_lookahead_months,
         "Partition manager started with configurable lookahead"

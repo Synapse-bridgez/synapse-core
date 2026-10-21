@@ -484,6 +484,8 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/settlements/:id/status",
             axum::routing::patch(handlers::settlements::update_settlement_status),
         )
+        // Admin: swap surveillance + market data archive (#1505, #1508)
+        .nest("/admin/swap", swap::versioning::admin_swap_router())
         // Admin: reconciliation reports
         .nest(
             "/admin/reconciliation",
@@ -560,6 +562,8 @@ pub fn create_app(app_state: AppState) -> Router {
         // Versioned route groups
         .nest("/api/v1", v1_routes)
         .nest("/api/v2", v2_routes)
+        // Swap API (#1507): versioned under /swap/v{N}
+        .nest("/swap", swap::versioning::swap_router())
         .merge(admin_only_routes)
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,

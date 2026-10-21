@@ -174,3 +174,10 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 - [ ] Metrics/alerts for partition health
 - [ ] Dynamic retention policy based on storage
 - [ ] Sub-partitioning by status or account (if needed)
+
+## Swap market-data archive partitions (#1508)
+
+`swap_quote_archive` and `swap_price_snapshots` use monthly range partitions managed by the SQL
+functions `ensure_swap_archive_partitions(months_ahead)` and `detach_swap_archive_partitions(retention_months)`
+(see `docs/swap-platform-hardening.md`). Detached partitions are tracked in `swap_archive_exports`
+and dropped only after a successful export.
