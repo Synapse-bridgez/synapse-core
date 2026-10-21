@@ -160,6 +160,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unattainable_min_received_is_a_422() {
+        let (status, body) = post(
+            app(),
+            "/swap/quotes",
+            r#"{"source_asset":"USDC","destination_asset":"XLM","amount_in":"1",
+                "protection":{"min_received":"10.0000001"}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "min_received_unattainable");
+    }
+
+    #[tokio::test]
     async fn unroutable_pair_is_a_422() {
         let (status, body) = post(
             app(),

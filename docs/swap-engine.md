@@ -52,8 +52,8 @@ safe:
 | Fill | Down | A fill never credits more than was received |
 | Allocation | Down + largest remainder | Shares always sum exactly to the total |
 | Rate | Half-even | Displayed rates are unbiased; they never move money |
-| Price impact | Up | Overstating impact makes the tolerance check fail safe |
-| Protection floor | Up | The minimum acceptable output is never loosened |
+| Price impact | Ceiling (toward +∞) | Overstating impact makes the tolerance check fail safe |
+| Protection floor | Ceiling (toward +∞) | The minimum acceptable output is never loosened |
 
 ### Allocation
 
@@ -95,6 +95,52 @@ reversed newest-first and the swap ends `compensated` (or
 `compensation_failed`, which needs an operator). Executing a quote twice
 returns the original swap; an expired quote is rejected with `410`.
 
+## Swap protection
+
+Clients can attach `protection` to a quote request and/or an execution
+request:
+
+```json
+{ "min_received": "89.5000000", "max_slippage_bps": 50 }
+```
+
+| Field | Meaning |
+|-------|---------|
+| `min_received` | Absolute minimum of the destination asset (destination precision; more digits is a `400`). |
+| `max_slippage_bps` | Maximum shortfall of the realized output versus the **reference rate** from the configured `PriceOracle`, `0`–`5000`. |
+
+Both collapse into one **floor**:
+
+```text
+reference_out = amount_in × reference_rate
+floor         = max(min_received, reference_out × (1 − max_slippage_bps / 10 000))   (rounded up)
+```
+
+Execution-time parameters can only **tighten** the quote's (higher
+`min_received`, lower `max_slippage_bps`).
+
+**Price impact** is `(reference_out − out) / reference_out × 10 000` in
+signed bps (positive = worse than reference), rounded toward +∞. Quotes
+report `reference_rate`, `price_impact_bps` and `min_out` (the floor);
+settled swaps report the realized `price_impact_bps`.
+
+Enforcement:
+
+| Stage | Check | Outcome |
+|-------|-------|---------|
+| Quote | expected output < floor | `422 min_received_unattainable` or `422 price_impact_exceeded`; nothing stored |
+| Execution start | reference re-read, floor recomputed; quoted output < floor | same `422`; no leg runs, no swap record |
+| Intermediate leg | sent with a proportional `min_out`; after the fill the final output is projected along the remaining quoted legs | projection < floor → `protection.tripped` event, stop before the next leg, compensate |
+| Final leg | sent with `min_out = floor`; realized < floor | compensate |
+
+Aborted swaps end `compensated` with `failure.code` `slippage_exceeded` or
+`min_received_not_met` (whichever parameter set the floor).
+
+`max_slippage_bps` needs a reference price: with no oracle configured, or
+the oracle failing, the request fails closed with
+`503 reference_price_unavailable`. Without slippage protection an oracle
+failure only drops `price_impact_bps` from the quote.
+
 ### HTTP
 
 `swap::http::router(service)` exposes:
@@ -108,6 +154,7 @@ returns the original swap; an expired quote is rejected with `410`.
 | GET | `/swap/executions/:id/events` | ordered event log |
 
 Errors are `{"error":{"code","message"}}`: `400` invalid request / amount /
-unknown asset, `404` unknown quote or swap, `410` expired quote, `422` no
-route. The router is not mounted in `create_app` yet; Phase 1 still
+protection / unknown asset, `404` unknown quote or swap, `410` expired quote,
+`422` no route or protection not attainable, `503` reference price
+unavailable. The router is not mounted in `create_app` yet; Phase 1 still
 defaults to `NoopSwapEngine`.

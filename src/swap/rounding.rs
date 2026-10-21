@@ -17,8 +17,8 @@
 //! | `Fill`         | `Down`     | A fill never credits more than was actually received.    |
 //! | `Allocation`   | `Down`     | Shares round down; the remainder is distributed exactly (see [`allocation`](crate::swap::allocation)). |
 //! | `Rate`         | `HalfEven` | Displayed/stored rates are unbiased; they never move money. |
-//! | `PriceImpact`  | `Up`       | Overstating impact makes the tolerance check fail safe.  |
-//! | `ProtectionFloor` | `Up`    | The minimum-acceptable output is never loosened by rounding. |
+//! | `PriceImpact`  | `Ceiling`  | Rounding toward +∞ overstates impact, so the tolerance check fails safe. |
+//! | `ProtectionFloor` | `Ceiling` | The minimum-acceptable output is never loosened by rounding. |
 
 use serde::{Deserialize, Serialize};
 
@@ -77,8 +77,8 @@ impl RoundingPolicy {
         fill: RoundingMode::Down,
         allocation: RoundingMode::Down,
         rate: RoundingMode::HalfEven,
-        price_impact: RoundingMode::Up,
-        protection_floor: RoundingMode::Up,
+        price_impact: RoundingMode::Ceiling,
+        protection_floor: RoundingMode::Ceiling,
     };
 
     pub const fn mode(&self, purpose: Purpose) -> RoundingMode {
@@ -112,8 +112,8 @@ mod tests {
         assert_eq!(p.mode(Purpose::Fill), RoundingMode::Down);
         assert_eq!(p.mode(Purpose::Fee), RoundingMode::Up);
         assert_eq!(p.mode(Purpose::QuoteInput), RoundingMode::Up);
-        assert_eq!(p.mode(Purpose::PriceImpact), RoundingMode::Up);
-        assert_eq!(p.mode(Purpose::ProtectionFloor), RoundingMode::Up);
+        assert_eq!(p.mode(Purpose::PriceImpact), RoundingMode::Ceiling);
+        assert_eq!(p.mode(Purpose::ProtectionFloor), RoundingMode::Ceiling);
         assert_eq!(p.mode(Purpose::Rate), RoundingMode::HalfEven);
         assert_eq!(RoundingPolicy::default(), p);
     }
