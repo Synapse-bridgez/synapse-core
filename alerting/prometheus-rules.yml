@@ -12,6 +12,64 @@
 # reads them with a line-oriented parser so CI needs no YAML dependency.
 
 groups:
+  - name: synapse-core-slo
+    rules:
+      - alert: SloBurnAvailabilityFast
+        expr: |
+          synapse:slo_availability_error_ratio:rate1h > 0.072
+            and synapse:slo_availability_error_ratio:rate5m > 0.072
+            and synapse:slo_http_request_volume:rate1h > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          slo: availability
+          route: page
+        annotations:
+          summary: "Swap engine availability SLO fast burn (14.4x budget over 1h); route: page"
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#slo-burn-availability-fast-burn
+
+      - alert: SloBurnAvailabilitySlow
+        expr: |
+          synapse:slo_availability_error_ratio:rate6h > 0.03
+            and synapse:slo_availability_error_ratio:rate30m > 0.03
+            and synapse:slo_http_request_volume:rate1h > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          slo: availability
+          route: ticket
+        annotations:
+          summary: "Swap engine availability SLO slow burn (6x budget over 6h); route: ticket"
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#slo-burn-availability-slow-burn
+
+      - alert: SloBurnLatencyFast
+        expr: |
+          synapse:slo_latency_error_ratio:rate1h > 0.72
+            and synapse:slo_latency_error_ratio:rate5m > 0.72
+            and synapse:slo_http_request_volume:rate1h > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          slo: latency
+          route: page
+        annotations:
+          summary: "Swap engine latency SLO fast burn (14.4x budget over 1h); route: page"
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#slo-burn-latency-fast-burn
+
+      - alert: SloBurnLatencySlow
+        expr: |
+          synapse:slo_latency_error_ratio:rate6h > 0.3
+            and synapse:slo_latency_error_ratio:rate30m > 0.3
+            and synapse:slo_http_request_volume:rate1h > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          slo: latency
+          route: ticket
+        annotations:
+          summary: "Swap engine latency SLO slow burn (6x budget over 6h); route: ticket"
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#slo-burn-latency-slow-burn
+
   - name: synapse-core
     rules:
       - alert: DatabasePoolUsageHigh

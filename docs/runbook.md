@@ -484,6 +484,38 @@ See `docs/release-scorecard.md`.
 
 ---
 
+### SLO Burn: Availability Fast Burn
+
+**Meaning:** HTTP 5xx ratio (tenant-caused 4xx excluded) is consuming the availability error budget faster than sustainable. Fast burn = 14.4x over 1h (and 5m). See `docs/slo.md`.
+
+**First steps:** Check `HighErrorRate`, `DatabasePoolExhausted` and `CircuitBreakerOpen`; inspect 5xx logs by route (`docs/structured-log-aggregation.md`); check the most recent deploy (`docs/blue-green-deployment.md`).
+
+**Escalation:** Page the on-call engineer; if a rollout is in progress, halt and roll back. If unresolved after 30 min, escalate to the engineering lead. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
+### SLO Burn: Availability Slow Burn
+
+**Meaning:** HTTP 5xx ratio (tenant-caused 4xx excluded) is consuming the availability error budget faster than sustainable. Slow burn = 6x over 6h (and 30m). See `docs/slo.md`.
+
+**First steps:** Check `HighErrorRate`, `DatabasePoolExhausted` and `CircuitBreakerOpen`; inspect 5xx logs by route (`docs/structured-log-aggregation.md`); check the most recent deploy (`docs/blue-green-deployment.md`).
+
+**Escalation:** Open a ticket for the owning team; review within one business day. Escalate to a page if it becomes a fast burn. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
+### SLO Burn: Latency Fast Burn
+
+**Meaning:** More than the budgeted share of requests exceed 1s. Fast burn = 14.4x over 1h (and 5m). See `docs/slo.md`.
+
+**First steps:** Check `HighResponseTime`, DB pool saturation and slow queries (`db_slow_queries_total`), and downstream dependency health (`docs/health-dependency-graph.md`).
+
+**Escalation:** Page the on-call engineer; if a rollout is in progress, halt and roll back. If unresolved after 30 min, escalate to the engineering lead. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
+### SLO Burn: Latency Slow Burn
+
+**Meaning:** More than the budgeted share of requests exceed 1s. Slow burn = 6x over 6h (and 30m). See `docs/slo.md`.
+
+**First steps:** Check `HighResponseTime`, DB pool saturation and slow queries (`db_slow_queries_total`), and downstream dependency health (`docs/health-dependency-graph.md`).
+
+**Escalation:** Open a ticket for the owning team; review within one business day. Escalate to a page if it becomes a fast burn. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
 ## Incident Response
 
 ### Incident Classification

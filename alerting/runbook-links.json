@@ -2,6 +2,10 @@
   "runbook": "docs/runbook.md",
   "base_url": "https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md",
   "alerts": {
+    "SloBurnAvailabilityFast": { "anchor": "slo-burn-availability-fast-burn" },
+    "SloBurnAvailabilitySlow": { "anchor": "slo-burn-availability-slow-burn" },
+    "SloBurnLatencyFast": { "anchor": "slo-burn-latency-fast-burn" },
+    "SloBurnLatencySlow": { "anchor": "slo-burn-latency-slow-burn" },
     "DatabasePoolUsageHigh": { "anchor": "symptom-pool-usage-consistently-high-80" },
     "DatabasePoolExhausted": { "anchor": "pool-exhaustion-response" },
     "HighErrorRate": { "anchor": "3-high-error-rate" },
