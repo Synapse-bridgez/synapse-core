@@ -17,6 +17,8 @@ pub mod security;
 pub mod services;
 pub mod startup;
 pub mod stellar;
+pub mod cdc;
+pub mod observability;
 pub mod swap;
 pub mod telemetry;
 pub mod tenant;
