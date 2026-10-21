@@ -159,7 +159,7 @@ mod tests {
             stellar_account: "GA...".into(),
             source_asset: "USDC".into(),
             amount: BigDecimal::from(100),
-            completed_at: chrono::Utc::now(),
+            completed_at: crate::time::Clock::now(&crate::time::SystemClock::new()),
             idempotency_key: "swap:0".into(),
             metadata: None,
         };
