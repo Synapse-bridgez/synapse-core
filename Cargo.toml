@@ -45,7 +45,7 @@ bigdecimal = { version = "0.3", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.11", features = ["json", "stream", "native-tls"] }
 bytes = "1"
 failsafe = "1"
 clap = { version = "4", features = ["derive"] }

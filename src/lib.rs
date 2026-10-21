@@ -291,6 +291,14 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route(
+            "/swap/disputes",
+            post(handlers::disputes::create_dispute).get(handlers::disputes::list_disputes),
+        )
+        .route(
+            "/swap/disputes/:id",
+            patch(handlers::disputes::update_dispute),
+        )
+        .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
         )

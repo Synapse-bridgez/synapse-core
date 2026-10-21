@@ -8,6 +8,7 @@ pub mod pagination;
 pub mod profiling;
 pub mod search;
 pub mod session;
+pub mod disputes;
 pub mod settlements;
 pub mod stats;
 pub mod v1;
