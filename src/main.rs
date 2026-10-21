@@ -128,6 +128,10 @@ async fn main() -> anyhow::Result<()> {
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
+        Some(Commands::Preflight {
+            offline,
+            timeout_secs,
+        }) => cli::handle_preflight(&config, offline, timeout_secs).await,
     }
 }
 
@@ -175,10 +179,21 @@ async fn serve(
          instance's max_connections"
     );
 
-    // Run migrations
+    // Run migrations, or with AUTO_MIGRATE=false refuse to start on drift.
     let migrator = Migrator::new(Path::new("./migrations")).await?;
-    migrator.run(&pool).await?;
-    tracing::info!("Database migrations completed");
+    if config::preflight::auto_migrate_enabled() {
+        migrator.run(&pool).await?;
+        tracing::info!("Database migrations completed");
+    } else {
+        let pending = config::preflight::pending_migrations(&pool, &migrator).await?;
+        if !pending.is_empty() {
+            anyhow::bail!(
+                "{} pending migration(s) {:?} and AUTO_MIGRATE=false; run `synapse-core db migrate` first",
+                pending.len(),
+                pending
+            );
+        }
+    }
 
     // Hard startup gate: refuse to serve traffic if the connected role can
     // bypass Row-Level Security. See startup::assert_no_bypassrls for why.

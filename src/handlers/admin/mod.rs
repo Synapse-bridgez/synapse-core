@@ -5,6 +5,7 @@ pub mod config_export;
 pub mod dependency_scorecard;
 pub mod health_graph;
 pub mod locks;
+pub mod operator_audit;
 pub mod quota;
 pub mod reconciliation;
 pub mod rules_preview;

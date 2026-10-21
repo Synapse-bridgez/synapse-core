@@ -231,6 +231,7 @@ pub struct Config {
 }
 
 pub mod assets;
+pub mod preflight;
 impl Config {
     pub async fn load() -> anyhow::Result<Self> {
         // Determine profile before loading env files
@@ -243,6 +244,10 @@ impl Config {
 
         // Apply profile defaults for any unset vars
         apply_profile_defaults(&app_env);
+
+        // Fail fast with every configuration problem at once, before any
+        // value is parsed or any dependency is contacted.
+        preflight::validate_env(|k| env::var(k).ok()).into_result()?;
 
         tracing::info!("Active environment profile: {}", app_env.as_str());
 

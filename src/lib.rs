@@ -1,4 +1,5 @@
 pub mod alerting;
+pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod config;
@@ -471,6 +472,15 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/admin/audit/cold/pointers",
             get(handlers::admin::audit::list_cold_pointers_handler),
+        )
+        // Admin: operator audit log for administrative swap actions (#1518)
+        .route(
+            "/admin/operator-audit",
+            get(handlers::admin::operator_audit::list_operator_audit),
+        )
+        .route(
+            "/admin/operator-audit/export",
+            get(handlers::admin::operator_audit::export_operator_audit),
         )
         // Admin: compliance report generation/listing — same gap as audit
         // search above.
