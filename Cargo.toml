@@ -42,6 +42,10 @@ sqlx = { version = "0.7", features = [
     "json",
 ] }
 bigdecimal = { version = "0.3", features = ["serde"] }
+# Exact integer arithmetic behind swap::decimal (same versions bigdecimal uses).
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"

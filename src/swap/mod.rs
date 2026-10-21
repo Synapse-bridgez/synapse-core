@@ -15,6 +15,20 @@
 //! [`swap_enabled_for`] returns `false` unless a tenant explicitly opts in via
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
+//!
+//! # Arithmetic
+//!
+//! All swap math (quotes, fees, allocations, fills) uses the shared
+//! fixed-point [`decimal::Decimal`] type and the explicit
+//! [`rounding::RoundingPolicy`]. Amounts cross every boundary as strings with
+//! documented precision; see `docs/swap-engine.md`.
+
+pub mod allocation;
+pub mod asset;
+pub mod decimal;
+pub mod fees;
+pub mod pricing;
+pub mod rounding;
 
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
@@ -65,6 +79,12 @@ impl SwapHandoff {
             idempotency_key: format!("swap:{}", tx.id),
             metadata: tx.metadata.clone(),
         }
+    }
+
+    /// The hand-off amount as a swap-engine [`decimal::Decimal`], keeping
+    /// the precision Phase 1 stored.
+    pub fn amount_decimal(&self) -> Result<decimal::Decimal, decimal::DecimalError> {
+        decimal::Decimal::from_bigdecimal(&self.amount)
     }
 }
 
