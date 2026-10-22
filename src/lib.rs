@@ -351,6 +351,11 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/canary",
             get(handlers::admin::get_canary_dashboard),
         )
+        // Admin: global swap order intake kill switch
+        .route(
+            "/admin/swap/kill-switch",
+            get(handlers::admin::get_swap_kill_switch).post(handlers::admin::set_swap_kill_switch),
+        )
         .route(
             "/admin/canary/:release_name",
             get(handlers::admin::get_canary_release)

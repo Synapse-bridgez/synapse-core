@@ -1,8 +1,10 @@
 use crate::secrets::SecretsManager;
+use crate::swap::circuit_breaker::BreakerConfig;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
 use std::env;
+use std::time::Duration;
 
 /// Active environment profile
 #[derive(Debug, Clone, PartialEq)]
@@ -231,8 +233,15 @@ pub struct Config {
     pub watchdog_interval_secs: u64,
     pub dlq_depth_alert_threshold: i64,
     pub dlq_age_alert_secs: u64,
+    // Months of swap order/quote/fill/event partitions to retain before detaching
+    pub swap_retention_months: i32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    /// Global swap order intake switch (`SWAP_ACCEPTING_ORDERS`). When false,
+    /// new swap orders are rejected; in-flight orders are unaffected.
+    pub swap_accepting_orders: bool,
+    /// Per-tenant and per-provider swap circuit breaker thresholds.
+    pub swap_breaker: BreakerConfig,
 }
 
 pub mod assets;
@@ -380,6 +389,9 @@ impl Config {
             partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
                 .unwrap_or_else(|_| "12".to_string())
                 .parse()?,
+            swap_retention_months: env::var("SWAP_RETENTION_MONTHS")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
             partition_lookahead_months: {
                 let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
                     .unwrap_or_else(|_| "1".to_string())
@@ -423,6 +435,32 @@ impl Config {
                 background_job_timeout_ms: env::var("DB_TIMEOUT_BACKGROUND_JOB_MS")
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
+            },
+            swap_accepting_orders: env::var("SWAP_ACCEPTING_ORDERS")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()?,
+            swap_breaker: BreakerConfig {
+                window: Duration::from_secs(
+                    env::var("SWAP_BREAKER_WINDOW_SECS")
+                        .unwrap_or_else(|_| "60".to_string())
+                        .parse()?,
+                ),
+                min_calls: env::var("SWAP_BREAKER_MIN_CALLS")
+                    .unwrap_or_else(|_| "20".to_string())
+                    .parse()?,
+                failure_rate_threshold: env::var("SWAP_BREAKER_FAILURE_RATE")
+                    .unwrap_or_else(|_| "0.5".to_string())
+                    .parse()?,
+                slow_call_threshold: Duration::from_millis(
+                    env::var("SWAP_BREAKER_SLOW_CALL_MS")
+                        .unwrap_or_else(|_| "2000".to_string())
+                        .parse()?,
+                ),
+                open_duration: Duration::from_secs(
+                    env::var("SWAP_BREAKER_OPEN_SECS")
+                        .unwrap_or_else(|_| "30".to_string())
+                        .parse()?,
+                ),
             },
         })
     }

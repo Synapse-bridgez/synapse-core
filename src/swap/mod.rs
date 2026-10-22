@@ -25,6 +25,7 @@ use crate::services::feature_flags::FeatureFlagService;
 
 /// Stuck-transaction watchdog and manual DLQ intervention (#1446).
 pub mod recovery;
+pub mod circuit_breaker;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
