@@ -1,48 +1,51 @@
-//! Transactional outbox dispatcher for swap lifecycle events (Issue #1437).
+//! Versioned lifecycle event contract published through the transactional
+//! outbox (see [`crate::db::outbox`]).
 //!
-//! Lifecycle events are written to `event_outbox` in the same DB transaction as
-//! the state change (see [`queries::update_transaction_status_versioned`]).
-//! [`dispatch_pending_events`] publishes them and marks each row dispatched only
-//! after its publish succeeds. A crash between publish and mark re-publishes the
-//! event on the next tick, so delivery is at-least-once. Consumers must dedupe
-//! on [`OutboxEvent::id`].
+//! # Envelope contract (stable)
+//!
+//! Every event is delivered as an [`EventEnvelope`] serialized to JSON:
+//!
+//! | Field         | Type             | Meaning                                                              |
+//! |---------------|------------------|----------------------------------------------------------------------|
+//! | `event_id`    | UUID             | Dedupe key. Stable across publish retries; consumers must dedupe on it. |
+//! | `order_id`    | UUID             | The order (transaction) the event belongs to.                        |
+//! | `sequence`    | integer >= 1     | Per-order monotonic sequence. Apply events for an order in ascending order. |
+//! | `event_type`  | string           | One of the `EVENT_*` constants in this module.                        |
+//! | `version`     | integer          | Envelope/payload schema version ([`EVENT_ENVELOPE_VERSION`]).         |
+//! | `tenant_id`   | UUID or null     | Owning tenant; `null` for unattributed transactions.                 |
+//! | `occurred_at` | RFC 3339 instant | When the domain state change committed.                              |
+//! | `payload`     | JSON object      | Event-type-specific data. Carries no PII beyond what consumers need. |
+//!
+//! Compatibility rules: fields are only added, never removed or renamed. A
+//! breaking payload change bumps `version` and keeps emitting the old version
+//! until consumers have moved.
+//!
+//! Delivery is at-least-once. Consumers must tolerate duplicates (dedupe on
+//! `event_id`) and must not assume cross-order ordering; only `sequence`
+//! within one `order_id` is ordered.
 
-use async_trait::async_trait;
-use sqlx::PgPool;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use crate::db::queries::{self, OutboxEvent};
+/// Current envelope and payload schema version.
+pub const EVENT_ENVELOPE_VERSION: i32 = 1;
 
-/// Publishes one outbox event to a downstream transport (broker, webhook, etc.).
-#[async_trait]
-pub trait EventPublisher: Send + Sync {
-    async fn publish(&self, event: &OutboxEvent) -> Result<(), String>;
-}
+/// A transaction row was created.
+pub const EVENT_TRANSACTION_CREATED: &str = "transaction.created";
 
-/// Publishes up to `batch_size` pending events in id order and returns how many
-/// were dispatched. Stops at the first publish failure so later events are not
-/// delivered ahead of the failed one. The failed row stays pending for the next
-/// tick.
-pub async fn dispatch_pending_events(
-    pool: &PgPool,
-    publisher: &dyn EventPublisher,
-    batch_size: i64,
-) -> sqlx::Result<usize> {
-    let events = queries::fetch_pending_outbox_events(pool, batch_size).await?;
-    let mut dispatched = 0;
+/// A transaction's `status` changed. `payload.status` holds the new status.
+pub const EVENT_TRANSACTION_STATUS_CHANGED: &str = "transaction.status_changed";
 
-    for event in &events {
-        if let Err(e) = publisher.publish(event).await {
-            tracing::warn!(
-                outbox_id = event.id,
-                event_type = %event.event_type,
-                error = %e,
-                "outbox publish failed; will retry on next dispatch"
-            );
-            break;
-        }
-        queries::mark_outbox_event_dispatched(pool, event.id).await?;
-        dispatched += 1;
-    }
-
-    Ok(dispatched)
+/// The stable on-the-wire event envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub event_id: Uuid,
+    pub order_id: Uuid,
+    pub sequence: i64,
+    pub event_type: String,
+    pub version: i32,
+    pub tenant_id: Option<Uuid>,
+    pub occurred_at: DateTime<Utc>,
+    pub payload: serde_json::Value,
 }

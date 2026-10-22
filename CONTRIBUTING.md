@@ -11,6 +11,7 @@ Thank you for your interest in contributing to Synapse Core! This guide will hel
 - [Pull Request Process](#pull-request-process)
 - [Architecture Decision Records](#architecture-decision-records)
 - [Maintainer Rotation & On-Call](#maintainer-rotation--on-call)
+- [Code of Conduct](#code-of-conduct)
 - [Communication](#communication)
 
 ## Getting Started
@@ -486,6 +487,15 @@ The project uses a version-controlled rotation schedule so contributors always k
 - **Published view:** the current and upcoming rotation is generated from that schedule and surfaced in the governance docs and the scheduled publish workflow under `.github/workflows/`.
 - **Swaps & coverage:** because the schedule is just a file, requesting a swap or coverage is a normal pull request editing the relevant entry. Open a PR titled `chore(rotation): swap <date> <role>` and tag the incoming maintainer.
 - **Gaps:** if no maintainer is assigned for the current period, the published view explicitly reports a rotation gap rather than silently falling back to an unspecified default. If you see a gap, open a PR to fill it.
+
+## Code of Conduct
+
+All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+It defines the standards for behavior, and the enforcement workflow for reports:
+intake, recusal, confidential review, decision, and communication.
+
+- **Report a concern privately:** email the address in the [Code of Conduct](CODE_OF_CONDUCT.md#1-reporting-intake) with the subject line `CONDUCT:`. Do not raise conduct concerns in public issues, PRs, or Discord.
+- **Security issues** go through [SECURITY.md](SECURITY.md), not the conduct channel.
 
 ## Communication
 

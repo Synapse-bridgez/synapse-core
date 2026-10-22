@@ -31,8 +31,10 @@
 //! - Sensitive data (passwords, tokens) never logged; only query structure logged
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Settlement, Transaction};
+use crate::db::models::{Settlement, SwapOrder, SwapOrderStatus, Transaction};
+use crate::db::outbox;
 use crate::services::query_cache::QueryCache;
+use crate::swap::events::{EVENT_TRANSACTION_CREATED, EVENT_TRANSACTION_STATUS_CHANGED};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -788,7 +790,7 @@ async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
 ) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+    let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
@@ -813,7 +815,10 @@ async fn persist_transaction(
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
     .fetch_one(&mut **db_tx)
-    .await
+    .await?;
+
+    outbox::enqueue_transaction_event(db_tx, result.id, EVENT_TRANSACTION_CREATED).await?;
+    Ok(result)
 }
 
 async fn audit_transaction_creation(
@@ -841,6 +846,36 @@ async fn audit_transaction_creation(
     .await
 }
 
+/// IDs of transactions left in `processing` for longer than `threshold_secs`.
+/// Bounded by `limit` and served by `idx_transactions_status_updated_at`.
+pub async fn find_stale_processing_ids(
+    pool: &PgPool,
+    threshold_secs: f64,
+    limit: i64,
+) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM transactions \
+         WHERE status = 'processing' AND updated_at < NOW() - make_interval(secs => $1) \
+         ORDER BY updated_at LIMIT $2",
+    )
+    .bind(threshold_secs)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Unresolved DLQ depth and the moved-at time of the oldest unresolved entry.
+/// An entry is unresolved while its transaction is still in `dlq`.
+pub async fn dlq_depth_and_oldest(pool: &PgPool) -> Result<(i64, Option<DateTime<Utc>>)> {
+    sqlx::query_as(
+        "SELECT COUNT(*), MIN(d.moved_to_dlq_at) \
+         FROM transaction_dlq d JOIN transactions t ON t.id = d.transaction_id \
+         WHERE t.status = 'dlq'",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     with_timeout(
         QueryTier::Read,
@@ -853,12 +888,12 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
 }
 
 /// Tenant-scoped equivalent of [`get_transaction`] used by GET
-/// /transactions/:id. `tenant_id IS NULL` rows are legacy/pre-migration data
-/// and remain visible to every tenant, matching the RLS policy in
-/// migrations/20260501000000_tenant_rls.sql — this is an application-level
-/// mirror of that policy (defense in depth), not a substitute for it: RLS
-/// still applies underneath regardless of whether this WHERE clause is
-/// present, since the connected role no longer bypasses it.
+/// /transactions/:id. Partitioning is strict: rows with `tenant_id IS NULL`
+/// are not visible to any tenant (they are admin-only), matching the RLS
+/// policy redefined in migrations/20260928000000_strict_tenant_partition.sql.
+/// This is an application-level mirror of that policy (defense in depth), not
+/// a substitute for it: RLS still applies underneath regardless of whether
+/// this WHERE clause is present, since the connected role no longer bypasses it.
 pub async fn get_transaction_for_tenant(
     pool: &PgPool,
     id: Uuid,
@@ -866,9 +901,9 @@ pub async fn get_transaction_for_tenant(
 ) -> Result<Transaction> {
     with_timeout(
         QueryTier::Read,
-        "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        "SELECT * FROM transactions WHERE id = $1 AND tenant_id = $2",
         sqlx::query_as::<_, Transaction>(
-            "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+            "SELECT * FROM transactions WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
         .bind(tenant_id)
@@ -1015,8 +1050,8 @@ pub async fn list_transactions_filtered(
 }
 
 /// Tenant-scoped equivalent of [`list_transactions_filtered`] used by GET
-/// /transactions. See [`get_transaction_for_tenant`] for the NULL-tenant and
-/// defense-in-depth notes — identical rules apply here.
+/// /transactions. See [`get_transaction_for_tenant`] for the strict-partition
+/// and defense-in-depth notes — identical rules apply here.
 pub async fn list_transactions_filtered_for_tenant(
     pool: &PgPool,
     limit: i64,
@@ -1059,7 +1094,7 @@ pub async fn list_transactions_filtered_for_tenant(
                 bind_idx += 1;
             }
 
-            conditions.push(format!("(tenant_id = ${} OR tenant_id IS NULL)", bind_idx));
+            conditions.push(format!("tenant_id = ${}", bind_idx));
             bind_idx += 1;
 
             let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -1244,8 +1279,8 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
 /// `SettlementService::settle_asset` groups unsettled transactions by
 /// `asset_code` only (see migrations/20260824000001_settlement_rls.sql for
 /// the full reasoning). A settlement is visible to `tenant_id` if at least
-/// one of its transactions belongs to that tenant (or is a legacy row with
-/// no tenant_id) — this mirrors the RLS policy's own EXISTS check so
+/// one of its transactions belongs to that tenant — this mirrors the RLS
+/// policy's own EXISTS check so
 /// behavior is identical whether or not RLS is what actually enforces it on
 /// a given connection.
 pub async fn get_settlement_for_tenant(
@@ -1263,7 +1298,7 @@ pub async fn get_settlement_for_tenant(
               AND EXISTS (
                   SELECT 1 FROM transactions t
                   WHERE t.settlement_id = settlements.id
-                    AND (t.tenant_id IS NULL OR t.tenant_id = $2)
+                    AND t.tenant_id = $2
               )
             "#,
         )
@@ -1353,7 +1388,7 @@ pub async fn list_settlements_cursor_for_tenant(
                 EXISTS (
                     SELECT 1 FROM transactions t
                     WHERE t.settlement_id = settlements.id
-                      AND (t.tenant_id IS NULL OR t.tenant_id = $TENANT_PARAM)
+                      AND t.tenant_id = $TENANT_PARAM
                 )
             "#;
 
@@ -1775,7 +1810,7 @@ pub async fn search_transactions(
 
 /// Tenant-scoped equivalent of [`search_transactions`] used by GET
 /// /transactions/search. See [`get_transaction_for_tenant`] for the
-/// NULL-tenant and defense-in-depth notes — identical rules apply here.
+/// strict-partition and defense-in-depth notes — identical rules apply here.
 #[allow(clippy::too_many_arguments)]
 pub async fn search_transactions_for_tenant(
     pool: &PgPool,
@@ -1844,10 +1879,7 @@ pub async fn search_transactions_for_tenant(
 
             // Unconditional tenant scope — always present, unlike the filters above.
             let tenant_param = param_count;
-            conditions.push(format!(
-                "(tenant_id = ${} OR tenant_id IS NULL)",
-                tenant_param
-            ));
+            conditions.push(format!("tenant_id = ${}", tenant_param));
             param_count += 1;
 
             let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -1928,6 +1960,145 @@ pub async fn search_transactions_for_tenant(
         },
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Swap orders (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`transition_swap_order`].
+#[derive(Debug)]
+pub enum SwapOrderTransitionError {
+    /// The edge is not allowed by [`SwapOrderStatus::can_transition_to`].
+    Invalid {
+        from: SwapOrderStatus,
+        to: SwapOrderStatus,
+    },
+    /// The order changed since it was read (or no longer exists). Re-fetch and retry.
+    Conflict,
+    /// Database failure, or a stored status that does not parse.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for SwapOrderTransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwapOrderTransitionError::Invalid { from, to } => {
+                write!(f, "cannot transition swap order from '{from}' to '{to}'")
+            }
+            SwapOrderTransitionError::Conflict => write!(f, "swap order was modified concurrently"),
+            SwapOrderTransitionError::Db(e) => write!(f, "swap order database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SwapOrderTransitionError {}
+
+pub async fn insert_swap_order(pool: &PgPool, order: &SwapOrder) -> Result<SwapOrder> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_orders ... RETURNING *",
+        sqlx::query_as::<_, SwapOrder>(
+            r#"
+            INSERT INTO swap_orders (
+                id, tenant_id, stellar_account, source_asset, destination_asset,
+                amount, quoted_amount, quote_id, status, version, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING *
+            "#,
+        )
+        .bind(order.id)
+        .bind(order.tenant_id)
+        .bind(&order.stellar_account)
+        .bind(&order.source_asset)
+        .bind(&order.destination_asset)
+        .bind(&order.amount)
+        .bind(&order.quoted_amount)
+        .bind(&order.quote_id)
+        .bind(&order.status)
+        .bind(order.version)
+        .bind(order.created_at)
+        .bind(order.updated_at)
+        .fetch_one(pool),
+    )
+    .await
+}
+
+pub async fn get_swap_order(pool: &PgPool, id: Uuid) -> Result<Option<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE id = $1",
+        sqlx::query_as::<_, SwapOrder>("SELECT * FROM swap_orders WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool),
+    )
+    .await
+}
+
+/// Newest-first orders for a tenant, capped at `limit`.
+pub async fn get_swap_orders_for_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+        sqlx::query_as::<_, SwapOrder>(
+            "SELECT * FROM swap_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(pool),
+    )
+    .await
+}
+
+/// Move `order` to `to` using a compare-and-set on `version`.
+///
+/// Same-state is a no-op that returns the order unchanged. An illegal edge
+/// returns [`SwapOrderTransitionError::Invalid`] without touching the row. If
+/// another writer bumped `version` since `order` was read, returns
+/// [`SwapOrderTransitionError::Conflict`]. `created_at` is in the predicate so
+/// the update prunes to the owning partition.
+pub async fn transition_swap_order(
+    pool: &PgPool,
+    order: &SwapOrder,
+    to: SwapOrderStatus,
+) -> std::result::Result<SwapOrder, SwapOrderTransitionError> {
+    let from: SwapOrderStatus = order
+        .status
+        .parse()
+        .map_err(|e: String| SwapOrderTransitionError::Db(sqlx::Error::Decode(e.into())))?;
+
+    if from == to {
+        return Ok(order.clone());
+    }
+    if !from.can_transition_to(to) {
+        return Err(SwapOrderTransitionError::Invalid { from, to });
+    }
+
+    let updated = with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_orders SET status = ... WHERE id = $2 AND created_at = $3 AND version = $4 RETURNING *",
+        sqlx::query_as::<_, SwapOrder>(
+            r#"
+            UPDATE swap_orders
+            SET status = $1, version = version + 1, updated_at = NOW()
+            WHERE id = $2 AND created_at = $3 AND version = $4
+            RETURNING *
+            "#,
+        )
+        .bind(to.to_string())
+        .bind(order.id)
+        .bind(order.created_at)
+        .bind(order.version)
+        .fetch_optional(pool),
+    )
+    .await
+    .map_err(SwapOrderTransitionError::Db)?;
+
+    updated.ok_or(SwapOrderTransitionError::Conflict)
 }
 
 // ---------------------------------------------------------------------------
@@ -2307,6 +2478,9 @@ pub async fn bulk_update_transaction_status(
         .await?;
 
     for &id in &valid_ids {
+        outbox::enqueue_transaction_event(&mut db_tx, id, EVENT_TRANSACTION_STATUS_CHANGED)
+            .await?;
+
         let old_status = old_statuses
             .get(&id)
             .map(|s| s.as_str())

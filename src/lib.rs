@@ -351,6 +351,11 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/canary",
             get(handlers::admin::get_canary_dashboard),
         )
+        // Admin: global swap order intake kill switch
+        .route(
+            "/admin/swap/kill-switch",
+            get(handlers::admin::get_swap_kill_switch).post(handlers::admin::set_swap_kill_switch),
+        )
         .route(
             "/admin/canary/:release_name",
             get(handlers::admin::get_canary_release)
@@ -493,6 +498,19 @@ pub fn create_app(app_state: AppState) -> Router {
         .nest(
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
+        )
+        // Admin: stuck-transaction DLQ interventions (#1446)
+        .route(
+            "/admin/transactions/:id/dlq/retry",
+            post(handlers::dlq::retry_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-complete",
+            post(handlers::dlq::force_complete_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-cancel",
+            post(handlers::dlq::force_cancel_dlq_transaction),
         )
         // Admin: transaction notes API (#1257)
         .route(
