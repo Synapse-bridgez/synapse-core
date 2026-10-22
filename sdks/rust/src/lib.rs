@@ -24,6 +24,8 @@ pub mod client;
 pub mod deprecation;
 pub mod error;
 pub mod graphql_builder;
+pub mod graphql_typed;
+pub mod logging;
 pub mod models;
 pub mod pagination;
 pub mod resources;
@@ -38,5 +40,6 @@ pub use graphql_builder::{
     SettlementField, SettlementQueryBuilder, TransactionField, TransactionQueryBuilder,
     TransactionQueryFilter,
 };
+pub use logging::{LogConfig, SdkLogger};
 pub use models::*;
 pub use pagination::{auto_follow, PageIter};

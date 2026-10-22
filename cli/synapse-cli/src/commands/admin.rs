@@ -55,6 +55,10 @@ pub enum AdminCommands {
     /// Tenant administration and secret rotation.
     #[command(subcommand)]
     Tenants(TenantAdminCommands),
+
+    /// Audit log inspection and real-time tailing.
+    #[command(subcommand)]
+    Audit(AuditCommands),
 }
 
 pub async fn run(cmd: AdminCommands, base_url: &str, api_key: &str) -> Result<()> {
@@ -73,6 +77,7 @@ pub async fn run(cmd: AdminCommands, base_url: &str, api_key: &str) -> Result<()
         AdminCommands::Webhooks(command) => webhooks::run(command, base_url, api_key).await,
         AdminCommands::Events(command) => handle_events(base_url, api_key, command).await,
         AdminCommands::Tenants(command) => handle_tenants(base_url, api_key, command).await,
+        AdminCommands::Audit(command) => handle_audit(base_url, api_key, command).await,
     }
 }
 
@@ -1140,4 +1145,317 @@ fn format_revoke_secret_table(response: &RevokeSecretResponse) -> String {
         format!("STATUS         {}", response.message),
     ]
     .join("\n")
+}
+
+// ── Audit log (issue #1356) ───────────────────────────────────────────────────
+
+/// `synapse admin audit <subcommand>`
+///
+/// Provides access to the server's audit-log table: listing recent entries and
+/// streaming new ones in real time (`tail`). All operations go through the
+/// `admin_auth` middleware (`Authorization: Bearer <key>`) — never `X-API-Key`.
+#[derive(Subcommand)]
+pub enum AuditCommands {
+    /// List the most recent audit-log entries.
+    ///
+    /// Fetches up to `--limit` entries (newest first) from
+    /// `GET /admin/audit/logs`.  Combine with `--entity-type` or `--actor`
+    /// to narrow the result set.
+    ///
+    /// # Exit codes
+    ///   0 – success (including empty list)
+    ///   1 – server error or network failure
+    #[command(
+        about = "List recent audit-log entries",
+        long_about = "Fetch recent audit-log entries from the server.\n\n\
+            Optional flags:\n  \
+            --limit <N>          Maximum entries to return (default: 50)\n  \
+            --entity-type <TYPE> Filter by entity type (e.g. transaction, settlement)\n  \
+            --actor <ACTOR>      Filter by the actor that triggered the change\n  \
+            --json               Emit raw JSON instead of a table"
+    )]
+    List {
+        /// Maximum number of entries to return (server default: 50).
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: u32,
+
+        /// Restrict to one entity type (e.g. `transaction`, `settlement`).
+        #[arg(long, value_name = "TYPE")]
+        entity_type: Option<String>,
+
+        /// Restrict to a specific actor (e.g. `admin`, a user UUID).
+        #[arg(long, value_name = "ACTOR")]
+        actor: Option<String>,
+
+        /// Emit the raw API JSON response instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Tail the audit log in real time.
+    ///
+    /// Polls `GET /admin/audit/logs` on a fixed interval (default 2 s) and
+    /// prints new entries as they arrive, deduplicating by log-entry ID so no
+    /// entry is shown twice even across poll boundaries.
+    ///
+    /// Press Ctrl-C to stop. Exit code 130 is normal on Ctrl-C.
+    ///
+    /// # Exit codes
+    ///   0   – clean exit (unreachable without interrupt)
+    ///   1   – server error or network failure
+    ///   130 – interrupted (Ctrl-C)
+    #[command(
+        about = "Stream new audit-log entries in real time",
+        long_about = "Poll the audit log and print new entries as they arrive.\n\n\
+            Press Ctrl-C to stop.\n\n\
+            Optional flags:\n  \
+            --interval-ms <MS>   Poll interval in milliseconds (default: 2000)\n  \
+            --entity-type <TYPE> Filter by entity type\n  \
+            --actor <ACTOR>      Filter by actor\n  \
+            --json               Emit each new entry as raw JSON (one object per line)"
+    )]
+    Tail {
+        /// Poll interval in milliseconds (default: 2 000 ms = 2 s).
+        #[arg(long, value_name = "MS", default_value_t = 2_000)]
+        interval_ms: u64,
+
+        /// Restrict to one entity type (e.g. `transaction`, `settlement`).
+        #[arg(long, value_name = "TYPE")]
+        entity_type: Option<String>,
+
+        /// Restrict to a specific actor (e.g. `admin`, a user UUID).
+        #[arg(long, value_name = "ACTOR")]
+        actor: Option<String>,
+
+        /// Emit each new entry as a JSON object (one per line) instead of a table row.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// A single audit-log entry as returned by `GET /admin/audit/logs`.
+///
+/// Fields mirror the server's `AuditLog` model (see `src/db/audit.rs`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuditLogEntry {
+    pub id: Uuid,
+    pub entity_id: Uuid,
+    pub entity_type: String,
+    pub action: String,
+    #[serde(default)]
+    pub old_val: Option<serde_json::Value>,
+    #[serde(default)]
+    pub new_val: Option<serde_json::Value>,
+    pub actor: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+}
+
+/// Top-level response for `GET /admin/audit/logs`.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AuditLogListResponse {
+    #[serde(default)]
+    pub entries: Vec<AuditLogEntry>,
+    pub total: i64,
+    #[serde(default)]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+async fn handle_audit(base_url: &str, api_key: &str, command: AuditCommands) -> Result<()> {
+    let client = AdminClient::new(base_url, api_key);
+
+    match command {
+        AuditCommands::List {
+            limit,
+            entity_type,
+            actor,
+            json,
+        } => {
+            let mut query: Vec<(&str, String)> = vec![("limit".into(), limit.to_string())];
+            if let Some(ref et) = entity_type {
+                query.push(("entity_type".into(), et.clone()));
+            }
+            if let Some(ref a) = actor {
+                query.push(("actor".into(), a.clone()));
+            }
+
+            // Build query string manually (AdminClient::get_query takes &[(&str,&str)])
+            let qs: Vec<(&str, &str)> = query
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect();
+
+            let response: AuditLogListResponse =
+                client.get_query("/admin/audit/logs", &qs).await?;
+
+            println!(
+                "{}",
+                output::render(&response, json, format_audit_table)?
+            );
+        }
+
+        AuditCommands::Tail {
+            interval_ms,
+            entity_type,
+            actor,
+            json,
+        } => {
+            tail_audit_log(&client, interval_ms, entity_type, actor, json).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Format a list of audit-log entries as a human-readable table.
+fn format_audit_table(response: &AuditLogListResponse) -> String {
+    let mut lines = vec![format!(
+        "Audit log: {} entries (limit {}, offset {})",
+        response.total, response.limit, response.offset
+    )];
+
+    if response.entries.is_empty() {
+        lines.push("No audit log entries found".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push(
+        "ID | TIMESTAMP | ENTITY TYPE | ENTITY ID | ACTION | ACTOR | TRACE ID"
+            .to_string(),
+    );
+    lines.push(
+        "-- | --------- | ----------- | --------- | ------ | ----- | --------"
+            .to_string(),
+    );
+
+    for entry in &response.entries {
+        let trace = entry.trace_id.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "{} | {} | {} | {} | {} | {} | {}",
+            entry.id,
+            entry.timestamp,
+            entry.entity_type,
+            entry.entity_id,
+            entry.action,
+            entry.actor,
+            trace,
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Format a single audit-log entry as a one-line table row (used by tail).
+fn format_audit_entry_row(entry: &AuditLogEntry) -> String {
+    let trace = entry.trace_id.as_deref().unwrap_or("-");
+    format!(
+        "{} | {} | {} | {} | {} | {} | {}",
+        entry.id,
+        entry.timestamp,
+        entry.entity_type,
+        entry.entity_id,
+        entry.action,
+        entry.actor,
+        trace,
+    )
+}
+
+/// Poll `GET /admin/audit/logs` every `interval_ms` milliseconds and print
+/// any new entries — deduplicating by `id` so each entry is shown at most
+/// once even across poll boundaries.
+///
+/// Runs until interrupted (Ctrl-C) or until the server returns an error.
+async fn tail_audit_log(
+    client: &AdminClient,
+    interval_ms: u64,
+    entity_type: Option<String>,
+    actor: Option<String>,
+    json: bool,
+) -> Result<()> {
+    use std::collections::HashSet;
+    use tokio::time::{sleep, Duration};
+
+    let mut seen_ids: HashSet<Uuid> = HashSet::new();
+    let poll_interval = Duration::from_millis(interval_ms);
+
+    // Print the header row for table mode once.
+    if !json {
+        eprintln!(
+            "Tailing audit log (interval {}ms) — press Ctrl-C to stop",
+            interval_ms
+        );
+        println!(
+            "ID | TIMESTAMP | ENTITY TYPE | ENTITY ID | ACTION | ACTOR | TRACE ID"
+        );
+        println!(
+            "-- | --------- | ----------- | --------- | ------ | ----- | --------"
+        );
+    }
+
+    loop {
+        // Build the query parameters for this poll.
+        let mut query_owned: Vec<(&str, String)> = vec![("limit".into(), "100".to_string())];
+        if let Some(ref et) = entity_type {
+            query_owned.push(("entity_type".into(), et.clone()));
+        }
+        if let Some(ref a) = actor {
+            query_owned.push(("actor".into(), a.clone()));
+        }
+        let qs: Vec<(&str, &str)> = query_owned
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect();
+
+        match client
+            .get_query::<AuditLogListResponse>("/admin/audit/logs", &qs)
+            .await
+        {
+            Ok(response) => {
+                // Process entries oldest-first so the tail output is
+                // chronologically ordered within a single poll window.
+                let mut new_entries: Vec<&AuditLogEntry> = response
+                    .entries
+                    .iter()
+                    .filter(|e| !seen_ids.contains(&e.id))
+                    .collect();
+
+                // Sort ascending by timestamp string (RFC 3339 is sort-safe).
+                new_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+                for entry in new_entries {
+                    seen_ids.insert(entry.id);
+
+                    if json {
+                        // One JSON object per line — suitable for piping to `jq`.
+                        match serde_json::to_string(entry) {
+                            Ok(line) => println!("{}", line),
+                            Err(e) => eprintln!("[audit tail] JSON serialisation error: {e}"),
+                        }
+                    } else {
+                        println!("{}", format_audit_entry_row(entry));
+                    }
+                }
+            }
+            Err(e) => {
+                // Surface the error on stderr but do not exit the loop
+                // immediately — transient server errors (5xx, network blip)
+                // should not kill a long-running tail.  Fatal auth errors
+                // (401/403) are propagated as hard failures.
+                use synapse_sdk::SynapseError;
+                match &e {
+                    SynapseError::Unauthorized(_) | SynapseError::Forbidden(_) => {
+                        return Err(anyhow::anyhow!("audit tail: {e}"));
+                    }
+                    _ => {
+                        eprintln!("[audit tail] transient error (retrying): {e}");
+                    }
+                }
+            }
+        }
+
+        sleep(poll_interval).await;
+    }
 }
