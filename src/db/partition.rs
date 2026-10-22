@@ -10,6 +10,7 @@ pub struct PartitionManager {
     interval: Duration,
     cache: Option<QueryCache>,
     lookahead_months: u32,
+    swap_retention_months: i32,
 }
 
 impl PartitionManager {
@@ -19,6 +20,7 @@ impl PartitionManager {
             interval: Duration::from_secs(interval_hours * 3600),
             cache,
             lookahead_months: 3, // default
+            swap_retention_months: 12, // default
         }
     }
 
@@ -33,7 +35,14 @@ impl PartitionManager {
             interval: Duration::from_secs(interval_hours * 3600),
             cache,
             lookahead_months,
+            swap_retention_months: 12, // default
         }
+    }
+
+    /// Set how many months of swap partitions are retained before detachment.
+    pub fn with_swap_retention_months(mut self, retention_months: i32) -> Self {
+        self.swap_retention_months = retention_months;
+        self
     }
 
     /// Whether this manager was constructed with a cache to warm on partition
@@ -69,6 +78,34 @@ impl PartitionManager {
         // Create partitions for lookahead window
         sqlx::query("SELECT ensure_future_partitions($1)")
             .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+
+        // Same lookahead for swap tables, then apply their retention policy.
+        // Errors propagate to start(), which logs them at error level.
+
+        sqlx::query("SELECT ensure_swap_partitions($1)")
+            .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("SELECT detach_swap_partitions($1)")
+            .bind(self.swap_retention_months)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("SELECT ensure_swap_partitions($1)")
+            .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+        // Same lookahead for swap tables, then apply their retention policy.
+        // Errors propagate to start(), which logs them at error level.
+        sqlx::query("SELECT ensure_swap_partitions($1)")
+            .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("SELECT detach_swap_partitions($1)")
+            .bind(self.swap_retention_months)
             .execute(&self.pool)
             .await?;
 

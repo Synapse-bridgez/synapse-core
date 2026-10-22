@@ -21,10 +21,13 @@ pub mod quoting;
 pub mod sources;
 
 use async_trait::async_trait;
+use opentelemetry::KeyValue;
 use sqlx::types::BigDecimal;
 use std::fmt;
+use tracing::Instrument;
 
 use crate::db::models::Transaction;
+use crate::metrics;
 use crate::services::feature_flags::FeatureFlagService;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
@@ -70,6 +73,27 @@ impl SwapHandoff {
             metadata: tx.metadata.clone(),
         }
     }
+
+    /// Boundary checks every swap engine must run before acting on a hand-off.
+    /// Rejects non-positive amounts, empty account/asset fields, and an
+    /// idempotency key not derived from `transaction_id` (a re-keyed or forged
+    /// hand-off would otherwise bypass replay deduplication).
+    pub fn validate(&self) -> Result<(), SwapError> {
+        if self.amount <= BigDecimal::from(0) {
+            return Err(SwapError::InvalidHandoff("amount must be positive".into()));
+        }
+        if self.stellar_account.trim().is_empty() || self.source_asset.trim().is_empty() {
+            return Err(SwapError::InvalidHandoff(
+                "account and asset must be non-empty".into(),
+            ));
+        }
+        if self.idempotency_key != format!("swap:{}", self.transaction_id) {
+            return Err(SwapError::InvalidHandoff(
+                "idempotency key does not match transaction".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Outcome of handing a transaction to the swap engine.
@@ -111,7 +135,8 @@ impl std::error::Error for SwapError {}
 /// Transport-agnostic: an implementation may run in-process, call out to a
 /// separate microservice, or drive an on-chain contract. It is handed a
 /// [`SwapHandoff`] and reports a [`SwapOutcome`]. Implementations must be
-/// idempotent on `handoff.idempotency_key`.
+/// idempotent on `handoff.idempotency_key`, and must call
+/// [`SwapHandoff::validate`] before acting on a hand-off.
 #[async_trait]
 pub trait SwapEngine: Send + Sync {
     /// Short identifier for logs/metrics (e.g. `"noop"`, `"in-process-v1"`).
@@ -134,6 +159,113 @@ impl SwapEngine for NoopSwapEngine {
 
     async fn on_swap_ready(&self, _handoff: SwapHandoff) -> Result<SwapOutcome, SwapError> {
         Ok(SwapOutcome::Skipped)
+    }
+}
+
+/// Wraps any [`SwapEngine`] with metrics, structured logs, and a `swap.handoff`
+/// trace span per hand-off. Order and tenant ids go only into logs and span
+/// fields; metric labels are limited to closed sets (`event`, `stage`,
+/// `outcome`, `engine`).
+#[derive(Debug, Clone)]
+pub struct ObservedSwapEngine<E> {
+    inner: E,
+}
+
+impl<E> ObservedSwapEngine<E> {
+    pub fn new(inner: E) -> Self {
+        Self { inner }
+    }
+}
+
+/// Stable, low-cardinality label for a [`SwapError`] variant.
+fn swap_error_kind(err: &SwapError) -> &'static str {
+    match err {
+        SwapError::Unavailable => "unavailable",
+        SwapError::InvalidHandoff(_) => "invalid_handoff",
+        SwapError::Internal(_) => "internal",
+    }
+}
+
+#[async_trait]
+impl<E: SwapEngine> SwapEngine for ObservedSwapEngine<E> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn on_swap_ready(&self, handoff: SwapHandoff) -> Result<SwapOutcome, SwapError> {
+        let engine = self.inner.name().to_owned();
+        let order_id = handoff.transaction_id.to_string();
+        let tenant_id = handoff.tenant_id.map(|t| t.to_string());
+        let span = tracing::info_span!(
+            "swap.handoff",
+            order_id = %order_id,
+            tenant_id = ?tenant_id,
+            engine = %engine,
+        );
+
+        async move {
+            let started = std::time::Instant::now();
+            metrics::swap_orders_in_flight().add(1, &[]);
+            let result = self.inner.on_swap_ready(handoff).await;
+            metrics::swap_orders_in_flight().add(-1, &[]);
+
+            let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let outcome = match &result {
+                Ok(SwapOutcome::Routed { .. }) => "ok",
+                Ok(SwapOutcome::Skipped) => "skipped",
+                Ok(SwapOutcome::Deferred { .. }) => "deferred",
+                Err(_) => "error",
+            };
+            metrics::swap_stage_latency_ms().record(
+                latency_ms,
+                &[
+                    KeyValue::new("stage", "handoff"),
+                    KeyValue::new("outcome", outcome),
+                ],
+            );
+
+            // `Routed` means the engine created an order; a rejection is an
+            // invalid hand-off, anything else that errored is a failure.
+            let event = match &result {
+                Ok(SwapOutcome::Routed { .. }) => Some("created"),
+                Err(SwapError::InvalidHandoff(_)) => Some("rejected"),
+                Err(_) => Some("failed"),
+                Ok(_) => None,
+            };
+            if let Some(event) = event {
+                metrics::swap_orders_total().add(
+                    1,
+                    &[
+                        KeyValue::new("event", event),
+                        KeyValue::new("engine", engine.clone()),
+                    ],
+                );
+            }
+
+            match &result {
+                Ok(_) => tracing::info!(
+                    order_id = %order_id,
+                    tenant_id = ?tenant_id,
+                    engine = %engine,
+                    outcome,
+                    latency_ms,
+                    "swap hand-off handled"
+                ),
+                Err(err) => tracing::warn!(
+                    order_id = %order_id,
+                    tenant_id = ?tenant_id,
+                    engine = %engine,
+                    outcome,
+                    error_kind = swap_error_kind(err),
+                    latency_ms,
+                    "swap hand-off failed"
+                ),
+            }
+
+            result
+        }
+        .instrument(span)
+        .await
     }
 }
 
