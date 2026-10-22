@@ -1,5 +1,4 @@
 use crate::secrets::SecretsManager;
-use crate::swap::circuit_breaker::BreakerConfig;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
@@ -618,6 +617,269 @@ pub struct Config {
     // Slow query logging
     pub slow_query_threshold_ms: u64,
     // Settlement batch limits
-    pub settlem
+    pub settlement_max_batch_size: usize,
+    pub settlement_min_tx_count: usize,
+    // Partition configuration
+    pub partition_lookahead_months: u32,
+    pub partition_lookahead_min: u32,
+    pub partition_lookahead_max: u32,
+    // Per-class query timeout configuration
+    pub per_class_timeout_config: PerClassTimeoutConfig,
+    // Cross-chain bridge handoff configuration
+    /// Whether settled swaps are handed off to the cross-chain bridge phase.
+    /// When disabled, no handoff records are produced (local/no-op mode).
+    pub bridge_enabled: bool,
+    /// Base URL of the bridge adapter endpoint. Optional: when unset the
+    /// no-op/local bridge implementation is used.
+    pub bridge_endpoint_url: Option<String>,
+    /// How long to wait for a bridge acknowledgement before marking a
+    /// handoff as failed (and eligible for retry/replay), in seconds.
+    pub bridge_ack_timeout_secs: u64,
+    // Graceful shutdown configuration
+    /// Total grace period allowed for in-flight swap work to drain before
+    /// the process proceeds to flush the outbox and close the DB pool.
+    pub shutdown_grace_period_secs: u64,
+    /// Maximum time to wait for in-flight swap executions to finish during
+    /// draining, in seconds. Must not exceed `shutdown_grace_period_secs`.
+    pub shutdown_drain_timeout_secs: u64,
+}
 
-/* … truncated 12084 chars — edit only what you need near the top … */
+pub mod assets;
+impl Config {
+    pub async fn load() -> anyhow::Result<Self> {
+        // Determine profile before loading env files
+        let app_env = AppEnv::from_str(
+            &std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string()),
+        );
+
+        // Load base .env then profile-specific .env.{profile}
+        load_env_profile(&app_env);
+
+        // Apply profile defaults for any unset vars
+        apply_profile_defaults(&app_env);
+
+        tracing::info!("Active environment profile: {}", app_env.as_str());
+
+        let allowed_ips =
+            parse_allowed_ips(&env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()))?;
+
+        let log_format =
+            parse_log_format(&env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()))?;
+
+        let use_vault = env::var("VAULT_ROLE_ID").is_ok() && env::var("VAULT_SECRET_ID").is_ok();
+
+        let (database_url, anchor_webhook_secret) = if use_vault {
+            let secrets = SecretsManager::new().await?;
+            let db_password = secrets.get_db_password().await?;
+            let anchor_secret = secrets.get_anchor_secret().await?;
+
+            let db_template = env::var("DATABASE_URL_TEMPLATE").ok();
+            let db_url = db_template
+                .map(|template| template.replace("{password}", &db_password))
+                .unwrap_or_else(|| env::var("DATABASE_URL").unwrap_or_default());
+
+            (db_url, anchor_secret)
+        } else {
+            (
+                env::var("DATABASE_URL")?,
+                env::var("ANCHOR_WEBHOOK_SECRET")?,
+            )
+        };
+
+        Ok(Config {
+            app_env,
+            server_port: env::var("SERVER_PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse()?,
+            database_url,
+            database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
+            backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
+            stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
+            anchor_webhook_secret,
+            redis_url: env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            default_rate_limit: env::var("DEFAULT_RATE_LIMIT")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()?,
+            whitelist_rate_limit: env::var("WHITELIST_RATE_LIMIT")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
+            whitelisted_ips: env::var("WHITELISTED_IPS").unwrap_or_default(),
+            log_format,
+            allowed_ips,
+            // Default of 1 assumes a single trusted proxy/load balancer in front of
+            // the app (the common case for this deployment shape). A deployment with
+            // a different topology (e.g. no proxy, or a proxy chain) must set this
+            // explicitly rather than relying on the default.
+            trusted_proxy_depth: env::var("TRUSTED_PROXY_DEPTH")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
+            backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
+            db_timeouts: DbTimeoutConfig {
+                read_query_secs: env::var("DB_TIMEOUT_READ_SECS")
+                    .unwrap_or_else(|_| "5".to_string())
+                    .parse()
+                    .unwrap_or(5),
+                write_query_secs: env::var("DB_TIMEOUT_WRITE_SECS")
+                    .unwrap_or_else(|_| "10".to_string())
+                    .parse()
+                    .unwrap_or(10),
+                admin_query_secs: env::var("DB_TIMEOUT_ADMIN_SECS")
+                    .unwrap_or_else(|_| "60".to_string())
+                    .parse()
+                    .unwrap_or(60),
+            },
+            otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            max_pending_queue: env::var("MAX_PENDING_QUEUE")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()?,
+            db_min_connections: env::var("DB_MIN_CONNECTIONS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()?,
+            db_max_connections: env::var("DB_MAX_CONNECTIONS")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            db_statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
+                .unwrap_or_else(|_| "30000".to_string())
+                .parse()?,
+            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()?,
+            db_long_running_statement_timeout_ms: env::var("DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS")
+                .unwrap_or_else(|_| "300000".to_string())
+                .parse()?,
+            processor_workers: env::var("PROCESSOR_WORKERS")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()?,
+            processor_batch_size: env::var("PROCESSOR_BATCH_SIZE")
+                .unwrap_or_else(|_| "50".to_string())
+                .parse()?,
+            processor_poll_interval_ms: env::var("PROCESSOR_POLL_INTERVAL_MS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
+            processor_min_batch: env::var("PROCESSOR_MIN_BATCH")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+            processor_max_batch: env::var("PROCESSOR_MAX_BATCH")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()?,
+            processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
+                .unwrap_or_else(|_| "0.5".to_string())
+                .parse()?,
+            slow_query_threshold_ms: env::var("SLOW_QUERY_THRESHOLD_MS")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()?,
+            settlement_max_batch_size: env::var("SETTLEMENT_MAX_BATCH_SIZE")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()?,
+            settlement_min_tx_count: env::var("SETTLEMENT_MIN_TX_COUNT")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            partition_lookahead_min: env::var("PARTITION_LOOKAHEAD_MIN")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
+            partition_lookahead_months: {
+                let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
+                    .unwrap_or_else(|_| "1".to_string())
+                    .parse()
+                    .unwrap_or(1);
+                let max: u32 = env::var("PARTITION_LOOKAHEAD_MAX")
+                    .unwrap_or_else(|_| "12".to_string())
+                    .parse()
+                    .unwrap_or(12);
+                let lookahead: u32 = env::var("PARTITION_LOOKAHEAD_MONTHS")
+                    .unwrap_or_else(|_| "3".to_string())
+                    .parse()?;
+
+                if lookahead < min {
+                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be less than PARTITION_LOOKAHEAD_MIN ({})", lookahead, min);
+                }
+                if lookahead > max {
+                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be greater than PARTITION_LOOKAHEAD_MAX ({})", lookahead, max);
+                }
+                lookahead
+            },
+            per_class_timeout_config: PerClassTimeoutConfig {
+                interactive_timeout_ms: env::var("DB_TIMEOUT_INTERACTIVE_MS")
+                    .unwrap_or_else(|_| "5000".to_string())
+                    .parse()?,
+                admin_report_timeout_ms: env::var("DB_TIMEOUT_ADMIN_REPORT_MS")
+                    .unwrap_or_else(|_| "30000".to_string())
+                    .parse()?,
+                background_job_timeout_ms: env::var("DB_TIMEOUT_BACKGROUND_JOB_MS")
+                    .unwrap_or_else(|_| "60000".to_string())
+                    .parse()?,
+            },
+            bridge_enabled: env::var("BRIDGE_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false),
+            bridge_endpoint_url: env::var("BRIDGE_ENDPOINT_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            bridge_ack_timeout_secs: env::var("BRIDGE_ACK_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()?,
+            shutdown_grace_period_secs: env::var("SHUTDOWN_GRACE_PERIOD_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()?,
+            shutdown_drain_timeout_secs: {
+                let grace: u64 = env::var("SHUTDOWN_GRACE_PERIOD_SECS")
+                    .unwrap_or_else(|_| "30".to_string())
+                    .parse()
+                    .unwrap_or(30);
+                let drain: u64 = env::var("SHUTDOWN_DRAIN_TIMEOUT_SECS")
+                    .unwrap_or_else(|_| "20".to_string())
+                    .parse()?;
+                if drain > grace {
+                    anyhow::bail!(
+                        "SHUTDOWN_DRAIN_TIMEOUT_SECS ({}) cannot be greater than SHUTDOWN_GRACE_PERIOD_SECS ({})",
+                        drain,
+                        grace
+                    );
+                }
+                drain
+            },
+        })
+    }
+}
+
+fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
+    let value = raw.trim();
+    if value == "*" {
+        return Ok(AllowedIps::Any);
+    }
+
+    let cidrs = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::parse::<IpNet>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if cidrs.is_empty() {
+        anyhow::bail!("ALLOWED_IPS must be '*' or a comma-separated list of CIDRs");
+    }
+
+    Ok(AllowedIps::Cidrs(cidrs))
+}
+
+fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "text" => Ok(LogFormat::Text),
+        "json" => Ok(LogFormat::Json),
+        _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
+    }
+}

@@ -360,6 +360,103 @@ const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 100;
 const LOCAL_FALLBACK_MAX_BUCKETS: usize = 10_000;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
+/// Default maximum number of items accepted in a single batch request
+/// (batch quote, batch order submission, bulk cancel, bulk status).
+pub const DEFAULT_BATCH_MAX_ITEMS: usize = 50;
+
+/// Hard ceiling for `BATCH_MAX_ITEMS`; operators may lower the cap but not
+/// raise it past this bound, so one batch can never fan out unbounded work.
+pub const BATCH_MAX_ITEMS_CEILING: usize = 500;
+
+/// Default maximum number of items processed concurrently while fanning a
+/// batch out to the single-item code paths.
+pub const DEFAULT_BATCH_CONCURRENCY: usize = 8;
+
+/// Batch size cap from `BATCH_MAX_ITEMS` (clamped to `1..=BATCH_MAX_ITEMS_CEILING`;
+/// default [`DEFAULT_BATCH_MAX_ITEMS`]).
+pub fn batch_max_items() -> usize {
+    std::env::var("BATCH_MAX_ITEMS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .map(|n| n.min(BATCH_MAX_ITEMS_CEILING))
+        .unwrap_or(DEFAULT_BATCH_MAX_ITEMS)
+}
+
+/// Bounded fan-out concurrency for batch endpoints from `BATCH_CONCURRENCY`
+/// (clamped to `1..=batch_max_items()`; default [`DEFAULT_BATCH_CONCURRENCY`]).
+pub fn batch_concurrency() -> usize {
+    let max_items = batch_max_items();
+    std::env::var("BATCH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .map(|n| n.min(max_items))
+        .unwrap_or(DEFAULT_BATCH_CONCURRENCY.min(max_items))
+}
+
+/// Per-item quota accounting for batch endpoints.
+///
+/// Quota is charged once per item, never once per batch, so a batch cannot be
+/// used to bypass the per-tenant rate limit. When `charge_upfront` is set the
+/// whole batch is charged before any item runs (rejecting the batch with 429
+/// if the tenant cannot afford it); otherwise each item is charged as it is
+/// processed and items over the limit fail individually with `quota_exceeded`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchQuotaSettings {
+    pub max_items: usize,
+    pub concurrency: usize,
+    pub charge_upfront: bool,
+}
+
+impl BatchQuotaSettings {
+    /// Read batch settings from the environment.
+    pub fn from_env() -> Self {
+        Self {
+            max_items: batch_max_items(),
+            concurrency: batch_concurrency(),
+            charge_upfront: std::env::var("BATCH_CHARGE_QUOTA_UPFRONT")
+                .ok()
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false),
+        }
+    }
+
+    /// Reject batches larger than the configured cap.
+    pub fn check_size(&self, items: usize) -> Result<(), BatchSizeError> {
+        if items == 0 {
+            return Err(BatchSizeError::Empty);
+        }
+        if items > self.max_items {
+            return Err(BatchSizeError::TooLarge {
+                requested: items,
+                max: self.max_items,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchSizeError {
+    Empty,
+    TooLarge { requested: usize, max: usize },
+}
+
+impl std::fmt::Display for BatchSizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BatchSizeError::Empty => write!(f, "batch must contain at least one item"),
+            BatchSizeError::TooLarge { requested, max } => write!(
+                f,
+                "batch contains {requested} items, exceeding the per-batch cap of {max}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BatchSizeError {}
+
 #[derive(Debug)]
 struct LocalBucket {
     window_started: Instant,
@@ -765,5 +862,34 @@ mod tests {
                 .consume("tenant:a", 1, now + RATE_LIMIT_WINDOW)
                 .allowed
         );
+    }
+
+    #[test]
+    fn batch_size_cap_rejects_empty_and_oversized_batches() {
+        let settings = BatchQuotaSettings {
+            max_items: 3,
+            concurrency: 2,
+            charge_upfront: false,
+        };
+        assert_eq!(settings.check_size(0), Err(BatchSizeError::Empty));
+        assert!(settings.check_size(1).is_ok());
+        assert!(settings.check_size(3).is_ok());
+        assert_eq!(
+            settings.check_size(4),
+            Err(BatchSizeError::TooLarge {
+                requested: 4,
+                max: 3
+            })
+        );
+    }
+
+    #[test]
+    fn batch_concurrency_is_bounded_by_batch_size() {
+        // Defaults must be internally consistent regardless of environment.
+        let settings = BatchQuotaSettings::from_env();
+        assert!(settings.max_items >= 1);
+        assert!(settings.max_items <= BATCH_MAX_ITEMS_CEILING);
+        assert!(settings.concurrency >= 1);
+        assert!(settings.concurrency <= settings.max_items);
     }
 }

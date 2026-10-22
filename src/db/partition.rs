@@ -83,10 +83,27 @@ impl PartitionManager {
 
         // Same lookahead for swap tables, then apply their retention policy.
         // Errors propagate to start(), which logs them at error level.
+
         sqlx::query("SELECT ensure_swap_partitions($1)")
             .bind(self.lookahead_months as i32)
             .execute(&self.pool)
             .await?;
+
+        sqlx::query("SELECT detach_swap_partitions($1)")
+            .bind(self.swap_retention_months)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("SELECT ensure_swap_partitions($1)")
+            .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+        // Same lookahead for swap tables, then apply their retention policy.
+        // Errors propagate to start(), which logs them at error level.
+        sqlx::query("SELECT ensure_swap_partitions($1)")
+            .bind(self.lookahead_months as i32)
+            .execute(&self.pool)
+            .await?;
+
         sqlx::query("SELECT detach_swap_partitions($1)")
             .bind(self.swap_retention_months)
             .execute(&self.pool)
