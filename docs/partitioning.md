@@ -68,6 +68,65 @@ manager.create_partition().await?;
 manager.detach_old_partitions(6).await?; // Keep 6 months
 ```
 
+## Swap Tables
+
+The Phase 2 swap tables use the same monthly `created_at` range partitioning as `transactions`
+(migration `20260928000000_swap_partitioned_tables.sql`):
+
+| Table | Purpose | Partition key | Primary key |
+|-------|---------|---------------|-------------|
+| `swap_orders` | One row per swap order | `created_at` | `(id, created_at)` |
+| `swap_quotes` | Quotes issued for an order | `created_at` | `(id, created_at)` |
+| `swap_fills` | Executions against a quote | `created_at` | `(id, created_at)` |
+| `swap_events` | Transactional outbox | `created_at` | `(id, created_at)` |
+| `swap_order_idempotency` | Global idempotency authority (not partitioned) | — | `(tenant_id, idempotency_key)` |
+
+Partitions are named `<table>_yYYYYmMM`, e.g. `swap_orders_y2026m10`.
+
+### Uniqueness and idempotency
+
+A partitioned table's unique constraints must include the partition key, so `swap_orders`
+cannot enforce a global unique order id or idempotency key by itself. Idempotency is enforced
+by `swap_order_idempotency`, which is not partitioned. Create the order and its idempotency row
+in one transaction:
+
+```sql
+INSERT INTO swap_order_idempotency (tenant_id, idempotency_key, order_id)
+VALUES ($1, $2, $3);   -- fails with unique_violation on replay
+```
+
+### Retention
+
+`detach_swap_partitions(retention_months)` runs from `maintain_partitions()` with the
+configured `SWAP_RETENTION_MONTHS` (default `12`). For each swap table it detaches partitions whose
+month starts before the cutoff, with two exceptions:
+
+- A partition is **kept** while any non-terminal order (`status NOT IN ('completed', 'failed', 'cancelled')`)
+  was created before the partition's end. Its quotes and fills may still be in the partition or
+  a later one.
+- A `swap_events` partition is **kept** while it holds unpublished outbox rows (`published_at IS NULL`).
+
+Detaching `swap_orders` also deletes `swap_order_idempotency` rows created before the partition's
+end, so the idempotency window matches the retention window.
+
+Detached partitions are standalone tables. Archive them as described under
+[Archival Strategy](#archival-strategy) and drop them once archived.
+
+### Manual operations
+
+```sql
+-- Create partitions for the current month plus the next two, across all swap tables
+SELECT ensure_swap_partitions(3);
+
+-- Create one month's swap partitions (e.g. for a backfill)
+SELECT ensure_swap_partition_for('2027-01-15');
+
+-- Detach swap partitions older than 6 months (still subject to the non-terminal guard)
+SELECT detach_swap_partitions(6);
+```
+
+`ensure_swap_partitions()` and `detach_swap_partitions()` are idempotent. Re-running them is safe.
+
 ## Migration Process
 
 The migration (`20250217000000_partition_transactions.sql`) performs:

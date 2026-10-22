@@ -119,6 +119,23 @@ pub mod codes {
         "Stale transition: settlement state changed during processing",
     );
 
+    // Swap compensation errors
+    pub const COMPENSATION_001: (&str, u16, &str) = (
+        "ERR_COMPENSATION_001",
+        500,
+        "Compensation step failed; retry scheduled",
+    );
+    pub const COMPENSATION_002: (&str, u16, &str) = (
+        "ERR_COMPENSATION_002",
+        500,
+        "Compensation retries exhausted; manual intervention required",
+    );
+    pub const COMPENSATION_003: (&str, u16, &str) = (
+        "ERR_COMPENSATION_003",
+        409,
+        "Refund target is disabled",
+    );
+
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
         ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
@@ -238,6 +255,21 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::SETTLEMENT_003.2,
         },
         ErrorCode {
+            code: codes::COMPENSATION_001.0,
+            http_status: codes::COMPENSATION_001.1,
+            description: codes::COMPENSATION_001.2,
+        },
+        ErrorCode {
+            code: codes::COMPENSATION_002.0,
+            http_status: codes::COMPENSATION_002.1,
+            description: codes::COMPENSATION_002.2,
+        },
+        ErrorCode {
+            code: codes::COMPENSATION_003.0,
+            http_status: codes::COMPENSATION_003.1,
+            description: codes::COMPENSATION_003.2,
+        },
+        ErrorCode {
             code: codes::RATE_LIMIT_001.0,
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
@@ -318,6 +350,15 @@ pub enum AppError {
     #[error("Settlement already exists: {0}")]
     SettlementAlreadyExists(String),
 
+    #[error("Compensation step failed: {0}")]
+    CompensationFailed(String),
+
+    #[error("Compensation retries exhausted: {0}")]
+    CompensationExhausted(String),
+
+    #[error("Refund target is disabled: {0}")]
+    CompensationTargetDisabled(String),
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
@@ -357,6 +398,9 @@ impl AppError {
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,
             AppError::SettlementAlreadyExists(_) => StatusCode::CONFLICT,
+            AppError::CompensationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::CompensationExhausted(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::CompensationTargetDisabled(_) => StatusCode::CONFLICT,
             AppError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
@@ -389,6 +433,9 @@ impl AppError {
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
             AppError::InvalidSettlementAmount(_) => codes::SETTLEMENT_001.0,
             AppError::SettlementAlreadyExists(_) => codes::SETTLEMENT_002.0,
+            AppError::CompensationFailed(_) => codes::COMPENSATION_001.0,
+            AppError::CompensationExhausted(_) => codes::COMPENSATION_002.0,
+            AppError::CompensationTargetDisabled(_) => codes::COMPENSATION_003.0,
             AppError::RateLimitExceeded => codes::RATE_LIMIT_001.0,
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,

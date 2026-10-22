@@ -32,7 +32,9 @@
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
 use crate::db::models::{Settlement, Transaction};
+use crate::db::outbox;
 use crate::services::query_cache::QueryCache;
+use crate::swap::events::{EVENT_TRANSACTION_CREATED, EVENT_TRANSACTION_STATUS_CHANGED};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -788,7 +790,7 @@ async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
 ) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+    let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
@@ -813,7 +815,10 @@ async fn persist_transaction(
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
     .fetch_one(&mut **db_tx)
-    .await
+    .await?;
+
+    outbox::enqueue_transaction_event(db_tx, result.id, EVENT_TRANSACTION_CREATED).await?;
+    Ok(result)
 }
 
 async fn audit_transaction_creation(
@@ -838,6 +843,36 @@ async fn audit_transaction_creation(
         }),
         "system",
     )
+    .await
+}
+
+/// IDs of transactions left in `processing` for longer than `threshold_secs`.
+/// Bounded by `limit` and served by `idx_transactions_status_updated_at`.
+pub async fn find_stale_processing_ids(
+    pool: &PgPool,
+    threshold_secs: f64,
+    limit: i64,
+) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM transactions \
+         WHERE status = 'processing' AND updated_at < NOW() - make_interval(secs => $1) \
+         ORDER BY updated_at LIMIT $2",
+    )
+    .bind(threshold_secs)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Unresolved DLQ depth and the moved-at time of the oldest unresolved entry.
+/// An entry is unresolved while its transaction is still in `dlq`.
+pub async fn dlq_depth_and_oldest(pool: &PgPool) -> Result<(i64, Option<DateTime<Utc>>)> {
+    sqlx::query_as(
+        "SELECT COUNT(*), MIN(d.moved_to_dlq_at) \
+         FROM transaction_dlq d JOIN transactions t ON t.id = d.transaction_id \
+         WHERE t.status = 'dlq'",
+    )
+    .fetch_one(pool)
     .await
 }
 
@@ -2307,6 +2342,9 @@ pub async fn bulk_update_transaction_status(
         .await?;
 
     for &id in &valid_ids {
+        outbox::enqueue_transaction_event(&mut db_tx, id, EVENT_TRANSACTION_STATUS_CHANGED)
+            .await?;
+
         let old_status = old_statuses
             .get(&id)
             .map(|s| s.as_str())
