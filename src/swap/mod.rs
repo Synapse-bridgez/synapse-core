@@ -17,6 +17,7 @@
 //! opted into swap are completely unaffected.
 
 pub mod compensation;
+pub mod events;
 
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
@@ -24,6 +25,10 @@ use std::fmt;
 
 use crate::db::models::Transaction;
 use crate::services::feature_flags::FeatureFlagService;
+
+/// Stuck-transaction watchdog and manual DLQ intervention (#1446).
+pub mod recovery;
+pub mod circuit_breaker;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
