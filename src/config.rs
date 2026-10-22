@@ -3,7 +3,10 @@ use crate::swap::circuit_breaker::BreakerConfig;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
+use std::collections::HashMap;
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Active environment profile
@@ -95,7 +98,7 @@ fn apply_profile_defaults(app_env: &AppEnv) {
 fn set_default(key: &str, value: &str) {
     if env::var(key).is_err() {
         // SAFETY: single-threaded at config load time
-        unsafe { env::set_var(key, value) };
+        unsafe { env::set_var(key, value) }
     }
 }
 
@@ -162,6 +165,399 @@ impl PerClassTimeoutConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Swap engine runtime parameters (hot-reloadable, versioned, audited)
+// ---------------------------------------------------------------------------
+
+/// A single tunable swap-engine parameter. Values are stored as `f64` so a
+/// single bounds-checked representation covers limits, spreads, timeouts and
+/// feature flags (0.0 = disabled, 1.0 = enabled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SwapParam {
+    /// Maximum order size in base units
+    MaxOrderSize,
+    /// Minimum order size in base units
+    MinOrderSize,
+    /// Bid/ask spread in basis points
+    SpreadBps,
+    /// Quote validity timeout in milliseconds
+    QuoteTimeoutMs,
+    /// Feature flag: enable a venue (0.0/1.0)
+    VenueEnabled,
+}
+
+impl SwapParam {
+    /// Documented inclusive bounds for each parameter. Validation rejects any
+    /// value outside these ranges; the bounds are the contract for operators.
+    pub fn bounds(&self) -> (f64, f64) {
+        match self {
+            SwapParam::MaxOrderSize => (0.0, 1_000_000_000.0),
+            SwapParam::MinOrderSize => (0.0, 1_000_000_000.0),
+            SwapParam::SpreadBps => (0.0, 10_000.0),
+            SwapParam::QuoteTimeoutMs => (100.0, 600_000.0),
+            SwapParam::VenueEnabled => (0.0, 1.0),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SwapParam::MaxOrderSize => "max_order_size",
+            SwapParam::MinOrderSize => "min_order_size",
+            SwapParam::SpreadBps => "spread_bps",
+            SwapParam::QuoteTimeoutMs => "quote_timeout_ms",
+            SwapParam::VenueEnabled => "venue_enabled",
+        }
+    }
+}
+
+/// A validated, immutable snapshot of swap parameters for a single tenant.
+/// In-flight orders capture this at acceptance so mid-flight behavior does not
+/// silently change when a new version is applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapConfigSnapshot {
+    pub version: u64,
+    pub tenant: Option<String>,
+    pub values: HashMap<SwapParam, f64>,
+}
+
+impl SwapConfigSnapshot {
+    pub fn get(&self, param: SwapParam) -> Option<f64> {
+        self.values.get(&param).copied()
+    }
+}
+
+/// A single proposed parameter change.
+#[derive(Debug, Clone)]
+pub struct ParamChange {
+    pub param: SwapParam,
+    pub value: f64,
+}
+
+/// Validation error for a configuration submission.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigValidationError {
+    pub param: SwapParam,
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl std::fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "parameter {} value {} out of bounds [{}, {}]",
+            self.param.as_str(),
+            self.value,
+            self.min,
+            self.max
+        )
+    }
+}
+
+impl std::error::Error for ConfigValidationError {}
+
+/// Validate a batch of changes atomically. Returns the first error without
+/// applying anything; callers must not mutate state on `Err`.
+pub fn validate_changes(changes: &[ParamChange]) -> Result<(), ConfigValidationError> {
+    for change in changes {
+        let (min, max) = change.param.bounds();
+        if change.value.is_nan() || change.value < min || change.value > max {
+            return Err(ConfigValidationError {
+                param: change.param,
+                value: change.value,
+                min,
+                max,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Audit record for an applied configuration change.
+#[derive(Debug, Clone)]
+pub struct ConfigAuditRecord {
+    pub version: u64,
+    pub actor: String,
+    pub timestamp: std::time::SystemTime,
+    pub reason: String,
+    pub before: HashMap<SwapParam, f64>,
+    pub after: HashMap<SwapParam, f64>,
+}
+
+/// A subscriber notified on every applied configuration change. Subscribers
+/// are invoked synchronously on apply; no polling loop is required.
+pub trait ConfigSubscriber: Send + Sync {
+    fn on_change(&self, snapshot: &SwapConfigSnapshot);
+}
+
+/// Error returned when an optimistic-concurrency version check fails.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionConflict {
+    pub expected: u64,
+    pub actual: u64,
+}
+
+impl std::fmt::Display for VersionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "configuration version conflict: expected {}, actual {}",
+            self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for VersionConflict {}
+
+/// Typed configuration provider for swap-engine parameters. Holds a single
+/// immutable snapshot swapped atomically; readers always see a consistent
+/// view. Layered resolution: environment defaults < persisted store <
+/// per-tenant overrides.
+#[derive(Clone)]
+pub struct SwapConfigProvider {
+    inner: Arc<SwapConfigInner>,
+}
+
+struct SwapConfigInner {
+    /// Global (non-tenant) snapshot, atomically swapped.
+    global: RwLock<Arc<SwapConfigSnapshot>>,
+    /// Per-tenant overrides layered on top of the global snapshot.
+    tenant_overrides: RwLock<HashMap<String, HashMap<SwapParam, f64>>>,
+    /// Monotonic version counter for optimistic concurrency.
+    version: AtomicU64,
+    /// Applied-change audit log (append-only).
+    audit: RwLock<Vec<ConfigAuditRecord>>,
+    /// Version history for rollback.
+    history: RwLock<Vec<Arc<SwapConfigSnapshot>>>,
+    /// Subscribers notified on change.
+    subscribers: RwLock<Vec<Arc<dyn ConfigSubscriber>>>,
+}
+
+impl SwapConfigProvider {
+    /// Build a provider from environment defaults (bootstrap fallback).
+    pub fn from_env() -> Self {
+        let mut values = HashMap::new();
+        values.insert(SwapParam::MaxOrderSize, 1_000_000.0);
+        values.insert(SwapParam::MinOrderSize, 1.0);
+        values.insert(SwapParam::SpreadBps, 10.0);
+        values.insert(SwapParam::QuoteTimeoutMs, 5_000.0);
+        values.insert(SwapParam::VenueEnabled, 1.0);
+        let snapshot = SwapConfigSnapshot {
+            version: 1,
+            tenant: None,
+            values,
+        };
+        Self {
+            inner: Arc::new(SwapConfigInner {
+                global: RwLock::new(Arc::new(snapshot.clone())),
+                tenant_overrides: RwLock::new(HashMap::new()),
+                version: AtomicU64::new(1),
+                audit: RwLock::new(Vec::new()),
+                history: RwLock::new(vec![Arc::new(snapshot)]),
+                subscribers: RwLock::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Register a subscriber notified on every applied change.
+    pub fn subscribe(&self, subscriber: Arc<dyn ConfigSubscriber>) {
+        if let Ok(mut subs) = self.inner.subscribers.write() {
+            subs.push(subscriber);
+        }
+    }
+
+    /// Current global snapshot (consistent view).
+    pub fn snapshot(&self) -> Arc<SwapConfigSnapshot> {
+        self.inner
+            .global
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| Arc::new(SwapConfigSnapshot {
+                version: 0,
+                tenant: None,
+                values: HashMap::new(),
+            }))
+    }
+
+    /// Resolve the effective snapshot for a tenant: global values overlaid
+    /// with per-tenant overrides. Missing overrides fall back to global.
+    pub fn snapshot_for_tenant(&self, tenant: &str) -> Arc<SwapConfigSnapshot> {
+        let global = self.snapshot();
+        let overrides = self
+            .inner
+            .tenant_overrides
+            .read()
+            .ok()
+            .and_then(|m| m.get(tenant).cloned())
+            .unwrap_or_default();
+        if overrides.is_empty() {
+            return global;
+        }
+        let mut values = global.values.clone();
+        for (k, v) in overrides {
+            values.insert(k, v);
+        }
+        Arc::new(SwapConfigSnapshot {
+            version: global.version,
+            tenant: Some(tenant.to_string()),
+            values,
+        })
+    }
+
+    /// Dry-run validation without applying anything.
+    pub fn validate(&self, changes: &[ParamChange]) -> Result<(), ConfigValidationError> {
+        validate_changes(changes)
+    }
+
+    /// Apply a batch of changes atomically. `expected_version` enforces
+    /// optimistic concurrency; on mismatch nothing is applied. On success the
+    /// snapshot is swapped atomically, an audit record is appended, the
+    /// version is bumped, and subscribers are notified.
+    pub fn apply(
+        &self,
+        expected_version: u64,
+        changes: &[ParamChange],
+        actor: &str,
+        reason: &str,
+    ) -> Result<u64, ApplyError> {
+        // Validate first — nothing partially applied on invalid input.
+        self.validate(changes).map_err(ApplyError::Invalid)?;
+
+        let current = self.snapshot();
+        if current.version != expected_version {
+            return Err(ApplyError::Conflict(VersionConflict {
+                expected: expected_version,
+                actual: current.version,
+            }));
+        }
+
+        let mut after = current.values.clone();
+        for change in changes {
+            after.insert(change.param, change.value);
+        }
+
+        let new_version = self.inner.version.fetch_add(1, Ordering::SeqCst) + 1;
+        let new_snapshot = Arc::new(SwapConfigSnapshot {
+            version: new_version,
+            tenant: None,
+            values: after.clone(),
+        });
+
+        // Swap atomically.
+        if let Ok(mut g) = self.inner.global.write() {
+            *g = new_snapshot.clone();
+        }
+
+        let record = ConfigAuditRecord {
+            version: new_version,
+            actor: actor.to_string(),
+            timestamp: std::time::SystemTime::now(),
+            reason: reason.to_string(),
+            before: current.values.clone(),
+            after,
+        };
+        if let Ok(mut audit) = self.inner.audit.write() {
+            audit.push(record);
+        }
+        if let Ok(mut history) = self.inner.history.write() {
+            history.push(new_snapshot.clone());
+        }
+
+        // Notify subscribers without polling.
+        if let Ok(subs) = self.inner.subscribers.read() {
+            for sub in subs.iter() {
+                sub.on_change(&new_snapshot);
+            }
+        }
+
+        Ok(new_version)
+    }
+
+    /// Set a per-tenant override (validated). Missing overrides fall back to
+    /// the global snapshot at resolution time.
+    pub fn set_tenant_override(
+        &self,
+        tenant: &str,
+        changes: &[ParamChange],
+    ) -> Result<(), ConfigValidationError> {
+        self.validate(changes)?;
+        if let Ok(mut overrides) = self.inner.tenant_overrides.write() {
+            let entry = overrides.entry(tenant.to_string()).or_default();
+            for change in changes {
+                entry.insert(change.param, change.value);
+            }
+        }
+        Ok(())
+    }
+
+    /// View the audit log of applied changes.
+    pub fn audit_log(&self) -> Vec<ConfigAuditRecord> {
+        self.inner
+            .audit
+            .read()
+            .map(|a| a.clone())
+            .unwrap_or_default()
+    }
+
+    /// View version history (snapshots).
+    pub fn history(&self) -> Vec<Arc<SwapConfigSnapshot>> {
+        self.inner
+            .history
+            .read()
+            .map(|h| h.clone())
+            .unwrap_or_default()
+    }
+
+    /// Roll back to a previous version by re-applying its values as a new
+    /// version (history is append-only; rollback is itself audited).
+    pub fn rollback(
+        &self,
+        target_version: u64,
+        actor: &str,
+        reason: &str,
+    ) -> Result<u64, ApplyError> {
+        let target = self
+            .inner
+            .history
+            .read()
+            .ok()
+            .and_then(|h| h.iter().find(|s| s.version == target_version).cloned())
+            .ok_or(ApplyError::UnknownVersion(target_version))?;
+
+        let current = self.snapshot();
+        let changes: Vec<ParamChange> = target
+            .values
+            .iter()
+            .map(|(param, value)| ParamChange {
+                param: *param,
+                value: *value,
+            })
+            .collect();
+        self.apply(current.version, &changes, actor, reason)
+    }
+}
+
+/// Errors from applying a configuration change.
+#[derive(Debug)]
+pub enum ApplyError {
+    Invalid(ConfigValidationError),
+    Conflict(VersionConflict),
+    UnknownVersion(u64),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::Invalid(e) => write!(f, "invalid configuration: {}", e),
+            ApplyError::Conflict(e) => write!(f, "{}", e),
+            ApplyError::UnknownVersion(v) => write!(f, "unknown configuration version {}", v),
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -222,274 +618,6 @@ pub struct Config {
     // Slow query logging
     pub slow_query_threshold_ms: u64,
     // Settlement batch limits
-    pub settlement_max_batch_size: usize,
-    pub settlement_min_tx_count: usize,
-    // Partition configuration
-    pub partition_lookahead_months: u32,
-    pub partition_lookahead_min: u32,
-    pub partition_lookahead_max: u32,
-    // Stuck-transaction watchdog (src/swap/recovery.rs)
-    pub stuck_processing_threshold_secs: u64,
-    pub watchdog_interval_secs: u64,
-    pub dlq_depth_alert_threshold: i64,
-    pub dlq_age_alert_secs: u64,
-    // Months of swap order/quote/fill/event partitions to retain before detaching
-    pub swap_retention_months: i32,
-    // Per-class query timeout configuration
-    pub per_class_timeout_config: PerClassTimeoutConfig,
-    /// Global swap order intake switch (`SWAP_ACCEPTING_ORDERS`). When false,
-    /// new swap orders are rejected; in-flight orders are unaffected.
-    pub swap_accepting_orders: bool,
-    /// Per-tenant and per-provider swap circuit breaker thresholds.
-    pub swap_breaker: BreakerConfig,
-}
+    pub settlem
 
-pub mod assets;
-impl Config {
-    pub async fn load() -> anyhow::Result<Self> {
-        // Determine profile before loading env files
-        let app_env = AppEnv::from_str(
-            &std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string()),
-        );
-
-        // Load base .env then profile-specific .env.{profile}
-        load_env_profile(&app_env);
-
-        // Apply profile defaults for any unset vars
-        apply_profile_defaults(&app_env);
-
-        tracing::info!("Active environment profile: {}", app_env.as_str());
-
-        let allowed_ips =
-            parse_allowed_ips(&env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()))?;
-
-        let log_format =
-            parse_log_format(&env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()))?;
-
-        let use_vault = env::var("VAULT_ROLE_ID").is_ok() && env::var("VAULT_SECRET_ID").is_ok();
-
-        let (database_url, anchor_webhook_secret) = if use_vault {
-            let secrets = SecretsManager::new().await?;
-            let db_password = secrets.get_db_password().await?;
-            let anchor_secret = secrets.get_anchor_secret().await?;
-
-            let db_template = env::var("DATABASE_URL_TEMPLATE").ok();
-            let db_url = db_template
-                .map(|template| template.replace("{password}", &db_password))
-                .unwrap_or_else(|| env::var("DATABASE_URL").unwrap_or_default());
-
-            (db_url, anchor_secret)
-        } else {
-            (
-                env::var("DATABASE_URL")?,
-                env::var("ANCHOR_WEBHOOK_SECRET")?,
-            )
-        };
-
-        Ok(Config {
-            app_env,
-            server_port: env::var("SERVER_PORT")
-                .unwrap_or_else(|_| "3000".to_string())
-                .parse()?,
-            database_url,
-            database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
-            backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
-            stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
-            anchor_webhook_secret,
-            redis_url: env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
-            default_rate_limit: env::var("DEFAULT_RATE_LIMIT")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse()?,
-            whitelist_rate_limit: env::var("WHITELIST_RATE_LIMIT")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()?,
-            whitelisted_ips: env::var("WHITELISTED_IPS").unwrap_or_default(),
-            log_format,
-            allowed_ips,
-            // Default of 1 assumes a single trusted proxy/load balancer in front of
-            // the app (the common case for this deployment shape). A deployment with
-            // a different topology (e.g. no proxy, or a proxy chain) must set this
-            // explicitly rather than relying on the default.
-            trusted_proxy_depth: env::var("TRUSTED_PROXY_DEPTH")
-                .unwrap_or_else(|_| "1".to_string())
-                .parse()?,
-            backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
-            backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
-            db_timeouts: DbTimeoutConfig {
-                read_query_secs: env::var("DB_TIMEOUT_READ_SECS")
-                    .unwrap_or_else(|_| "5".to_string())
-                    .parse()
-                    .unwrap_or(5),
-                write_query_secs: env::var("DB_TIMEOUT_WRITE_SECS")
-                    .unwrap_or_else(|_| "10".to_string())
-                    .parse()
-                    .unwrap_or(10),
-                admin_query_secs: env::var("DB_TIMEOUT_ADMIN_SECS")
-                    .unwrap_or_else(|_| "60".to_string())
-                    .parse()
-                    .unwrap_or(60),
-            },
-            otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
-            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect(),
-            max_pending_queue: env::var("MAX_PENDING_QUEUE")
-                .unwrap_or_else(|_| "10000".to_string())
-                .parse()?,
-            db_min_connections: env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse()?,
-            db_max_connections: env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "50".to_string())
-                .parse()?,
-            db_statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
-                .unwrap_or_else(|_| "30000".to_string())
-                .parse()?,
-            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "600".to_string())
-                .parse()?,
-            db_long_running_statement_timeout_ms: env::var("DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS")
-                .unwrap_or_else(|_| "300000".to_string())
-                .parse()?,
-            processor_workers: env::var("PROCESSOR_WORKERS")
-                .unwrap_or_else(|_| "4".to_string())
-                .parse()?,
-            processor_batch_size: env::var("PROCESSOR_BATCH_SIZE")
-                .unwrap_or_else(|_| "50".to_string())
-                .parse()?,
-            processor_poll_interval_ms: env::var("PROCESSOR_POLL_INTERVAL_MS")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()?,
-            processor_min_batch: env::var("PROCESSOR_MIN_BATCH")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()?,
-            processor_max_batch: env::var("PROCESSOR_MAX_BATCH")
-                .unwrap_or_else(|_| "500".to_string())
-                .parse()?,
-            processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
-                .unwrap_or_else(|_| "0.5".to_string())
-                .parse()?,
-            slow_query_threshold_ms: env::var("SLOW_QUERY_THRESHOLD_MS")
-                .unwrap_or_else(|_| "500".to_string())
-                .parse()?,
-            settlement_max_batch_size: env::var("SETTLEMENT_MAX_BATCH_SIZE")
-                .unwrap_or_else(|_| "10000".to_string())
-                .parse()?,
-            settlement_min_tx_count: env::var("SETTLEMENT_MIN_TX_COUNT")
-                .unwrap_or_else(|_| "1".to_string())
-                .parse()?,
-            partition_lookahead_min: env::var("PARTITION_LOOKAHEAD_MIN")
-                .unwrap_or_else(|_| "1".to_string())
-                .parse()?,
-            partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
-                .unwrap_or_else(|_| "12".to_string())
-                .parse()?,
-            swap_retention_months: env::var("SWAP_RETENTION_MONTHS")
-                .unwrap_or_else(|_| "12".to_string())
-                .parse()?,
-            partition_lookahead_months: {
-                let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
-                    .unwrap_or_else(|_| "1".to_string())
-                    .parse()
-                    .unwrap_or(1);
-                let max: u32 = env::var("PARTITION_LOOKAHEAD_MAX")
-                    .unwrap_or_else(|_| "12".to_string())
-                    .parse()
-                    .unwrap_or(12);
-                let lookahead: u32 = env::var("PARTITION_LOOKAHEAD_MONTHS")
-                    .unwrap_or_else(|_| "3".to_string())
-                    .parse()?;
-
-                if lookahead < min {
-                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be less than PARTITION_LOOKAHEAD_MIN ({})", lookahead, min);
-                }
-                if lookahead > max {
-                    anyhow::bail!("PARTITION_LOOKAHEAD_MONTHS ({}) cannot be greater than PARTITION_LOOKAHEAD_MAX ({})", lookahead, max);
-                }
-                lookahead
-            },
-            stuck_processing_threshold_secs: env::var("STUCK_PROCESSING_THRESHOLD_SECS")
-                .unwrap_or_else(|_| "900".to_string())
-                .parse()?,
-            watchdog_interval_secs: env::var("WATCHDOG_INTERVAL_SECS")
-                .unwrap_or_else(|_| "60".to_string())
-                .parse()?,
-            dlq_depth_alert_threshold: env::var("DLQ_DEPTH_ALERT_THRESHOLD")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse()?,
-            dlq_age_alert_secs: env::var("DLQ_AGE_ALERT_SECS")
-                .unwrap_or_else(|_| "3600".to_string())
-                .parse()?,
-            per_class_timeout_config: PerClassTimeoutConfig {
-                interactive_timeout_ms: env::var("DB_TIMEOUT_INTERACTIVE_MS")
-                    .unwrap_or_else(|_| "5000".to_string())
-                    .parse()?,
-                admin_report_timeout_ms: env::var("DB_TIMEOUT_ADMIN_REPORT_MS")
-                    .unwrap_or_else(|_| "30000".to_string())
-                    .parse()?,
-                background_job_timeout_ms: env::var("DB_TIMEOUT_BACKGROUND_JOB_MS")
-                    .unwrap_or_else(|_| "60000".to_string())
-                    .parse()?,
-            },
-            swap_accepting_orders: env::var("SWAP_ACCEPTING_ORDERS")
-                .unwrap_or_else(|_| "true".to_string())
-                .parse()?,
-            swap_breaker: BreakerConfig {
-                window: Duration::from_secs(
-                    env::var("SWAP_BREAKER_WINDOW_SECS")
-                        .unwrap_or_else(|_| "60".to_string())
-                        .parse()?,
-                ),
-                min_calls: env::var("SWAP_BREAKER_MIN_CALLS")
-                    .unwrap_or_else(|_| "20".to_string())
-                    .parse()?,
-                failure_rate_threshold: env::var("SWAP_BREAKER_FAILURE_RATE")
-                    .unwrap_or_else(|_| "0.5".to_string())
-                    .parse()?,
-                slow_call_threshold: Duration::from_millis(
-                    env::var("SWAP_BREAKER_SLOW_CALL_MS")
-                        .unwrap_or_else(|_| "2000".to_string())
-                        .parse()?,
-                ),
-                open_duration: Duration::from_secs(
-                    env::var("SWAP_BREAKER_OPEN_SECS")
-                        .unwrap_or_else(|_| "30".to_string())
-                        .parse()?,
-                ),
-            },
-        })
-    }
-}
-
-fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
-    let value = raw.trim();
-    if value == "*" {
-        return Ok(AllowedIps::Any);
-    }
-
-    let cidrs = value
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::parse::<IpNet>)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if cidrs.is_empty() {
-        anyhow::bail!("ALLOWED_IPS must be '*' or a comma-separated list of CIDRs");
-    }
-
-    Ok(AllowedIps::Cidrs(cidrs))
-}
-
-fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "text" => Ok(LogFormat::Text),
-        "json" => Ok(LogFormat::Json),
-        _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
-    }
-}
+/* … truncated 12084 chars — edit only what you need near the top … */
