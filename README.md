@@ -62,6 +62,15 @@ STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.
 REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
 ```
 
+Swap engine rollout (optional, defaults to off). Set per environment in `.env.development`, `.env.production`, or `.env.example.failover`:
+
+```
+SWAP_ENGINE_ENABLED – Process-wide kill switch for swap hand-offs (true/false, default false)
+SWAP_ENGINE_TENANT_ALLOWLIST – Comma-separated tenant ids admitted to swap (* = all, empty = none)
+```
+
+A tenant also needs the `swap_engine` feature flag enabled. The rollout sequence, kill switch, and stuck-order runbook are in [docs/swap-rollout.md](docs/swap-rollout.md).
+
 3. Start PostgresSQL Using Docker (recommended for development):
 
 ```bash
