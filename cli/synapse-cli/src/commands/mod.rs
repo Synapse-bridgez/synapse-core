@@ -5,6 +5,7 @@ pub mod graphql;
 pub mod health;
 pub mod settlements;
 pub mod stats;
+pub mod swap;
 pub mod transactions;
 pub mod webhooks;
 
@@ -106,6 +107,20 @@ pub enum Commands {
                       Output defaults to a human-readable table; add --json for raw JSON."
     )]
     Settlements(settlements::SettlementsCmd),
+
+    /// Swap order commands (create, get, list, cancel, risk)
+    #[command(
+        about = "Swap order commands",
+        long_about = "Create, inspect, list and cancel swap orders, and view exposure.\n\n\
+                      Subcommands:\n  \
+                      create  — Create a swap order\n  \
+                      get     — Get a swap order by UUID\n  \
+                      list    — List swap orders\n  \
+                      cancel  — Cancel a swap order\n  \
+                      risk    — Show current exposure against limits\n\n\
+                      Output defaults to a human-readable table; add --json for raw JSON."
+    )]
+    Swap(swap::SwapCmd),
 
     /// Transaction lookup commands (get, export)
     #[command(

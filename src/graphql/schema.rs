@@ -199,11 +199,18 @@ impl Extension for ErrorTaxonomyExtensionImpl {
 ///
 /// Panics if the schema cannot be built (e.g., resolver conflict, invalid field names).
 pub fn build_schema(state: AppState) -> AppSchema {
-    async_graphql::Schema::build(
+    let builder = async_graphql::Schema::build(
         Query::default(),
         Mutation::default(),
         Subscription::default(),
-    )
+    );
+    // Introspection is disabled in production.
+    let builder = if std::env::var("APP_ENV").is_ok_and(|e| e.eq_ignore_ascii_case("production")) {
+        builder.disable_introspection()
+    } else {
+        builder
+    };
+    builder
     .data(state)
     .limit_depth(MAX_QUERY_DEPTH)
     .limit_complexity(MAX_QUERY_COMPLEXITY)
