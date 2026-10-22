@@ -15,6 +15,16 @@
 //! [`swap_enabled_for`] returns `false` unless a tenant explicitly opts in via
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
+//!
+//! The Phase 2 swap domain model (order lifecycle, transition guards, and typed
+//! amount/asset/quote/fill value objects) lives in [`order`]. It is pure logic
+//! with no I/O.
+
+pub mod order;
+
+pub mod events;
+pub mod execution;
+pub mod order;
 
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
@@ -22,6 +32,9 @@ use std::fmt;
 
 use crate::db::models::Transaction;
 use crate::services::feature_flags::FeatureFlagService;
+
+pub mod market_data;
+pub mod quote;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";

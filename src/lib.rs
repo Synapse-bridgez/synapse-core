@@ -297,6 +297,21 @@ pub fn create_app(app_state: AppState) -> Router {
         // Tenant-facing usage: the caller's own latency histograms (#1337).
         .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
 
+    // Swap API (#1440). Tenant identity comes from the SwapCaller extractor;
+    // request bodies are capped well below the global default.
+    let swap_routes = Router::new()
+        .route("/swap/quotes", post(handlers::swap::create_quote))
+        .route(
+            "/swap/orders",
+            post(handlers::swap::create_order).get(handlers::swap::list_orders),
+        )
+        .route("/swap/orders/:id", get(handlers::swap::get_order))
+        .route("/swap/orders/:id/cancel", post(handlers::swap::cancel_order))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            handlers::swap::SWAP_MAX_BODY_BYTES,
+        ));
+    let data_routes = data_routes.merge(swap_routes);
+
     // core_routes intentionally does NOT layer api_key_auth across the board:
     // callback_routes/webhook_routes authenticate inbound anchor calls via
     // HMAC signature validation (middleware::webhook_signature::verify_anchor_signature),
@@ -350,6 +365,11 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/admin/canary",
             get(handlers::admin::get_canary_dashboard),
+        )
+        // Admin: global swap order intake kill switch
+        .route(
+            "/admin/swap/kill-switch",
+            get(handlers::admin::get_swap_kill_switch).post(handlers::admin::set_swap_kill_switch),
         )
         .route(
             "/admin/canary/:release_name",
@@ -493,6 +513,19 @@ pub fn create_app(app_state: AppState) -> Router {
         .nest(
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
+        )
+        // Admin: stuck-transaction DLQ interventions (#1446)
+        .route(
+            "/admin/transactions/:id/dlq/retry",
+            post(handlers::dlq::retry_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-complete",
+            post(handlers::dlq::force_complete_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-cancel",
+            post(handlers::dlq::force_cancel_dlq_transaction),
         )
         // Admin: transaction notes API (#1257)
         .route(
