@@ -108,7 +108,75 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 
 NOTE: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
 
+### 🌐 Stellar Testnet Integration Environment
+
+Unit tests and the simulation harness use mocks, so they cannot catch issues that only appear on a real network (sequence handling, trustline/authorization edge cases, ledger-close timing, transaction result codes, Horizon pagination). The end-to-end suite in `tests/integration/` drives a swap order from creation through quote, execution, settlement, and confirmation against real ledger behaviour.
+
+#### 1. Bring up the environment
+
+The suite separates **environment bring-up** from **scenario execution**, so the same scenarios can run against a local container or the hosted testnet.
+
+**Option A – Local Stellar Quickstart (default, used by CI):**
+
+```bash
+docker compose -f docker-compose.testnet.yml up -d
+# wait for Horizon to report a healthy ledger
+curl -sf http://localhost:8000/health || echo "Horizon not ready yet"
+```
+
+Tear it down (also removes the ephemeral ledger state):
+
+```bash
+docker compose -f docker-compose.testnet.yml down -v
+```
+
+**Option B – Hosted Stellar testnet:**
+
+```bash
+export STELLAR_TESTNET_MODE=hosted
+export STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
+export STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+```
+
+No container is required; accounts are funded via friendbot (with backoff for rate limits). Tests never depend on external asset issuers — each run issues its own assets from a freshly funded account.
+
+#### 2. Run the suite locally
+
+The suite is gated behind an opt-in label so it does not run on every `cargo test`:
+
+```bash
+# local quickstart (default)
+STELLAR_TESTNET_MODE=local \
+DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test \
+cargo test --features integration --test integration -- --test-threads=1
+
+# against hosted testnet
+STELLAR_TESTNET_MODE=hosted \
+STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org \
+DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test \
+cargo test --features integration --test integration -- --test-threads=1
+```
+
+Each test creates unique accounts and assets and cleans up its state, so runs are isolated. The suite asserts on persisted swap records **and** on-chain state, not just HTTP responses.
+
+#### 3. Run in CI
+
+The integration job lives in `.github/workflows/` and runs:
+
+- **Per-PR:** only when the PR carries the `integration-testnet` label (opt-in).
+- **Nightly:** on a scheduled run against the hosted testnet.
+
+The job starts the quickstart container, waits for Horizon health, runs the suite with explicit timeouts and bounded ledger polling, then tears the container down. Total runtime is bounded; load/performance testing and chaos injection are out of scope (separate issues).
+
+#### 4. Interpreting failures
+
+- **Environment unreachable:** the suite fails loudly with a self-check error (`testnet environment unreachable at <url>`) instead of skipping silently. Check the container is up (`docker compose -f docker-compose.testnet.yml ps`) or that `STELLAR_HORIZON_URL` is correct.
+- **Testnet reset:** if Horizon returns `404` for a previously known account/ledger, the network was reset — re-run against a fresh environment; the failure message names the reset explicitly.
+- **Friendbot rate limits:** funding retries with exponential backoff; persistent `429`s surface as a clear failure rather than a hang.
+- **Ledger polling timeouts:** waits are bounded; a timeout reports the last observed ledger sequence and the pending transaction hash for diagnosis.
+
 ## 📊 Database Partitioning
+=======
 
 The `transactions` table uses time-based partitioning for high-volume scaling:
 

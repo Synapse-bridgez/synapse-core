@@ -184,6 +184,35 @@ All database migrations must pass the safety checker:
 
 This ensures migrations are compatible with blue-green deployments. See [docs/migration-safety.md](docs/migration-safety.md) for details.
 
+### Liquidity Provider Adapter Onboarding & Certification
+
+New liquidity provider (LP) adapters must be onboarded through the registration manifest and pass the conformance suite before they can serve live traffic. The full workflow is documented in [docs/lp-adapter-onboarding.md](docs/lp-adapter-onboarding.md); the essentials are:
+
+1. **Declare an adapter manifest** under `src/swap/liquidity/` describing supported assets/pairs, rate limits, precision, and capabilities (streaming quotes, cancellation, partial fills). Manifests are validated at startup.
+2. **Load credentials** from environment/secret storage only — never commit secrets. Credential rotation must work without a process restart, and the secrets path must respect `.secrets-allowlist.txt` and pre-commit secret scanning.
+3. **Run the conformance suite** against your adapter (see below) and commit the generated certification report.
+
+#### Running the conformance suite locally
+
+The conformance kit lives in `tests/conformance/` and is independent of production wiring, so it can run against the mock adapter in CI or a live sandbox adapter manually:
+
+```bash
+# Run the full conformance suite against the mock adapter (as CI does)
+cargo test --test conformance
+
+# Run certification for a specific adapter and emit a machine-readable report
+cargo xtask certify-adapter --adapter <adapter-name> --output reports/<adapter-name>.json
+
+# Or via the helper script
+./scripts/certify-adapter.sh <adapter-name>
+```
+
+The suite exercises quote freshness, amount precision, error mapping, timeout behavior, cancellation semantics, and partial-fill reporting. Adapters that declare capabilities they do not honour fail certification rather than degrading silently.
+
+#### Certification requirement
+
+An adapter **must** have a passing certification report before it can be enabled outside test configurations. The registry refuses to activate uncertified adapters in non-test environments. When adding an adapter, include the certification report in your PR and reference it in the description.
+
 ## Code Style Guide
 
 ### Rust Conventions
@@ -445,6 +474,8 @@ cargo test
 3. **Add tests** for new functionality
 
 4. **Update CHANGELOG.md** if applicable
+
+5. **Certify new LP adapters:** if your PR adds or changes a liquidity provider adapter, run the conformance suite and attach the certification report (see [Liquidity Provider Adapter Onboarding & Certification](#liquidity-provider-adapter-onboarding--certification))
 
 ### PR Guidelines
 

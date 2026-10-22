@@ -17,6 +17,7 @@
 //! opted into swap are completely unaffected.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sqlx::types::BigDecimal;
 use std::fmt;
 
@@ -144,6 +145,176 @@ pub async fn swap_enabled_for(flags: &FeatureFlagService, tenant_id: &str) -> bo
         .unwrap_or(false)
 }
 
+/// Current schema version emitted for swap lifecycle events.
+///
+/// Bump this only for a **major** (breaking) change. Additive changes within a
+/// version do not bump it. See `docs/swap-events.md` for the compatibility and
+/// deprecation policy.
+pub const SWAP_EVENT_SCHEMA_VERSION: u32 = 1;
+
+/// Canonical, versioned envelope shared by every swap lifecycle event.
+///
+/// Field formats are canonical across all versions:
+/// - `occurred_at` is RFC3339 in UTC (serialized via `chrono`'s default).
+/// - amounts in payloads are decimal strings (see [`DecimalString`]).
+///
+/// The envelope is additive-only within a [`SWAP_EVENT_SCHEMA_VERSION`];
+/// consumers must ignore unknown fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    /// Unique id for this event instance (dedupe key for consumers).
+    pub event_id: uuid::Uuid,
+    /// Event type discriminator, e.g. `"swap.order.created"`.
+    pub event_type: String,
+    /// Schema version of the payload carried in `payload`.
+    pub schema_version: u32,
+    /// When the event occurred, RFC3339 UTC.
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    /// Owning tenant, when the event is tenant-scoped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<uuid::Uuid>,
+    /// The swap order this event concerns.
+    pub order_id: uuid::Uuid,
+    /// Correlation/trace id linking related events and requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+}
+
+/// Canonical decimal amount, serialized as a string to avoid float drift and
+/// to stay consistent with the decimal policy (issue #2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DecimalString(pub String);
+
+impl DecimalString {
+    /// Build from a `BigDecimal`, using its plain (non-exponent) string form.
+    pub fn from_bigdecimal(value: &BigDecimal) -> Self {
+        DecimalString(value.normalized().to_string())
+    }
+}
+
+/// Typed payloads for each swap lifecycle event.
+///
+/// Each variant carries only the fields meaningful at that stage. New optional
+/// fields may be added within a version; new variants are additive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event_type", content = "payload")]
+pub enum SwapEventPayload {
+    /// A swap order was created.
+    #[serde(rename = "swap.order.created")]
+    OrderCreated {
+        source_asset: String,
+        target_asset: String,
+        source_amount: DecimalString,
+    },
+    /// A quote was obtained for the order.
+    #[serde(rename = "swap.order.quoted")]
+    Quoted {
+        source_asset: String,
+        target_asset: String,
+        source_amount: DecimalString,
+        target_amount: DecimalString,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rate: Option<DecimalString>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// Execution of the order started.
+    #[serde(rename = "swap.order.executing")]
+    Executing {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_hash: Option<String>,
+    },
+    /// The order filled completely.
+    #[serde(rename = "swap.order.filled")]
+    Filled {
+        source_amount: DecimalString,
+        target_amount: DecimalString,
+    },
+    /// The order filled partially.
+    #[serde(rename = "swap.order.partially_filled")]
+    PartiallyFilled {
+        filled_source_amount: DecimalString,
+        filled_target_amount: DecimalString,
+        remaining_source_amount: DecimalString,
+    },
+    /// The order was cancelled.
+    #[serde(rename = "swap.order.cancelled")]
+    Cancelled {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The order failed.
+    #[serde(rename = "swap.order.failed")]
+    Failed {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
+    },
+    /// The order settled on-chain.
+    #[serde(rename = "swap.order.settled")]
+    Settled {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_hash: Option<String>,
+        settled_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+impl SwapEventPayload {
+    /// The canonical event type string for this payload.
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            SwapEventPayload::OrderCreated { .. } => "swap.order.created",
+            SwapEventPayload::Quoted { .. } => "swap.order.quoted",
+            SwapEventPayload::Executing { .. } => "swap.order.executing",
+            SwapEventPayload::Filled { .. } => "swap.order.filled",
+            SwapEventPayload::PartiallyFilled { .. } => "swap.order.partially_filled",
+            SwapEventPayload::Cancelled { .. } => "swap.order.cancelled",
+            SwapEventPayload::Failed { .. } => "swap.order.failed",
+            SwapEventPayload::Settled { .. } => "swap.order.settled",
+        }
+    }
+}
+
+/// A fully-formed, versioned swap lifecycle event ready for publication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwapEvent {
+    /// Common envelope (ids, type, version, timestamps).
+    #[serde(flatten)]
+    pub envelope: EventEnvelope,
+    /// Typed payload; serializes as `event_type` + `payload` at the top level.
+    #[serde(flatten)]
+    pub payload: SwapEventPayload,
+}
+
+impl SwapEvent {
+    /// Build a versioned event at the current [`SWAP_EVENT_SCHEMA_VERSION`].
+    pub fn new(
+        order_id: uuid::Uuid,
+        tenant_id: Option<uuid::Uuid>,
+        correlation_id: Option<String>,
+        payload: SwapEventPayload,
+    ) -> Self {
+        Self {
+            envelope: EventEnvelope {
+                event_id: uuid::Uuid::new_v4(),
+                event_type: payload.event_type().to_string(),
+                schema_version: SWAP_EVENT_SCHEMA_VERSION,
+                occurred_at: chrono::Utc::now(),
+                tenant_id,
+                order_id,
+                correlation_id,
+            },
+            payload,
+        }
+    }
+
+    /// Serialize to the canonical versioned JSON payload for publication.
+    pub fn to_versioned_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +381,50 @@ mod tests {
         assert!(SwapError::InvalidHandoff("x".into())
             .to_string()
             .contains("x"));
+    }
+
+    #[test]
+    fn event_serializes_with_envelope_and_payload() {
+        let order_id = uuid::Uuid::new_v4();
+        let event = SwapEvent::new(
+            order_id,
+            Some(uuid::Uuid::new_v4()),
+            Some("trace-1".into()),
+            SwapEventPayload::OrderCreated {
+                source_asset: "USDC".into(),
+                target_asset: "XLM".into(),
+                source_amount: DecimalString("100.00".into()),
+            },
+        );
+        let json = event.to_versioned_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["event_type"], "swap.order.created");
+        assert_eq!(value["schema_version"], SWAP_EVENT_SCHEMA_VERSION);
+        assert_eq!(value["order_id"], order_id.to_string());
+        assert_eq!(value["payload"]["source_amount"], "100.00");
+        // occurred_at is RFC3339 UTC
+        assert!(value["occurred_at"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn event_round_trips_through_json() {
+        let event = SwapEvent::new(
+            uuid::Uuid::new_v4(),
+            None,
+            None,
+            SwapEventPayload::Filled {
+                source_amount: DecimalString("1.5".into()),
+                target_amount: DecimalString("2.5".into()),
+            },
+        );
+        let json = event.to_versioned_json().unwrap();
+        let back: SwapEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn decimal_string_from_bigdecimal_is_plain() {
+        let d = DecimalString::from_bigdecimal(&BigDecimal::from(100));
+        assert_eq!(d.0, "100");
     }
 }

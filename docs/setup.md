@@ -3,6 +3,8 @@
 This guide walks through setting up a local development environment, running the service, and deploying with Docker.
 
 > For an overview of the system design and module responsibilities, see [architecture.md](architecture.md).
+>
+> Onboarding a new liquidity provider (LP) adapter? See [lp-onboarding.md](lp-onboarding.md).
 
 ---
 
@@ -178,6 +180,32 @@ cargo fmt              # auto-format
 cargo clippy           # lint
 ```
 
+### LP Adapter Conformance
+
+The LP adapter conformance suite runs in CI against the mock adapter (and a deliberately non-conformant fixture that must fail). To run it locally:
+
+```bash
+cargo test --test conformance
+```
+
+To certify a candidate adapter and produce a machine-readable report:
+
+```bash
+cargo xtask certify-lp --adapter <adapter-name>
+```
+
+See [lp-onboarding.md](lp-onboarding.md) for the manifest format, credential rotation, and the certification gate.
+
+---
+
+## 6a. Secrets Handling
+
+LP credentials are loaded from environment variables or secret storage and are never committed. Before committing:
+
+- Ensure any new secret-bearing path is listed in `.secrets-allowlist.txt` (only for non-secret placeholders/fixtures).
+- The pre-commit secret scanner must pass; do not bypass it with `--no-verify`.
+- Never log credentials — use the redacting credential loader in `src/swap/liquidity/`.
+
 ---
 
 ## 7. Docker Compose (Full Stack)
@@ -289,6 +317,7 @@ synapse-core/
 │   └── 20250216000000_init.sql  # Initial schema migration
 ├── docs/
 │   ├── architecture.md       # System design & module docs
+│   ├── lp-onboarding.md      # LP adapter onboarding & certification guide
 │   └── setup.md              # This file
 ├── src/
 │   ├── main.rs               # Entry point, server setup, migrations
@@ -307,6 +336,7 @@ synapse-core/
 │       ├── mod.rs            # Stellar module exports (planned)
 │       └── client.rs         # Horizon API client (planned)
 ├── tests/
+│   ├── conformance/          # LP adapter conformance & certification suite
 │   └── integration_test.rs   # Integration tests (planned)
 └── .github/
     └── workflows/
@@ -335,3 +365,6 @@ synapse-core/
 | `SQLX_OFFLINE` errors in CI           | Run `cargo sqlx prepare` locally to generate offline query data |
 | Port already in use                    | Change `SERVER_PORT` in `.env` or stop the conflicting process |
 | Docker connection refused to Postgres  | Use `host.docker.internal` or `172.17.0.1` instead of `localhost` |
+| Adapter refuses to start: manifest invalid | Validate the manifest against the schema in [lp-onboarding.md](lp-onboarding.md) |
+| Adapter disabled outside test configs  | Run `cargo xtask certify-lp --adapter <name>` and commit the certification report |
+| Pre-commit secret scan fails          | Remove the secret, use env/secret storage, or add a non-secret fixture path to `.secrets-allowlist.txt` |

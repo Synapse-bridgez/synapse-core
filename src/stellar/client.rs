@@ -28,6 +28,31 @@ pub enum HorizonError {
     InvalidResponse(String),
     #[error("Circuit breaker open: {0}")]
     CircuitBreakerOpen(String),
+    /// Horizon accepted the submission but the transaction failed on-chain
+    /// (or was rejected at submission time) with a `tx_*` result code.
+    /// `code` is the raw Horizon result code (e.g. `tx_bad_seq`), and
+    /// `detail` carries the human-readable `result_codes` payload when
+    /// Horizon provided one.
+    #[error("Transaction submission failed: {code}{}", .detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default())]
+    TransactionFailed {
+        code: String,
+        detail: Option<String>,
+    },
+    /// The submitted transaction is already included in the ledger (or is
+    /// already known to Horizon). This is a *success* outcome for settlement
+    /// purposes: the caller must look up the transaction by hash rather than
+    /// re-applying it.
+    #[error("Transaction already included: {0}")]
+    TransactionAlreadyIncluded(String),
+    /// The submission request timed out or the connection dropped before
+    /// Horizon answered. The transaction may still be included — callers
+    /// must treat this as "unknown" and reconcile by hash lookup.
+    #[error("Transaction submission outcome unknown: {0}")]
+    SubmissionOutcomeUnknown(String),
+    /// The transaction was not found by hash. This is a normal, expected
+    /// outcome while a transaction is still propagating to Horizon.
+    #[error("Transaction not found: {0}")]
+    TransactionNotFound(String),
 }
 
 impl Clone for HorizonError {
@@ -37,6 +62,13 @@ impl Clone for HorizonError {
             Self::AccountNotFound(s) => Self::AccountNotFound(s.clone()),
             Self::InvalidResponse(s) => Self::InvalidResponse(s.clone()),
             Self::CircuitBreakerOpen(s) => Self::CircuitBreakerOpen(s.clone()),
+            Self::TransactionFailed { code, detail } => Self::TransactionFailed {
+                code: code.clone(),
+                detail: detail.clone(),
+            },
+            Self::TransactionAlreadyIncluded(s) => Self::TransactionAlreadyIncluded(s.clone()),
+            Self::SubmissionOutcomeUnknown(s) => Self::SubmissionOutcomeUnknown(s.clone()),
+            Self::TransactionNotFound(s) => Self::TransactionNotFound(s.clone()),
         }
     }
 }
@@ -60,6 +92,16 @@ pub(crate) fn classify_horizon_error(
             }
         }
         HorizonError::CircuitBreakerOpen(_) => CallOutcome::CircuitRejected,
+        // A `tx_*` result code is the network answering normally about a
+        // transaction it considers ours to fix; likewise a not-found lookup
+        // and an already-included transaction are normal business outcomes.
+        HorizonError::TransactionFailed { .. }
+        | HorizonError::TransactionAlreadyIncluded(_)
+        | HorizonError::TransactionNotFound(_) => CallOutcome::Success,
+        // A submission timeout means we don't know whether Horizon is
+        // healthy; treat it as a dependency fault so the scorecard reflects
+        // the uncertainty rather than masking it.
+        HorizonError::SubmissionOutcomeUnknown(_) => CallOutcome::DependencyFault,
     }
 }
 
@@ -138,6 +180,116 @@ struct PaymentsResponse {
 #[derive(Debug, Deserialize)]
 struct PaymentsEmbedded {
     records: Vec<PaymentRecord>,
+}
+
+/// Response body from Horizon's `POST /transactions` endpoint. On success
+/// Horizon returns the full transaction record; on failure it returns a
+/// `result_codes` object describing why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitTransactionResponse {
+    pub hash: String,
+    pub ledger: Option<i64>,
+    pub successful: Option<bool>,
+    #[serde(default)]
+    pub result_codes: Option<TransactionResultCodes>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionResultCodes {
+    #[serde(default)]
+    pub transaction: Option<String>,
+    #[serde(default)]
+    pub operations: Option<Vec<String>>,
+}
+
+/// A transaction record as returned by `GET /transactions/{hash}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionRecord {
+    pub hash: String,
+    pub ledger: i64,
+    pub successful: bool,
+    pub source_account: String,
+    #[serde(default)]
+    pub source_account_sequence: Option<String>,
+    #[serde(default)]
+    pub result_codes: Option<TransactionResultCodes>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HorizonErrorBody {
+    #[serde(default)]
+    status: Option<u16>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    extras: Option<HorizonErrorExtras>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HorizonErrorExtras {
+    #[serde(default)]
+    result_codes: Option<TransactionResultCodes>,
+}
+
+/// Classifies a Horizon submission failure into a typed `HorizonError`.
+///
+/// Horizon reports submission failures in two shapes:
+/// * `400 Bad Request` with `extras.result_codes.transaction` set to a
+///   `tx_*` code (e.g. `tx_bad_seq`, `tx_too_low`, `tx_too_late`).
+/// * `409 Conflict` / `400` with a `detail` mentioning the transaction is
+///   already included or already known.
+///
+/// This is exposed for unit testing so the retry classifier's inputs can be
+/// verified without a live Horizon.
+pub(crate) fn classify_submission_failure(
+    status: u16,
+    body: Option<&str>,
+) -> HorizonError {
+    let parsed: Option<HorizonErrorBody> =
+        body.and_then(|b| serde_json::from_str::<HorizonErrorBody>(b).ok());
+
+    let tx_code = parsed
+        .as_ref()
+        .and_then(|p| p.extras.as_ref())
+        .and_then(|e| e.result_codes.as_ref())
+        .and_then(|rc| rc.transaction.clone());
+
+    if let Some(code) = tx_code {
+        // `tx_bad_seq` and `tx_too_low` are distinct codes but both mean
+        // "the sequence number we used is wrong" — keep them distinct so
+        // the retry classifier can decide whether to re-allocate.
+        return HorizonError::TransactionFailed {
+            code,
+            detail: parsed
+                .as_ref()
+                .and_then(|p| p.detail.clone())
+                .or_else(|| parsed.as_ref().and_then(|p| p.title.clone())),
+        };
+    }
+
+    let detail = parsed
+        .as_ref()
+        .and_then(|p| p.detail.clone())
+        .or_else(|| parsed.as_ref().and_then(|p| p.title.clone()))
+        .or_else(|| body.map(|b| b.to_string()));
+
+    let detail_lower = detail.as_deref().unwrap_or("").to_lowercase();
+    if status == 409
+        || detail_lower.contains("already")
+        || detail_lower.contains("duplicate")
+    {
+        return HorizonError::TransactionAlreadyIncluded(
+            detail.unwrap_or_else(|| "transaction already included".to_string()),
+        );
+    }
+
+    HorizonError::InvalidResponse(format!(
+        "Horizon API error: {} {}",
+        status,
+        detail.unwrap_or_default()
+    ))
 }
 
 /// HTTP client for interacting with the Stellar Horizon API
@@ -485,6 +637,207 @@ impl HorizonClient {
     ) -> StreamMetrics {
         *metrics.lock().await
     }
+
+    /// Submits a base64-encoded signed transaction envelope to Horizon's
+    /// `POST /transactions` endpoint.
+    ///
+    /// # Outcome contract
+    ///
+    /// * `Ok(SubmitTransactionResponse)` — Horizon accepted the transaction
+    ///   (it may still be pending; check `successful`/`ledger`).
+    /// * `Err(HorizonError::TransactionFailed { code, .. })` — Horizon
+    ///   rejected the transaction with a `tx_*` result code. The retry
+    ///   classifier decides whether this is transient (`tx_bad_seq`,
+    ///   `tx_too_low`, `tx_too_late`) or terminal.
+    /// * `Err(HorizonError::TransactionAlreadyIncluded(_))` — the
+    ///   transaction is already known to Horizon; callers must reconcile by
+    ///   hash lookup rather than re-applying.
+    /// * `Err(HorizonError::SubmissionOutcomeUnknown(_))` — the request
+    ///   timed out or the connection dropped. The transaction may still be
+    ///   included; callers must reconcile by hash lookup.
+    ///
+    /// The signed envelope is never logged: it is passed straight into the
+    /// request body and only the transaction hash is surfaced in traces.
+    #[instrument(name = "horizon.submit_transaction", skip(self, envelope_xdr), fields(stellar.tx_hash = tracing::field::Empty))]
+    pub async fn submit_transaction(
+        &self,
+        envelope_xdr: &str,
+    ) -> Result<SubmitTransactionResponse, HorizonError> {
+        let url = format!("{}/transactions", self.base_url.trim_end_matches('/'));
+        let client = self.client.clone();
+        let envelope = envelope_xdr.to_string();
+
+        let mut headers = std::collections::HashMap::new();
+        let propagator = TraceContextPropagator::new();
+        let cx = opentelemetry::Context::current();
+        propagator.inject_context(&cx, &mut headers);
+
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let mut req = client
+                    .post(&url)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .form(&[("tx", envelope.as_str())]);
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let response = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // A timeout or transport error means we don't know
+                        // whether Horizon included the transaction.
+                        if e.is_timeout() || e.is_connect() || e.is_request() {
+                            return Err(HorizonError::SubmissionOutcomeUnknown(e.to_string()));
+                        }
+                        return Err(HorizonError::RequestError(e));
+                    }
+                };
+
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+
+                if status.is_success() {
+                    let parsed = serde_json::from_str::<SubmitTransactionResponse>(&body)
+                        .map_err(|e| HorizonError::InvalidResponse(e.to_string()))?;
+                    return Ok(parsed);
+                }
+
+                Err(classify_submission_failure(status.as_u16(), Some(&body)))
+            })
+            .await;
+
+        self.record_scorecard(permitted_before, started, &result);
+        match result {
+            Ok(resp) => Ok(resp),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
+        }
+    }
+
+    /// Fetches a transaction record by hash from `GET /transactions/{hash}`.
+    ///
+    /// Returns `Err(HorizonError::TransactionNotFound(_))` on a 404, which
+    /// is the normal outcome while a transaction is still propagating. This
+    /// is the idempotent read of truth used to detect duplicate submissions
+    /// and to reconcile submissions whose outcome was unknown.
+    #[instrument(name = "horizon.get_transaction", skip(self), fields(stellar.tx_hash = %tx_hash))]
+    pub async fn get_transaction(
+        &self,
+        tx_hash: &str,
+    ) -> Result<TransactionRecord, HorizonError> {
+        let url = format!(
+            "{}/transactions/{}",
+            self.base_url.trim_end_matches('/'),
+            tx_hash
+        );
+        let client = self.client.clone();
+        let hash = tx_hash.to_string();
+
+        let mut headers = std::collections::HashMap::new();
+        let propagator = TraceContextPropagator::new();
+        let cx = opentelemetry::Context::current();
+        propagator.inject_context(&cx, &mut headers);
+
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let mut req = client.get(&url);
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let response = req.send().await?;
+
+                if response.status() == 404 {
+                    return Err(HorizonError::TransactionNotFound(hash));
+                }
+                if !response.status().is_success() {
+                    return Err(HorizonError::InvalidResponse(format!(
+                        "Horizon API error: {}",
+                        response.status()
+                    )));
+                }
+
+                let record = response.json::<TransactionRecord>().await?;
+                Ok(record)
+            })
+            .await;
+
+        self.record_scorecard(permitted_before, started, &result);
+        match result {
+            Ok(record) => Ok(record),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
+        }
+    }
+
+    /// Reads the current ledger sequence from Horizon's `/ledgers?order=desc&limit=1`
+    /// endpoint. Used to bound `tx_too_late` waits and to confirm that a
+    /// transaction's inclusion ledger has closed.
+    #[instrument(name = "horizon.latest_ledger", skip(self))]
+    pub async fn latest_ledger_sequence(&self) -> Result<i64, HorizonError> {
+        #[derive(Debug, Deserialize)]
+        struct LedgersResponse {
+            #[serde(rename = "_embedded")]
+            embedded: LedgersEmbedded,
+        }
+        #[derive(Debug, Deserialize)]
+        struct LedgersEmbedded {
+            records: Vec<LedgerRecord>,
+        }
+        #[derive(Debug, Deserialize)]
+        struct LedgerRecord {
+            sequence: i64,
+        }
+
+        let url = format!(
+            "{}/ledgers?order=desc&limit=1",
+            self.base_url.trim_end_matches('/')
+        );
+        let client = self.client.clone();
+
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let response = client.get(&url).send().await?;
+                if !response.status().is_success() {
+                    return Err(HorizonError::InvalidResponse(format!(
+                        "Horizon API error: {}",
+                        response.status()
+                    )));
+                }
+                let parsed = response.json::<LedgersResponse>().await?;
+                parsed
+                    .embedded
+                    .records
+                    .into_iter()
+                    .next()
+                    .map(|r| r.sequence)
+                    .ok_or_else(|| {
+                        HorizonError::InvalidResponse("no ledgers returned".to_string())
+                    })
+            })
+            .await;
+
+        self.record_scorecard(permitted_before, started, &result);
+        match result {
+            Ok(seq) => Ok(seq),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -721,6 +1074,200 @@ mod tests {
         );
         let state = client.circuit_state();
         assert_eq!(state, "closed");
+    }
+
+    #[test]
+    fn test_classify_submission_failure_tx_bad_seq() {
+        let body = r#"{
+            "status": 400,
+            "title": "Transaction Failed",
+            "detail": "The transaction failed when submitted to the stellar network.",
+            "extras": {
+                "result_codes": {
+                    "transaction": "tx_bad_seq"
+                }
+            }
+        }"#;
+        let err = classify_submission_failure(400, Some(body));
+        match err {
+            HorizonError::TransactionFailed { code, .. } => assert_eq!(code, "tx_bad_seq"),
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_submission_failure_tx_too_low() {
+        let body = r#"{
+            "status": 400,
+            "extras": { "result_codes": { "transaction": "tx_too_low" } }
+        }"#;
+        let err = classify_submission_failure(400, Some(body));
+        match err {
+            HorizonError::TransactionFailed { code, .. } => assert_eq!(code, "tx_too_low"),
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_submission_failure_tx_too_late() {
+        let body = r#"{
+            "status": 400,
+            "extras": { "result_codes": { "transaction": "tx_too_late" } }
+        }"#;
+        let err = classify_submission_failure(400, Some(body));
+        match err {
+            HorizonError::TransactionFailed { code, .. } => assert_eq!(code, "tx_too_late"),
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_submission_failure_duplicate() {
+        let body = r#"{
+            "status": 409,
+            "title": "Transaction Already Exists",
+            "detail": "The transaction already exists in the ledger."
+        }"#;
+        let err = classify_submission_failure(409, Some(body));
+        assert!(matches!(
+            err,
+            HorizonError::TransactionAlreadyIncluded(_)
+        ));
+    }
+
+    #[test]
+    fn test_classify_submission_failure_duplicate_by_detail() {
+        let body = r#"{ "detail": "duplicate transaction" }"#;
+        let err = classify_submission_failure(400, Some(body));
+        assert!(matches!(
+            err,
+            HorizonError::TransactionAlreadyIncluded(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_submit_transaction_success() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "hash": "abc123",
+            "ledger": 42,
+            "successful": true
+        }"#;
+        let mock = server
+            .mock("POST", "/transactions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let resp = client
+            .submit_transaction("AAAA...")
+            .await
+            .expect("expected successful submission");
+        assert_eq!(resp.hash, "abc123");
+        assert_eq!(resp.ledger, Some(42));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_submit_transaction_bad_seq() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "status": 400,
+            "extras": { "result_codes": { "transaction": "tx_bad_seq" } }
+        }"#;
+        let mock = server
+            .mock("POST", "/transactions")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let err = client
+            .submit_transaction("AAAA...")
+            .await
+            .expect_err("expected tx_bad_seq");
+        match err {
+            HorizonError::TransactionFailed { code, .. } => assert_eq!(code, "tx_bad_seq"),
+            other => panic!("expected TransactionFailed, got {other:?}"),
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/transactions/.*".into()))
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let err = client
+            .get_transaction("deadbeef")
+            .await
+            .expect_err("expected not found");
+        assert!(matches!(err, HorizonError::TransactionNotFound(_)));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_found() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "hash": "deadbeef",
+            "ledger": 100,
+            "successful": true,
+            "source_account": "GSRC",
+            "source_account_sequence": "12345"
+        }"#;
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/transactions/.*".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let record = client
+            .get_transaction("deadbeef")
+            .await
+            .expect("expected record");
+        assert_eq!(record.hash, "deadbeef");
+        assert_eq!(record.ledger, 100);
+        assert!(record.successful);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_latest_ledger_sequence() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "_embedded": {
+                "records": [ { "sequence": 777 } ]
+            }
+        }"#;
+        let mock = server
+            .mock("GET", mockito::Matcher::Regex(r"^/ledgers.*".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let seq = client
+            .latest_ledger_sequence()
+            .await
+            .expect("expected ledger sequence");
+        assert_eq!(seq, 777);
+        mock.assert_async().await;
     }
 
     #[tokio::test]

@@ -235,6 +235,29 @@ CREATE TABLE IF NOT EXISTS transactions (
 | PostgreSQL         | 14+       | Primary data store                 |
 | Docker             | —         | Containerization                   |
 
+## Swap Lifecycle Event Contract
+
+Swap lifecycle events are published to tenant webhooks, the outbox
+publication pipeline, the SDKs, and internal services. Every event is governed
+by a versioned, machine-readable contract so that consumers can integrate
+without silent breakage. The full contract — common envelope, per-event
+schemas, canonical field formats, and the compatibility/deprecation policy —
+is documented in [`docs/swap-events.md`](swap-events.md). The JSON Schemas
+live in the in-repo [`schemas/`](../schemas) directory, and CI validates
+emitted sample payloads against them with:
+
+```
+cargo xtask validate-schemas
+```
+
+The Rust event types in the swap domain module are the source of truth; a
+serialization test asserts that the hand-maintained schemas match the types so
+code and schema cannot drift. Within a schema version only additive changes
+are permitted; breaking changes require a new major version published
+alongside the old one for its documented sunset period.
+
+---
+
 ## Distributed Tracing Sampling
 
 The app exports `tracing` spans through the OpenTelemetry layer. When an OTLP

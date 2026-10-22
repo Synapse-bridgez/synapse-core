@@ -66,6 +66,8 @@ fn apply_profile_defaults(app_env: &AppEnv) {
             set_default("DB_TIMEOUT_READ_SECS", "30");
             set_default("DB_TIMEOUT_WRITE_SECS", "60");
             set_default("DB_STATEMENT_TIMEOUT_MS", "60000");
+            // LP adapter onboarding: certification not required in development
+            set_default("LP_REQUIRE_CERTIFICATION", "false");
         }
         AppEnv::Staging => {
             set_default("LOG_FORMAT", "json");
@@ -75,6 +77,8 @@ fn apply_profile_defaults(app_env: &AppEnv) {
             set_default("DB_TIMEOUT_READ_SECS", "10");
             set_default("DB_TIMEOUT_WRITE_SECS", "20");
             set_default("DB_STATEMENT_TIMEOUT_MS", "30000");
+            // Staging mirrors production: certification required
+            set_default("LP_REQUIRE_CERTIFICATION", "true");
         }
         AppEnv::Production => {
             // JSON logging, strict rate limits, short timeouts
@@ -85,6 +89,8 @@ fn apply_profile_defaults(app_env: &AppEnv) {
             set_default("DB_TIMEOUT_READ_SECS", "5");
             set_default("DB_TIMEOUT_WRITE_SECS", "10");
             set_default("DB_STATEMENT_TIMEOUT_MS", "30000");
+            // Production: certification is mandatory before an adapter serves traffic
+            set_default("LP_REQUIRE_CERTIFICATION", "true");
         }
     }
 }
@@ -160,6 +166,118 @@ impl PerClassTimeoutConfig {
     }
 }
 
+/// Where LP adapter credentials are sourced from.
+///
+/// Credentials are always resolved through [`SecretsManager`] (Vault) or the
+/// process environment; they are never written to disk, logged, or embedded in
+/// the manifest. The variant only selects *which* backend is consulted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LpCredentialSource {
+    /// Read credentials from process environment variables.
+    Environment,
+    /// Read credentials from the secret store (Vault) via [`SecretsManager`].
+    SecretStore,
+}
+
+impl LpCredentialSource {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "secret_store" | "secret-store" | "vault" => LpCredentialSource::SecretStore,
+            _ => LpCredentialSource::Environment,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LpCredentialSource::Environment => "environment",
+            LpCredentialSource::SecretStore => "secret_store",
+        }
+    }
+}
+
+/// Configuration for LP adapter onboarding, credentialing, and certification.
+///
+/// Note: this struct intentionally holds *no* secret material. Credentials are
+/// fetched on demand through [`SecretsManager`] so that rotation does not
+/// require a process restart and secrets never appear in `Debug` output.
+#[derive(Debug, Clone)]
+pub struct LpAdapterConfig {
+    /// Directory containing adapter registration manifests (`*.toml`/`*.json`).
+    pub manifest_dir: String,
+    /// Where adapter credentials are loaded from.
+    pub credential_source: LpCredentialSource,
+    /// How often (in seconds) credentials are re-read to pick up rotations.
+    /// Rotation is applied without a restart; `0` disables periodic refresh.
+    pub credential_rotation_interval_secs: u64,
+    /// Grace period (in seconds) during which the previous credential remains
+    /// valid after a rotation, to avoid in-flight request failures.
+    pub credential_rotation_grace_secs: u64,
+    /// When `true`, an adapter must have a passing certification report before
+    /// it is enabled outside test configurations.
+    pub require_certification: bool,
+    /// Directory where machine-readable certification reports are written.
+    pub certification_report_dir: String,
+}
+
+impl Default for LpAdapterConfig {
+    fn default() -> Self {
+        Self {
+            manifest_dir: "./config/lp-adapters".to_string(),
+            credential_source: LpCredentialSource::Environment,
+            credential_rotation_interval_secs: 300,
+            credential_rotation_grace_secs: 60,
+            require_certification: true,
+            certification_report_dir: "./certification-reports".to_string(),
+        }
+    }
+}
+
+/// Configuration for Stellar settlement transaction submission.
+///
+/// Holds channel-account pooling and retry limits. Signed transaction
+/// envelopes are never stored here (and must never be logged).
+#[derive(Debug, Clone)]
+pub struct StellarSettlementConfig {
+    /// Source account used for settlement transactions when no channel account
+    /// is available.
+    pub source_account: Option<String>,
+    /// Channel accounts available for pooling. Empty disables pooling.
+    pub channel_accounts: Vec<String>,
+    /// Maximum number of concurrent in-flight submissions per source account.
+    /// Caps sequence churn and prevents a single account from deadlocking.
+    pub max_concurrent_per_account: usize,
+    /// Maximum number of submission attempts for a single transaction before
+    /// it is treated as terminally failed.
+    pub max_submission_attempts: u32,
+    /// Base backoff (in milliseconds) for transient submission errors.
+    pub retry_base_backoff_ms: u64,
+    /// Maximum backoff (in milliseconds) for transient submission errors.
+    pub retry_max_backoff_ms: u64,
+    /// Overall timeout (in seconds) for a single submission attempt against
+    /// Horizon. A timeout does not imply failure — the transaction may still
+    /// be included, so confirmation is checked idempotently.
+    pub submission_timeout_secs: u64,
+    /// How long (in seconds) a sequence lease is held before it is considered
+    /// stale and may be reclaimed by another replica.
+    pub sequence_lease_ttl_secs: u64,
+}
+
+impl Default for StellarSettlementConfig {
+    fn default() -> Self {
+        Self {
+            source_account: None,
+            channel_accounts: Vec::new(),
+            max_concurrent_per_account: 4,
+            max_submission_attempts: 5,
+            retry_base_backoff_ms: 250,
+            retry_max_backoff_ms: 8000,
+            submission_timeout_secs: 30,
+            sequence_lease_ttl_secs: 60,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -228,6 +346,10 @@ pub struct Config {
     pub partition_lookahead_max: u32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    // LP adapter onboarding, credentialing, and certification
+    pub lp_adapter: LpAdapterConfig,
+    // Stellar settlement submission (sequence management + retry)
+    pub stellar_settlement: StellarSettlementConfig,
 }
 
 pub mod assets;
@@ -271,6 +393,69 @@ impl Config {
                 env::var("ANCHOR_WEBHOOK_SECRET")?,
             )
         };
+
+        // LP adapter configuration. No secret material is read here: credentials
+        // are resolved lazily through SecretsManager so rotation does not require
+        // a restart and secrets never enter the Config struct or logs.
+        let lp_adapter = LpAdapterConfig {
+            manifest_dir: env::var("LP_MANIFEST_DIR")
+                .unwrap_or_else(|_| "./config/lp-adapters".to_string()),
+            credential_source: LpCredentialSource::from_str(
+                &env::var("LP_CREDENTIAL_SOURCE").unwrap_or_else(|_| "environment".to_string()),
+            ),
+            credential_rotation_interval_secs: env::var("LP_CREDENTIAL_ROTATION_INTERVAL_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()?,
+            credential_rotation_grace_secs: env::var("LP_CREDENTIAL_ROTATION_GRACE_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()?,
+            require_certification: env::var("LP_REQUIRE_CERTIFICATION")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()?,
+            certification_report_dir: env::var("LP_CERTIFICATION_REPORT_DIR")
+                .unwrap_or_else(|_| "./certification-reports".to_string()),
+        };
+
+        // Stellar settlement submission configuration. Channel accounts are
+        // public keys only; signing keys are resolved via SecretsManager.
+        let channel_accounts = env::var("STELLAR_CHANNEL_ACCOUNTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        let stellar_settlement = StellarSettlementConfig {
+            source_account: env::var("STELLAR_SETTLEMENT_SOURCE_ACCOUNT").ok(),
+            channel_accounts,
+            max_concurrent_per_account: env::var("STELLAR_MAX_CONCURRENT_PER_ACCOUNT")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()?,
+            max_submission_attempts: env::var("STELLAR_MAX_SUBMISSION_ATTEMPTS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()?,
+            retry_base_backoff_ms: env::var("STELLAR_RETRY_BASE_BACKOFF_MS")
+                .unwrap_or_else(|_| "250".to_string())
+                .parse()?,
+            retry_max_backoff_ms: env::var("STELLAR_RETRY_MAX_BACKOFF_MS")
+                .unwrap_or_else(|_| "8000".to_string())
+                .parse()?,
+            submission_timeout_secs: env::var("STELLAR_SUBMISSION_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()?,
+            sequence_lease_ttl_secs: env::var("STELLAR_SEQUENCE_LEASE_TTL_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()?,
+        };
+
+        if stellar_settlement.retry_base_backoff_ms > stellar_settlement.retry_max_backoff_ms {
+            anyhow::bail!(
+                "STELLAR_RETRY_BASE_BACKOFF_MS ({}) cannot exceed STELLAR_RETRY_MAX_BACKOFF_MS ({})",
+                stellar_settlement.retry_base_backoff_ms,
+                stellar_settlement.retry_max_backoff_ms
+            );
+        }
 
         Ok(Config {
             app_env,
@@ -407,6 +592,8 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            lp_adapter,
+            stellar_settlement,
         })
     }
 }

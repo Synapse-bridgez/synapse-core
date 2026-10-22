@@ -8,9 +8,43 @@
 #
 # Update this file (and re-render) as part of the release checklist whenever
 # `sdks/rust` or `cli/synapse-cli` cuts a new version.
+#
+# Swap lifecycle event schemas (see schemas/ and docs/swap-events.md) are
+# versioned independently of the SDK/CLI/API versions. Each entry below
+# records the event schema major/minor version that a given SDK/CLI/API
+# combination is known to be compatible with, so the release compatibility
+# check also accounts for event schema versions.
+#
+# Event schema versioning policy (summary; full policy in docs/swap-events.md):
+#   - Within a major version, only additive changes are allowed (new optional
+#     fields, new enum variants that consumers must tolerate). Minor version
+#     bumps signal such additive changes.
+#   - Breaking changes require a new major version, published alongside the
+#     old one for the documented sunset period.
+#   - Old schema files are kept in-repo until their sunset date passes.
 
 [[entry]]
 sdk_version = "0.1.0"
 cli_version = "0.1.0"
 api_versions = ["v1", "v2"]
+event_schema_versions = ["1.0"]
 notes = "Initial tracked compatibility entry."
+
+# Swap lifecycle event schema compatibility.
+#
+# `event_schema_versions` lists the event schema major.minor versions that
+# the SDK/CLI/API combination in this entry can consume. Producers must not
+# emit a schema version that no supported consumer entry lists.
+[[entry]]
+sdk_version = "0.1.0"
+cli_version = "0.1.0"
+api_versions = ["v1", "v2"]
+event_schema_versions = ["1.0"]
+notes = """
+Swap lifecycle event schemas v1.0 (order created, quoted, executing, filled,
+partially filled, cancelled, failed, settled). Common envelope: event id,
+type, schema version, occurred_at (UTC RFC 3339), tenant id, order id,
+correlation/trace id. Amounts are canonical decimal strings per the decimal
+policy; timestamps are UTC. Additive changes only within v1; breaking changes
+introduce v2 alongside v1 with a documented sunset date.
+"""

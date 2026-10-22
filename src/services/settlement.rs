@@ -1,6 +1,10 @@
 use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
 use crate::error::AppError;
+use crate::swap::settlement::{
+    SequenceAllocator, SubmissionOutcome, SubmissionOutcomeRecord, SubmissionRetryPolicy,
+    SubmissionStatus, TransactionSubmitter,
+};
 use crate::validation::state_transitions::{is_valid_transition, SETTLEMENT_TRANSITIONS};
 use bigdecimal::BigDecimal;
 use chrono::Utc;
@@ -259,6 +263,15 @@ pub struct SettlementService {
     /// Shared `QueryCache` for cache invalidation after settlement. `None`
     /// means invalidation is skipped (see `with_query_cache`).
     query_cache: Option<crate::services::query_cache::QueryCache>,
+    /// Durable per-source-account sequence allocator for Stellar settlement
+    /// submissions. `None` means on-chain submission is disabled and only the
+    /// off-chain settlement bookkeeping runs.
+    sequence_allocator: Option<Arc<SequenceAllocator>>,
+    /// Deterministic retry policy applied to transient submission errors.
+    submission_retry_policy: SubmissionRetryPolicy,
+    /// Submitter used to broadcast signed settlement transactions to Horizon.
+    /// `None` disables on-chain submission.
+    submitter: Option<Arc<dyn TransactionSubmitter>>,
 }
 
 impl SettlementService {
@@ -271,6 +284,9 @@ impl SettlementService {
             readiness: None,
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
             query_cache: None,
+            sequence_allocator: None,
+            submission_retry_policy: SubmissionRetryPolicy::default(),
+            submitter: None,
         }
     }
 
@@ -283,7 +299,26 @@ impl SettlementService {
             readiness: None,
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
             query_cache: None,
+            sequence_allocator: None,
+            submission_retry_policy: SubmissionRetryPolicy::default(),
+            submitter: None,
         }
+    }
+
+    /// Attach the durable sequence allocator and Horizon submitter so that
+    /// settlement batches are broadcast on-chain with managed sequence numbers.
+    ///
+    /// Without this, settlement only performs the off-chain bookkeeping.
+    pub fn with_submission(
+        mut self,
+        allocator: Arc<SequenceAllocator>,
+        submitter: Arc<dyn TransactionSubmitter>,
+        retry_policy: SubmissionRetryPolicy,
+    ) -> Self {
+        self.sequence_allocator = Some(allocator);
+        self.submitter = Some(submitter);
+        self.submission_retry_policy = retry_policy;
+        self
     }
 
     /// Attach the process's shared `QueryCache` so post-settlement cache
@@ -304,6 +339,9 @@ impl SettlementService {
             readiness: Some(readiness),
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
             query_cache: None,
+            sequence_allocator: None,
+            submission_retry_policy: SubmissionRetryPolicy::default(),
+            submitter: None,
         }
     }
 
@@ -321,6 +359,9 @@ impl SettlementService {
             readiness: Some(readiness),
             settlement_duration_ms,
             query_cache: None,
+            sequence_allocator: None,
+            submission_retry_policy: SubmissionRetryPolicy::default(),
+            submitter: None,
         }
     }
 
@@ -522,6 +563,22 @@ impl SettlementService {
                 "Settlement batch created"
             );
 
+            // Broadcast the settlement on-chain when submission is configured.
+            // The submission attempt is recorded (and committed) before the
+            // transaction is broadcast so a crash mid-submit leaves a
+            // recoverable record for reconciliation.
+            if let (Some(allocator), Some(submitter)) =
+                (self.sequence_allocator.as_ref(), self.submitter.as_ref())
+            {
+                self.submit_settlement_batch(
+                    allocator.as_ref(),
+                    submitter.as_ref(),
+                    &saved,
+                    &total_amount,
+                )
+                .await?;
+            }
+
             settlements.push(saved);
         }
 
@@ -720,6 +777,134 @@ impl SettlementService {
 
         Ok((saved_settlement, legs))
     }
+
+    /// Submit a single settlement batch on-chain using the durable sequence
+    /// allocator and the deterministic retry policy.
+    ///
+    /// Flow:
+    /// 1. Allocate a sequence number for the source account (durable, safe
+    ///    across replicas, respects the per-account concurrency cap).
+    /// 2. Build the transaction envelope with the allocated sequence.
+    /// 3. Persist a `Pending` submission attempt *before* broadcasting so a
+    ///    crash mid-submit leaves a recoverable record.
+    /// 4. Broadcast with bounded retries for transient errors.
+    /// 5. Confirm via ledger-close lookup (idempotent read of truth) and
+    ///    persist the structured outcome for reconciliation.
+    ///
+    /// Signed transaction envelopes are never logged.
+    pub async fn submit_settlement_batch(
+        &self,
+        allocator: &SequenceAllocator,
+        submitter: &dyn TransactionSubmitter,
+        settlement: &Settlement,
+        total_amount: &BigDecimal,
+    ) -> Result<SubmissionOutcomeRecord, AppError> {
+        // 1. Allocate a sequence number for the source account. The allocator
+        //    is database-backed so allocation is safe across replicas and
+        //    survives restarts.
+        let lease = allocator
+            .allocate(settlement.id)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // 2. Build the (unsigned) transaction with the allocated sequence.
+        let envelope = submitter
+            .build_envelope(settlement, total_amount, lease.sequence_number)
+            .await
+            .map_err(|e| AppError::ExternalService(format!("build envelope failed: {e}")))?;
+
+        // 3. Record the attempt *before* submitting. This is committed
+        //    independently of the settlement transaction so a crash mid-submit
+        //    leaves a recoverable `Pending` record.
+        let attempt = allocator
+            .record_attempt(settlement.id, &lease, &envelope)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // 4. Broadcast with bounded retries for transient errors.
+        let mut attempt_no = 0u32;
+        let outcome = loop {
+            attempt_no += 1;
+            let result = submitter.submit(&envelope).await;
+            match result {
+                Ok(receipt) => {
+                    // 5. Confirm via ledger-close lookup. This is an
+                    //    idempotent read of truth: if the transaction is
+                    //    already included we treat it as confirmed rather
+                    //    than re-applying it.
+                    let confirmed = submitter
+                        .confirm(&receipt.hash)
+                        .await
+                        .map_err(|e| AppError::ExternalService(format!("confirm failed: {e}")))?;
+                    break SubmissionOutcome {
+                        status: if confirmed.included {
+                            SubmissionStatus::Confirmed
+                        } else {
+                            SubmissionStatus::Pending
+                        },
+                        tx_hash: Some(receipt.hash),
+                        ledger: confirmed.ledger,
+                        error_code: None,
+                        attempts: attempt_no,
+                    };
+                }
+                Err(err) => {
+                    let class = self.submission_retry_policy.classify(&err);
+                    if class.is_terminal() {
+                        break SubmissionOutcome {
+                            status: SubmissionStatus::Failed,
+                            tx_hash: None,
+                            ledger: None,
+                            error_code: Some(err.code().to_string()),
+                            attempts: attempt_no,
+                        };
+                    }
+                    // Transient: check whether the transaction was actually
+                    // included despite the error (e.g. Horizon timeout).
+                    if let Some(hash) = err.tx_hash() {
+                        if let Ok(confirmed) = submitter.confirm(hash).await {
+                            if confirmed.included {
+                                break SubmissionOutcome {
+                                    status: SubmissionStatus::Confirmed,
+                                    tx_hash: Some(hash.to_string()),
+                                    ledger: confirmed.ledger,
+                                    error_code: None,
+                                    attempts: attempt_no,
+                                };
+                            }
+                        }
+                    }
+                    if !self.submission_retry_policy.should_retry(attempt_no) {
+                        break SubmissionOutcome {
+                            status: SubmissionStatus::Failed,
+                            tx_hash: None,
+                            ledger: None,
+                            error_code: Some(err.code().to_string()),
+                            attempts: attempt_no,
+                        };
+                    }
+                    let backoff = self.submission_retry_policy.backoff(attempt_no);
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        };
+
+        // Persist the structured outcome for reconciliation against the swap
+        // order. On a terminal failure the sequence lease is released so the
+        // gap is recoverable and the account does not deadlock.
+        let record = allocator
+            .finalize_attempt(attempt.id, &outcome)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        if outcome.status == SubmissionStatus::Failed {
+            allocator
+                .release(&lease)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        Ok(record)
     }
 }
 

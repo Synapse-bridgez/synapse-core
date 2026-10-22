@@ -55,6 +55,30 @@ services:
       - IPC_LOCK
     command: server -dev
 
+  # Containerized Stellar quickstart network used by the integration suite
+  # (tests/integration). It runs a local standalone network with a built-in
+  # friendbot and Horizon, so end-to-end swap settlement tests can exercise
+  # real ledger behaviour without depending on hosted testnet resets or rate
+  # limits. Start it with:
+  #   docker compose -f docker-compose.dev.yml up -d stellar-quickstart
+  # Horizon is exposed on http://localhost:8000 and friendbot on
+  # http://localhost:8000/friendbot. Tear down (and wipe ledger state) with:
+  #   docker compose -f docker-compose.dev.yml down -v
+  stellar-quickstart:
+    image: stellar/quickstart:latest
+    container_name: synapse-stellar-quickstart
+    command: --standalone --enable-soroban-rpc
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # Horizon's root endpoint only returns 200 once the network has
+      # finished bootstrapping and the ledger is advancing.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
   app:
     image: rust:latest
     container_name: synapse-app-dev
@@ -73,7 +97,9 @@ services:
       DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
       DATABASE_URL_TEMPLATE: postgres://synapse_app:{password}@postgres:5432/synapse
       BACKUP_DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
-      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      # Point at the local quickstart network by default; override with
+      # https://horizon-testnet.stellar.org to run against hosted testnet.
+      STELLAR_HORIZON_URL: http://stellar-quickstart:8000
       VAULT_ADDR: http://vault:8200
       VAULT_ROLE_ID: ""
       VAULT_SECRET_ID: ""
