@@ -5,6 +5,7 @@
 
 use crate::validation::state_transitions::{is_valid_transition, Transition};
 use sqlx::types::BigDecimal;
+use uuid::Uuid;
 
 pub const SWAP_ORDER_TRANSITIONS: &[Transition] = &[
     Transition {
@@ -66,9 +67,23 @@ pub const FAILURE_RETRIES_EXHAUSTED: &str = "RETRIES_EXHAUSTED";
 pub const FAILURE_VENUE_REJECTED: &str = "VENUE_REJECTED";
 pub const FAILURE_RECONCILIATION_FAILED: &str = "RECONCILIATION_FAILED";
 
+/// Lifecycle state of a [`SwapOrder`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderStatus {
+    /// Accepted, not yet risk-checked or executed.
+    Pending,
+    /// Handed to an execution venue.
+    Executing,
+    /// Executed and settled.
+    Settled,
+    /// Terminally failed; see the emitted failure event for the reason.
+    Failed,
+}
+
+/// A swap order created from an accepted hand-off.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SwapOrder {
-    pub id: uuid::Uuid,
+    pub id: Uuid,
     pub status: String,
     pub venue: String,
     pub source_asset: String,
@@ -76,6 +91,12 @@ pub struct SwapOrder {
     pub amount: BigDecimal,
     pub filled_amount: BigDecimal,
     pub attempts: i32,
+    /// Idempotency key of the originating hand-off (`SwapHandoff::idempotency_key`).
+    pub idempotency_key: String,
+    /// The Phase 1 transaction this order swaps.
+    pub transaction_id: Uuid,
+    /// Quote the order was placed against, if one was issued.
+    pub quote_id: Option<String>,
 }
 
 impl SwapOrder {

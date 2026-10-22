@@ -67,6 +67,47 @@ Same-state transitions: Always valid (idempotent)
 └─ X → X for any state          ✓
 ```
 
+## Swap Order Status State Machine
+
+Phase 2 swap orders (`swap_orders` table, `SwapOrderStatus` in `db/models.rs`).
+Orders start at `swap_ready` when a funded deposit is ready to be turned into an
+executable order.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SWAP ORDER STATES                             │
+└─────────────────────────────────────────────────────────────────┘
+
+swap_ready ──→ quoting ──→ quoted ──→ executing ──→ settled
+    │              │          │            │
+    │              │          │            └─→ failed
+    │              │          │
+    ├──────────────┴──────────┴─→ cancelled
+    │              │          │
+    │              └──────────┴─→ failed
+```
+
+Valid Transitions (8 total):
+├─ swap_ready → quoting       ✓
+├─ swap_ready → cancelled     ✓
+├─ quoting → quoted           ✓
+├─ quoting → failed           ✓
+├─ quoting → cancelled        ✓
+├─ quoted → executing         ✓
+├─ quoted → failed            ✓
+├─ quoted → cancelled         ✓
+├─ executing → settled        ✓
+└─ executing → failed         ✓
+
+Terminal states: `settled`, `failed`, `cancelled` (no outgoing edges).
+Once `executing`, an order can no longer be cancelled.
+
+Same-state transitions: Always valid (idempotent, no write)
+└─ X → X for any state      ✓
+
+Concurrency: each transition is a compare-and-set on `(id, created_at, version)`.
+A stale read returns `SwapOrderTransitionError::Conflict` and the caller re-fetches.
+
 ## Transition Paths
 
 ### Settlement Dispute Path
@@ -179,6 +220,7 @@ Result: Task B gets 409 Conflict
 | **Transaction** | `state_transitions.rs` | `validation/state_machine.rs` | `validate_status_transition()` |
 | **Settlement** | `state_transitions.rs` | `services/settlement.rs` | `is_valid_transition()` |
 | **Query** | `state_transitions.rs` | `db/queries.rs` | re-validation in lock |
+| **Swap order** | `db/models.rs` (`SwapOrderStatus`) | `db/queries.rs` (`transition_swap_order`) | `can_transition_to()`, version CAS |
 
 ## Error Codes
 
