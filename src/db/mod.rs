@@ -51,6 +51,7 @@ pub mod audit;
 pub mod cold_storage;
 pub mod cron;
 pub mod models;
+pub mod outbox;
 pub mod partition;
 pub mod partition_migration;
 pub mod pool_manager;
