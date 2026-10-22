@@ -31,10 +31,11 @@ pub enum RedisComponent {
     WebhookDispatcher,
     WebhookFilterCache,
     SecretsRotationPubSub,
+    QuoteCache,
 }
 
 impl RedisComponent {
-    pub const ALL: [RedisComponent; 7] = [
+    pub const ALL: [RedisComponent; 8] = [
         RedisComponent::QueryCache,
         RedisComponent::RateLimit,
         RedisComponent::Idempotency,
@@ -42,6 +43,7 @@ impl RedisComponent {
         RedisComponent::WebhookDispatcher,
         RedisComponent::WebhookFilterCache,
         RedisComponent::SecretsRotationPubSub,
+        RedisComponent::QuoteCache,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -53,6 +55,7 @@ impl RedisComponent {
             RedisComponent::WebhookDispatcher => "webhook_dispatcher",
             RedisComponent::WebhookFilterCache => "webhook_filter_cache",
             RedisComponent::SecretsRotationPubSub => "secrets_rotation_pubsub",
+            RedisComponent::QuoteCache => "quote_cache",
         }
     }
 
