@@ -51,6 +51,7 @@ pub mod audit;
 pub mod cold_storage;
 pub mod cron;
 pub mod models;
+pub mod outbox;
 pub mod partition;
 pub mod partition_migration;
 pub mod pool_manager;
@@ -58,6 +59,7 @@ pub mod queries;
 pub mod replica_lag_monitor;
 pub mod session;
 pub mod slow_query;
+pub mod swap_queries;
 pub mod webhook;
 pub mod timeout;
 

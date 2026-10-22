@@ -233,6 +233,7 @@ mod tests {
             slow_query_threshold_ms: 500,
             settlement_max_batch_size: 10_000,
             settlement_min_tx_count: 1,
+            swap_fees: Default::default(),
         }
     }
 
