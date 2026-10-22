@@ -123,6 +123,14 @@ response would carry. Rate-limit errors additionally carry `extensions.retryAfte
 |------|-------------|-------------|
 | ERR_QUERY_COMPLEXITY_001 | 400 | Query exceeds depth, complexity, or alias limits (GraphQL) |
 
+### Swap Errors (ERR_SWAP_xxx)
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| ERR_SWAP_001 | 503 | Swap engine unavailable |
+| ERR_SWAP_002 | 400 | Invalid swap hand-off |
+| ERR_SWAP_003 | 500 | Swap engine internal error |
+
 ## Using Error Codes
 
 ### Programmatic Retry Logic

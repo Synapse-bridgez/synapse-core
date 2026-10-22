@@ -1,63 +1,35 @@
-//! Typed errors for the swap quoting engine.
+impl std::error::Error for QuoteError {}
 
-use std::fmt;
-
-use uuid::Uuid;
-
-/// Error returned by the quoting engine in `src/swap/quote.rs`.
+/// A rejected swap order. Carries the policy version that made the decision
+/// so the rejection can be replayed against the same configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QuoteError {
-    /// Base and quote assets are the same, so there is nothing to swap.
-    SameAsset(String),
-    /// No configured price source supports this asset pair.
-    UnsupportedPair { base: String, quote: String },
-    /// The requested amount is zero or negative.
-    InvalidAmount(String),
-    /// The requested amount falls outside the configured min/max order size.
-    OrderSizeOutOfBounds {
-        amount: String,
-        min: String,
-        max: String,
-    },
-    /// Every supporting source failed, timed out, returned stale data, or
-    /// produced no positive net output.
-    NoLiquidity { base: String, quote: String },
-    /// The request key was already used for a quote with different parameters.
-    RequestKeyConflict(String),
-    /// No quote exists with the given id.
-    NotFound(Uuid),
-    /// The quote's TTL has elapsed and it can no longer be executed.
-    Expired(Uuid),
-    /// The quote store failed.
-    Store(String),
+pub struct RiskRejection {
+    pub code: RiskRejectionCode,
+    pub policy_version: String,
 }
 
-impl fmt::Display for QuoteError {
+impl fmt::Display for RiskRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            QuoteError::SameAsset(asset) => {
-                write!(f, "base and quote asset are both {asset}")
-            }
-            QuoteError::UnsupportedPair { base, quote } => {
-                write!(f, "unsupported pair {base}/{quote}")
-            }
-            QuoteError::InvalidAmount(amount) => {
-                write!(f, "invalid order amount {amount}: must be positive")
-            }
-            QuoteError::OrderSizeOutOfBounds { amount, min, max } => {
-                write!(f, "order size {amount} outside bounds [{min}, {max}]")
-            }
-            QuoteError::NoLiquidity { base, quote } => {
-                write!(f, "no usable liquidity for {base}/{quote}")
-            }
-            QuoteError::RequestKeyConflict(key) => {
-                write!(f, "request key {key} already used for a different quote")
-            }
-            QuoteError::NotFound(id) => write!(f, "quote {id} not found"),
-            QuoteError::Expired(id) => write!(f, "quote {id} has expired"),
-            QuoteError::Store(m) => write!(f, "quote store error: {m}"),
+        write!(f, "{}: {}", self.code
         }
     }
 }
 
 impl std::error::Error for QuoteError {}
+
+/// A rejected swap order. Carries the policy version that made the decision
+/// so the rejection can be replayed against the same configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RiskRejection {
+    pub code: RiskRejectionCode,
+    pub policy_version: String,
+}
+
+impl fmt::Display for RiskRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.code(), self.code.client_message())
+    }
+}
+
+impl std::error::Error for RiskRejection {}
+

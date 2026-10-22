@@ -67,6 +67,47 @@ Same-state transitions: Always valid (idempotent)
 └─ X → X for any state          ✓
 ```
 
+## Swap Order Status State Machine
+
+Phase 2 swap orders (`swap_orders` table, `SwapOrderStatus` in `db/models.rs`).
+Orders start at `swap_ready` when a funded deposit is ready to be turned into an
+executable order.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SWAP ORDER STATES                             │
+└─────────────────────────────────────────────────────────────────┘
+
+swap_ready ──→ quoting ──→ quoted ──→ executing ──→ settled
+    │              │          │            │
+    │              │          │            └─→ failed
+    │              │          │
+    ├──────────────┴──────────┴─→ cancelled
+    │              │          │
+    │              └──────────┴─→ failed
+```
+
+Valid Transitions (8 total):
+├─ swap_ready → quoting       ✓
+├─ swap_ready → cancelled     ✓
+├─ quoting → quoted           ✓
+├─ quoting → failed           ✓
+├─ quoting → cancelled        ✓
+├─ quoted → executing         ✓
+├─ quoted → failed            ✓
+├─ quoted → cancelled         ✓
+├─ executing → settled        ✓
+└─ executing → failed         ✓
+
+Terminal states: `settled`, `failed`, `cancelled` (no outgoing edges).
+Once `executing`, an order can no longer be cancelled.
+
+Same-state transitions: Always valid (idempotent, no write)
+└─ X → X for any state      ✓
+
+Concurrency: each transition is a compare-and-set on `(id, created_at, version)`.
+A stale read returns `SwapOrderTransitionError::Conflict` and the caller re-fetches.
+
 ## Transition Paths
 
 ### Settlement Dispute Path
@@ -179,6 +220,7 @@ Result: Task B gets 409 Conflict
 | **Transaction** | `state_transitions.rs` | `validation/state_machine.rs` | `validate_status_transition()` |
 | **Settlement** | `state_transitions.rs` | `services/settlement.rs` | `is_valid_transition()` |
 | **Query** | `state_transitions.rs` | `db/queries.rs` | re-validation in lock |
+| **Swap order** | `db/models.rs` (`SwapOrderStatus`) | `db/queries.rs` (`transition_swap_order`) | `can_transition_to()`, version CAS |
 
 ## Error Codes
 
@@ -200,3 +242,32 @@ Result: Task B gets 409 Conflict
 | Duplicate rule definitions eliminated | 2 |
 | New error variants | 1 |
 | Test cases added | 10+ |
+
+## Swap Order Execution (#1436)
+
+Status is governed by `SWAP_ORDER_TRANSITIONS` in `src/swap/order.rs`; every change goes
+through `execution::transition_order` (guard + conditional `WHERE status = from AND lease_owner = me`).
+
+```
+quoted ──► executing ──► filled
+   │          ├──► partially_filled ──► filled
+   │          └──► reconciling  (venue timeout / unknown outcome)
+   │                 └──► filled / partially_filled
+   └──► failed  (also from executing / partially_filled / reconciling:
+                 permanent venue error, retries exhausted)
+```
+
+Flow per attempt (events in `swap_order_events`: started, submitted, partially_filled, filled, failed):
+
+1. Worker leases orders with `FOR UPDATE SKIP LOCKED`, setting `lease_owner`/`lease_expires_at`
+   (visibility timeout; crashed workers' orders are reclaimed once the lease expires).
+2. `quoted → executing`, then `ExecutionVenue::submit` with idempotency key `swap-order:<order_id>`,
+   so a crash mid-submission re-submits the same key and the venue dedupes.
+3. Fills are inserted into `swap_fills` (unique on `order_id, venue_fill_id`, so replays are no-ops)
+   and the total is reconciled from the table; total >= amount → `filled`, else `partially_filled`.
+4. `Transient` → lease released with exponential backoff, up to `max_attempts`, then `failed`
+   (`RETRIES_EXHAUSTED`). `Permanent` → `failed` (`VENUE_REJECTED`).
+5. `Unknown` (timeout) → `reconciling`; later attempts only call `ExecutionVenue::lookup`, never
+   `submit`. Exhaustion → `failed` (`RECONCILIATION_FAILED`).
+
+The worker is started in `main.rs` only when `SWAP_ENGINE_ENABLED=true`.
