@@ -27,6 +27,9 @@
     {"code": "ERR_SETTLEMENT_003", "http_status": 409, "graphql_surfacing": "extensions.code", "description": "Stale transition: settlement state changed during processing"},
     {"code": "ERR_RATE_LIMIT_001", "http_status": 429, "graphql_surfacing": "extensions.code", "description": "Rate limit exceeded"},
     {"code": "ERR_REDIS_001", "http_status": 500, "graphql_surfacing": "extensions.code", "description": "Redis operation failed"},
-    {"code": "ERR_QUERY_COMPLEXITY_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Query exceeds depth, complexity, or alias limits (GraphQL)"}
+    {"code": "ERR_QUERY_COMPLEXITY_001", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Query exceeds depth, complexity, or alias limits (GraphQL)"},
+    {"code": "ERR_SWAP_001", "http_status": 503, "graphql_surfacing": "extensions.code", "description": "Swap engine unavailable"},
+    {"code": "ERR_SWAP_002", "http_status": 400, "graphql_surfacing": "extensions.code", "description": "Invalid swap hand-off"},
+    {"code": "ERR_SWAP_003", "http_status": 500, "graphql_surfacing": "extensions.code", "description": "Swap engine internal error"}
   ]
 }
