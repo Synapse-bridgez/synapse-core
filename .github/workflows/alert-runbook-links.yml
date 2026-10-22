@@ -22,6 +22,9 @@ on:
       - "scripts/test_check_alert_runbook_links.py"
       - "scripts/test_loki_log_alert_rules.py"
       - "scripts/test_alert_grouping.py"
+      - "scripts/test_slo_rules.py"
+      - "scripts/slo_model.py"
+      - "observability/recording-rules.yml"
       - ".github/workflows/alert-runbook-links.yml"
   workflow_dispatch: {}
 
@@ -35,11 +38,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install PyYAML (SLO rule tests)
+        run: python3 -m pip install pyyaml
+
       - name: Validator self-tests
         run: |
           python3 -m unittest -v scripts/test_check_alert_runbook_links.py
           python3 -m unittest -v scripts/test_loki_log_alert_rules.py
           python3 -m unittest -v scripts/test_alert_grouping.py
+          python3 -m unittest -v scripts/test_slo_rules.py
 
       - name: Validate alert -> runbook mapping
         run: python3 scripts/check-alert-runbook-links.py

@@ -128,6 +128,10 @@ async fn main() -> anyhow::Result<()> {
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
+        Some(Commands::Preflight {
+            offline,
+            timeout_secs,
+        }) => cli::handle_preflight(&config, offline, timeout_secs).await,
     }
 }
 
@@ -135,6 +139,12 @@ async fn serve(
     config: config::Config,
     tracer_manager: synapse_core::telemetry::TracerManager,
 ) -> anyhow::Result<()> {
+    // The Phase 2 swap engine registers no routes or background tasks yet;
+    // this only records that the flag is on so operators can see it at boot.
+    if config.swap.engine_enabled {
+        tracing::info!("Swap engine enabled via SWAP_ENGINE_ENABLED; no swap routes or workers are registered yet");
+    }
+
     let pool = db::create_pool(&config).await?;
 
     // Initialize pool manager for multi-region failover.
@@ -175,10 +185,21 @@ async fn serve(
          instance's max_connections"
     );
 
-    // Run migrations
+    // Run migrations, or with AUTO_MIGRATE=false refuse to start on drift.
     let migrator = Migrator::new(Path::new("./migrations")).await?;
-    migrator.run(&pool).await?;
-    tracing::info!("Database migrations completed");
+    if config::preflight::auto_migrate_enabled() {
+        migrator.run(&pool).await?;
+        tracing::info!("Database migrations completed");
+    } else {
+        let pending = config::preflight::pending_migrations(&pool, &migrator).await?;
+        if !pending.is_empty() {
+            anyhow::bail!(
+                "{} pending migration(s) {:?} and AUTO_MIGRATE=false; run `synapse-core db migrate` first",
+                pending.len(),
+                pending
+            );
+        }
+    }
 
     // Hard startup gate: refuse to serve traffic if the connected role can
     // bypass Row-Level Security. See startup::assert_no_bypassrls for why.
@@ -212,13 +233,22 @@ async fn serve(
         24,
         Some(query_cache.clone()),
         config.partition_lookahead_months,
-    );
+    )
+    .with_swap_retention_months(config.swap_retention_months);
     assert!(
         partition_manager.has_cache(),
         "PartitionManager must be constructed with a cache so create_partition's \
          warming path actually runs; see query_cache initialization above"
     );
     partition_manager.start();
+
+    // Swap Phase 2 background jobs (#1505, #1506, #1508); each is opt-in via env.
+    synapse_core::swap::compliance::surveillance::spawn(pool.clone());
+    synapse_core::swap::analytics::spawn(pool.clone());
+    synapse_core::swap::market_data::spawn_maintenance(pool.clone(), None);
+
+    // Stuck-transaction watchdog and DLQ depth/age alerting (#1446)
+    synapse_core::swap::recovery::spawn_watchdog(pool.clone(), &config);
     tracing::info!(
         lookahead_months = config.partition_lookahead_months,
         "Partition manager started with configurable lookahead"
@@ -427,10 +457,17 @@ async fn serve(
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
         config.processor_min_batch as u64,
     ));
-    // Initialize asset registry cache (refreshes every 5 minutes)
-    let _asset_cache =
-        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
+    // Initialize asset registry cache (refresh interval: ASSET_REGISTRY_REFRESH_SECS)
+    let _asset_cache = synapse_core::AssetCache::start(
+        pool.clone(),
+        std::time::Duration::from_secs(config.asset_registry_refresh_secs),
+    )
+    .await;
     tracing::info!("Asset registry cache initialized");
+    synapse_core::swap::circuit_breaker::init_swap_gate(
+        config.swap_accepting_orders,
+        config.swap_breaker,
+    );
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -485,6 +522,25 @@ async fn serve(
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
     });
+
+    // Swap order execution worker (#1436), opt-in via SWAP_ENGINE_ENABLED.
+    // Orders for a venue with no registration here are released back to the
+    // queue (never failed) so a replica that has the venue can pick them up.
+    if std::env::var("SWAP_ENGINE_ENABLED")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+    {
+        let venues: std::collections::HashMap<
+            String,
+            Arc<dyn synapse_core::swap::execution::ExecutionVenue>,
+        > = std::collections::HashMap::new();
+        tokio::spawn(synapse_core::swap::execution::run_worker(
+            pool.clone(),
+            venues,
+            synapse_core::swap::execution::ExecutionConfig::default(),
+        ));
+        tracing::info!("Swap execution worker started");
+    }
 
     // Background task: alert if the dead quota:config:* Redis key space
     // (see handlers::admin::quota::set_tenant_quota and
@@ -549,6 +605,15 @@ async fn serve(
         processor_pool = processor_pool.with_webhook_dispatcher(dispatcher);
     }
     let processor_shutdown = processor_pool.start();
+
+    // Outbox publisher for lifecycle events. Local dev uses the log sink; deployed
+    // environments should pass a broker-backed `EventPublisher` here.
+    let (outbox_shutdown, outbox_shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(synapse_core::db::outbox::run_outbox_worker(
+        pool.clone(),
+        Arc::new(synapse_core::db::outbox::LogEventPublisher),
+        outbox_shutdown_rx,
+    ));
 
     // Register and start scheduled jobs
     let scheduler = synapse_core::services::JobScheduler::new();
@@ -645,6 +710,19 @@ async fn serve(
         });
     }
 
+    // Reconcile swap orders stuck in settlement_pending (status checks only, never re-submits).
+    {
+        use synapse_core::swap::settlement::{
+            run_reconciliation_loop, HorizonSettlementAdapter, SettlementConfig, SettlementService,
+        };
+        let service = SettlementService::new(
+            pool.clone(),
+            HorizonSettlementAdapter::new(config.stellar_horizon_url.clone()),
+            SettlementConfig::from_env(),
+        );
+        tokio::spawn(run_reconciliation_loop(service));
+    }
+
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
     let app =
         app.merge(SwaggerUi::new("/api/docs").url("/api/docs/openapi.json", ApiDoc::openapi()));
@@ -710,6 +788,7 @@ async fn serve(
     // Stop background workers from claiming new work *before* draining DB
     // connections, so in-flight queries aren't force-cut when the pool closes.
     let _ = processor_shutdown.send(true);
+    let _ = outbox_shutdown.send(true);
     if let Err(e) = scheduler.stop().await {
         tracing::warn!("Error stopping job scheduler: {}", e);
     }

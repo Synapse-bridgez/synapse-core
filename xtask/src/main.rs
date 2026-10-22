@@ -18,6 +18,10 @@ enum Command {
 	Scorecard(commands::scorecard::ScorecardArgs),
 	/// Generate a postmortem draft from alert, metric, and deployment history.
 	Postmortem(commands::postmortem::PostmortemArgs),
+	/// Collect SOC 2 control evidence or render the control matrix.
+	Compliance(commands::compliance::ComplianceArgs),
+	/// Generate release notes for Wave-linked merged PRs, grouped by category and complexity.
+	ReleaseNotes(commands::release_notes::ReleaseNotesArgs),
 }
 
 fn main() -> Result<()> {
@@ -26,5 +30,7 @@ fn main() -> Result<()> {
 		Command::CapacityForecast(args) => commands::capacity_forecast::run(args),
 		Command::Scorecard(args) => commands::scorecard::run(args),
 		Command::Postmortem(args) => commands::postmortem::run(args),
+		Command::Compliance(args) => commands::compliance::run(args),
+		Command::ReleaseNotes(args) => commands::release_notes::run(args),
 	}
 }
