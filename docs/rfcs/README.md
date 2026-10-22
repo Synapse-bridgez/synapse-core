@@ -59,6 +59,39 @@ this period:
   maintainers. Silence is not consent: at least one maintainer must explicitly
   approve.
 
+## Voting and consensus
+
+Votes are cast with normal GitHub PR reviews on the RFC pull request. No
+separate voting tool is needed.
+
+- **Approve** (an *approving* review) counts as an approval.
+- **Request changes** (a *changes-requested* review) is a blocking objection
+  and must be resolved before acceptance.
+- **Comment** reviews do not vote. A dismissed review no longer votes.
+- Only current members of the maintainers team vote. The RFC author never votes.
+- Each voter's latest vote counts.
+
+Thresholds:
+
+- **Accepted:** at least one maintainer approval and no outstanding objections.
+- **Needs revision:** at least one outstanding objection. The author revises the
+  RFC, and the objector re-reviews to clear it.
+- **Open:** neither of the above yet.
+- **Rejected, Withdrawn, Deferred:** set by a maintainer in the RFC header once
+  the discussion has concluded. The status tool reports these but never
+  computes them.
+
+Maintainer departures: a former maintainer's votes, approvals and objections
+alike, stop counting as soon as they leave the maintainers team. The status
+comment lists them under "Excluded from tally" so the change is visible. A
+departed maintainer's objection therefore cannot block an RFC indefinitely.
+
+The `RFC Vote Status` workflow (`.github/workflows/rfc-vote-status.yml`, script
+`scripts/rfc-vote-status.py`) runs on every RFC pull request and review. It
+posts or updates a single status comment that shows the current RFC status,
+consensus outcome, approvals, objections, what is still outstanding, and any
+excluded votes.
+
 ## RFC states
 
 Every RFC has exactly one status in its header:

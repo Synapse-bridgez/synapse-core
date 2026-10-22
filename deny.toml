@@ -42,6 +42,15 @@ ignore = [
     # Tracked separately. Reviewed 2026-08-24.
     "RUSTSEC-2026-0204",
     "RUSTSEC-2026-0258",
+    # rsa 0.9.x (transitive, via sqlx-mysql's lockfile entry). RUSTSEC-2023-0071
+    # (Marvin timing side channel) has no patched release upstream. We use
+    # Postgres only; the mysql driver is never compiled into the binary.
+    # Reviewed 2026-10-19.
+    "RUSTSEC-2023-0071",
+    # instant 0.1.x (transitive, via backoff-style retry crates) is
+    # unmaintained; no drop-in upgrade without upstream changes.
+    # Reviewed 2026-10-19.
+    "RUSTSEC-2024-0384",
 ]
 
 [licenses]

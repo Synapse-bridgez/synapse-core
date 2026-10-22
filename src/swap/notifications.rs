@@ -1,81 +1,34 @@
-//! Tenant notification preferences, templates, and multi-channel delivery
-//! planning for swap lifecycle events.
-//!
-//! The canonical event payload is never modified: rendering is a pure function
-//! of `(template, event, channel)` that only produces the notification body, so
-//! templates cannot suppress compliance fields. Rendering failures are returned
-//! as [`DeliveryOutcome::Failed`] so they appear in the delivery log instead of
-//! being dropped. Persistence: `migrations/20260928000002_swap_notification_settings.sql`.
-//!
-//! Default for a tenant with no saved preferences: opted in to every event
-//! type on the `webhook` channel, delivered immediately (the pre-existing
-//! behaviour). Email is opt-in only.
-
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeSet;
-
-pub const MAX_TEMPLATE_BYTES: usize = 4096;
-pub const MAX_RECIPIENTS: usize = 20;
-/// Variables a template may reference; each resolves to a top-level scalar of the event.
-pub const ALLOWED_VARIABLES: &[&str] = &[
-    "event_type",
-    "order_id",
-    "tenant_id",
-    "status",
-    "from_asset",
-    "to_asset",
-    "amount",
-    "reason",
-];
-/// Events that are never batched into a digest.
-const CRITICAL_EVENTS: &[&str] = &["swap.failed", "swap.refunded", "swap.held"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Channel {
-    Webhook,
-    Email,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryMode {
-    Immediate,
-    Digest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Recipients {
-    pub emails: Vec<String>,
-    pub webhook_urls: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotificationPreferences {
-    /// Empty set means "all event types".
-    pub subscribed_events: BTreeSet<String>,
-    pub channels: BTreeSet<Channel>,
-    pub mode: DeliveryMode,
-    pub recipients: Recipients,
-}
-
-impl Default for NotificationPreferences {
-    fn default() -> Self {
-        Self {
-            subscribed_events: BTreeSet::new(),
-            channels: BTreeSet::from([Channel::Webhook]),
-            mode: DeliveryMode::Immediate,
-            recipients: Recipients {
-                emails: vec![],
-                webhook_urls: vec![],
-            },
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NotificationError {
+    #[error("template exceeds {MAX_TEMPLATE_BYTES} bytes")]
+    TemplateTooLarge,
+    #[error("template has an unterminated or empty placeholder")]
+    MalformedPlaceholder,
+    #[error("unknown template variable `{0}`")]
+    UnknownVariable(String),
+    #[error("event is missing variable `{0}`")]
+    MissingValue(String),
+    #[error("invalid recipient: {0}")]
+    InvalidRecipi
         }
     }
 }
 
+/// Errors from building, signing, or validating a swap notification.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NotificationError {
+    #[error("invalid callback URL: {0}")]
+    InvalidUrl(String),
+    #[error("callback URL must use https")]
+    InsecureScheme,
+    #[error("callback URL targets a private or reserved address")]
+    BlockedAddress,
+    #[error("payload is {size} bytes, limit is {max}")]
+    PayloadTooLarge { size: usize, max: usize },
+    #[error("webhook secret is empty")]
+    EmptySecret,
+    #[error("payload serialization failed: {0}")]
+    Serialization(String),
     #[error("template exceeds {MAX_TEMPLATE_BYTES} bytes")]
     TemplateTooLarge,
     #[error("template has an unterminated or empty placeholder")]
@@ -88,6 +41,145 @@ pub enum NotificationError {
     InvalidRecipient(String),
     #[error("more than {MAX_RECIPIENTS} recipients")]
     TooManyRecipients,
+}
+
+/// One swap lifecycle notification in the documented payload shape.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SwapWebhookPayload {
+    /// Stable per transaction and event; receivers deduplicate on this.
+    pub id: String,
+    #[serde(rename = "type")]
+    pub event_type: &'static str,
+    /// Outbox sequence number; per-endpoint ordering follows this.
+    pub sequence: i64,
+    pub created_at: DateTime<Utc>,
+    pub transaction_id: Uuid,
+    pub data: Value,
+}
+
+impl SwapWebhookPayload {
+    pub fn new(
+        event: SwapLifecycleEvent,
+        transaction_id: Uuid,
+        sequence: i64,
+        created_at: DateTime<Utc>,
+        data: Value,
+    ) -> Self {
+        Self {
+            id: format!("swap:{transaction_id}:{}", event.event_type()),
+            event_type: event.event_type(),
+            sequence,
+            created_at,
+            transaction_id,
+            data,
+        }
+    }
+
+    /// Serialize the payload to the exact bytes that get signed and sent.
+    pub fn to_body(&self) -> Result<Vec<u8>, NotificationError> {
+        let body =
+            serde_json::to_vec(self).map_err(|e| NotificationError::Serialization(e.to_string()))?;
+        if body.len() > MAX_PAYLOAD_BYTES {
+            return Err(NotificationError::PayloadTooLarge {
+                size: body.len(),
+                max: MAX_PAYLOAD_BYTES,
+            });
+        }
+        Ok(body)
+    }
+}
+
+/// Compute the `X-Webhook-Signature` header value for a body sent at `timestamp`.
+pub fn sign_payload(
+    secret: &[u8],
+    timestamp: u64,
+    body: &[u8],
+) -> Result<String, NotificationError> {
+    if secret.is_empty() {
+        return Err(NotificationError::EmptySecret);
+    }
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|_| NotificationError::EmptySecret)?;
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    Ok(format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+}
+
+/// Validate a tenant-supplied callback URL before any request is made to it.
+///
+/// Requires `https`, no embedded credentials, and a host that is not a
+/// loopback, private, link-local, or otherwise reserved address, nor a
+/// single-label or internal-looking hostname. This checks the URL as written;
+/// the delivery layer must also re-check the addresses the hostname resolves
+/// to, to guard against DNS rebinding.
+pub fn validate_callback_url(raw: &str) -> Result<Url, NotificationError> {
+    let url = Url::parse(raw).map_err(|e| NotificationError::InvalidUrl(e.to_string()))?;
+    if url.scheme() != "https" {
+        return Err(NotificationError::InsecureScheme);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(NotificationError::InvalidUrl(
+            "credentials are not allowed".into(),
+        ));
+    }
+    let blocked = match url.host() {
+        None => return Err(NotificationError::InvalidUrl("missing host".into())),
+        Some(Host::Ipv4(ip)) => is_blocked_ip(IpAddr::V4(ip)),
+        Some(Host::Ipv6(ip)) => is_blocked_ip(IpAddr::V6(ip)),
+        Some(Host::Domain(domain)) => is_reserved_hostname(domain),
+    };
+    if blocked {
+        return Err(NotificationError::BlockedAddress);
+    }
+    Ok(url)
+}
+
+fn is_reserved_hostname(domain: &str) -> bool {
+    let host = domain.trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || !host.contains('.')
+}
+
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_blocked_v4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_blocked_v4(v4),
+            None => is_blocked_v6(v6),
+        },
+    }
+}
+
+fn is_blocked_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        || a == 0
+        // RFC 1918: 10/8, 172.16/12, 192.168/16
+        || a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        // Carrier-grade NAT, 100.64.0.0/10
+        || (a == 100 && (64..=127).contains(&b))
+}
+
+fn is_blocked_v6(ip: Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        // Unique local, fc00::/7
+        || (first & 0xfe00) == 0xfc00
+        // Link-local, fe80::/10
+        || (first & 0xffc0) == 0xfe80
 }
 
 /// Safe built-in template used until a tenant customizes an event type.
