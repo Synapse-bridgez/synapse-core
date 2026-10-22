@@ -44,6 +44,43 @@ Known false positives may be added to `.secrets-allowlist.txt`, but each entry
 must be justified and kept minimal. This provides a documented, reviewable allowlist
 mechanism without disabling the guardrail for real credentials.
 
+## Swap engine threat model
+
+The Phase 2 swap engine (`src/swap/`) is the first path that can move value.
+Phase 1 only prepares transactions; the hand-off at `swap_ready` is the trust
+boundary this model covers. Nothing in this repository exposes swap REST or
+GraphQL endpoints yet. When they are added they must be protected by a
+default-deny authorization layer applied at the router, so a new route is
+rejected unless it is explicitly marked as public.
+
+### Assets and trust boundaries
+
+- **Assets:** funds in the source asset of a `swap_ready` transaction, and the
+  routed swap output.
+- **Trust boundary:** the `SwapHandoff` built from the Phase 1 transaction row.
+  Anything arriving from a client (amounts, destination accounts, rates) is
+  untrusted until it is checked against that row.
+- **Credentials:** venue API keys and signing keys. They are loaded only from
+  the environment or the secret store (`src/secrets.rs`), compared in constant
+  time, and never logged or returned in error payloads.
+
+### Threats and required controls
+
+| Threat | Description | Required control |
+| --- | --- | --- |
+| Quote manipulation | A client or stale quote supplies the execution rate, or a quote is replayed after the market moved. | Rates are computed server-side at execution time. Client-supplied prices are ignored. Quotes carry an expiry and are rejected after it. |
+| Replay / double execution | The same hand-off is delivered twice, or a retry runs a second swap. | `idempotency_key` is `swap:<transaction_id>` and must be derived from the transaction. `SwapHandoff::validate` rejects a mismatched key. Engines must dedupe on the key. A transaction moves to `swap_ready` once, and only from `completed`. |
+| Settlement redirection | A request changes the account that receives swap output. | The destination comes only from the transaction record, never from request input. `stellar_account` is checked as non-empty and must match the stored transaction. Changes to destinations require a separate authorized action. |
+| Cross-tenant action | Tenant A acts on tenant B's transaction or order. | Every swap operation is scoped by the authenticated tenant. Lookups by ID that fail for tenant ownership return the same `NotFound` response as a missing ID, so existence is not leaked. Authorization failures return 403 without detail. |
+| Amount abuse | Zero, negative, overflowing, or oversized amounts. | `SwapHandoff::validate` requires a positive amount. Amount bounds are enforced at the API boundary before a hand-off is built. |
+| Secret exposure | Venue or signing credentials appear in logs, errors, or `Debug` output. | Credential types must not implement `Debug` with their values. Errors carry only generic messages (see `src/error.rs`). |
+
+### Out of scope
+
+- Third-party penetration testing. This model does not replace an external
+  review.
+- Compromise of the Stellar network or of a venue's own systems.
+
 ## Publishing Security Advisories
 
 Applies to the independently versioned components consumed by third parties:

@@ -123,6 +123,14 @@ response would carry. Rate-limit errors additionally carry `extensions.retryAfte
 |------|-------------|-------------|
 | ERR_QUERY_COMPLEXITY_001 | 400 | Query exceeds depth, complexity, or alias limits (GraphQL) |
 
+### Swap Errors (ERR_SWAP_xxx)
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| ERR_SWAP_001 | 409 | Swap order is not in a cancellable state (only `pending` orders can be cancelled) |
+| ERR_SWAP_002 | 409 | Swap request conflicts with an existing order (idempotency key reused with a different request, or deposit already swapped) |
+| ERR_SWAP_003 | 400 | Deposit transaction is not eligible for a swap (must be `completed`) |
+
 ## Using Error Codes
 
 ### Programmatic Retry Logic
@@ -158,9 +166,10 @@ if response["code"] == "ERR_TRANSACTION_004":
 
 ## Version
 
-This error catalog is version 1.1.0. API consumers can retrieve the latest version via the `/errors` endpoint.
+This error catalog is version 1.2.0. API consumers can retrieve the latest version via the `/errors` endpoint.
 
 ## Changelog
 
+- 1.2.0 - Added `ERR_SWAP_001`, `ERR_SWAP_002`, and `ERR_SWAP_003` for the swap order REST endpoints (`/swaps`)
 - 1.1.0 - Documented `ERR_SETTLEMENT_003` and `ERR_REDIS_001` (already emitted, previously undocumented); added `ERR_TRANSACTION_006` (concurrent modification) and `ERR_QUERY_COMPLEXITY_001` (GraphQL query limits); noted that GraphQL errors carry these codes in `extensions.code`
 - 1.0.0 - Initial error catalog with 19 error codes

@@ -24,3 +24,13 @@ groups:
 
       - record: synapse:pending_queue_depth:avg5m
         expr: avg_over_time(pending_queue_depth[5m])
+
+      - record: synapse:swap_failure_ratio:rate10m
+        expr: |
+          sum(rate(swap_orders_total{event="failed"}[10m]))
+            / clamp_min(sum(rate(swap_orders_total{event=~"created|failed|rejected"}[10m])), 1e-12)
+
+      - record: synapse:swap_rejection_ratio:rate10m
+        expr: |
+          sum(rate(swap_orders_total{event="rejected"}[10m]))
+            / clamp_min(sum(rate(swap_orders_total{event=~"created|failed|rejected"}[10m])), 1e-12)
