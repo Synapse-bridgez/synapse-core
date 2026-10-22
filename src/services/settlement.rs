@@ -1,6 +1,11 @@
 use crate::db::models::{Asset, Settlement};
 use crate::db::queries;
 use crate::error::AppError;
+use crate::swap::calendar::{CalendarSet, ClosedWindowBehavior};
+use crate::swap::settlement::fee::{
+    FeeBumpDecision, FeeBumpPolicy, FeeCapError, FeeEstimator, FeeSnapshot, InclusionStatus,
+    SettlementFeeRecord,
+};
 use crate::validation::state_transitions::{is_valid_transition, SETTLEMENT_TRANSITIONS};
 use bigdecimal::BigDecimal;
 use chrono::Utc;
@@ -246,6 +251,30 @@ impl LatencyBudgetTracker {
     }
 }
 
+/// Outcome of evaluating the settlement window for a corridor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementWindowOutcome {
+    /// Window is open; settle immediately.
+    Open,
+    /// Window is closed and the settlement was deferred to `next_open`.
+    Deferred {
+        next_open: Option<chrono::DateTime<Utc>>,
+    },
+    /// Window is closed but the settlement was allowed to proceed (extended).
+    Extended,
+}
+
+/// Result of a settlement submission that may have involved fee bumps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementSubmission {
+    /// Final transaction hash (the bump hash if any bumps occurred).
+    pub tx_hash: String,
+    /// Fee actually paid on the final attempt, in stroops.
+    pub fee_stroops: i64,
+    /// Number of fee bumps applied.
+    pub bumps: usize,
+}
+
 pub struct SettlementService {
     pool: PgPool,
     max_batch_size: usize,
@@ -259,6 +288,17 @@ pub struct SettlementService {
     /// Shared `QueryCache` for cache invalidation after settlement. `None`
     /// means invalidation is skipped (see `with_query_cache`).
     query_cache: Option<crate::services::query_cache::QueryCache>,
+    /// Dynamic fee estimator snapshot source for Stellar inclusion fees.
+    /// `None` disables dynamic fee computation (submission path falls back to
+    /// the caller-supplied base fee).
+    fee_estimator: Option<Arc<FeeEstimator>>,
+    /// Policy governing when/how stalled transactions are fee-bumped.
+    fee_bump_policy: FeeBumpPolicy,
+    /// Trading calendar used to enforce settlement windows. `None` means
+    /// settlement windows are not enforced (always open).
+    calendar: Option<Arc<CalendarSet>>,
+    /// Behavior when a settlement is requested outside an open window.
+    closed_window_behavior: ClosedWindowBehavior,
 }
 
 impl SettlementService {
@@ -271,6 +311,10 @@ impl SettlementService {
             readiness: None,
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
             query_cache: None,
+            fee_estimator: None,
+            fee_bump_policy: FeeBumpPolicy::default(),
+            calendar: None,
+            closed_window_behavior: ClosedWindowBehavior::Reject,
         }
     }
 
@@ -283,6 +327,10 @@ impl SettlementService {
             readiness: None,
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
             query_cache: None,
+            fee_estimator: None,
+            fee_bump_policy: FeeBumpPolicy::default(),
+            calendar: None,
+            closed_window_behavior: ClosedWindowBehavior::Reject,
         }
     }
 
@@ -304,6 +352,10 @@ impl SettlementService {
             readiness: Some(readiness),
             settlement_duration_ms: crate::metrics::settlement_duration_ms(),
             query_cache: None,
+            fee_estimator: None,
+            fee_bump_policy: FeeBumpPolicy::default(),
+            calendar: None,
+            closed_window_behavior: ClosedWindowBehavior::Reject,
         }
     }
 
@@ -321,6 +373,186 @@ impl SettlementService {
             readiness: Some(readiness),
             settlement_duration_ms,
             query_cache: None,
+            fee_estimator: None,
+            fee_bump_policy: FeeBumpPolicy::default(),
+            calendar: None,
+            closed_window_behavior: ClosedWindowBehavior::Reject,
+        }
+    }
+
+    /// Attach the dynamic fee estimator used to derive inclusion fees for
+    /// settlement submissions.
+    pub fn with_fee_estimator(mut self, estimator: Arc<FeeEstimator>) -> Self {
+        self.fee_estimator = Some(estimator);
+        self
+    }
+
+    /// Override the fee-bump policy (timeout, max bumps, cap behavior).
+    pub fn with_fee_bump_policy(mut self, policy: FeeBumpPolicy) -> Self {
+        self.fee_bump_policy = policy;
+        self
+    }
+
+    /// Attach the trading calendar used to enforce settlement windows.
+    pub fn with_calendar(mut self, calendar: Arc<CalendarSet>) -> Self {
+        self.calendar = Some(calendar);
+        self
+    }
+
+    /// Set the behavior applied when a settlement is requested outside an
+    /// open settlement window.
+    pub fn with_closed_window_behavior(mut self, behavior: ClosedWindowBehavior) -> Self {
+        self.closed_window_behavior = behavior;
+        self
+    }
+
+    /// Resolve the settlement window for `corridor` at `now`.
+    ///
+    /// Returns `Ok(())` when settlement may proceed immediately. When the
+    /// window is closed the configured [`ClosedWindowBehavior`] decides the
+    /// outcome:
+    /// - `Reject`: fail with an actionable error.
+    /// - `Defer`: return the next open instant so the caller can reschedule.
+    /// - `Extend`: allow the settlement to proceed (window extended).
+    fn check_settlement_window(
+        &self,
+        corridor: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<SettlementWindowOutcome, AppError> {
+        let Some(calendar) = self.calendar.as_ref() else {
+            return Ok(SettlementWindowOutcome::Open);
+        };
+
+        if calendar.is_settlement_open(corridor, now) {
+            return Ok(SettlementWindowOutcome::Open);
+        }
+
+        match self.closed_window_behavior {
+            ClosedWindowBehavior::Reject => Err(AppError::BadRequest(format!(
+                "settlement window closed for corridor {corridor} at {now}"
+            ))),
+            ClosedWindowBehavior::Defer => {
+                let next = calendar.next_settlement_open(corridor, now);
+                Ok(SettlementWindowOutcome::Deferred { next_open: next })
+            }
+            ClosedWindowBehavior::Extend => Ok(SettlementWindowOutcome::Extended),
+        }
+    }
+
+    /// Compute the inclusion fee for a settlement submission from the current
+    /// fee-estimator snapshot, enforcing per-tenant and global caps.
+    ///
+    /// Returns the fee in stroops. When no estimator is configured the
+    /// caller-supplied `base_fee` is returned unchanged.
+    pub fn resolve_inclusion_fee(
+        &self,
+        tenant_id: &str,
+        base_fee: i64,
+    ) -> Result<i64, AppError> {
+        let Some(estimator) = self.fee_estimator.as_ref() else {
+            return Ok(base_fee);
+        };
+        let snapshot: FeeSnapshot = estimator.snapshot();
+        snapshot
+            .recommended_fee(tenant_id)
+            .map_err(|e: FeeCapError| AppError::FeeCapExceeded(e.to_string()))
+    }
+
+    /// Submit a settlement transaction, poll Horizon for inclusion, and apply
+    /// fee bumps when the transaction stalls past the configured timeout.
+    ///
+    /// `submit` submits the initial transaction and returns its hash.
+    /// `bump` submits a fee-bump/replacement for a stalled hash and returns
+    /// the new hash. `poll` returns the current inclusion status of a hash.
+    ///
+    /// The actual fee paid per attempt is recorded via `record` for later
+    /// cost reporting. If the transaction is already included when a bump
+    /// would be attempted, the bump is a no-op (never double-submitted).
+    pub async fn submit_with_fee_bumps<S, B, P, R>(
+        &self,
+        tenant_id: &str,
+        base_fee: i64,
+        mut submit: S,
+        mut bump: B,
+        mut poll: P,
+        mut record: R,
+    ) -> Result<SettlementSubmission, AppError>
+    where
+        S: FnMut(i64) -> Result<String, AppError>,
+        B: FnMut(&str, i64) -> Result<String, AppError>,
+        P: FnMut(&str) -> Result<InclusionStatus, AppError>,
+        R: FnMut(SettlementFeeRecord),
+    {
+        let initial_fee = self.resolve_inclusion_fee(tenant_id, base_fee)?;
+        let mut hash = submit(initial_fee)?;
+        record(SettlementFeeRecord {
+            tx_hash: hash.clone(),
+            fee_stroops: initial_fee,
+            attempt: 0,
+            is_bump: false,
+        });
+
+        let mut bumps = 0usize;
+        let mut current_fee = initial_fee;
+
+        loop {
+            match poll(&hash)? {
+                InclusionStatus::Included => {
+                    return Ok(SettlementSubmission {
+                        tx_hash: hash,
+                        fee_stroops: current_fee,
+                        bumps,
+                    });
+                }
+                InclusionStatus::Failed => {
+                    return Err(AppError::BadRequest(format!(
+                        "settlement transaction {hash} failed on-ledger"
+                    )));
+                }
+                InclusionStatus::Pending => {}
+            }
+
+            let decision = self
+                .fee_bump_policy
+                .decide(bumps, current_fee, self.fee_estimator.as_deref(), tenant_id)
+                .map_err(|e: FeeCapError| AppError::FeeCapExceeded(e.to_string()))?;
+
+            match decision {
+                FeeBumpDecision::Wait => {
+                    // Not yet past the timeout; caller-driven polling loop.
+                    return Ok(SettlementSubmission {
+                        tx_hash: hash,
+                        fee_stroops: current_fee,
+                        bumps,
+                    });
+                }
+                FeeBumpDecision::GiveUp => {
+                    return Err(AppError::BadRequest(format!(
+                        "settlement transaction {hash} not included after {bumps} fee bump(s)"
+                    )));
+                }
+                FeeBumpDecision::Bump { new_fee } => {
+                    // Re-check inclusion immediately before bumping so an
+                    // already-included transaction is never double-submitted.
+                    if matches!(poll(&hash)?, InclusionStatus::Included) {
+                        return Ok(SettlementSubmission {
+                            tx_hash: hash,
+                            fee_stroops: current_fee,
+                            bumps,
+                        });
+                    }
+                    let new_hash = bump(&hash, new_fee)?;
+                    bumps += 1;
+                    current_fee = new_fee;
+                    record(SettlementFeeRecord {
+                        tx_hash: new_hash.clone(),
+                        fee_stroops: new_fee,
+                        attempt: bumps,
+                        is_bump: true,
+                    });
+                    hash = new_hash;
+                }
+            }
         }
     }
 
@@ -426,6 +658,20 @@ impl SettlementService {
     /// transactions.  Returns `Err` on any database or domain-level failure.
     pub async fn settle_asset(&self, asset_code: &str) -> Result<Vec<Settlement>, AppError> {
         let start = std::time::Instant::now();
+
+        // Enforce the settlement window for this corridor before doing any
+        // work. Closed-window behavior is explicit (reject/defer/extend).
+        match self.check_settlement_window(asset_code, Utc::now())? {
+            SettlementWindowOutcome::Open | SettlementWindowOutcome::Extended => {}
+            SettlementWindowOutcome::Deferred { next_open } => {
+                tracing::info!(
+                    asset = %asset_code,
+                    ?next_open,
+                    "Settlement deferred: window closed"
+                );
+                return Ok(vec![]);
+            }
+        }
 
         let mut tx = self
             .pool
@@ -870,6 +1116,95 @@ mod tests {
         // The metrics should be initialized without panicking
         // We can't easily test the actual recording in unit tests, but we can verify the method exists
         assert!(std::mem::size_of::<Histogram<f64>>() > 0);
+    }
+
+    #[tokio::test]
+    async fn stuck_transaction_is_bumped_and_succeeds() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let svc = SettlementService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+        )
+        .with_fee_bump_policy(FeeBumpPolicy {
+            inclusion_timeout: Duration::from_millis(0),
+            max_bumps: 3,
+            bump_multiplier: 2,
+        });
+
+        // First poll pending, second poll (pre-bump recheck) pending, then
+        // the bumped hash is included.
+        let polls = Rc::new(RefCell::new(0usize));
+        let polls_c = polls.clone();
+        let recorded = Rc::new(RefCell::new(Vec::new()));
+        let recorded_c = recorded.clone();
+
+        let result = svc
+            .submit_with_fee_bumps(
+                "tenant-a",
+                100,
+                |_fee| Ok("hash-0".to_string()),
+                |_hash, _fee| Ok("hash-1".to_string()),
+                move |_hash| {
+                    let mut n = polls_c.borrow_mut();
+                    *n += 1;
+                    if *n >= 3 {
+                        Ok(InclusionStatus::Included)
+                    } else {
+                        Ok(InclusionStatus::Pending)
+                    }
+                },
+                move |rec| recorded_c.borrow_mut().push(rec),
+            )
+            .await
+            .expect("submission should succeed after bump");
+
+        assert_eq!(result.tx_hash, "hash-1");
+        assert_eq!(result.bumps, 1);
+        // Two attempts recorded: initial + one bump.
+        assert_eq!(recorded.borrow().len(), 2);
+        assert!(recorded.borrow()[1].is_bump);
+    }
+
+    #[tokio::test]
+    async fn already_included_transaction_is_never_double_submitted() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let svc = SettlementService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://dummy")
+                .unwrap(),
+        )
+        .with_fee_bump_policy(FeeBumpPolicy {
+            inclusion_timeout: Duration::from_millis(0),
+            max_bumps: 3,
+            bump_multiplier: 2,
+        });
+
+        let bumps = Rc::new(RefCell::new(0usize));
+        let bumps_c = bumps.clone();
+
+        let result = svc
+            .submit_with_fee_bumps(
+                "tenant-a",
+                100,
+                |_fee| Ok("hash-0".to_string()),
+                move |_hash, _fee| {
+                    *bumps_c.borrow_mut() += 1;
+                    Ok("hash-1".to_string())
+                },
+                |_hash| Ok(InclusionStatus::Included),
+                |_rec| {},
+            )
+            .await
+            .expect("included transaction should return immediately");
+
+        assert_eq!(result.tx_hash, "hash-0");
+        assert_eq!(result.bumps, 0);
+        assert_eq!(*bumps.borrow(), 0, "no bump must be submitted");
     }
 
     #[test]

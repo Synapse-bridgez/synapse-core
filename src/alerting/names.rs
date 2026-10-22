@@ -15,6 +15,9 @@ pub const PIPELINE_LATENCY_BUDGET_EXCEEDED: &str = "PipelineLatencyBudgetExceede
 pub const TOKIO_TASK_LEAK_SUSPECTED: &str = "TokioTaskLeakSuspected";
 pub const RELEASE_RELIABILITY_REGRESSION: &str = "ReleaseReliabilityRegression";
 pub const QUOTA_CONFIG_SPLIT_BRAIN: &str = "QuotaConfigSplitBrain";
+pub const SETTLEMENT_FEE_SPIKE: &str = "SettlementFeeSpike";
+pub const SETTLEMENT_FEE_BUMP_FREQUENCY_ANOMALY: &str = "SettlementFeeBumpFrequencyAnomaly";
+pub const SETTLEMENT_FEE_CAP_REJECTION: &str = "SettlementFeeCapRejection";
 
 /// All in-process alert names, for exhaustive checks.
 pub const ALL: &[&str] = &[
@@ -24,4 +27,7 @@ pub const ALL: &[&str] = &[
     TOKIO_TASK_LEAK_SUSPECTED,
     RELEASE_RELIABILITY_REGRESSION,
     QUOTA_CONFIG_SPLIT_BRAIN,
+    SETTLEMENT_FEE_SPIKE,
+    SETTLEMENT_FEE_BUMP_FREQUENCY_ANOMALY,
+    SETTLEMENT_FEE_CAP_REJECTION,
 ];

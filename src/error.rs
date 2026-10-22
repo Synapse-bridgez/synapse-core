@@ -118,6 +118,16 @@ pub mod codes {
         409,
         "Stale transition: settlement state changed during processing",
     );
+    pub const SETTLEMENT_004: (&str, u16, &str) = (
+        "ERR_SETTLEMENT_004",
+        409,
+        "Settlement fee cap exceeded: required inclusion fee exceeds the configured cap",
+    );
+    pub const SETTLEMENT_005: (&str, u16, &str) = (
+        "ERR_SETTLEMENT_005",
+        409,
+        "Settlement window closed: the target market/settlement window is not open",
+    );
 
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
@@ -238,6 +248,16 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::SETTLEMENT_003.2,
         },
         ErrorCode {
+            code: codes::SETTLEMENT_004.0,
+            http_status: codes::SETTLEMENT_004.1,
+            description: codes::SETTLEMENT_004.2,
+        },
+        ErrorCode {
+            code: codes::SETTLEMENT_005.0,
+            http_status: codes::SETTLEMENT_005.1,
+            description: codes::SETTLEMENT_005.2,
+        },
+        ErrorCode {
             code: codes::RATE_LIMIT_001.0,
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
@@ -318,6 +338,29 @@ pub enum AppError {
     #[error("Settlement already exists: {0}")]
     SettlementAlreadyExists(String),
 
+    /// The inclusion fee required to submit (or bump) a settlement
+    /// transaction exceeds the configured per-tenant or global cap. Failing
+    /// here is deliberate: the alternative is silently overpaying. The
+    /// message is built purely from our own configured numbers and the
+    /// caller-supplied tenant/order identifiers, so it is safe to expose.
+    #[error(
+        "Settlement fee cap exceeded: required {required_stroops} stroops exceeds the {scope} cap of {cap_stroops} stroops"
+    )]
+    SettlementFeeCapExceeded {
+        /// Fee the network currently requires, in stroops.
+        required_stroops: i64,
+        /// The cap that was hit, in stroops.
+        cap_stroops: i64,
+        /// Which cap was hit ("tenant" or "global").
+        scope: &'static str,
+    },
+
+    /// The target market/settlement window is closed and the operation
+    /// cannot proceed (e.g. a settlement scheduled into a closed window with
+    /// no deferral allowed). Built from calendar identifiers only.
+    #[error("Settlement window closed: {0}")]
+    SettlementWindowClosed(String),
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
@@ -357,6 +400,8 @@ impl AppError {
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,
             AppError::SettlementAlreadyExists(_) => StatusCode::CONFLICT,
+            AppError::SettlementFeeCapExceeded { .. } => StatusCode::CONFLICT,
+            AppError::SettlementWindowClosed(_) => StatusCode::CONFLICT,
             AppError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
@@ -389,6 +434,8 @@ impl AppError {
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
             AppError::InvalidSettlementAmount(_) => codes::SETTLEMENT_001.0,
             AppError::SettlementAlreadyExists(_) => codes::SETTLEMENT_002.0,
+            AppError::SettlementFeeCapExceeded { .. } => codes::SETTLEMENT_004.0,
+            AppError::SettlementWindowClosed(_) => codes::SETTLEMENT_005.0,
             AppError::RateLimitExceeded => codes::RATE_LIMIT_001.0,
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
@@ -499,6 +546,19 @@ impl IntoResponse for AppError {
             }
             AppError::Validation(msg) => {
                 format!("Validation failed. {msg}")
+            }
+            AppError::SettlementFeeCapExceeded {
+                required_stroops,
+                cap_stroops,
+                scope,
+            } => format!(
+                "The network currently requires an inclusion fee of {required_stroops} stroops, \
+                 which exceeds the configured {scope} cap of {cap_stroops} stroops. The settlement \
+                 was not submitted to avoid overpaying. Retry when network fees subside or raise \
+                 the {scope} fee cap."
+            ),
+            AppError::SettlementWindowClosed(msg) => {
+                format!("The settlement window is closed. {msg}")
             }
             _ => error_message.clone(),
         };
@@ -666,6 +726,19 @@ mod tests {
             codes::SETTLEMENT_002.0
         );
         assert_eq!(
+            AppError::SettlementFeeCapExceeded {
+                required_stroops: 500,
+                cap_stroops: 100,
+                scope: "tenant",
+            }
+            .code(),
+            codes::SETTLEMENT_004.0
+        );
+        assert_eq!(
+            AppError::SettlementWindowClosed("corridor closed".to_string()).code(),
+            codes::SETTLEMENT_005.0
+        );
+        assert_eq!(
             AppError::ConcurrentModification("test".to_string()).code(),
             codes::TRANSACTION_006.0
         );
@@ -782,6 +855,44 @@ mod tests {
                 "docs/error-catalog.md documents {token}, which is not in get_all_error_codes()"
             );
         }
+    }
+
+    #[test]
+    fn test_settlement_fee_cap_exceeded_maps_to_conflict() {
+        let error = AppError::SettlementFeeCapExceeded {
+            required_stroops: 500,
+            cap_stroops: 100,
+            scope: "tenant",
+        };
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), codes::SETTLEMENT_004.0);
+    }
+
+    #[test]
+    fn test_settlement_window_closed_maps_to_conflict() {
+        let error = AppError::SettlementWindowClosed("corridor closed".to_string());
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), codes::SETTLEMENT_005.0);
+    }
+
+    /// The fee-cap error is built only from our own configured numbers, so
+    /// its actionable message must survive to the client unredacted.
+    #[tokio::test]
+    async fn test_settlement_fee_cap_exceeded_response_is_actionable() {
+        let error = AppError::SettlementFeeCapExceeded {
+            required_stroops: 500,
+            cap_stroops: 100,
+            scope: "tenant",
+        };
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body_str.contains("500"));
+        assert!(body_str.contains("100"));
+        assert!(body_str.contains("tenant"));
+        assert!(body_str.contains(codes::SETTLEMENT_004.0));
     }
 
     #[tokio::test]

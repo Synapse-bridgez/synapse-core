@@ -32,6 +32,97 @@ If you prefer to set things up manually, follow the steps below.
 
 ---
 
+## Swap Engine Local Development Profile (One-Command Bootstrap)
+
+For work on the swap engine (settlement, market data, liquidity adapters), use the dedicated dev profile. It is idempotent — running it repeatedly converges to the same state — and hermetic (no external network access beyond container image pulls).
+
+```bash
+cargo xtask dev up
+```
+
+This single command:
+
+1. Starts the required dependencies via the `dev` compose profile (`docker compose -f docker-compose.dev.yml --profile swap up -d`): PostgreSQL, Redis, and Adminer.
+2. Waits for all services to pass their health checks.
+3. Applies all migrations from `migrations/` (the same migrations the service runs on boot).
+4. Seeds deterministic demo data (see below).
+5. Prints ready-to-use endpoints, e.g.:
+
+```
+Swap engine dev profile ready.
+  API:        http://localhost:3000
+  Health:     http://localhost:3000/health
+  Adminer:    http://localhost:8080  (postgres / synapse / synapse)
+  Redis:      localhost:6379
+```
+
+Then start the service with `cargo run` (or `docker compose -f docker-compose.dev.yml up app` for hot reload).
+
+### Deterministic seed data
+
+The seed tool inserts fixed IDs and timestamps so local runs and snapshots are comparable across machines. It seeds, through the same persistence layer the service uses:
+
+- Two demo tenants (`tenant-demo-alpha`, `tenant-demo-beta`)
+- Demo assets (XLM, USDC) and liquidity-provider stubs
+- A handful of sample swap orders and fills in known states
+
+Seed data is written with `ON CONFLICT DO NOTHING` semantics, so re-running the seed never duplicates rows.
+
+### Teardown and reset
+
+```bash
+cargo xtask dev seed            # seed (idempotent)
+cargo xtask dev reset           # drop seeded data and re-seed from scratch
+cargo xtask dev down            # stop containers (keeps volumes)
+cargo xtask dev down --volumes  # stop containers and wipe volumes
+```
+
+**Safety guard:** `reset` and `down --volumes` refuse to run against anything that is not a local development database. The tool checks the resolved `DATABASE_URL` host (must be `localhost`, `127.0.0.1`, or a compose service name) and the database name (must end in `_dev` or `_test`). If the check fails, the command aborts with an actionable error and requires an explicit `--force` plus interactive confirmation to proceed. Never point the dev profile at a shared or production database.
+
+### Configuration
+
+The dev profile reads `.env.development` (checked in, contains no real secrets). Override any value with environment variables.
+
+---
+
+## Stellar Settlement Fee Policy (Operators)
+
+Settlement transactions pay a dynamic Stellar inclusion fee derived from Horizon fee statistics, with hard caps to prevent unbounded spend.
+
+### Fee estimation
+
+The fee estimator polls Horizon fee statistics periodically (default every 30s) and derives a recommended inclusion fee (in stroops, carried as `i64` end-to-end) from a configurable percentile of recent ledger fees, clamped to sane bounds.
+
+| Setting                              | Env var                                  | Default | Description                                              |
+|--------------------------------------|------------------------------------------|---------|----------------------------------------------------------|
+| Fee stats poll interval              | `STELLAR_FEE_POLL_INTERVAL_SECS`         | `30`    | How often Horizon fee stats are refreshed                |
+| Fee percentile                       | `STELLAR_FEE_PERCENTILE`                 | `90`    | Percentile of recent inclusion fees to target            |
+| Minimum inclusion fee (stroops)      | `STELLAR_FEE_MIN_STROOPS`                | `100`   | Floor applied to the recommended fee                     |
+| Maximum inclusion fee (stroops)      | `STELLAR_FEE_MAX_STROOPS`                | `100000`| Ceiling applied to the recommended fee                   |
+| Per-tenant fee cap (stroops)         | `STELLAR_FEE_TENANT_CAP_STROOPS`         | `1000000`| Max cumulative fee spend per tenant per settlement window |
+| Global fee cap (stroops)             | `STELLAR_FEE_GLOBAL_CAP_STROOPS`         | `10000000`| Max cumulative fee spend across all tenants per window  |
+| Stuck-transaction timeout (secs)     | `STELLAR_SETTLEMENT_STUCK_TIMEOUT_SECS`  | `60`    | Time without inclusion before a fee bump is attempted    |
+| Max fee bumps per transaction        | `STELLAR_SETTLEMENT_MAX_BUMPS`           | `3`     | Upper bound on bump attempts for a single transaction    |
+
+### Caps and rejection behavior
+
+- Every settlement attempt records the fee actually paid, for cost reporting and reconciliation.
+- Before submitting (or bumping), the submission path checks the projected fee against the per-tenant and global caps. If the cap would be exceeded, the transaction is **not** submitted; instead the attempt fails with a classified, actionable error (`FeeCapExceeded`) that names the tenant, the cap, and the projected spend. Operators should treat this as a signal to raise caps or investigate a fee spike — never as a reason to overpay.
+- Fee aggregation uses checked arithmetic; precision overflow aborts the attempt with a classified error rather than wrapping.
+
+### Fee bumps for stalled transactions
+
+- If a settlement transaction is not included within `STELLAR_SETTLEMENT_STUCK_TIMEOUT_SECS`, the bump policy attempts a fee-bump (or replacement) transaction per the submission path's rules, up to `STELLAR_SETTLEMENT_MAX_BUMPS` times.
+- Before bumping, the policy queries Horizon to confirm the original transaction was not included. If it was, the bump is a **no-op** — an already-included transaction is never double-submitted.
+- Transactions whose operations are non-replaceable are not bumped; they are surfaced as failed attempts for operator follow-up.
+- If the cap is exhausted mid-bump sequence, the sequence stops and the attempt fails with `FeeCapExceeded`.
+
+### Metrics and alerting
+
+The swap engine emits metrics for fee spikes, bump frequency, and fee-cap rejections. Alert rules live under `monitoring/` and `alerting/`; operators should page on sustained fee-cap rejections and on bump frequency above the configured threshold.
+
+---
+
 ## Prerequisites
 
 | Tool        | Version        | Installation                               |
@@ -284,6 +375,9 @@ synapse-core/
 ├── Cargo.toml               # Dependencies and workspace config
 ├── .env.example              # Example environment variables
 ├── docker-compose.yml        # Full-stack Docker setup
+├── docker-compose.dev.yml    # Dev profile (hot reload + swap engine deps)
+├── .env.development          # Dev profile defaults (no real secrets)
+├── xtask/                    # Task runner: `cargo xtask dev up|seed|reset|down`
 ├── dockerfile                # Multi-stage Rust build
 ├── migrations/
 │   └── 20250216000000_init.sql  # Initial schema migration
@@ -335,3 +429,5 @@ synapse-core/
 | `SQLX_OFFLINE` errors in CI           | Run `cargo sqlx prepare` locally to generate offline query data |
 | Port already in use                    | Change `SERVER_PORT` in `.env` or stop the conflicting process |
 | Docker connection refused to Postgres  | Use `host.docker.internal` or `172.17.0.1` instead of `localhost` |
+| `cargo xtask dev reset` refuses to run | The target DB is not local — check `DATABASE_URL`; use `--force` only for a disposable dev DB |
+| Settlement fails with `FeeCapExceeded` | Network fees exceed the tenant/global cap — raise caps or investigate the fee spike |

@@ -68,7 +68,69 @@ manager.create_partition().await?;
 manager.detach_old_partitions(6).await?; // Keep 6 months
 ```
 
-## Migration Process
+## Expand/Contract Migration Policy
+
+All schema changes to swap engine tables (orders, quotes, fills, events, screenings, submissions) and to the partitioned `transactions` table MUST follow the expand/contract practice described below. Naive migrations that drop or rename columns break running replicas and block zero-downtime deploys, so they are not permitted outside the contract phase.
+
+### Phases
+
+1. **Expand** — ship an additive, backward-compatible migration:
+   - Add new columns as `NULL`-able, or `NOT NULL` **with** a `DEFAULT` (or a `DEFAULT` added in the same statement).
+   - Add new tables, indexes, and constraints as separate statements.
+   - Never drop or rename a column, table, or constraint that a running application version still references.
+   - Old and new application versions must both work against the expanded schema.
+2. **Migrate** — deploy the application version that writes to the new columns/tables while still reading the old ones. Backfill of existing rows is handled by its own issue and must be idempotent and resumable.
+3. **Contract** — only after every replica runs a version that no longer references the old shape, ship a cleanup migration that drops/renames the obsolete columns, tables, or constraints. Contract migrations are destructive and require the exemption process below.
+
+### Ordering relative to application deploys
+
+| Step | Migration | Application deploy |
+|------|-----------|--------------------|
+| 1 | Expand (additive) | — |
+| 2 | — | Deploy version writing new + reading old |
+| 3 | — | Backfill (separate issue) |
+| 4 | — | Deploy version reading/writing new only |
+| 5 | Contract (destructive) | — |
+
+A migration must never require the new application code to be live before it is applied, and application code must never require a migration that has not yet been applied. When in doubt, split the change into more releases.
+
+### Handling destructive changes
+
+Destructive changes (dropping/renaming columns or tables, narrowing types, adding `NOT NULL` without a default, adding constraints that existing rows may violate) are only allowed in a contract migration. If a down path genuinely cannot exist, the PR MUST:
+
+- Record a **dated exemption** in the table below, including the migration name, the reason, and the date it was reviewed.
+- Link the exemption from the migration file header as a comment.
+- Be reviewed by a second engineer in the PR.
+
+#### Dated exemptions
+
+| Migration | Destructive change | Reason no down path | Reviewed |
+|-----------|--------------------|---------------------|----------|
+| _(none yet)_ | | | |
+
+Exemptions are reviewed at each release; stale entries are removed once the change is fully rolled out.
+
+### Avoiding `ACCESS EXCLUSIVE` locks
+
+On partitioned and high-volume tables, prefer operations that take weaker locks and split work into steps:
+
+- **Indexes**: use `CREATE INDEX CONCURRENTLY` (outside a transaction) instead of `CREATE INDEX`. On partitioned tables create the index on the parent with `ONLY` and then attach per-partition indexes, or create per-partition indexes concurrently and attach them.
+- **Constraints**: add `CHECK`/`FOREIGN KEY` constraints as `NOT VALID`, then run `VALIDATE CONSTRAINT` in a separate migration/transaction. `VALIDATE` takes only a `SHARE UPDATE EXCLUSIVE` lock.
+- **`NOT NULL`**: add the column nullable, backfill, add a `NOT VALID` check, validate it, then set `NOT NULL` (PostgreSQL 12+ can use a validated check to avoid a full table scan).
+- **Column type changes**: add a new column, dual-write, backfill, then contract the old column.
+- **Defaults**: adding a column with a constant `DEFAULT` is metadata-only on PostgreSQL 11+; volatile defaults rewrite the table and must be avoided.
+
+## Migration Linting and Rollback Rehearsal
+
+CI enforces the policy above for every migration under `migrations/`:
+
+- **Lint** (`cargo xtask migrate lint` / `scripts/migration_lint.sh`): flags obviously unsafe migrations — `DROP COLUMN`, `RENAME COLUMN`, `ADD COLUMN ... NOT NULL` without `DEFAULT`, `CREATE INDEX` without `CONCURRENTLY` on large/partitioned tables, and `ALTER TABLE ... SET NOT NULL` without a validated check. A deliberately unsafe fixture migration proves the linter fails.
+- **Forward run**: all migrations are applied to an empty database.
+- **Rollback rehearsal**: each migration's down path (or documented equivalent) is applied against a database seeded with representative data, verifying the schema is safely reversible.
+
+The linter is a fast heuristic and does not prove data-dependent safety; reviewers remain responsible for judging backfills and constraint validity against production data.
+
+## Partitioning Migration Process
 
 The migration (`20250217000000_partition_transactions.sql`) performs:
 

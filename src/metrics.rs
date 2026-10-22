@@ -498,6 +498,97 @@ pub fn settlement_transactions_total() -> Counter<u64> {
         .init()
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic Stellar network fee strategy (issue #1484)
+// ---------------------------------------------------------------------------
+//
+// Settlement transactions pay a Stellar *inclusion* fee derived from current
+// Horizon fee statistics. These instruments make the fee strategy observable:
+// how often the network is spiking, how often we bump stalled transactions,
+// how often a fee cap forced us to reject rather than overpay, and how many
+// stroops each settlement attempt actually cost. All amounts are stroops
+// (i64) end-to-end; the histogram records them as f64 for export only.
+
+/// Recommended inclusion fee (stroops) derived from Horizon fee stats, labeled
+/// by `percentile` (the configured percentile used, e.g. `"p90"`). A rising
+/// series here is the earliest signal of ledger congestion.
+pub fn settlement_fee_recommended_stroops() -> Histogram<f64> {
+    meter()
+        .f64_histogram("settlement_fee_recommended_stroops")
+        .with_description(
+            "Recommended Stellar inclusion fee in stroops derived from Horizon fee \
+             stats, labeled by the configured percentile",
+        )
+        .with_unit(Unit::new("stroop"))
+        .init()
+}
+
+/// Fee actually paid per settlement attempt, in stroops, labeled by
+/// `asset_code` and `attempt_kind` (`"initial"` | `"bump"`). Used for cost
+/// reporting and reconciliation of fee spend per order.
+pub fn settlement_fee_paid_stroops() -> Histogram<f64> {
+    meter()
+        .f64_histogram("settlement_fee_paid_stroops")
+        .with_description(
+            "Stellar inclusion fee actually paid per settlement attempt, in stroops, \
+             labeled by asset_code and attempt_kind",
+        )
+        .with_unit(Unit::new("stroop"))
+        .init()
+}
+
+/// Cumulative stroops paid across all settlement attempts, labeled by
+/// `asset_code`. A counter (not a gauge) so it can be summed for cost
+/// reporting without losing history.
+pub fn settlement_fee_paid_total_stroops() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_paid_total_stroops")
+        .with_description(
+            "Cumulative Stellar inclusion fees paid for settlement, in stroops, \
+             labeled by asset_code",
+        )
+        .init()
+}
+
+/// Fee-spike detections: the recommended inclusion fee exceeded the configured
+/// spike threshold relative to the base fee, labeled by `severity`
+/// (`"warning"` | `"critical"`). Drives the fee-spike alerting rule.
+pub fn settlement_fee_spike_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_spike_total")
+        .with_description(
+            "Detections of a Stellar fee spike (recommended fee far above base fee), \
+             labeled by severity",
+        )
+        .init()
+}
+
+/// Fee-bump attempts for stalled settlement transactions, labeled by
+/// `outcome` (`"submitted"` | `"already_included"` | `"cap_exceeded"` |
+/// `"failed"`). `already_included` is the no-op path where Horizon shows the
+/// original transaction landed before the bump was submitted.
+pub fn settlement_fee_bump_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_bump_total")
+        .with_description(
+            "Fee-bump attempts for stalled settlement transactions, labeled by outcome",
+        )
+        .init()
+}
+
+/// Settlement attempts rejected because the required fee would exceed a
+/// per-tenant or global fee cap, labeled by `scope` (`"tenant"` | `"global"`).
+/// A nonzero rate means settlement is being blocked by caps under congestion.
+pub fn settlement_fee_cap_rejected_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_cap_rejected_total")
+        .with_description(
+            "Settlement attempts rejected because the required fee would exceed a \
+             fee cap, labeled by scope (tenant | global)",
+        )
+        .init()
+}
+
 /// Total number of locks successfully acquired.
 pub fn lock_acquired_total() -> Counter<u64> {
     meter()

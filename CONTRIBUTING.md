@@ -101,6 +101,21 @@ cargo build
 cargo test
 ```
 
+8. **Bootstrap the swap engine dev profile (optional)**
+
+If you are working on the swap engine, you can bring up the full stack with
+deterministic demo data in a single idempotent command:
+
+```bash
+cargo xtask dev up
+```
+
+This starts the compose profile, applies migrations, seeds demo tenants,
+assets, liquidity provider stubs, sample orders and fills, and prints
+ready-to-use endpoints. See
+[Swap Engine Local Development Profile](#swap-engine-local-development-profile)
+for details.
+
 ## Development Setup
 
 ### Development Environment
@@ -183,6 +198,78 @@ All database migrations must pass the safety checker:
 ```
 
 This ensures migrations are compatible with blue-green deployments. See [docs/migration-safety.md](docs/migration-safety.md) for details.
+
+### Expand/Contract Migrations
+
+Swap engine tables (orders, quotes, fills, events, screenings, submissions)
+are migrated using an **expand/contract** practice so that multiple running
+replicas never observe a schema they cannot handle. The full policy lives in
+[docs/migrations/expand-contract.md](docs/migrations/expand-contract.md); the
+short version:
+
+1. **Expand** — add new columns/tables/indexes additively. New columns must be
+   nullable or have a default. Ship the migration *before* the code that uses
+   it.
+2. **Migrate** — deploy application code that writes both old and new shapes
+   and backfills data in a separate, batched step.
+3. **Contract** — only after all replicas run the new code, drop or rename the
+   old shape in a later release.
+
+Rules enforced in CI:
+
+- Dropping or renaming a column still referenced by the current schema is
+  rejected.
+- Adding a `NOT NULL` column without a default is rejected.
+- Long-running locks on high-volume/partitioned tables are flagged; split
+  index creation (`CREATE INDEX CONCURRENTLY`) and constraint validation
+  (`NOT VALID` + `VALIDATE CONSTRAINT`) into separate migrations.
+- Every migration must have a working down path. If a down path genuinely
+  cannot exist, record a dated exemption in the policy document and call it
+  out in the PR description.
+
+Run the checks locally before pushing:
+
+```bash
+cargo xtask migrate lint      # flag unsafe migrations
+cargo xtask migrate rehearse  # forward + rollback against a seeded database
+```
+
+### Swap Engine Local Development Profile
+
+The swap engine has a first-class local development profile that is hermetic
+(no network access beyond container image pulls) and deterministic (fixed ids
+and timestamps) so local state and snapshots are comparable between
+contributors.
+
+**One-command bootstrap:**
+
+```bash
+cargo xtask dev up
+```
+
+This is idempotent — re-running it will not duplicate data. It:
+
+1. Starts the dependencies from `docker-compose.dev.yml` with healthy defaults
+   (PostgreSQL primary/replica, Redis, Adminer).
+2. Applies all migrations via `sqlx`.
+3. Seeds deterministic demo data: tenants, assets, liquidity provider stubs,
+   sample swap orders and fills.
+4. Prints ready-to-use endpoints (API base URL, Adminer, Redis).
+
+**Teardown / reset:**
+
+```bash
+cargo xtask dev seed --reset   # wipe seeded data and re-seed from scratch
+cargo xtask dev down           # stop the profile and remove volumes
+```
+
+**Safety guard:** seeding and teardown refuse to run against a non-local
+database host unless you pass `--force` *and* confirm interactively. The
+default profile only ever targets `localhost`. Never point the seed tool at a
+shared or production database.
+
+**Environment:** the profile reads `.env.development`. Copy it if you need to
+override ports or credentials locally; do not commit secrets.
 
 ## Code Style Guide
 
@@ -438,7 +525,13 @@ cargo fmt --all -- --check
 cargo clippy -- -D warnings
 cargo build
 cargo test
+cargo xtask migrate lint
+cargo xtask migrate rehearse
 ```
+
+If your PR touches swap-related migrations, confirm they follow the
+[expand/contract practice](#expandcontract-migrations) and note any dated
+exemptions in the PR description.
 
 2. **Update documentation** if you changed public APIs
 

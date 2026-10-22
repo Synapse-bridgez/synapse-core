@@ -140,6 +140,141 @@ struct PaymentsEmbedded {
     records: Vec<PaymentRecord>,
 }
 
+/// Raw response from Horizon's `/fee_stats` endpoint. All fee fields are
+/// decimal strings in stroops; they are parsed into `i64` by
+/// `HorizonClient::get_fee_stats` so callers never deal with string amounts.
+#[derive(Debug, Clone, Deserialize)]
+struct FeeStatsResponse {
+    #[serde(default)]
+    last_ledger: Option<String>,
+    #[serde(default)]
+    last_ledger_base_fee: Option<String>,
+    #[serde(default)]
+    ledger_capacity_usage: Option<String>,
+    #[serde(default)]
+    fee_charged: Option<FeePercentiles>,
+    #[serde(default)]
+    max_fee: Option<FeePercentiles>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FeePercentiles {
+    #[serde(default)]
+    min: Option<String>,
+    #[serde(default)]
+    max: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    p10: Option<String>,
+    #[serde(default)]
+    p50: Option<String>,
+    #[serde(default)]
+    p90: Option<String>,
+    #[serde(default)]
+    p95: Option<String>,
+    #[serde(default)]
+    p99: Option<String>,
+}
+
+/// Network fee statistics from Horizon, with every amount already parsed
+/// into `i64` stroops. Percentile fields are `None` when Horizon omitted
+/// them (e.g. an empty ledger), letting the estimator fall back to the
+/// base fee.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeeStats {
+    pub last_ledger: Option<i64>,
+    pub last_ledger_base_fee: Option<i64>,
+    /// Fraction (0.0..=1.0) of the last ledger's capacity that was used.
+    pub ledger_capacity_usage: Option<f64>,
+    /// Percentiles of fees actually charged, in stroops.
+    pub fee_charged_min: Option<i64>,
+    pub fee_charged_max: Option<i64>,
+    pub fee_charged_mode: Option<i64>,
+    pub fee_charged_p10: Option<i64>,
+    pub fee_charged_p50: Option<i64>,
+    pub fee_charged_p90: Option<i64>,
+    pub fee_charged_p95: Option<i64>,
+    pub fee_charged_p99: Option<i64>,
+    /// Percentiles of the maximum fee bids seen, in stroops.
+    pub max_fee_min: Option<i64>,
+    pub max_fee_max: Option<i64>,
+    pub max_fee_mode: Option<i64>,
+    pub max_fee_p10: Option<i64>,
+    pub max_fee_p50: Option<i64>,
+    pub max_fee_p90: Option<i64>,
+    pub max_fee_p95: Option<i64>,
+    pub max_fee_p99: Option<i64>,
+}
+
+impl FeeStats {
+    /// Returns the `fee_charged` percentile for the given integer percentile
+    /// (10, 50, 90, 95 or 99). Unknown percentiles yield `None`.
+    pub fn fee_charged_percentile(&self, percentile: u8) -> Option<i64> {
+        match percentile {
+            10 => self.fee_charged_p10,
+            50 => self.fee_charged_p50,
+            90 => self.fee_charged_p90,
+            95 => self.fee_charged_p95,
+            99 => self.fee_charged_p99,
+            _ => None,
+        }
+    }
+
+    /// Returns the `max_fee` percentile for the given integer percentile
+    /// (10, 50, 90, 95 or 99). Unknown percentiles yield `None`.
+    pub fn max_fee_percentile(&self, percentile: u8) -> Option<i64> {
+        match percentile {
+            10 => self.max_fee_p10,
+            50 => self.max_fee_p50,
+            90 => self.max_fee_p90,
+            95 => self.max_fee_p95,
+            99 => self.max_fee_p99,
+            _ => None,
+        }
+    }
+}
+
+/// Parses a Horizon decimal-string amount into `i64` stroops, rejecting
+/// values that are non-numeric or would overflow `i64`.
+fn parse_stroops(field: &str, value: &Option<String>) -> Result<Option<i64>, HorizonError> {
+    match value {
+        None => Ok(None),
+        Some(raw) => raw
+            .trim()
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|e| HorizonError::InvalidResponse(format!("invalid {field} '{raw}': {e}"))),
+    }
+}
+
+/// Outcome of looking up a transaction by hash on Horizon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionInclusion {
+    /// Horizon has no record of the hash: the transaction was never
+    /// submitted or has already been pruned from history.
+    NotFound,
+    /// Horizon knows the hash but it is not yet in a ledger.
+    Pending,
+    /// The transaction is included in a ledger.
+    Included {
+        ledger: i64,
+        successful: bool,
+        /// Fee actually charged, in stroops.
+        fee_charged: i64,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct TransactionRecord {
+    #[serde(default)]
+    ledger: Option<i64>,
+    #[serde(default)]
+    successful: Option<bool>,
+    #[serde(default)]
+    fee_charged: Option<String>,
+}
+
 /// HTTP client for interacting with the Stellar Horizon API
 #[derive(Clone)]
 pub struct HorizonClient {
@@ -345,6 +480,174 @@ impl HorizonClient {
         self.record_scorecard(permitted_before, started, &result);
         match result {
             Ok(payments) => Ok(payments),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
+        }
+    }
+
+    /// Fetches current network fee statistics from Horizon's `/fee_stats`
+    /// endpoint. All fee amounts are returned as `i64` stroops.
+    #[instrument(name = "horizon.get_fee_stats", skip(self))]
+    pub async fn get_fee_stats(&self) -> Result<FeeStats, HorizonError> {
+        let url = format!("{}/fee_stats", self.base_url.trim_end_matches('/'));
+        let client = self.client.clone();
+
+        let mut headers = std::collections::HashMap::new();
+        let propagator = TraceContextPropagator::new();
+        let cx = opentelemetry::Context::current();
+        propagator.inject_context(&cx, &mut headers);
+
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let mut req = client.get(&url);
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let response = req.send().await?;
+
+                if !response.status().is_success() {
+                    return Err(HorizonError::InvalidResponse(format!(
+                        "Horizon API error: {}",
+                        response.status()
+                    )));
+                }
+
+                let raw = response.json::<FeeStatsResponse>().await?;
+                let charged = raw.fee_charged.unwrap_or(FeePercentiles {
+                    min: None,
+                    max: None,
+                    mode: None,
+                    p10: None,
+                    p50: None,
+                    p90: None,
+                    p95: None,
+                    p99: None,
+                });
+                let max_fee = raw.max_fee.unwrap_or(FeePercentiles {
+                    min: None,
+                    max: None,
+                    mode: None,
+                    p10: None,
+                    p50: None,
+                    p90: None,
+                    p95: None,
+                    p99: None,
+                });
+
+                let ledger_capacity_usage = match raw.ledger_capacity_usage.as_deref() {
+                    None => None,
+                    Some(s) => Some(s.trim().parse::<f64>().map_err(|e| {
+                        HorizonError::InvalidResponse(format!(
+                            "invalid ledger_capacity_usage '{s}': {e}"
+                        ))
+                    })?),
+                };
+
+                Ok(FeeStats {
+                    last_ledger: parse_stroops("last_ledger", &raw.last_ledger)?,
+                    last_ledger_base_fee: parse_stroops(
+                        "last_ledger_base_fee",
+                        &raw.last_ledger_base_fee,
+                    )?,
+                    ledger_capacity_usage,
+                    fee_charged_min: parse_stroops("fee_charged.min", &charged.min)?,
+                    fee_charged_max: parse_stroops("fee_charged.max", &charged.max)?,
+                    fee_charged_mode: parse_stroops("fee_charged.mode", &charged.mode)?,
+                    fee_charged_p10: parse_stroops("fee_charged.p10", &charged.p10)?,
+                    fee_charged_p50: parse_stroops("fee_charged.p50", &charged.p50)?,
+                    fee_charged_p90: parse_stroops("fee_charged.p90", &charged.p90)?,
+                    fee_charged_p95: parse_stroops("fee_charged.p95", &charged.p95)?,
+                    fee_charged_p99: parse_stroops("fee_charged.p99", &charged.p99)?,
+                    max_fee_min: parse_stroops("max_fee.min", &max_fee.min)?,
+                    max_fee_max: parse_stroops("max_fee.max", &max_fee.max)?,
+                    max_fee_mode: parse_stroops("max_fee.mode", &max_fee.mode)?,
+                    max_fee_p10: parse_stroops("max_fee.p10", &max_fee.p10)?,
+                    max_fee_p50: parse_stroops("max_fee.p50", &max_fee.p50)?,
+                    max_fee_p90: parse_stroops("max_fee.p90", &max_fee.p90)?,
+                    max_fee_p95: parse_stroops("max_fee.p95", &max_fee.p95)?,
+                    max_fee_p99: parse_stroops("max_fee.p99", &max_fee.p99)?,
+                })
+            })
+            .await;
+
+        self.record_scorecard(permitted_before, started, &result);
+        match result {
+            Ok(stats) => Ok(stats),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
+        }
+    }
+
+    /// Looks up a transaction by hash on Horizon's `/transactions/{hash}`
+    /// endpoint to determine whether it has been included in a ledger.
+    ///
+    /// A 404 maps to `TransactionInclusion::NotFound` (a normal outcome for
+    /// a not-yet-visible hash), not an error, so the bump policy can treat
+    /// it as "still pending" without special-casing `HorizonError`.
+    #[instrument(name = "horizon.get_transaction", skip(self), fields(stellar.tx_hash = %tx_hash))]
+    pub async fn get_transaction_inclusion(
+        &self,
+        tx_hash: &str,
+    ) -> Result<TransactionInclusion, HorizonError> {
+        let url = format!(
+            "{}/transactions/{}",
+            self.base_url.trim_end_matches('/'),
+            tx_hash
+        );
+        let client = self.client.clone();
+
+        let mut headers = std::collections::HashMap::new();
+        let propagator = TraceContextPropagator::new();
+        let cx = opentelemetry::Context::current();
+        propagator.inject_context(&cx, &mut headers);
+
+        let permitted_before = self.circuit_breaker.is_call_permitted();
+        let started = std::time::Instant::now();
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let mut req = client.get(&url);
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let response = req.send().await?;
+
+                if response.status() == 404 {
+                    return Ok(TransactionInclusion::NotFound);
+                }
+                if !response.status().is_success() {
+                    return Err(HorizonError::InvalidResponse(format!(
+                        "Horizon API error: {}",
+                        response.status()
+                    )));
+                }
+
+                let record = response.json::<TransactionRecord>().await?;
+                match record.ledger {
+                    None => Ok(TransactionInclusion::Pending),
+                    Some(ledger) => {
+                        let fee_charged =
+                            parse_stroops("fee_charged", &record.fee_charged)?.unwrap_or(0);
+                        Ok(TransactionInclusion::Included {
+                            ledger,
+                            successful: record.successful.unwrap_or(false),
+                            fee_charged,
+                        })
+                    }
+                }
+            })
+            .await;
+
+        self.record_scorecard(permitted_before, started, &result);
+        match result {
+            Ok(inclusion) => Ok(inclusion),
             Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
                 "Horizon API circuit breaker is open".to_string(),
             )),
@@ -703,6 +1006,121 @@ mod tests {
 
         assert!(matches!(result, Err(HorizonError::AccountNotFound(_))));
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_fee_stats_with_mock() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_response = r#"{
+            "last_ledger": "12345",
+            "last_ledger_base_fee": "100",
+            "ledger_capacity_usage": "0.75",
+            "fee_charged": {
+                "min": "100", "max": "5000", "mode": "100",
+                "p10": "100", "p50": "150", "p90": "800", "p95": "1200", "p99": "4000"
+            },
+            "max_fee": {
+                "min": "100", "max": "9000", "mode": "100",
+                "p10": "100", "p50": "200", "p90": "1500", "p95": "2500", "p99": "8000"
+            }
+        }"#;
+
+        let mock = server
+            .mock("GET", "/fee_stats")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_response)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let stats = client.get_fee_stats().await.expect("expected fee stats");
+
+        assert_eq!(stats.last_ledger, Some(12345));
+        assert_eq!(stats.last_ledger_base_fee, Some(100));
+        assert_eq!(stats.ledger_capacity_usage, Some(0.75));
+        assert_eq!(stats.fee_charged_p50, Some(150));
+        assert_eq!(stats.fee_charged_percentile(90), Some(800));
+        assert_eq!(stats.max_fee_percentile(99), Some(8000));
+        assert_eq!(stats.fee_charged_percentile(42), None);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_fee_stats_rejects_overflowing_amount() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_response = r#"{
+            "fee_charged": { "p50": "99999999999999999999999999" }
+        }"#;
+
+        let _mock = server
+            .mock("GET", "/fee_stats")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_response)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let result = client.get_fee_stats().await;
+        assert!(matches!(result, Err(HorizonError::InvalidResponse(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_inclusion_included() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_response = r#"{
+            "hash": "abc",
+            "ledger": 42,
+            "successful": true,
+            "fee_charged": "250"
+        }"#;
+
+        let mock = server
+            .mock("GET", "/transactions/abc")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_response)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let inclusion = client
+            .get_transaction_inclusion("abc")
+            .await
+            .expect("expected inclusion lookup");
+
+        assert_eq!(
+            inclusion,
+            TransactionInclusion::Included {
+                ledger: 42,
+                successful: true,
+                fee_charged: 250,
+            }
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_inclusion_not_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("GET", "/transactions/missing")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let inclusion = client
+            .get_transaction_inclusion("missing")
+            .await
+            .expect("404 should map to NotFound, not an error");
+
+        assert_eq!(inclusion, TransactionInclusion::NotFound);
     }
 
     #[test]

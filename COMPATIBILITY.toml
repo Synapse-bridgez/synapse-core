@@ -14,3 +14,46 @@ sdk_version = "0.1.0"
 cli_version = "0.1.0"
 api_versions = ["v1", "v2"]
 notes = "Initial tracked compatibility entry."
+
+# ---------------------------------------------------------------------------
+# Migration tooling compatibility constraints
+# ---------------------------------------------------------------------------
+#
+# The expand/contract migration practice (see docs/migrations.md) and the
+# migration lint / rollback rehearsal tooling (`cargo xtask migrate lint`,
+# `cargo xtask migrate rollback`) impose the following constraints on the
+# swap engine schema and on the tooling that consumes it:
+#
+# - Migrations must be forward-compatible with the immediately preceding
+#   application release (expand phase) and only removed in a later cleanup
+#   release (contract phase). Running replicas of the previous release must
+#   continue to function against the expanded schema.
+# - Every migration must provide a down path (or a dated exemption recorded
+#   in docs/migrations.md) so the rollback rehearsal can apply it against a
+#   populated test database.
+# - The migration linter requires the `sqlx` migration metadata format used
+#   by `migrations/` (timestamped, reversible pairs). Changing the migration
+#   directory layout or the `sqlx` major version is a breaking change for the
+#   tooling and must be recorded here.
+# - Fee and calendar changes that alter persisted column types or semantics
+#   must follow the expand/contract phases; the linter flags destructive
+#   changes (drop/rename, non-nullable columns without defaults) unless an
+#   exemption is recorded.
+
+[[entry]]
+sdk_version = "0.1.0"
+cli_version = "0.1.0"
+api_versions = ["v1", "v2"]
+notes = """
+Migration tooling constraints (expand/contract practice, issue #1498):
+- Schema changes must be expand/contract compatible with the previous
+  application release; destructive changes require a dated exemption in
+  docs/migrations.md.
+- All migrations must be reversible (or documented equivalent) for the
+  rollback rehearsal.
+- `sqlx` migration metadata format and `migrations/` layout are part of the
+  tooling contract; changing either is a breaking change for
+  `cargo xtask migrate lint` / `cargo xtask migrate rollback`.
+- Fee and calendar schema changes that alter persisted types or semantics
+  must follow the expand/contract phases and pass the migration linter.
+"""
