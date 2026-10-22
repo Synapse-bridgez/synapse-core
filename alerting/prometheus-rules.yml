@@ -132,6 +132,47 @@ groups:
           summary: Burst of missing-partition (23514) errors on transaction insert
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#6-missing-partition-23514-burst-on-transaction-insert
 
+      - alert: SwapOrderFailureRateHigh
+        expr: |
+          sum(rate(swap_orders_total{event="failed"}[10m]))
+            / clamp_min(sum(rate(swap_orders_total{event=~"created|failed|rejected"}[10m])), 1e-12) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Swap orders failing above 5% of hand-offs
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#swap-engine-alerts
+
+      - alert: SwapOrderRejectionRateHigh
+        expr: |
+          sum(rate(swap_orders_total{event="rejected"}[10m]))
+            / clamp_min(sum(rate(swap_orders_total{event=~"created|failed|rejected"}[10m])), 1e-12) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Swap engine rejecting above 10% of hand-offs
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#swap-engine-alerts
+
+      - alert: SwapOrdersStuckExecuting
+        expr: min_over_time(swap_orders_in_flight[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Swap hand-offs in flight for the entire last 15 minutes
+          description: At least one swap hand-off has been awaiting the swap engine continuously for 15 minutes; the order is likely stuck in Executing.
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#swap-engine-alerts
+
+      - alert: SwapSettlementLagHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(swap_stage_latency_ms_bucket{stage="settle"}[10m]))) > 300000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Swap settlement P95 latency above 5 minutes
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#swap-engine-alerts
+
       - alert: Watchdog
         expr: vector(1)
         labels:
