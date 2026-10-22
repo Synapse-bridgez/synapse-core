@@ -1,4 +1,7 @@
 //! Phase 2 swap-engine service boundary.
+
+pub mod accounting;
+pub mod liquidity;
 //!
 //! This repository is Phase 1 of Synapse Bridge (transaction preparation). A
 //! future swap engine - in this repo, a separate service, or an external
