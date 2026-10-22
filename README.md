@@ -222,3 +222,6 @@ This project is licensed under the MIT License. See the LICENSE file for details
 
 <!-- handsoff-issue-1467 -->
 - #1467: Add Consumer-Driven Contract Tests Against the Stellar Anchor Platform and Horizon
+
+<!-- handsoff-issue-1469 -->
+- #1469: Implement Data Retention, Erasure, and PII Handling Compliance for Swap Data
