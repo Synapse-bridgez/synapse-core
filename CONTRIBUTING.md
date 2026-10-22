@@ -9,8 +9,10 @@ Thank you for your interest in contributing to Synapse Core! This guide will hel
 - [Code Style Guide](#code-style-guide)
 - [Testing Requirements](#testing-requirements)
 - [Pull Request Process](#pull-request-process)
+- [Documentation Translations](#documentation-translations)
 - [Architecture Decision Records](#architecture-decision-records)
 - [Maintainer Rotation & On-Call](#maintainer-rotation--on-call)
+- [Code of Conduct](#code-of-conduct)
 - [Communication](#communication)
 
 ## Getting Started
@@ -474,6 +476,26 @@ docs: Update API authentication guide
 
 See [Maintainer Rotation & On-Call](#maintainer-rotation--on-call) to find the current reviewer.
 
+## Documentation Translations
+
+Translations of the key onboarding docs (`README.md`, `CONTRIBUTING.md`, `docs/QUICK_START.md`) are welcome. They must be written by a human fluent in the target language; machine-translated content will not be merged.
+
+1. **Open an issue first** (or comment on an existing one) so two people don't translate the same file.
+2. **Copy the English source** to `docs/i18n/<lang>/`, using the BCP 47 language tag as the directory name (`es`, `pt-BR`, `zh-Hans`). Keep the file name of the source: `README.md`, `CONTRIBUTING.md`, or `QUICK_START.md`.
+3. **Add front matter** at the very top of the file that records what the translation reflects:
+
+   ```markdown
+   ---
+   source: docs/QUICK_START.md
+   source_commit: <full SHA of the last commit that changed the source file>
+   ---
+   ```
+
+   Get the SHA with `git log -1 --format=%H -- docs/QUICK_START.md`. `source` must be one of the three key docs above, relative to the repo root.
+4. **Translate and open a PR** with the `docs` label.
+
+Every PR runs `scripts/check-i18n-staleness.py`. A translation is **stale** when its source file has changed between `source_commit` and `HEAD`; the check posts a warning annotation for each stale file. Stale translations are not deleted, but they must be brought up to date (or the `source_commit` bumped after a review of the source changes) before the next release. See [`docs/i18n/README.md`](docs/i18n/README.md) for the full process and the list of available languages.
+
 ## Architecture Decision Records
 
 Significant architectural decisions are documented as ADRs in [`docs/rfcs/`](docs/rfcs/). If your change alters system architecture, add or update an ADR following the [template](docs/rfcs/000-template.md).
@@ -486,6 +508,15 @@ The project uses a version-controlled rotation schedule so contributors always k
 - **Published view:** the current and upcoming rotation is generated from that schedule and surfaced in the governance docs and the scheduled publish workflow under `.github/workflows/`.
 - **Swaps & coverage:** because the schedule is just a file, requesting a swap or coverage is a normal pull request editing the relevant entry. Open a PR titled `chore(rotation): swap <date> <role>` and tag the incoming maintainer.
 - **Gaps:** if no maintainer is assigned for the current period, the published view explicitly reports a rotation gap rather than silently falling back to an unspecified default. If you see a gap, open a PR to fill it.
+
+## Code of Conduct
+
+All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+It defines the standards for behavior, and the enforcement workflow for reports:
+intake, recusal, confidential review, decision, and communication.
+
+- **Report a concern privately:** email the address in the [Code of Conduct](CODE_OF_CONDUCT.md#1-reporting-intake) with the subject line `CONDUCT:`. Do not raise conduct concerns in public issues, PRs, or Discord.
+- **Security issues** go through [SECURITY.md](SECURITY.md), not the conduct channel.
 
 ## Communication
 
