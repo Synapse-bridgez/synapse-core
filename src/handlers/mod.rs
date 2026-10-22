@@ -6,6 +6,7 @@ pub mod idempotency;
 pub mod import;
 pub mod pagination;
 pub mod profiling;
+pub mod quote_stream;
 pub mod search;
 pub mod session;
 pub mod settlements;

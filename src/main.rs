@@ -623,7 +623,27 @@ async fn serve(
     }
     tracing::info!("Job scheduler started");
 
-    let app = synapse_core::create_app(app_state.clone());
+    let quote_broker = synapse_core::swap::streaming::QuoteBroker::new(
+        config::QuoteStreamConfig::from_env(),
+    );
+    let swap_admission = synapse_core::swap::admission::AdmissionController::new(
+        config::SwapAdmissionConfig::from_env().map_err(anyhow::Error::msg)?,
+    ).map_err(anyhow::Error::msg)?;
+    let app = synapse_core::create_app_with_swap(
+        app_state.clone(), quote_broker.clone(), swap_admission,
+    );
+    let expiry_readiness = app_state.readiness.clone();
+    let quote_expiry = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            if expiry_readiness.is_draining() {
+                quote_broker.disconnect_all();
+                break;
+            }
+            quote_broker.expire(chrono::Utc::now());
+        }
+    });
     let readiness = app_state.readiness.clone();
 
     // Run initialization checks in the background so the HTTP listener can start
@@ -707,6 +727,7 @@ async fn serve(
         })
         .await?;
 
+    quote_expiry.abort();
     // Stop background workers from claiming new work *before* draining DB
     // connections, so in-flight queries aren't force-cut when the pool closes.
     let _ = processor_shutdown.send(true);

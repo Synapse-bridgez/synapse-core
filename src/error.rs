@@ -34,6 +34,127 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Additive-only public swap error contract. Raw infrastructure causes must
+/// never be stored in these variants or included in problem details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapApiError {
+    Validation,
+    UnsupportedAsset,
+    StaleQuote,
+    LimitExceeded,
+    Expired,
+    UpstreamFailure,
+    SettlementFailure,
+    Internal,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    MethodNotAllowed,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SwapProblem {
+    #[serde(rename = "type")]
+    pub problem_type: String,
+    pub title: &'static str,
+    pub status: u16,
+    pub detail: &'static str,
+    pub code: &'static str,
+}
+
+impl SwapApiError {
+    pub fn contract(self) -> (&'static str, StatusCode, &'static str, &'static str) {
+        match self {
+            Self::Validation => ("SWAP_VALIDATION", StatusCode::BAD_REQUEST, "Invalid swap request", "Check the request parameters and subscription message."),
+            Self::UnsupportedAsset => ("SWAP_UNSUPPORTED_ASSET", StatusCode::UNPROCESSABLE_ENTITY, "Unsupported asset", "The requested asset or pair is not supported."),
+            Self::StaleQuote => ("SWAP_STALE_QUOTE", StatusCode::CONFLICT, "Stale quote", "Request a new quote or reconnect without a resume cursor."),
+            Self::LimitExceeded => ("SWAP_LIMIT_EXCEEDED", StatusCode::TOO_MANY_REQUESTS, "Swap limit exceeded", "Reduce subscriptions or retry after the indicated delay."),
+            Self::Expired => ("SWAP_EXPIRED", StatusCode::GONE, "Quote expired", "The quote has expired; request a new quote."),
+            Self::UpstreamFailure => ("SWAP_UPSTREAM_FAILURE", StatusCode::BAD_GATEWAY, "Liquidity provider unavailable", "A liquidity provider could not complete the request."),
+            Self::SettlementFailure => ("SWAP_SETTLEMENT_FAILURE", StatusCode::BAD_GATEWAY, "Settlement failed", "The settlement could not be completed."),
+            Self::Internal => ("SWAP_INTERNAL", StatusCode::INTERNAL_SERVER_ERROR, "Swap service error", "The swap service could not complete the request."),
+            Self::Unauthorized => ("SWAP_UNAUTHORIZED", StatusCode::UNAUTHORIZED, "Authentication required", "Supply a valid active tenant API key."),
+            Self::Forbidden => ("SWAP_FORBIDDEN", StatusCode::FORBIDDEN, "Access denied", "The request is not permitted."),
+            Self::NotFound => ("SWAP_NOT_FOUND", StatusCode::NOT_FOUND, "Swap resource not found", "The requested swap resource does not exist."),
+            Self::MethodNotAllowed => ("SWAP_METHOD_NOT_ALLOWED", StatusCode::METHOD_NOT_ALLOWED, "Method not allowed", "Use a supported HTTP method for this resource."),
+            Self::Unavailable => ("SWAP_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, "Swap service saturated", "Retry after the indicated delay."),
+        }
+    }
+
+    pub fn problem(self) -> SwapProblem {
+        let (code, status, title, detail) = self.contract();
+        SwapProblem { problem_type: format!("urn:synapse:swap:problem:{code}"), title, status: status.as_u16(), detail, code }
+    }
+
+    /// Normalize errors from extractors and middleware without reading their
+    /// potentially sensitive response bodies.
+    pub fn from_status(status: StatusCode) -> Self {
+        match status {
+            StatusCode::UNAUTHORIZED => Self::Unauthorized,
+            StatusCode::FORBIDDEN => Self::Forbidden,
+            StatusCode::NOT_FOUND => Self::NotFound,
+            StatusCode::METHOD_NOT_ALLOWED => Self::MethodNotAllowed,
+            StatusCode::CONFLICT => Self::StaleQuote,
+            StatusCode::GONE => Self::Expired,
+            StatusCode::TOO_MANY_REQUESTS => Self::LimitExceeded,
+            StatusCode::SERVICE_UNAVAILABLE => Self::Unavailable,
+            s if s.is_client_error() => Self::Validation,
+            _ => Self::Internal,
+        }
+    }
+}
+
+impl From<sqlx::Error> for SwapApiError {
+    fn from(error: sqlx::Error) -> Self {
+        tracing::error!(%error, "swap persistence failure");
+        Self::Internal
+    }
+}
+
+impl From<anyhow::Error> for SwapApiError {
+    fn from(error: anyhow::Error) -> Self {
+        tracing::error!(%error, "swap internal failure");
+        Self::Internal
+    }
+}
+
+impl IntoResponse for SwapApiError {
+    fn into_response(self) -> Response {
+        let mut response = (self.contract().1, Json(self.problem())).into_response();
+        response.headers_mut().insert(axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/problem+json"));
+        response.headers_mut().insert(axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"));
+        if matches!(self, Self::Unavailable | Self::LimitExceeded) {
+            response.headers_mut().insert(axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"));
+        }
+        response
+    }
+}
+
+/// Apply outside all swap handlers so extractor failures follow the same
+/// contract as domain errors. Successful streaming bodies are never consumed.
+pub async fn swap_problem_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next<axum::body::Body>,
+) -> Response {
+    let response = next.run(request).await;
+    if !(response.status().is_client_error() || response.status().is_server_error())
+        || response.headers().get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()) == Some("application/problem+json") {
+        return response;
+    }
+    let mut normalized = SwapApiError::from_status(response.status()).into_response();
+    for name in [axum::http::header::RETRY_AFTER, axum::http::header::ALLOW] {
+        if let Some(value) = response.headers().get(&name) {
+            normalized.headers_mut().insert(name, value.clone());
+        }
+    }
+    normalized
+}
+
 /// Error codes for programmatic error handling
 /// These codes are stable and should never be renamed or reused
 #[derive(Debug, Clone, Serialize, Deserialize)]

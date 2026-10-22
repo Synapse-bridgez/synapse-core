@@ -24,6 +24,17 @@ pub mod utils;
 pub mod validation;
 pub mod ws;
 
+/// Prometheus registry metrics, including bounded-label swap admission metrics.
+/// The existing OpenTelemetry exporter continues to serve the remaining metrics.
+async fn swap_metrics() -> Result<impl axum::response::IntoResponse, axum::http::StatusCode> {
+    use prometheus::Encoder;
+    let encoder = prometheus::TextEncoder::new();
+    let mut bytes = Vec::new();
+    encoder.encode(&prometheus::gather(), &mut bytes)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], bytes))
+}
+
 pub use config::assets::AssetCache;
 
 use crate::db::pool_manager::PoolManager;
@@ -158,6 +169,20 @@ impl axum::extract::FromRef<ApiState> for AppState {
 }
 
 pub fn create_app(app_state: AppState) -> Router {
+    let quotes = crate::swap::streaming::QuoteBroker::new(crate::config::QuoteStreamConfig::from_env());
+    let admission = crate::swap::admission::AdmissionController::new(
+        crate::config::SwapAdmissionConfig::from_env().expect("valid swap admission configuration"),
+    ).expect("valid swap admission configuration");
+    create_app_with_swap(app_state, quotes, admission)
+}
+
+/// Inject the same broker used by trusted quote producers. Producers call
+/// `QuoteBroker::publish`; the server drives expiry and graceful disconnection.
+pub fn create_app_with_swap(
+    app_state: AppState,
+    quotes: crate::swap::streaming::QuoteBroker,
+    admission: Arc<crate::swap::admission::AdmissionController>,
+) -> Router {
     let graphql_schema = crate::graphql::schema::build_schema(app_state.clone());
     let api_state = ApiState {
         app_state: app_state.clone(),
@@ -183,6 +208,13 @@ pub fn create_app(app_state: AppState) -> Router {
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
+        .layer(axum_middleware::from_fn_with_state(
+            crate::swap::admission::AdmissionRoute {
+                controller: admission.clone(),
+                priority: crate::swap::admission::Priority::Mutation,
+            },
+            crate::swap::admission::admission_middleware,
+        ))
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::quota::rate_limit_middleware,
@@ -309,7 +341,21 @@ pub fn create_app(app_state: AppState) -> Router {
     // the HMAC check, and no HMAC check actually ran anywhere on this path.
     // Only data_routes needs tenant-key auth, and it gets it from the
     // TenantContext extractor above.
+    let swap_routes = Router::new()
+        .route("/swap/quotes/ws", get(handlers::quote_stream::websocket))
+        .route("/swap/quotes/events", get(handlers::quote_stream::events))
+        .layer(axum_middleware::from_fn_with_state(
+            crate::swap::admission::AdmissionRoute {
+                controller: admission,
+                priority: crate::swap::admission::Priority::Quote,
+            },
+            crate::swap::admission::admission_middleware,
+        ))
+        .layer(axum::Extension(quotes))
+        .layer(axum_middleware::from_fn(crate::error::swap_problem_middleware));
+
     let core_routes = data_routes
+        .merge(swap_routes)
         .merge(callback_routes.clone())
         .merge(webhook_routes.clone());
 
@@ -326,6 +372,7 @@ pub fn create_app(app_state: AppState) -> Router {
     // Health/liveness routes — intentionally public (infra probes have no
     // credentials to send) and never in scope for admin_auth.
     let public_health_routes = Router::new()
+        .route("/metrics", get(crate::swap_metrics))
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))

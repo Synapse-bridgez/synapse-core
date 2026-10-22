@@ -395,9 +395,7 @@ pub async fn callback(
 
     let tx = callback_transaction(payload)?;
 
-    let inserted =
-        queries::insert_transaction(&state.app_state.db, &tx, Some(&state.app_state.query_cache))
-            .await?;
+    let inserted = crate::swap::deposits::persist_deposit_callback(&state.app_state, &tx).await?;
 
     Ok((StatusCode::CREATED, Json(inserted)).into_response())
 }

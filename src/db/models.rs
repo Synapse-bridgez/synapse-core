@@ -5,6 +5,20 @@ use sqlx::FromRow;
 use std::str::FromStr;
 use uuid::Uuid;
 
+/// Persisted Phase 2 intake order. Source identity includes the Phase 1
+/// partition key; query by source_transaction_id to traverse the reverse link.
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub source_transaction_id: Uuid,
+    pub source_transaction_created_at: DateTime<Utc>,
+    pub asset_code: String,
+    pub amount: BigDecimal,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text")]
 pub enum TransactionStatus {

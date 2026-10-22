@@ -776,7 +776,7 @@ fn is_missing_partition_error(err: &sqlx::Error) -> bool {
 /// targeting the same partition via `pg_advisory_xact_lock` and tolerates a
 /// losing concurrent `CREATE TABLE` rather than propagating it. Safe to call
 /// from multiple concurrent `insert_transaction` self-heal paths at once.
-async fn ensure_partition_for(pool: &PgPool, ts: DateTime<Utc>) -> Result<()> {
+pub(crate) async fn ensure_partition_for(pool: &PgPool, ts: DateTime<Utc>) -> Result<()> {
     sqlx::query("SELECT ensure_partition_for($1::date)")
         .bind(ts.date_naive())
         .execute(pool)
@@ -788,13 +788,21 @@ async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
 ) -> Result<Transaction> {
+    persist_transaction_for_tenant(db_tx, tx, None).await
+}
+
+pub(crate) async fn persist_transaction_for_tenant(
+    db_tx: &mut SqlxTransaction<'_, Postgres>,
+    tx: &Transaction,
+    tenant_id: Option<Uuid>,
+) -> Result<Transaction> {
     sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
             created_at, updated_at, anchor_transaction_id, callback_type, callback_status,
-            settlement_id, memo, memo_type, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            settlement_id, memo, memo_type, metadata, tenant_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING *
         "#,
     )
@@ -812,11 +820,12 @@ async fn persist_transaction(
     .bind(&tx.memo)
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
+    .bind(tenant_id)
     .fetch_one(&mut **db_tx)
     .await
 }
 
-async fn audit_transaction_creation(
+pub(crate) async fn audit_transaction_creation(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     result: &Transaction,
 ) -> Result<()> {
