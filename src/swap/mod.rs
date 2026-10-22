@@ -16,14 +16,21 @@
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
 
+pub mod compensation;
+pub mod events;
 pub mod fees;
 
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
 use std::fmt;
 
+use crate::config::Config;
 use crate::db::models::Transaction;
 use crate::services::feature_flags::FeatureFlagService;
+
+/// Stuck-transaction watchdog and manual DLQ intervention (#1446).
+pub mod recovery;
+pub mod circuit_breaker;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
@@ -137,9 +144,19 @@ impl SwapEngine for NoopSwapEngine {
 
 /// Whether `tenant_id` has opted into Phase 2 swap hand-off. Defaults to
 /// `false` (and on any lookup error), so nothing is opted in until an operator
-/// enables the `swap_engine` flag for a tenant. Asset-level gating can layer on
-/// top by scoping the flag key per asset.
-pub async fn swap_enabled_for(flags: &FeatureFlagService, tenant_id: &str) -> bool {
+/// enables the `swap_engine` flag for a tenant. The env-level kill switch and
+/// tenant allowlist (`SWAP_ENGINE_ENABLED`, `SWAP_ENGINE_TENANT_ALLOWLIST`) are
+/// checked first, so disabling the engine blocks new hand-offs without waiting
+/// on the flag. Asset-level gating can layer on top by scoping the flag key per
+/// asset.
+pub async fn swap_enabled_for(
+    config: &Config,
+    flags: &FeatureFlagService,
+    tenant_id: &str,
+) -> bool {
+    if !config.swap_engine_allows_tenant(tenant_id) {
+        return false;
+    }
     flags
         .is_enabled_for_tenant(SWAP_ENGINE_FLAG, tenant_id)
         .await

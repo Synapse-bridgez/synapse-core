@@ -42,15 +42,28 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "processing",
         to: "pending_review",
     },
+    // Stuck-transaction watchdog quarantines stalled processing rows (#1446)
+    Transition {
+        from: "processing",
+        to: "dlq",
+    },
     // From failed (reprocess)
     Transition {
         from: "failed",
         to: "pending",
     },
-    // From dlq (requeue)
+    // From dlq (requeue, or operator force-complete / force-cancel #1446)
     Transition {
         from: "dlq",
         to: "pending",
+    },
+    Transition {
+        from: "dlq",
+        to: "completed",
+    },
+    Transition {
+        from: "dlq",
+        to: "failed",
     },
     // From pending_review: ops can resolve to completed, failed, or requeue
     Transition {

@@ -1,9 +1,11 @@
 use crate::secrets::SecretsManager;
 use crate::swap::fees::{FeeConfig, FeeRule};
+use crate::swap::circuit_breaker::BreakerConfig;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
 use std::env;
+use std::time::Duration;
 
 /// Active environment profile
 #[derive(Debug, Clone, PartialEq)]
@@ -227,8 +229,26 @@ pub struct Config {
     pub partition_lookahead_months: u32,
     pub partition_lookahead_min: u32,
     pub partition_lookahead_max: u32,
+    // Stuck-transaction watchdog (src/swap/recovery.rs)
+    pub stuck_processing_threshold_secs: u64,
+    pub watchdog_interval_secs: u64,
+    pub dlq_depth_alert_threshold: i64,
+    pub dlq_age_alert_secs: u64,
+    // Months of swap order/quote/fill/event partitions to retain before detaching
+    pub swap_retention_months: i32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    /// How often the asset registry reloads from Postgres, in seconds.
+    /// Failed reloads keep the last known good registry.
+    pub asset_registry_refresh_secs: u64,
+    /// Global swap order intake switch (`SWAP_ACCEPTING_ORDERS`). When false,
+    /// new swap orders are rejected; in-flight orders are unaffected.
+    pub swap_accepting_orders: bool,
+    /// Per-tenant and per-provider swap circuit breaker thresholds.
+    pub swap_breaker: BreakerConfig,
+    // Swap engine rollout gate (process-wide kill switch + tenant allowlist)
+    pub swap_engine_enabled: bool,
+    pub swap_engine_tenant_allowlist: Vec<String>,
     // Swap fee defaults (per-tenant/pair overrides are layered on at runtime)
     pub swap_fees: FeeConfig,
 }
@@ -378,6 +398,9 @@ impl Config {
             partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
                 .unwrap_or_else(|_| "12".to_string())
                 .parse()?,
+            swap_retention_months: env::var("SWAP_RETENTION_MONTHS")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
             partition_lookahead_months: {
                 let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
                     .unwrap_or_else(|_| "1".to_string())
@@ -399,6 +422,18 @@ impl Config {
                 }
                 lookahead
             },
+            stuck_processing_threshold_secs: env::var("STUCK_PROCESSING_THRESHOLD_SECS")
+                .unwrap_or_else(|_| "900".to_string())
+                .parse()?,
+            watchdog_interval_secs: env::var("WATCHDOG_INTERVAL_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()?,
+            dlq_depth_alert_threshold: env::var("DLQ_DEPTH_ALERT_THRESHOLD")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()?,
+            dlq_age_alert_secs: env::var("DLQ_AGE_ALERT_SECS")
+                .unwrap_or_else(|_| "3600".to_string())
+                .parse()?,
             per_class_timeout_config: PerClassTimeoutConfig {
                 interactive_timeout_ms: env::var("DB_TIMEOUT_INTERACTIVE_MS")
                     .unwrap_or_else(|_| "5000".to_string())
@@ -409,6 +444,46 @@ impl Config {
                 background_job_timeout_ms: env::var("DB_TIMEOUT_BACKGROUND_JOB_MS")
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
+            },
+            swap_engine_enabled: parse_bool(
+                &env::var("SWAP_ENGINE_ENABLED").unwrap_or_else(|_| "false".to_string()),
+                "SWAP_ENGINE_ENABLED",
+            )?,
+            swap_engine_tenant_allowlist: env::var("SWAP_ENGINE_TENANT_ALLOWLIST")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            asset_registry_refresh_secs: env::var("ASSET_REGISTRY_REFRESH_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()?,
+            swap_accepting_orders: env::var("SWAP_ACCEPTING_ORDERS")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()?,
+            swap_breaker: BreakerConfig {
+                window: Duration::from_secs(
+                    env::var("SWAP_BREAKER_WINDOW_SECS")
+                        .unwrap_or_else(|_| "60".to_string())
+                        .parse()?,
+                ),
+                min_calls: env::var("SWAP_BREAKER_MIN_CALLS")
+                    .unwrap_or_else(|_| "20".to_string())
+                    .parse()?,
+                failure_rate_threshold: env::var("SWAP_BREAKER_FAILURE_RATE")
+                    .unwrap_or_else(|_| "0.5".to_string())
+                    .parse()?,
+                slow_call_threshold: Duration::from_millis(
+                    env::var("SWAP_BREAKER_SLOW_CALL_MS")
+                        .unwrap_or_else(|_| "2000".to_string())
+                        .parse()?,
+                ),
+                open_duration: Duration::from_secs(
+                    env::var("SWAP_BREAKER_OPEN_SECS")
+                        .unwrap_or_else(|_| "30".to_string())
+                        .parse()?,
+                ),
             },
             swap_fees: FeeConfig {
                 default: FeeRule {
@@ -425,6 +500,27 @@ impl Config {
                 ..Default::default()
             },
         })
+    }
+
+    /// Env-level gate for new swap hand-offs. `false` when the process-wide kill
+    /// switch (`SWAP_ENGINE_ENABLED`) is off, or when the tenant is not listed in
+    /// `SWAP_ENGINE_TENANT_ALLOWLIST` (`*` admits every tenant). Callers must
+    /// also check the per-tenant `swap_engine` feature flag. Only gates *new*
+    /// hand-offs; orders already routed are not affected.
+    pub fn swap_engine_allows_tenant(&self, tenant_id: &str) -> bool {
+        self.swap_engine_enabled
+            && self
+                .swap_engine_tenant_allowlist
+                .iter()
+                .any(|entry| entry == "*" || entry == tenant_id)
+    }
+}
+
+fn parse_bool(raw: &str, key: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" | "" => Ok(false),
+        _ => anyhow::bail!("{key} must be 'true' or 'false'"),
     }
 }
 
