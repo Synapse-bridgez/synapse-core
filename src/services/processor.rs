@@ -7,9 +7,11 @@ use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::db::models::Transaction;
+use crate::db::outbox;
 use crate::services::lock_manager::LeaderElection;
 use crate::services::webhook_dispatcher::WebhookDispatcher;
 use crate::stellar::{HorizonClient, HorizonError};
+use crate::swap::events::EVENT_TRANSACTION_STATUS_CHANGED;
 
 const LEADER_HEARTBEAT_SECS: u64 = 15;
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -524,13 +526,21 @@ pub async fn process_batch(
                 warn!(transaction_id = %transaction.id, error = %e, "Cannot transition to failed");
                 continue;
             }
-            sqlx::query(
+            let result = sqlx::query(
                 "UPDATE transactions SET status = 'failed', updated_at = NOW() WHERE id = $1 AND status = $2",
             )
             .bind(transaction.id)
             .bind(&transaction.status)
             .execute(&mut *tx)
             .await?;
+            if result.rows_affected() > 0 {
+                outbox::enqueue_transaction_event(
+                    &mut tx,
+                    transaction.id,
+                    EVENT_TRANSACTION_STATUS_CHANGED,
+                )
+                .await?;
+            }
             continue;
         }
 
@@ -590,6 +600,12 @@ pub async fn process_batch(
 
                     match result {
                         Ok(r) if r.rows_affected() > 0 => {
+                            outbox::enqueue_transaction_event(
+                                &mut tx,
+                                transaction.id,
+                                EVENT_TRANSACTION_STATUS_CHANGED,
+                            )
+                            .await?;
                             completed.push(transaction.clone());
                         }
                         Ok(_) => {}
@@ -641,6 +657,12 @@ pub async fn process_batch(
                     .bind(format!("disagreement:{reason}"))
                     .execute(&mut *tx)
                     .await?;
+                    outbox::enqueue_transaction_event(
+                        &mut tx,
+                        transaction.id,
+                        EVENT_TRANSACTION_STATUS_CHANGED,
+                    )
+                    .await?;
                     continue;
                 }
             }
@@ -674,6 +696,12 @@ pub async fn process_batch(
         };
 
         if result.rows_affected() > 0 {
+            outbox::enqueue_transaction_event(
+                &mut tx,
+                transaction.id,
+                EVENT_TRANSACTION_STATUS_CHANGED,
+            )
+            .await?;
             completed.push(transaction.clone());
         }
     }

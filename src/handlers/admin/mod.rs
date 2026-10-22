@@ -152,6 +152,30 @@ pub async fn get_flags(State(state): State<AppState>) -> Result<impl IntoRespons
     Ok((StatusCode::OK, Json(flags)))
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SwapKillSwitchRequest {
+    /// `true` resumes new swap order intake, `false` halts it.
+    pub accepting: bool,
+}
+
+/// GET /admin/swap/kill-switch
+pub async fn get_swap_kill_switch() -> impl IntoResponse {
+    let gate = crate::swap::circuit_breaker::swap_gate();
+    Json(serde_json::json!({ "accepting": gate.is_accepting() }))
+}
+
+/// POST /admin/swap/kill-switch
+///
+/// Halts or resumes new swap order intake globally. In-flight orders are not
+/// affected. The toggle is audit-logged with the acting admin.
+pub async fn set_swap_kill_switch(
+    Json(payload): Json<SwapKillSwitchRequest>,
+) -> impl IntoResponse {
+    let gate = crate::swap::circuit_breaker::swap_gate();
+    gate.set_accepting(payload.accepting, "admin");
+    Json(serde_json::json!({ "accepting": gate.is_accepting() }))
+}
+
 pub async fn get_canary_dashboard(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
