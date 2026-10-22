@@ -1,327 +1,349 @@
-//! Swap API handlers: tenant analytics (#1506) and operator surveillance /
-//! archive endpoints (#1505, #1508). Routed via `swap::versioning`.
+//! Swap REST API (#1440): quotes, orders, order history and cancellation.
+//!
+//! Handlers stay thin: extract the caller (tenant + optional idempotency key),
+//! validate, call the domain service in `crate::swap`, map errors through
+//! `AppError`. Response schemas are dedicated DTOs so internal columns
+//! (tenant id, idempotency key, request hash) never reach clients.
+//!
+//! Versioning: these routes are part of `data_routes`, so they are served
+//! under `/api/v1` and `/api/v2`. Changes within a version are additive only.
+//!
+//! Also hosts tenant analytics (#1506) and operator surveillance / archive
+//! endpoints (#1505, #1508), routed via `swap::versioning`.
 
 use crate::error::AppError;
 use crate::swap::analytics::Granularity;
+use crate::swap::execution::{self, SwapOrder, SwapOrderStatus};
 use crate::swap::market_data::{self, PriceQuery, QuoteQuery};
+use crate::swap::quote::{self, SwapQuote};
 use crate::tenant::TenantContext;
+use crate::utils::cursor as cursor_util;
 use crate::ApiState;
 use axum::{
-    extract::{Path, Query, State},
-    http::HeaderMap,
+    async_trait,
+    extract::{FromRequestParts, Path, Query, State},
+    http::{request::Parts, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{types::BigDecimal, PgPool};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-// ── Tenant analytics ─────────────────────────────────────────────────────────
+/// Maximum request body accepted by swap endpoints.
+pub const SWAP_MAX_BODY_BYTES: usize = 4 * 1024;
+const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
-#[derive(Debug, Deserialize)]
-pub struct AnalyticsQuery {
-    pub granularity: Granularity,
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-    pub pair: Option<String>,
-    pub direction: Option<String>,
-    pub status: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
+/// Shared extractor: resolves the tenant (auth, activity and rate limiting
+/// are enforced by `TenantContext`) and the optional `Idempotency-Key`
+/// header, so every swap endpoint reads them the same way.
+pub struct SwapCaller {
+    pub tenant_id: Uuid,
+    idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct BucketRow {
-    pub bucket_start: DateTime<Utc>,
-    pub pair: String,
-    pub direction: String,
-    pub status: String,
-    pub order_count: i64,
-    pub volume: BigDecimal,
-    pub avg_slippage_bps: Option<BigDecimal>,
-    pub median_settlement_ms: Option<f64>,
-    #[sqlx(skip)]
-    pub complete: bool,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct Summary {
-    pub filled: Option<i64>,
-    pub failed: Option<i64>,
-    pub volume: Option<BigDecimal>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Freshness {
-    pub as_of: DateTime<Utc>,
-    /// Buckets starting at/after this instant may still change.
-    pub incomplete_from: DateTime<Utc>,
-    pub note: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AnalyticsResponse {
-    pub granularity: Granularity,
-    pub timezone: &'static str,
-    pub freshness: Freshness,
-    pub success_rate: Option<f64>,
-    pub summary: Summary,
-    pub limit: i64,
-    pub offset: i64,
-    pub data: Vec<BucketRow>,
-}
-
-/// GET /swap/v1/analytics — always scoped to the caller's own tenant.
-pub async fn tenant_analytics(
-    State(state): State<ApiState>,
-    tenant: TenantContext,
-    Query(q): Query<AnalyticsQuery>,
-) -> Result<Json<AnalyticsResponse>, AppError> {
-    if q.to <= q.from {
-        return Err(AppError::BadRequest("'to' must be after 'from'".into()));
+impl SwapCaller {
+    fn require_idempotency_key(&self) -> Result<&str, AppError> {
+        self.idempotency_key
+            .as_deref()
+            .ok_or_else(|| AppError::Validation("Idempotency-Key header is required".to_string()))
     }
-    if q.to - q.from > q.granularity.max_range() {
-        return Err(AppError::BadRequest(format!(
-            "range too large for {} granularity (max {} days)",
-            q.granularity.as_str(),
-            q.granularity.max_range().num_days()
-        )));
+}
+
+#[async_trait]
+impl FromRequestParts<ApiState> for SwapCaller {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ApiState,
+    ) -> Result<Self, Self::Rejection> {
+        let tenant = TenantContext::from_request_parts(parts, state).await?;
+        let idempotency_key = match parts.headers.get(IDEMPOTENCY_HEADER) {
+            None => None,
+            Some(v) => Some(
+                v.to_str()
+                    .map_err(|_| AppError::Validation("Idempotency-Key is not valid".to_string()))?
+                    .to_string(),
+            ),
+        };
+        Ok(Self {
+            tenant_id: tenant.tenant_id,
+            idempotency_key,
+        })
     }
-    let (limit, offset) = (
-        q.limit.unwrap_or(100).clamp(1, 500),
-        q.offset.unwrap_or(0).max(0),
-    );
-    let db = &state.app_state.db;
-    const FILTER: &str = "tenant_id = $1 AND granularity = $2 AND bucket_start >= $3 AND bucket_start < $4
-        AND ($5::text IS NULL OR pair = $5) AND ($6::text IS NULL OR direction = $6) AND ($7::text IS NULL OR status = $7)";
-    let mut data: Vec<BucketRow> = sqlx::query_as(&format!(
-        "SELECT bucket_start, pair, direction, status, order_count, volume, avg_slippage_bps, median_settlement_ms
-         FROM swap_analytics_buckets WHERE {FILTER} ORDER BY bucket_start, pair, direction, status LIMIT $8 OFFSET $9"
-    ))
-    .bind(tenant.tenant_id)
-    .bind(q.granularity.as_str())
-    .bind(q.from)
-    .bind(q.to)
-    .bind(&q.pair)
-    .bind(&q.direction)
-    .bind(&q.status)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(db)
-    .await
-    .map_err(AppError::Database)?;
-    let now = Utc::now();
-    for r in &mut data {
-        r.complete = q.granularity.is_complete(r.bucket_start, now);
-    }
-    let summary: Summary = sqlx::query_as(&format!(
-        "SELECT SUM(order_count) FILTER (WHERE status = 'filled')::bigint AS filled,
-                SUM(order_count) FILTER (WHERE status IN ('failed','rejected'))::bigint AS failed,
-                SUM(volume) AS volume
-         FROM swap_analytics_buckets WHERE {FILTER}"
-    ))
-    .bind(tenant.tenant_id)
-    .bind(q.granularity.as_str())
-    .bind(q.from)
-    .bind(q.to)
-    .bind(&q.pair)
-    .bind(&q.direction)
-    .bind(&q.status)
-    .fetch_one(db)
-    .await
-    .map_err(AppError::Database)?;
-    let (f, x) = (summary.filled.unwrap_or(0), summary.failed.unwrap_or(0));
-    Ok(Json(AnalyticsResponse {
-        granularity: q.granularity,
-        timezone: "UTC",
-        freshness: Freshness {
-            as_of: now,
-            incomplete_from: q.granularity.bucket_start(now),
-            note: "Buckets containing the current time may be incomplete and can change as late events arrive.",
-        },
-        success_rate: (f + x > 0).then(|| f as f64 / (f + x) as f64),
-        summary,
-        limit,
-        offset,
-        data,
-    }))
 }
 
-// ── Operator: surveillance findings ──────────────────────────────────────────
-
-fn actor(headers: &HeaderMap) -> String {
-    headers
-        .get("x-reviewer")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("admin")
-        .to_string()
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateQuoteRequest {
+    pub source_asset: String,
+    pub dest_asset: String,
+    /// Decimal string, at most 7 fractional digits.
+    pub source_amount: String,
 }
 
-async fn audit(
-    db: &PgPool,
-    finding: Option<Uuid>,
-    actor: &str,
-    action: &str,
-    from: Option<&str>,
-    to: Option<&str>,
-    note: Option<&str>,
-) -> Result<(), AppError> {
-    sqlx::query("INSERT INTO surveillance_audit_log (finding_id, actor, action, from_status, to_status, note) VALUES ($1,$2,$3,$4,$5,$6)")
-        .bind(finding)
-        .bind(actor)
-        .bind(action)
-        .bind(from)
-        .bind(to)
-        .bind(note)
-        .execute(db)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(())
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateOrderRequest {
+    pub quote_id: Uuid,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FindingsQuery {
-    pub status: Option<String>,
-    pub severity: Option<String>,
-    pub tenant_id: Option<Uuid>,
-    pub limit: Option<i64>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct FindingRow {
-    pub id: Uuid,
-    pub rule: String,
-    pub severity: String,
-    pub status: String,
-    pub tenant_ids: Vec<Uuid>,
-    pub accounts: Vec<String>,
-    pub pair: Option<String>,
-    pub route: Option<String>,
-    pub window_start: DateTime<Utc>,
-    pub window_end: DateTime<Utc>,
-    pub evidence: serde_json::Value,
+#[derive(Debug, Serialize, ToSchema)]
+pub struct QuoteResponse {
+    pub quote_id: Uuid,
+    pub source_asset: String,
+    pub dest_asset: String,
+    pub source_amount: String,
+    pub dest_amount: String,
+    pub rate: String,
+    pub fee_bps: i32,
+    pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 
-/// GET /admin/swap/v1/surveillance/findings — cross-tenant; admin-only and
-/// every query is itself written to the audit log.
-pub async fn list_findings(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(q): Query<FindingsQuery>,
-) -> Result<Json<Vec<FindingRow>>, AppError> {
-    let db = &state.app_state.db;
-    let rows = sqlx::query_as(
-        "SELECT id, rule, severity, status, tenant_ids, accounts, pair, route, window_start, window_end, evidence, created_at
-         FROM surveillance_findings
-         WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR severity = $2) AND ($3::uuid IS NULL OR $3 = ANY(tenant_ids))
-         ORDER BY created_at DESC LIMIT $4",
-    )
-    .bind(&q.status)
-    .bind(&q.severity)
-    .bind(q.tenant_id)
-    .bind(q.limit.unwrap_or(100).clamp(1, 500))
-    .fetch_all(db)
-    .await
-    .map_err(AppError::Database)?;
-    let note = format!(
-        "status={:?} severity={:?} tenant={:?}",
-        q.status, q.severity, q.tenant_id
-    );
-    audit(db, None, &actor(&headers), "query", None, None, Some(&note)).await?;
-    Ok(Json(rows))
+impl From<SwapQuote> for QuoteResponse {
+    fn from(q: SwapQuote) -> Self {
+        Self {
+            quote_id: q.id,
+            source_asset: q.source_asset,
+            dest_asset: q.dest_asset,
+            source_amount: q.source_amount.to_string(),
+            dest_amount: q.dest_amount.to_string(),
+            rate: q.rate.normalized().to_string(),
+            fee_bps: q.fee_bps,
+            expires_at: q.expires_at,
+            created_at: q.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OrderResponse {
+    pub order_id: Uuid,
+    pub quote_id: Uuid,
+    pub source_asset: String,
+    pub dest_asset: String,
+    pub source_amount: String,
+    pub dest_amount: String,
+    /// One of `pending`, `executing`, `completed`, `failed`, `canceled`.
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<SwapOrder> for OrderResponse {
+    fn from(o: SwapOrder) -> Self {
+        Self {
+            order_id: o.id,
+            quote_id: o.quote_id,
+            source_asset: o.source_asset,
+            dest_asset: o.dest_asset,
+            source_amount: o.source_amount.to_string(),
+            dest_amount: o.dest_amount.to_string(),
+            status: o.status,
+            created_at: o.created_at,
+            updated_at: o.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OrderListResponse {
+    pub orders: Vec<OrderResponse>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateStatus {
-    pub status: String,
-    pub note: Option<String>,
+pub struct OrderListQuery {
+    pub status: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
-/// POST /admin/swap/v1/surveillance/findings/:id/status
-pub async fn update_finding_status(
+#[utoipa::path(
+    post,
+    path = "/swap/quotes",
+    request_body = CreateQuoteRequest,
+    responses(
+        (status = 201, description = "Quote created", body = QuoteResponse),
+        (status = 400, description = "Validation error"),
+        (status = 422, description = "Rejected by risk policy"),
+        (status = 429, description = "Rate limit exceeded"),
+    ),
+    tag = "Swap"
+)]
+pub async fn create_quote(
     State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-    Json(body): Json<UpdateStatus>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    if !matches!(body.status.as_str(), "open" | "acknowledged" | "dismissed") {
-        return Err(AppError::BadRequest(
-            "status must be open, acknowledged or dismissed".into(),
-        ));
-    }
-    let db = &state.app_state.db;
-    let prev: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM surveillance_findings WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(db)
-            .await
-            .map_err(AppError::Database)?;
-    let Some((from,)) = prev else {
-        return Err(AppError::NotFound(format!("finding {id}")));
-    };
-    sqlx::query("UPDATE surveillance_findings SET status = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(&body.status)
-        .execute(db)
-        .await
-        .map_err(AppError::Database)?;
-    audit(
-        db,
-        Some(id),
-        &actor(&headers),
-        "status_change",
-        Some(&from),
-        Some(&body.status),
-        body.note.as_deref(),
+    caller: SwapCaller,
+    Json(req): Json<CreateQuoteRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let quote = quote::create_quote(
+        &state.app_state.db,
+        caller.tenant_id,
+        &req.source_asset,
+        &req.dest_asset,
+        &req.source_amount,
     )
     .await?;
-    Ok(Json(serde_json::json!({ "id": id, "status": body.status })))
+    Ok((StatusCode::CREATED, Json(QuoteResponse::from(quote))))
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct AuditRow {
-    pub actor: String,
-    pub action: String,
-    pub from_status: Option<String>,
-    pub to_status: Option<String>,
-    pub note: Option<String>,
-    pub at: DateTime<Utc>,
-}
-
-/// GET /admin/swap/v1/surveillance/findings/:id/audit
-pub async fn finding_audit(
+#[utoipa::path(
+    post,
+    path = "/swap/orders",
+    request_body = CreateOrderRequest,
+    params(("Idempotency-Key" = String, Header, description = "Client-chosen key, 1-128 chars")),
+    responses(
+        (status = 201, description = "Order created (or identical replay)", body = OrderResponse),
+        (status = 400, description = "Validation error / missing Idempotency-Key"),
+        (status = 404, description = "Unknown quote"),
+        (status = 409, description = "Quote expired or idempotency key conflict"),
+        (status = 422, description = "Rejected by risk policy"),
+        (status = 429, description = "Rate limit exceeded"),
+    ),
+    tag = "Swap"
+)]
+pub async fn create_order(
     State(state): State<ApiState>,
+    caller: SwapCaller,
+    Json(req): Json<CreateOrderRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let key = caller.require_idempotency_key()?;
+    let order =
+        execution::create_order(&state.app_state.db, caller.tenant_id, key, req.quote_id).await?;
+    Ok((StatusCode::CREATED, Json(OrderResponse::from(order))))
+}
+
+#[utoipa::path(
+    get,
+    path = "/swap/orders/{id}",
+    params(("id" = Uuid, Path, description = "Order ID")),
+    responses(
+        (status = 200, description = "Order", body = OrderResponse),
+        (status = 404, description = "Order not found"),
+    ),
+    tag = "Swap"
+)]
+pub async fn get_order(
+    State(state): State<ApiState>,
+    caller: SwapCaller,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<AuditRow>>, AppError> {
-    let rows = sqlx::query_as("SELECT actor, action, from_status, to_status, note, at FROM surveillance_audit_log WHERE finding_id = $1 ORDER BY at")
-        .bind(id)
-        .fetch_all(&state.app_state.db)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(Json(rows))
+) -> Result<impl IntoResponse, AppError> {
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    let order = crate::db::queries::get_swap_order_for_tenant(&pool, id, caller.tenant_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Order not found".to_string()))?;
+    let mut response: Response = Json(OrderResponse::from(order)).into_response();
+    if replica_used {
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
+    }
+    Ok(response)
 }
 
-// ── Operator: market data archive ────────────────────────────────────────────
-
-/// GET /admin/swap/v1/market-data/quotes
-pub async fn archived_quotes(
+#[utoipa::path(
+    get,
+    path = "/swap/orders",
+    params(
+        ("status" = Option<String>, Query, description = "pending|executing|completed|failed|canceled"),
+        ("created_from" = Option<String>, Query, description = "RFC 3339, inclusive"),
+        ("created_to" = Option<String>, Query, description = "RFC 3339, exclusive"),
+        ("cursor" = Option<String>, Query, description = "Opaque cursor from a previous page"),
+        ("limit" = Option<i64>, Query, description = "Page size (1-100, default 20)"),
+    ),
+    responses(
+        (status = 200, description = "Page of orders, newest first", body = OrderListResponse),
+        (status = 400, description = "Invalid filter or cursor"),
+    ),
+    tag = "Swap"
+)]
+pub async fn list_orders(
     State(state): State<ApiState>,
-    Query(q): Query<QuoteQuery>,
-) -> Result<Json<Vec<market_data::QuoteRecord>>, AppError> {
-    market_data::query_quotes(&state.app_state.db, &q)
-        .await
-        .map(Json)
-        .map_err(AppError::Database)
+    caller: SwapCaller,
+    Query(params): Query<OrderListQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let status = match params.status.as_deref() {
+        Some(s) => Some(
+            SwapOrderStatus::parse(s)
+                .ok_or_else(|| AppError::Validation("unknown status filter".to_string()))?
+                .as_str(),
+        ),
+        None => None,
+    };
+    if let (Some(from), Some(to)) = (params.created_from, params.created_to) {
+        if from >= to {
+            return Err(AppError::Validation(
+                "created_from must be before created_to".to_string(),
+            ));
+        }
+    }
+    let cursor = match params.cursor.as_deref() {
+        Some(c) => Some(
+            cursor_util::decode(c)
+                .map_err(|e| AppError::BadRequest(format!("invalid cursor: {e}")))?,
+        ),
+        None => None,
+    };
+
+    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
+    let mut orders = crate::db::queries::list_swap_orders_for_tenant(
+        &pool,
+        caller.tenant_id,
+        status,
+        params.created_from,
+        params.created_to,
+        cursor,
+        limit + 1,
+    )
+    .await?;
+
+    let has_more = orders.len() as i64 > limit;
+    if has_more {
+        orders.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        orders.last().map(|o| cursor_util::encode(o.created_at, o.id))
+    } else {
+        None
+    };
+    let body = OrderListResponse {
+        orders: orders.into_iter().map(OrderResponse::from).collect(),
+        next_cursor,
+        has_more,
+    };
+
+    let mut response: Response = Json(body).into_response();
+    if replica_used {
+        response
+            .headers_mut()
+            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
+    }
+    Ok(response)
 }
 
-/// GET /admin/swap/v1/market-data/prices
-pub async fn archived_prices(
+#[utoipa::path(
+    post,
+    path = "/swap/orders/{id}/cancel",
+    params(("id" = Uuid, Path, description = "Order ID")),
+    responses(
+        (status = 200, description = "Order canceled", body = OrderResponse),
+        (status = 404, description = "Order not found"),
+        (status = 409, description = "Order is not cancelable"),
+    ),
+    tag = "Swap"
+)]
+pub async fn cancel_order(
     State(state): State<ApiState>,
-    Query(q): Query<PriceQuery>,
-) -> Result<Json<Vec<market_data::PriceSnapshot>>, AppError> {
-    market_data::query_prices(&state.app_state.db, &q)
-        .await
-        .map(Json)
-        .map_err(AppError::Database)
+    caller: SwapCaller,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let order = execution::cancel_order(&state.app_state.db, caller.tenant_id, id).await?;
+    Ok(Json(OrderResponse::from(order)))
 }

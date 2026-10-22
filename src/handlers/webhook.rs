@@ -149,6 +149,22 @@ pub async fn transaction_callback(
         carrier.get("traceparent").cloned()
     });
 
+    // Anchor callbacks are at-least-once: a redelivered callback must not create
+    // a second transaction. Callbacks without an anchor id cannot be deduped.
+    let dedupe_key = payload.anchor_transaction_id.as_deref().map(|anchor_id| {
+        anchor_callback_dedupe_key(
+            anchor_id,
+            payload.callback_type.as_deref(),
+            payload.callback_status.as_deref(),
+        )
+    });
+    if let Some(key) = &dedupe_key {
+        if !queries::claim_external_event(&state.db, CALLBACK_DEDUPE_TENANT, key).await? {
+            let body = serde_json::json!({ "status": "duplicate" });
+            return Ok((StatusCode::OK, Json(body)).into_response());
+        }
+    }
+
     let tx = Transaction::new(
         payload.stellar_address,
         payload.amount,
@@ -162,7 +178,19 @@ pub async fn transaction_callback(
     )
     .with_trace_id(trace_id);
 
-    let inserted = queries::insert_transaction(&state.db, &tx, Some(&state.query_cache)).await?;
+    let inserted = match queries::insert_transaction(&state.db, &tx, Some(&state.query_cache)).await
+    {
+        Ok(inserted) => inserted,
+        Err(e) => {
+            // Release the claim so the sender's retry is processed, not dropped.
+            if let Some(key) = &dedupe_key {
+                queries::release_external_event(&state.db, CALLBACK_DEDUPE_TENANT, key)
+                    .await
+                    .ok();
+            }
+            return Err(e.into());
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -170,7 +198,33 @@ pub async fn transaction_callback(
             id: inserted.id.to_string(),
             status: inserted.status,
         }),
-    ))
+    )
+        .into_response())
+}
+
+/// Tenant namespace for anchor callback dedupe records. Callbacks arrive without
+/// tenant context, so they share the `default` namespace.
+const CALLBACK_DEDUPE_TENANT: &str = "default";
+
+/// Hashed dedupe key for an anchor callback. Hashing keeps raw anchor ids out of
+/// the `idempotency_keys` table and keeps the key within its 255-char column.
+fn anchor_callback_dedupe_key(
+    anchor_transaction_id: &str,
+    callback_type: Option<&str>,
+    callback_status: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for part in [
+        anchor_transaction_id,
+        callback_type.unwrap_or(""),
+        callback_status.unwrap_or(""),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("anchor-callback:{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
