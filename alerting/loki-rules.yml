@@ -43,3 +43,16 @@ groups:
           summary: Repeated {{ $labels.skew_direction }}-dated webhook events rejected
           description: '{{ $value }} POST /telemetry/webhook timestamp rejects in 5m; direction: {{ $labels.skew_direction }}, skew band: {{ $labels.skew_band }}, allowed skew: 300s. Environment: {{ $labels.environment }}.'
           runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/runbook.md#telemetry-silent-failure-log-alerts
+
+      - alert: TransactionDlqThresholdCrossed
+        expr: |
+          sum by (service, environment) (
+            count_over_time({service="synapse-core"} | json message="fields.message" | message="Transaction DLQ threshold crossed" [5m])
+          ) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Stuck-transaction DLQ depth or age over threshold
+          description: 'The stuck-transaction watchdog reports unresolved DLQ depth or oldest age above threshold. Resolve via POST /admin/transactions/{id}/dlq/{retry|force-complete|force-cancel}. Environment: {{ $labels.environment }}.'
+          runbook_url: https://github.com/Synapse-bridgez/synapse-core/blob/main/docs/dlq.md

@@ -31,8 +31,10 @@
 //! - Sensitive data (passwords, tokens) never logged; only query structure logged
 
 use crate::db::audit::{AuditLog, ENTITY_TRANSACTION};
-use crate::db::models::{Settlement, Transaction};
+use crate::db::models::{Settlement, SwapOrder, SwapOrderStatus, Transaction};
+use crate::db::outbox;
 use crate::services::query_cache::QueryCache;
+use crate::swap::events::{EVENT_TRANSACTION_CREATED, EVENT_TRANSACTION_STATUS_CHANGED};
 use crate::tenant::TenantConfig;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -788,7 +790,7 @@ async fn persist_transaction(
     db_tx: &mut SqlxTransaction<'_, Postgres>,
     tx: &Transaction,
 ) -> Result<Transaction> {
-    sqlx::query_as::<_, Transaction>(
+    let result = sqlx::query_as::<_, Transaction>(
         r#"
         INSERT INTO transactions (
             id, stellar_account, amount, asset_code, status,
@@ -813,7 +815,10 @@ async fn persist_transaction(
     .bind(&tx.memo_type)
     .bind(&tx.metadata)
     .fetch_one(&mut **db_tx)
-    .await
+    .await?;
+
+    outbox::enqueue_transaction_event(db_tx, result.id, EVENT_TRANSACTION_CREATED).await?;
+    Ok(result)
 }
 
 async fn audit_transaction_creation(
@@ -841,6 +846,36 @@ async fn audit_transaction_creation(
     .await
 }
 
+/// IDs of transactions left in `processing` for longer than `threshold_secs`.
+/// Bounded by `limit` and served by `idx_transactions_status_updated_at`.
+pub async fn find_stale_processing_ids(
+    pool: &PgPool,
+    threshold_secs: f64,
+    limit: i64,
+) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM transactions \
+         WHERE status = 'processing' AND updated_at < NOW() - make_interval(secs => $1) \
+         ORDER BY updated_at LIMIT $2",
+    )
+    .bind(threshold_secs)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Unresolved DLQ depth and the moved-at time of the oldest unresolved entry.
+/// An entry is unresolved while its transaction is still in `dlq`.
+pub async fn dlq_depth_and_oldest(pool: &PgPool) -> Result<(i64, Option<DateTime<Utc>>)> {
+    sqlx::query_as(
+        "SELECT COUNT(*), MIN(d.moved_to_dlq_at) \
+         FROM transaction_dlq d JOIN transactions t ON t.id = d.transaction_id \
+         WHERE t.status = 'dlq'",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     with_timeout(
         QueryTier::Read,
@@ -853,12 +888,12 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
 }
 
 /// Tenant-scoped equivalent of [`get_transaction`] used by GET
-/// /transactions/:id. `tenant_id IS NULL` rows are legacy/pre-migration data
-/// and remain visible to every tenant, matching the RLS policy in
-/// migrations/20260501000000_tenant_rls.sql — this is an application-level
-/// mirror of that policy (defense in depth), not a substitute for it: RLS
-/// still applies underneath regardless of whether this WHERE clause is
-/// present, since the connected role no longer bypasses it.
+/// /transactions/:id. Partitioning is strict: rows with `tenant_id IS NULL`
+/// are not visible to any tenant (they are admin-only), matching the RLS
+/// policy redefined in migrations/20260928000000_strict_tenant_partition.sql.
+/// This is an application-level mirror of that policy (defense in depth), not
+/// a substitute for it: RLS still applies underneath regardless of whether
+/// this WHERE clause is present, since the connected role no longer bypasses it.
 pub async fn get_transaction_for_tenant(
     pool: &PgPool,
     id: Uuid,
@@ -866,9 +901,9 @@ pub async fn get_transaction_for_tenant(
 ) -> Result<Transaction> {
     with_timeout(
         QueryTier::Read,
-        "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+        "SELECT * FROM transactions WHERE id = $1 AND tenant_id = $2",
         sqlx::query_as::<_, Transaction>(
-            "SELECT * FROM transactions WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)",
+            "SELECT * FROM transactions WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
         .bind(tenant_id)
@@ -1015,8 +1050,8 @@ pub async fn list_transactions_filtered(
 }
 
 /// Tenant-scoped equivalent of [`list_transactions_filtered`] used by GET
-/// /transactions. See [`get_transaction_for_tenant`] for the NULL-tenant and
-/// defense-in-depth notes — identical rules apply here.
+/// /transactions. See [`get_transaction_for_tenant`] for the strict-partition
+/// and defense-in-depth notes — identical rules apply here.
 pub async fn list_transactions_filtered_for_tenant(
     pool: &PgPool,
     limit: i64,
@@ -1059,7 +1094,7 @@ pub async fn list_transactions_filtered_for_tenant(
                 bind_idx += 1;
             }
 
-            conditions.push(format!("(tenant_id = ${} OR tenant_id IS NULL)", bind_idx));
+            conditions.push(format!("tenant_id = ${}", bind_idx));
             bind_idx += 1;
 
             let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -1244,8 +1279,8 @@ pub async fn get_settlement(pool: &PgPool, id: Uuid) -> Result<Settlement> {
 /// `SettlementService::settle_asset` groups unsettled transactions by
 /// `asset_code` only (see migrations/20260824000001_settlement_rls.sql for
 /// the full reasoning). A settlement is visible to `tenant_id` if at least
-/// one of its transactions belongs to that tenant (or is a legacy row with
-/// no tenant_id) — this mirrors the RLS policy's own EXISTS check so
+/// one of its transactions belongs to that tenant — this mirrors the RLS
+/// policy's own EXISTS check so
 /// behavior is identical whether or not RLS is what actually enforces it on
 /// a given connection.
 pub async fn get_settlement_for_tenant(
@@ -1263,7 +1298,7 @@ pub async fn get_settlement_for_tenant(
               AND EXISTS (
                   SELECT 1 FROM transactions t
                   WHERE t.settlement_id = settlements.id
-                    AND (t.tenant_id IS NULL OR t.tenant_id = $2)
+                    AND t.tenant_id = $2
               )
             "#,
         )
@@ -1353,7 +1388,7 @@ pub async fn list_settlements_cursor_for_tenant(
                 EXISTS (
                     SELECT 1 FROM transactions t
                     WHERE t.settlement_id = settlements.id
-                      AND (t.tenant_id IS NULL OR t.tenant_id = $TENANT_PARAM)
+                      AND t.tenant_id = $TENANT_PARAM
                 )
             "#;
 
@@ -1775,7 +1810,7 @@ pub async fn search_transactions(
 
 /// Tenant-scoped equivalent of [`search_transactions`] used by GET
 /// /transactions/search. See [`get_transaction_for_tenant`] for the
-/// NULL-tenant and defense-in-depth notes — identical rules apply here.
+/// strict-partition and defense-in-depth notes — identical rules apply here.
 #[allow(clippy::too_many_arguments)]
 pub async fn search_transactions_for_tenant(
     pool: &PgPool,
@@ -1844,10 +1879,7 @@ pub async fn search_transactions_for_tenant(
 
             // Unconditional tenant scope — always present, unlike the filters above.
             let tenant_param = param_count;
-            conditions.push(format!(
-                "(tenant_id = ${} OR tenant_id IS NULL)",
-                tenant_param
-            ));
+            conditions.push(format!("tenant_id = ${}", tenant_param));
             param_count += 1;
 
             let where_clause = format!("WHERE {}", conditions.join(" AND "));
@@ -1977,6 +2009,87 @@ pub async fn get_swap_quote_for_tenant(
     .await
 }
 
+// Swap orders (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`transition_swap_order`].
+#[derive(Debug)]
+pub enum SwapOrderTransitionError {
+    /// The edge is not allowed by [`SwapOrderStatus::can_transition_to`].
+    Invalid {
+        from: SwapOrderStatus,
+        to: SwapOrderStatus,
+    },
+    /// The order changed since it was read (or no longer exists). Re-fetch and retry.
+    Conflict,
+    /// Database failure, or a stored status that does not parse.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for SwapOrderTransitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwapOrderTransitionError::Invalid { from, to } => {
+                write!(f, "cannot transition swap order from '{from}' to '{to}'")
+            }
+            SwapOrderTransitionError::Conflict => write!(f, "swap order was modified concurrently"),
+            SwapOrderTransitionError::Db(e) => write!(f, "swap order database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SwapOrderTransitionError {}
+
+/// Inserts an order; returns `None` when a unique constraint (tenant +
+/// idempotency key, or quote) already holds a row.
+pub async fn insert_swap_order(
+    pool: &PgPool,
+    o: &crate::swap::execution::SwapOrder,
+) -> Result<Option<crate::swap::execution::SwapOrder>> {
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_orders ON CONFLICT DO NOTHING",
+        sqlx::query_as::<_, crate::swap::execution::SwapOrder>(
+            r#"
+            INSERT INTO swap_orders (
+                id, tenant_id, stellar_account, source_asset, destination_asset,
+                amount, quoted_amount, quote_id, status, version, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT DO NOTHING
+            RETURNING *
+            "#,
+        )
+        .bind(o.id)
+        .bind(o.tenant_id)
+        .bind(&o.stellar_account)
+        .bind(&o.source_asset)
+        .bind(&o.destination_asset)
+        .bind(&o.amount)
+        .bind(&o.quoted_amount)
+        .bind(&o.quote_id)
+        .bind(&o.status)
+        .bind(o.version)
+        .bind(o.created_at)
+        .bind(o.updated_at)
+        .fetch_optional(pool),
+    )
+    .await
+}
+
+pub async fn get_swap_order(pool: &PgPool, id: Uuid) -> Result<Option<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE id = $1",
+        sqlx::query_as::<_, SwapOrder>("SELECT * FROM swap_orders WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool),
+    )
+    .await
+}
+    )
+    .await
+}
+
 /// Inserts an order; returns `None` when a unique constraint (tenant +
 /// idempotency key, or quote) already holds a row.
 pub async fn insert_swap_order(
@@ -2085,6 +2198,30 @@ pub async fn list_swap_orders_for_tenant(
     .await
 }
 
+/// Newest-first orders for a tenant, capped at `limit`.
+pub async fn get_swap_orders_for_tenant(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SwapOrder>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM swap_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+        sqlx::query_as::<_, SwapOrder>(
+            "SELECT * FROM swap_orders WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(pool),
+    )
+    .await
+}
+        .bind(limit)
+        .fetch_all(pool),
+    )
+    .await
+}
+
 /// Moves a `pending` order to `canceled`; `None` if it is no longer pending.
 pub async fn cancel_swap_order(
     pool: &PgPool,
@@ -2103,6 +2240,54 @@ pub async fn cancel_swap_order(
         .fetch_optional(pool),
     )
     .await
+}
+
+/// Move `order` to `to` using a compare-and-set on `version`.
+///
+/// Same-state is a no-op that returns the order unchanged. An illegal edge
+/// returns [`SwapOrderTransitionError::Invalid`] without touching the row. If
+/// another writer bumped `version` since `order` was read, returns
+/// [`SwapOrderTransitionError::Conflict`]. `created_at` is in the predicate so
+/// the update prunes to the owning partition.
+pub async fn transition_swap_order(
+    pool: &PgPool,
+    order: &SwapOrder,
+    to: SwapOrderStatus,
+) -> std::result::Result<SwapOrder, SwapOrderTransitionError> {
+    let from: SwapOrderStatus = order
+        .status
+        .parse()
+        .map_err(|e: String| SwapOrderTransitionError::Db(sqlx::Error::Decode(e.into())))?;
+
+    if from == to {
+        return Ok(order.clone());
+    }
+    if !from.can_transition_to(to) {
+        return Err(SwapOrderTransitionError::Invalid { from, to });
+    }
+
+    let updated = with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_orders SET status = ... WHERE id = $2 AND created_at = $3 AND version = $4 RETURNING *",
+        sqlx::query_as::<_, SwapOrder>(
+            r#"
+            UPDATE swap_orders
+            SET status = $1, version = version + 1, updated_at = NOW()
+            WHERE id = $2 AND created_at = $3 AND version = $4
+            RETURNING *
+            "#,
+        )
+        .bind(to.to_string())
+        .bind(order.id)
+        .bind(order.created_at)
+        .bind(order.version)
+        .fetch_optional(pool),
+    )
+    .await
+    .map_err(SwapOrderTransitionError::Db)?;
+
+    updated.ok_or(SwapOrderTransitionError::Conflict)
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -2482,6 +2667,9 @@ pub async fn bulk_update_transaction_status(
         .await?;
 
     for &id in &valid_ids {
+        outbox::enqueue_transaction_event(&mut db_tx, id, EVENT_TRANSACTION_STATUS_CHANGED)
+            .await?;
+
         let old_status = old_statuses
             .get(&id)
             .map(|s| s.as_str())
@@ -2738,6 +2926,162 @@ pub async fn cleanup_expired_idempotency_keys(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
+}
+
+// --- Swap Lifecycle Guards (Issue #1437) ---
+//
+// Retention:
+// - External event dedupe records (`idempotency_keys`) live for
+//   `EXTERNAL_EVENT_RETENTION_HOURS` and are removed by
+//   `cleanup_expired_idempotency_keys`.
+// - Outbox rows are kept until dispatched, then removed by
+//   `delete_dispatched_outbox_events` after `OUTBOX_RETENTION_DAYS`.
+
+pub const EXTERNAL_EVENT_RETENTION_HOURS: i64 = 24;
+pub const OUTBOX_RETENTION_DAYS: i64 = 7;
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OutboxEvent {
+    pub id: i64,
+    pub tenant_id: Option<Uuid>,
+    pub aggregate_id: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Compare-and-set a transaction's status. Returns the new version, or `None`
+/// when `expected_version` no longer matches, meaning another writer changed
+/// the row after the caller read it. The status change and its outbox row
+/// commit atomically.
+pub async fn update_transaction_status_versioned(
+    pool: &PgPool,
+    id: Uuid,
+    expected_version: i64,
+    new_status: &str,
+) -> Result<Option<i64>> {
+    let mut db_tx = pool.begin().await?;
+
+    let row = sqlx::query(
+        "UPDATE transactions SET status = $1, updated_at = NOW() \
+         WHERE id = $2 AND version = $3 RETURNING version, tenant_id",
+    )
+    .bind(new_status)
+    .bind(id)
+    .bind(expected_version)
+    .fetch_optional(&mut *db_tx)
+    .await?;
+
+    let Some(row) = row else {
+        db_tx.rollback().await?;
+        return Ok(None);
+    };
+    let version: i64 = row.get("version");
+    let tenant_id: Option<Uuid> = row.get("tenant_id");
+
+    insert_outbox_event(
+        &mut db_tx,
+        tenant_id,
+        &id.to_string(),
+        "transaction.status_changed",
+        &json!({ "status": new_status, "version": version }),
+    )
+    .await?;
+
+    db_tx.commit().await?;
+    Ok(Some(version))
+}
+
+/// Append an event to the outbox within the caller's DB transaction.
+pub async fn insert_outbox_event(
+    db_tx: &mut SqlxTransaction<'_, Postgres>,
+    tenant_id: Option<Uuid>,
+    aggregate_id: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO event_outbox (tenant_id, aggregate_id, event_type, payload) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tenant_id)
+    .bind(aggregate_id)
+    .bind(event_type)
+    .bind(payload)
+    .execute(&mut **db_tx)
+    .await?;
+    Ok(())
+}
+
+/// Oldest undispatched outbox events first, so consumers see per-aggregate order.
+pub async fn fetch_pending_outbox_events(pool: &PgPool, limit: i64) -> Result<Vec<OutboxEvent>> {
+    sqlx::query_as::<_, OutboxEvent>(
+        "SELECT id, tenant_id, aggregate_id, event_type, payload, created_at \
+         FROM event_outbox WHERE dispatched_at IS NULL ORDER BY id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Call only after the event has been successfully published.
+pub async fn mark_outbox_event_dispatched(pool: &PgPool, id: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE event_outbox SET dispatched_at = NOW() WHERE id = $1 AND dispatched_at IS NULL",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_dispatched_outbox_events(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM event_outbox WHERE dispatched_at IS NOT NULL \
+         AND dispatched_at < NOW() - make_interval(days => $1)",
+    )
+    .bind(OUTBOX_RETENTION_DAYS as i32)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Record that an external event (already hashed to `event_key` by the caller)
+/// has been consumed for `tenant_id`. Returns `false` when a live record already
+/// exists, i.e. the event is a duplicate delivery. An expired record is
+/// reclaimed.
+pub async fn claim_external_event(
+    pool: &PgPool,
+    tenant_id: &str,
+    event_key: &str,
+) -> Result<bool> {
+    let expires_at = Utc::now() + chrono::Duration::hours(EXTERNAL_EVENT_RETENTION_HOURS);
+    let result = sqlx::query(
+        "INSERT INTO idempotency_keys (tenant_id, key, status, expires_at) \
+         VALUES ($1, $2, 'claimed', $3) \
+         ON CONFLICT (tenant_id, key) DO UPDATE \
+         SET status = 'claimed', response = NULL, created_at = NOW(), expires_at = EXCLUDED.expires_at \
+         WHERE idempotency_keys.expires_at <= NOW()",
+    )
+    .bind(tenant_id)
+    .bind(event_key)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Release a claim taken by [`claim_external_event`] when processing failed, so
+/// the sender's retry is not rejected as a duplicate.
+pub async fn release_external_event(pool: &PgPool, tenant_id: &str, event_key: &str) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM idempotency_keys WHERE tenant_id = $1 AND key = $2 AND status = 'claimed'",
+    )
+    .bind(tenant_id)
+    .bind(event_key)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // --- Webhook Endpoint Redirects (Issue #1259) ---
