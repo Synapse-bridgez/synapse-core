@@ -18,6 +18,8 @@ pub const QUOTA_CONFIG_SPLIT_BRAIN: &str = "QuotaConfigSplitBrain";
 pub const SETTLEMENT_FEE_SPIKE: &str = "SettlementFeeSpike";
 pub const SETTLEMENT_FEE_BUMP_FREQUENCY_ANOMALY: &str = "SettlementFeeBumpFrequencyAnomaly";
 pub const SETTLEMENT_FEE_CAP_REJECTION: &str = "SettlementFeeCapRejection";
+pub const SWAP_SURVEILLANCE_HIGH_SEVERITY: &str = "SwapSurveillanceHighSeverity";
+pub const SWAP_ARCHIVE_DEGRADED: &str = "SwapArchiveDegraded";
 
 /// All in-process alert names, for exhaustive checks.
 pub const ALL: &[&str] = &[
@@ -30,4 +32,6 @@ pub const ALL: &[&str] = &[
     SETTLEMENT_FEE_SPIKE,
     SETTLEMENT_FEE_BUMP_FREQUENCY_ANOMALY,
     SETTLEMENT_FEE_CAP_REJECTION,
+    SWAP_SURVEILLANCE_HIGH_SEVERITY,
+    SWAP_ARCHIVE_DEGRADED,
 ];
