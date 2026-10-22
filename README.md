@@ -219,3 +219,6 @@ This project is licensed under the MIT License. See the LICENSE file for details
 - #1341: [High] Build a Go SDK with parity to the Rust SDK
 <!-- handsoff-issue-1351 -->
 - #1351: [High] Add typed GraphQL codegen for the Rust SDK from the live schema
+
+<!-- handsoff-issue-1467 -->
+- #1467: Add Consumer-Driven Contract Tests Against the Stellar Anchor Platform and Horizon
