@@ -76,8 +76,9 @@ swap, waiting for the Phase 2 swap engine to pick it up.
 
 **Entry conditions:**
 - `completed → swap_ready`, performed by a future swap-hand-off step, gated on
-  `swap::swap_enabled_for(flags, tenant_id)` (the `swap_engine` feature flag,
-  off by default)
+  `swap::swap_enabled_for(config, flags, tenant_id)` (the `SWAP_ENGINE_ENABLED`
+  kill switch and tenant allowlist, plus the `swap_engine` feature flag; off by
+  default). See `docs/swap-rollout.md`.
 
 **Exit transitions:**
 - → `failed`: the swap engine rejected the hand-off (`SwapError`)
@@ -209,9 +210,10 @@ receives a `swap::SwapHandoff`:
 transport-agnostic — an implementation may be in-process, a separate microservice,
 or an on-chain contract — and must be idempotent on `idempotency_key`.
 
-**Opt-in.** `swap::swap_enabled_for(flags, tenant_id)` returns `false` unless the
-`swap_engine` feature flag is enabled for that tenant, so transactions for tenants
-and assets not opted into swap are unaffected. The default engine is
+**Opt-in.** `swap::swap_enabled_for(config, flags, tenant_id)` returns `false` unless
+the env gate admits the tenant (`SWAP_ENGINE_ENABLED`, `SWAP_ENGINE_TENANT_ALLOWLIST`)
+and the `swap_engine` feature flag is enabled for that tenant, so transactions for
+tenants and assets not opted into swap are unaffected. The default engine is
 `NoopSwapEngine`, which returns `SwapOutcome::Skipped` for every hand-off.
 
 ---

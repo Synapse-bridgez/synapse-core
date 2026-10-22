@@ -477,12 +477,26 @@ pub struct ComplianceReport {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-// Minimal Asset struct for asset cache functionality
+/// Canonical identity of an asset: `{CODE}:{ISSUER}`, or `{CODE}` when there is
+/// no issuer (native XLM). Code and issuer are trimmed and uppercased so every
+/// module compares the same string regardless of how the input was supplied.
+pub fn canonical_asset_id(code: &str, issuer: Option<&str>) -> String {
+    let code = code.trim().to_ascii_uppercase();
+    match issuer.map(|i| i.trim().to_ascii_uppercase()) {
+        Some(issuer) if !issuer.is_empty() => format!("{code}:{issuer}"),
+        _ => code,
+    }
+}
+
+// Asset registry row (see src/config/assets.rs for the cache built on top)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Asset {
     pub id: Uuid,
     pub asset_code: String,
     pub asset_issuer: Option<String>,
+    pub decimals: i32,
+    pub min_amount: Option<BigDecimal>,
+    pub max_amount: Option<BigDecimal>,
     pub metadata: Option<serde_json::Value>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -490,9 +504,14 @@ pub struct Asset {
 }
 
 impl Asset {
+    /// Canonical `{CODE}:{ISSUER}` id for this asset.
+    pub fn canonical_id(&self) -> String {
+        canonical_asset_id(&self.asset_code, self.asset_issuer.as_deref())
+    }
+
     /// Fetch all assets from the database.
     pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
+        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, decimals, min_amount, max_amount, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code, asset_issuer")
             .fetch_all(pool)
             .await
     }
