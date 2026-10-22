@@ -119,6 +119,37 @@ pub mod codes {
         "Stale transition: settlement state changed during processing",
     );
 
+    // Swap specific errors
+    pub const SWAP_001: (&str, u16, &str) = ("ERR_SWAP_001", 409, "Swap quote expired");
+    pub const SWAP_002: (&str, u16, &str) = (
+        "ERR_SWAP_002",
+        409,
+        "Swap order cannot make this status transition",
+    );
+    pub const SWAP_003: (&str, u16, &str) = (
+        "ERR_SWAP_003",
+        409,
+        "Idempotency key reused with a different request payload",
+    );
+    pub const SWAP_004: (&str, u16, &str) = ("ERR_SWAP_004", 422, "Swap rejected by risk policy");
+
+    // Swap compensation errors
+    pub const COMPENSATION_001: (&str, u16, &str) = (
+        "ERR_COMPENSATION_001",
+        500,
+        "Compensation step failed; retry scheduled",
+    );
+    pub const COMPENSATION_002: (&str, u16, &str) = (
+        "ERR_COMPENSATION_002",
+        500,
+        "Compensation retries exhausted; manual intervention required",
+    );
+    pub const COMPENSATION_003: (&str, u16, &str) = (
+        "ERR_COMPENSATION_003",
+        409,
+        "Refund target is disabled",
+    );
+
     // Rate limiting
     pub const RATE_LIMIT_001: (&str, u16, &str) =
         ("ERR_RATE_LIMIT_001", 429, "Rate limit exceeded");
@@ -238,6 +269,41 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
             description: codes::SETTLEMENT_003.2,
         },
         ErrorCode {
+            code: codes::SWAP_001.0,
+            http_status: codes::SWAP_001.1,
+            description: codes::SWAP_001.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_002.0,
+            http_status: codes::SWAP_002.1,
+            description: codes::SWAP_002.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_003.0,
+            http_status: codes::SWAP_003.1,
+            description: codes::SWAP_003.2,
+        },
+        ErrorCode {
+            code: codes::SWAP_004.0,
+            http_status: codes::SWAP_004.1,
+            description: codes::SWAP_004.2,
+        },
+        ErrorCode {
+            code: codes::COMPENSATION_001.0,
+            http_status: codes::COMPENSATION_001.1,
+            description: codes::COMPENSATION_001.2,
+        },
+        ErrorCode {
+            code: codes::COMPENSATION_002.0,
+            http_status: codes::COMPENSATION_002.1,
+            description: codes::COMPENSATION_002.2,
+        },
+        ErrorCode {
+            code: codes::COMPENSATION_003.0,
+            http_status: codes::COMPENSATION_003.1,
+            description: codes::COMPENSATION_003.2,
+        },
+        ErrorCode {
             code: codes::RATE_LIMIT_001.0,
             http_status: codes::RATE_LIMIT_001.1,
             description: codes::RATE_LIMIT_001.2,
@@ -318,8 +384,31 @@ pub enum AppError {
     #[error("Settlement already exists: {0}")]
     SettlementAlreadyExists(String),
 
+    #[error("Compensation step failed: {0}")]
+    CompensationFailed(String),
+
+    #[error("Compensation retries exhausted: {0}")]
+    CompensationExhausted(String),
+
+    #[error("Refund target is disabled: {0}")]
+    CompensationTargetDisabled(String),
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
+
+    #[error("Swap quote expired")]
+    SwapQuoteExpired,
+
+    #[error("Illegal swap order transition: {0}")]
+    SwapIllegalTransition(String),
+
+    #[error("Idempotency key conflict: {0}")]
+    SwapIdempotencyConflict(String),
+
+    /// Risk-policy rejection. Carries only a stable machine-readable reason
+    /// code; policy thresholds and internals are never included.
+    #[error("Swap rejected by risk policy: {0}")]
+    SwapRiskRejected(&'static str),
 
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
@@ -357,7 +446,14 @@ impl AppError {
             AppError::MalformedWebhookPayload(_) => StatusCode::BAD_REQUEST,
             AppError::InvalidSettlementAmount(_) => StatusCode::BAD_REQUEST,
             AppError::SettlementAlreadyExists(_) => StatusCode::CONFLICT,
+            AppError::CompensationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::CompensationExhausted(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::CompensationTargetDisabled(_) => StatusCode::CONFLICT,
             AppError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            AppError::SwapQuoteExpired => StatusCode::CONFLICT,
+            AppError::SwapIllegalTransition(_) => StatusCode::CONFLICT,
+            AppError::SwapIdempotencyConflict(_) => StatusCode::CONFLICT,
+            AppError::SwapRiskRejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
             AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -389,7 +485,14 @@ impl AppError {
             AppError::MalformedWebhookPayload(_) => codes::WEBHOOK_002.0,
             AppError::InvalidSettlementAmount(_) => codes::SETTLEMENT_001.0,
             AppError::SettlementAlreadyExists(_) => codes::SETTLEMENT_002.0,
+            AppError::CompensationFailed(_) => codes::COMPENSATION_001.0,
+            AppError::CompensationExhausted(_) => codes::COMPENSATION_002.0,
+            AppError::CompensationTargetDisabled(_) => codes::COMPENSATION_003.0,
             AppError::RateLimitExceeded => codes::RATE_LIMIT_001.0,
+            AppError::SwapQuoteExpired => codes::SWAP_001.0,
+            AppError::SwapIllegalTransition(_) => codes::SWAP_002.0,
+            AppError::SwapIdempotencyConflict(_) => codes::SWAP_003.0,
+            AppError::SwapRiskRejected(_) => codes::SWAP_004.0,
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
             AppError::Redis(_) => codes::REDIS_001.0,
@@ -503,7 +606,7 @@ impl IntoResponse for AppError {
             _ => error_message.clone(),
         };
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "error": error_message,
             "code": code,
             "status": status.as_u16(),
@@ -511,6 +614,9 @@ impl IntoResponse for AppError {
             "detail": detail,
             "docs_url": docs_url,
         });
+        if let AppError::SwapRiskRejected(reason) = &self {
+            body["reason_code"] = serde_json::json!(reason);
+        }
 
         (status, Json(body)).into_response()
     }
