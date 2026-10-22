@@ -62,6 +62,51 @@ check_case "unsafe fixture (RENAME TABLE) is flagged" \
 check_case "safe fixture (view shim instead of RENAME TABLE) passes" \
   "$FIXTURES_DIR/safe-rename-table-view-shim" "pass"
 
+check_case "unsafe fixture (DROP COLUMN still referenced) is flagged" \
+  "$FIXTURES_DIR/unsafe-drop-column" "fail"
+
+check_case "safe fixture (expand/contract deprecation instead of DROP COLUMN) passes" \
+  "$FIXTURES_DIR/safe-drop-column-expand-contract" "pass"
+
+check_case "unsafe fixture (ADD COLUMN NOT NULL with volatile DEFAULT) is flagged" \
+  "$FIXTURES_DIR/unsafe-not-null-volatile-default" "fail"
+
+check_case "safe fixture (ADD COLUMN nullable then backfill) passes" \
+  "$FIXTURES_DIR/safe-add-column-nullable" "pass"
+
+check_case "unsafe fixture (ALTER COLUMN TYPE rewrite on large table) is flagged" \
+  "$FIXTURES_DIR/unsafe-type-rewrite" "fail"
+
+check_case "safe fixture (expand/contract new column for type change) passes" \
+  "$FIXTURES_DIR/safe-type-change-expand-contract" "pass"
+
+check_case "unsafe fixture (VALIDATE CONSTRAINT without NOT VALID) is flagged" \
+  "$FIXTURES_DIR/unsafe-validate-constraint" "fail"
+
+check_case "safe fixture (ADD CONSTRAINT NOT VALID then VALIDATE) passes" \
+  "$FIXTURES_DIR/safe-validate-constraint" "pass"
+
+# Rollback rehearsal: apply all migrations forward against an empty database,
+# seed representative data, then apply each migration's down path.
+ROLLBACK_SCRIPT="$SCRIPT_DIR/rollback-rehearsal.sh"
+if [[ -x "$ROLLBACK_SCRIPT" ]]; then
+  set +e
+  rollback_output=$("$ROLLBACK_SCRIPT" 2>&1)
+  rollback_status=$?
+  set -e
+
+  if [[ "$rollback_status" -ne 0 ]]; then
+    echo "FAIL: rollback rehearsal -- expected down paths to apply cleanly against seeded database"
+    echo "--- output ---"
+    echo "$rollback_output"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo "OK: rollback rehearsal (forward + seeded down paths)"
+  fi
+else
+  echo "SKIP: rollback rehearsal -- $ROLLBACK_SCRIPT not found or not executable"
+fi
+
 if [[ "$FAILURES" -gt 0 ]]; then
   echo "$FAILURES fixture test(s) failed."
   exit 1

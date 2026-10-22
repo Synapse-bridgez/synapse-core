@@ -52,6 +52,12 @@
 //! | `tokio_task_leak_suspected_total` | Counter    | Load-uncorrelated task growth detections, by category |
 //! | `pipeline_stage_latency_ms`       | Histogram  | Latency attributed to each pipeline stage (latency budget) |
 //! | `pipeline_stage_budget_utilization` | Gauge    | Stage P95 / stage budget, by stage |
+//! | `swap_orders_total`               | Counter    | Swap order lifecycle events, labeled by event (created, quoted, executed, settled, failed, rejected) and engine |
+//! | `swap_stage_latency_ms`           | Histogram  | Latency per swap stage (quote, execute, settle, handoff), labeled by stage and outcome |
+//! | `swap_orders_in_flight`           | UpDownCounter | Swap hand-offs currently awaiting a result from the swap engine |
+//!
+//! Swap metrics never carry `order_id` or `tenant_id` labels: those belong in
+//! logs and trace spans (see `docs/metrics-cardinality-convention.md`).
 //!
 //! ## Configuration
 //!
@@ -62,7 +68,7 @@
 
 use opentelemetry::{
     global,
-    metrics::{Counter, Histogram, Meter, ObservableGauge, Unit},
+    metrics::{Counter, Histogram, Meter, ObservableGauge, Unit, UpDownCounter},
     KeyValue,
 };
 use opentelemetry_otlp::WithExportConfig;
@@ -165,6 +171,25 @@ pub fn cache_misses_total() -> Counter<u64> {
     meter()
         .u64_counter("cache_misses_total")
         .with_description("Number of cache misses")
+        .init()
+}
+
+/// Swap quote cache lookup counter, labelled by `outcome` (hit, miss, stale_reject).
+pub fn quote_cache_lookups_total() -> Counter<u64> {
+    meter()
+        .u64_counter("quote_cache_lookups_total")
+        .with_description("Swap quote cache lookups by outcome")
+        .init()
+}
+
+/// Swap circuit breaker and kill-switch state transitions, labeled by the
+/// state entered (`open`, `half_open`, `closed`).
+pub fn swap_breaker_transitions_total() -> Counter<u64> {
+    meter()
+        .u64_counter("swap_breaker_transitions_total")
+        .with_description("Swap circuit breaker state transitions, labeled by new state")
+        .init()
+}
         .init()
 }
 
@@ -350,6 +375,37 @@ pub fn account_monitor_concurrent_write_prevented_total() -> Counter<u64> {
         .init()
 }
 
+/// Swap order lifecycle counter, labeled by `event` (`created`, `quoted`,
+/// `executed`, `settled`, `failed`, `rejected`) and `engine`. Both label sets
+/// are closed: `event` is an enum and `engine` is the configured
+/// `SwapEngine::name()`.
+pub fn swap_orders_total() -> Counter<u64> {
+    meter()
+        .u64_counter("swap_orders_total")
+        .with_description("Swap order lifecycle events, labeled by event and engine")
+        .init()
+}
+
+/// Per-stage swap latency histogram (milliseconds), labeled by `stage`
+/// (`quote`, `execute`, `settle`, `handoff`) and `outcome` (`ok`, `error`,
+/// `skipped`, `deferred`).
+pub fn swap_stage_latency_ms() -> Histogram<f64> {
+    meter()
+        .f64_histogram("swap_stage_latency_ms")
+        .with_description("Latency of each swap stage in milliseconds")
+        .with_unit(Unit::new("ms"))
+        .init()
+}
+
+/// Swap hand-offs currently in flight at the swap engine. A value that never
+/// returns to zero indicates stuck hand-offs.
+pub fn swap_orders_in_flight() -> UpDownCounter<i64> {
+    meter()
+        .i64_up_down_counter("swap_orders_in_flight")
+        .with_description("Swap hand-offs currently awaiting a result from the swap engine")
+        .init()
+}
+
 fn task_state() -> &'static [std::sync::Mutex<TaskCategoryState>; 3] {
     TASK_STATE.get_or_init(|| {
         [
@@ -495,6 +551,97 @@ pub fn settlement_transactions_total() -> Counter<u64> {
     meter()
         .u64_counter("settlement_transactions_total")
         .with_description("Total transactions settled via settle_asset, labeled by asset_code")
+        .init()
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Stellar network fee strategy (issue #1484)
+// ---------------------------------------------------------------------------
+//
+// Settlement transactions pay a Stellar *inclusion* fee derived from current
+// Horizon fee statistics. These instruments make the fee strategy observable:
+// how often the network is spiking, how often we bump stalled transactions,
+// how often a fee cap forced us to reject rather than overpay, and how many
+// stroops each settlement attempt actually cost. All amounts are stroops
+// (i64) end-to-end; the histogram records them as f64 for export only.
+
+/// Recommended inclusion fee (stroops) derived from Horizon fee stats, labeled
+/// by `percentile` (the configured percentile used, e.g. `"p90"`). A rising
+/// series here is the earliest signal of ledger congestion.
+pub fn settlement_fee_recommended_stroops() -> Histogram<f64> {
+    meter()
+        .f64_histogram("settlement_fee_recommended_stroops")
+        .with_description(
+            "Recommended Stellar inclusion fee in stroops derived from Horizon fee \
+             stats, labeled by the configured percentile",
+        )
+        .with_unit(Unit::new("stroop"))
+        .init()
+}
+
+/// Fee actually paid per settlement attempt, in stroops, labeled by
+/// `asset_code` and `attempt_kind` (`"initial"` | `"bump"`). Used for cost
+/// reporting and reconciliation of fee spend per order.
+pub fn settlement_fee_paid_stroops() -> Histogram<f64> {
+    meter()
+        .f64_histogram("settlement_fee_paid_stroops")
+        .with_description(
+            "Stellar inclusion fee actually paid per settlement attempt, in stroops, \
+             labeled by asset_code and attempt_kind",
+        )
+        .with_unit(Unit::new("stroop"))
+        .init()
+}
+
+/// Cumulative stroops paid across all settlement attempts, labeled by
+/// `asset_code`. A counter (not a gauge) so it can be summed for cost
+/// reporting without losing history.
+pub fn settlement_fee_paid_total_stroops() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_paid_total_stroops")
+        .with_description(
+            "Cumulative Stellar inclusion fees paid for settlement, in stroops, \
+             labeled by asset_code",
+        )
+        .init()
+}
+
+/// Fee-spike detections: the recommended inclusion fee exceeded the configured
+/// spike threshold relative to the base fee, labeled by `severity`
+/// (`"warning"` | `"critical"`). Drives the fee-spike alerting rule.
+pub fn settlement_fee_spike_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_spike_total")
+        .with_description(
+            "Detections of a Stellar fee spike (recommended fee far above base fee), \
+             labeled by severity",
+        )
+        .init()
+}
+
+/// Fee-bump attempts for stalled settlement transactions, labeled by
+/// `outcome` (`"submitted"` | `"already_included"` | `"cap_exceeded"` |
+/// `"failed"`). `already_included` is the no-op path where Horizon shows the
+/// original transaction landed before the bump was submitted.
+pub fn settlement_fee_bump_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_bump_total")
+        .with_description(
+            "Fee-bump attempts for stalled settlement transactions, labeled by outcome",
+        )
+        .init()
+}
+
+/// Settlement attempts rejected because the required fee would exceed a
+/// per-tenant or global fee cap, labeled by `scope` (`"tenant"` | `"global"`).
+/// A nonzero rate means settlement is being blocked by caps under congestion.
+pub fn settlement_fee_cap_rejected_total() -> Counter<u64> {
+    meter()
+        .u64_counter("settlement_fee_cap_rejected_total")
+        .with_description(
+            "Settlement attempts rejected because the required fee would exceed a \
+             fee cap, labeled by scope (tenant | global)",
+        )
         .init()
 }
 

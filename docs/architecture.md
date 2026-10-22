@@ -131,6 +131,99 @@ Will define a centralized `AppError` enum using `thiserror`, covering database, 
 
 ---
 
+### `src/swap/calendar.rs` — Trading Calendars *(Planned)*
+
+A configurable, immutable, versioned trading-calendar subsystem that defines
+when trading and settlement are actually possible per venue or corridor. It is
+the single source of truth for time logic used by quote validity, scheduled
+order firing, execution slicing, and settlement scheduling.
+
+**Design principles**
+
+- **IANA timezones** via a maintained tz database (no fixed offsets), so
+  daylight-saving transitions and half-day sessions are handled correctly.
+- **Immutable, versioned data.** Each calendar set carries a monotonically
+  increasing `version`; decisions record the version used so historical
+  outcomes can be explained after the fact.
+- **Pure helper functions** over an explicit `now` argument, so tests are
+  deterministic. A single authoritative clock source (injected) is used for
+  all production time comparisons; replicas must not use their own clocks.
+- **Explicit closed-window behavior per enforcement point** (reject, defer to
+  next open, or extend expiry) rather than defaulting to rejection everywhere.
+
+**Configuration schema**
+
+```toml
+[[calendars]]
+version = 3
+venue = "stellar-dex"          # venue or corridor identifier
+corridor = "USD->USDC"         # optional; omit for venue-wide calendars
+timezone = "America/New_York"  # IANA timezone name
+
+# Weekly hours: one entry per weekday (mon..sun). Times are local to `timezone`.
+[calendars.weekly_hours]
+mon = [["09:30", "16:00"]]
+tue = [["09:30", "16:00"]]
+wed = [["09:30", "16:00"]]
+thu = [["09:30", "16:00"]]
+fri = [["09:30", "13:00"]]     # half-day session
+sat = []
+sun = []
+
+# Holiday exceptions: full-day closures or partial-day overrides.
+[[calendars.holidays]]
+date = "2025-12-25"
+closed = true
+
+[[calendars.holidays]]
+date = "2025-11-28"
+closed = false
+hours = [["09:30", "13:00"]]   # early close
+
+# Settlement windows (fiat banking hours) for this calendar.
+[[calendars.settlement_windows]]
+days = ["mon", "tue", "wed", "thu", "fri"]
+hours = [["09:00", "17:00"]]
+```
+
+**Validation rules** (rejected at load time with descriptive errors):
+
+- `timezone` must be a valid IANA name.
+- Weekly-hour and settlement-window ranges must be well-formed `HH:MM`, with
+  `start < end`; overlapping ranges within a day are rejected.
+- Holiday dates must be valid `YYYY-MM-DD`; overlapping holiday definitions
+  for the same date are rejected.
+- `version` must be strictly greater than the currently loaded version.
+
+**Helper API**
+
+| Function | Answers |
+|----------|---------|
+| `is_tradable_now(venue, corridor, now)` | Is this pair tradable right now? |
+| `next_open_window(venue, corridor, after)` | When is the next open window? |
+| `quote_expiry_in_window(venue, corridor, expiry)` | Does this quote expiry fall inside a window? |
+| `next_settlement_window(venue, corridor, after)` | When can this settlement occur? |
+
+**Enforcement points and closed-window behavior**
+
+| Enforcement point | Behavior on a closed window |
+|-------------------|-----------------------------|
+| Quote issuance / expiry | Reject issuance outside a window; extend expiry to the next open window when it would otherwise fall in a closure. |
+| Scheduled / recurring orders | Defer firing to the next open window. |
+| Execution slicing schedules | Defer slices to the next open window. |
+| Settlement scheduling | Defer settlement to the next settlement window. |
+
+**Out of scope:** real-time venue outage detection (belongs with
+observability / circuit-breaker work).
+
+**Edge cases covered by tests:** DST transitions, half-day sessions,
+overlapping holiday definitions, calendars changed while orders are in flight
+(version pinning), and clock skew across replicas (single injected clock).
+Table-driven tests span DST boundaries and year rollovers; configuration
+validation tests cover malformed calendars.
+
+---
+
 ### `src/stellar/` — Stellar Integration *(Planned)*
 
 | File        | Purpose                                                         |

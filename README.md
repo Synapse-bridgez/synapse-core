@@ -60,7 +60,32 @@ DATABASE_URL – PostgresSQL connection string (e.g., postgres://synapse:synapse
 SERVER_PORT – Port for the web server (default 3000)
 STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.stellar.org)
 REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
+QUOTE_CACHE_TTL_SECS – TTL for cached swap quotes in seconds (default 10)
+QUOTE_CACHE_MAX_STALENESS_SECS – Max age of the price snapshot a cached quote may be served from, in seconds (default 5)
 ```
+
+Optional market-data (price feed for swap quoting) settings:
+
+```
+PRICE_SOURCE_URL – HTTP price source base URL; calls GET {url}/price?base=&quote= (unset disables HTTP ingestion)
+PRICE_SOURCE_TIMEOUT_MS – Per-request timeout (default 2000)
+PRICE_SOURCE_MAX_RETRIES – Retries after a failed fetch, max 10 (default 2)
+PRICE_SOURCE_RETRY_BACKOFF_MS – Base retry backoff, doubled per attempt (default 200)
+PRICE_INGESTION_INTERVAL_SECS – Scheduled ingestion interval (default 10)
+PRICE_CACHE_TTL_SECS – Fresh snapshot cache TTL in Redis (default 30)
+PRICE_MAX_AGE_SECS – Max snapshot age accepted for quoting (default 15)
+```
+
+A snapshot is usable for quoting only if it is not flagged `stale` and its source timestamp is within `PRICE_MAX_AGE_SECS`. When the source is unavailable, the last known snapshot is served with `stale = true`.
+
+Swap engine rollout (optional, defaults to off). Set per environment in `.env.development`, `.env.production`, or `.env.example.failover`:
+
+```
+SWAP_ENGINE_ENABLED – Process-wide kill switch for swap hand-offs (true/false, default false)
+SWAP_ENGINE_TENANT_ALLOWLIST – Comma-separated tenant ids admitted to swap (* = all, empty = none)
+```
+
+A tenant also needs the `swap_engine` feature flag enabled. The rollout sequence, kill switch, and stuck-order runbook are in [docs/swap-rollout.md](docs/swap-rollout.md).
 
 3. Start PostgresSQL Using Docker (recommended for development):
 
@@ -91,6 +116,64 @@ cargo run
 ```
 
 You should see logs indicating the server started and migrations completed.
+
+### ⚡ One-Command Local Development (Swap Engine Profile)
+
+For swap engine work there is a dedicated, idempotent bootstrap that brings up
+the full local stack, applies migrations, seeds deterministic demo data, and
+prints ready-to-use endpoints:
+
+```bash
+cargo xtask dev up
+```
+
+This command:
+
+1. Starts the `dev` docker-compose profile (`docker-compose.dev.yml`) with
+   PostgreSQL, Redis, and the swap engine dependencies, using the healthy
+   defaults from `.env.development`.
+2. Applies all `migrations/` via `sqlx` (the same migrations the service runs on
+   startup).
+3. Seeds deterministic demo data through the service's persistence layer:
+   tenants, assets, liquidity provider stubs, sample swap orders, and fills.
+   Fixed ids and timestamps are used so local runs and snapshots are
+   comparable.
+4. Prints the endpoints you can hit immediately, e.g.:
+
+   ```text
+   API:        http://localhost:3000
+   Health:     http://localhost:3000/health
+   Webhook:    http://localhost:3000/webhook
+   PostgreSQL: postgres://synapse:synapse@localhost:5432/synapse
+   Redis:      redis://localhost:6379
+   ```
+
+The bootstrap is safe to re-run: seeding is idempotent and will not duplicate
+rows. It requires no external network access beyond container image pulls and
+contains no real secrets (local-only credentials from `.env.development`).
+
+#### Seed & Teardown
+
+```bash
+# Seed demo data (idempotent)
+cargo xtask dev seed
+
+# Tear down seeded demo data and stop the stack
+cargo xtask dev down
+
+# Reset: tear down, re-apply migrations, and re-seed from scratch
+cargo xtask dev reset
+```
+
+`reset`/teardown is guarded: it refuses to run against a non-local database
+host (anything other than `localhost`/`127.0.0.1`) unless you explicitly pass
+`--force`, and it will prompt for confirmation when the target database does
+not look like a development database. This keeps the tooling safe against
+accidental use on shared or production databases.
+
+The dev profile is additive and does not change the existing Phase 1 flow:
+`docker-compose up -d` and `cargo run` continue to work as documented above.
+=======
 
 ### Testing
 

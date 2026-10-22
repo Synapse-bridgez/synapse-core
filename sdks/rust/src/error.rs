@@ -141,6 +141,9 @@ pub enum ErrorCode {
     RateLimit001,
     Redis001,
     QueryComplexity001,
+    Swap001,
+    Swap002,
+    Swap003,
     /// A catalog code with no matching variant in this SDK version.
     Unknown(String),
 }
@@ -174,6 +177,9 @@ impl ErrorCode {
             "ERR_RATE_LIMIT_001" => Self::RateLimit001,
             "ERR_REDIS_001" => Self::Redis001,
             "ERR_QUERY_COMPLEXITY_001" => Self::QueryComplexity001,
+            "ERR_SWAP_001" => Self::Swap001,
+            "ERR_SWAP_002" => Self::Swap002,
+            "ERR_SWAP_003" => Self::Swap003,
             other => Self::Unknown(other.to_string()),
         }
     }

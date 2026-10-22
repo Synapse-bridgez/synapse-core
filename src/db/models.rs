@@ -168,6 +168,63 @@ pub struct Settlement {
     pub destination_account: Option<String>,
 }
 
+/// Settlement state for one executed swap hand-off (`swap_settlements` row).
+/// `status` is one of `pending`, `settlement_pending`, `settled`, `failed`.
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapSettlement {
+    pub id: Uuid,
+    pub idempotency_key: String,
+    pub transaction_id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub stellar_account: String,
+    pub asset_code: String,
+    pub amount: BigDecimal,
+    pub status: String,
+    pub settlement_ref: Option<String>,
+    pub last_error: Option<String>,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A Phase 2 swap order. `status` is one of `quoted`, `executing`, `settled`,
+/// `failed` (see `swap_orders` in migrations).
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub transaction_id: Uuid,
+    pub source_asset: String,
+    pub target_asset: String,
+    pub amount: BigDecimal,
+    pub minimum_output: BigDecimal,
+    pub status: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[async_graphql::Object]
+impl Settlement {
+    async fn id(&self) -> String {
+        self.id.to_string()
+    }
+    async fn asset_code(&self) -> &str {
+        &self.asset_code
+    }
+    async fn total_amount(&self) -> String {
+        self.total_amount.to_string()
+    }
+    async fn tx_count(&self) -> i32 {
+        self.tx_count
+    }
+    async fn period_start(&self) -> DateTime<Utc> {
+        self.period_start
+    }
+   
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[async_graphql::Object]
 impl Settlement {
     async fn id(&self) -> String {
@@ -477,12 +534,26 @@ pub struct ComplianceReport {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-// Minimal Asset struct for asset cache functionality
+/// Canonical identity of an asset: `{CODE}:{ISSUER}`, or `{CODE}` when there is
+/// no issuer (native XLM). Code and issuer are trimmed and uppercased so every
+/// module compares the same string regardless of how the input was supplied.
+pub fn canonical_asset_id(code: &str, issuer: Option<&str>) -> String {
+    let code = code.trim().to_ascii_uppercase();
+    match issuer.map(|i| i.trim().to_ascii_uppercase()) {
+        Some(issuer) if !issuer.is_empty() => format!("{code}:{issuer}"),
+        _ => code,
+    }
+}
+
+// Asset registry row (see src/config/assets.rs for the cache built on top)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Asset {
     pub id: Uuid,
     pub asset_code: String,
     pub asset_issuer: Option<String>,
+    pub decimals: i32,
+    pub min_amount: Option<BigDecimal>,
+    pub max_amount: Option<BigDecimal>,
     pub metadata: Option<serde_json::Value>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -490,9 +561,14 @@ pub struct Asset {
 }
 
 impl Asset {
+    /// Canonical `{CODE}:{ISSUER}` id for this asset.
+    pub fn canonical_id(&self) -> String {
+        canonical_asset_id(&self.asset_code, self.asset_issuer.as_deref())
+    }
+
     /// Fetch all assets from the database.
     pub async fn fetch_all(pool: &sqlx::PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code")
+        sqlx::query_as::<_, Self>("SELECT id, asset_code, asset_issuer, decimals, min_amount, max_amount, metadata, enabled, created_at, updated_at FROM assets ORDER BY asset_code, asset_issuer")
             .fetch_all(pool)
             .await
     }
@@ -507,4 +583,183 @@ impl Asset {
         .await?;
         Ok(exists)
     }
+}
+
+/// Lifecycle of a Phase 2 swap order. Persisted as snake_case text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwapOrderStatus {
+    SwapReady,
+    Quoting,
+    Quoted,
+    Executing,
+    Settled,
+    Failed,
+    Cancelled,
+}
+
+impl SwapOrderStatus {
+    /// Whether an order may move from `self` to `to`. Same-state is always
+    /// allowed (idempotent). `failed` and `cancelled` are terminal, and an
+    /// order can no longer be cancelled once it is executing.
+    pub fn can_transition_to(self, to: SwapOrderStatus) -> bool {
+        use SwapOrderStatus::*;
+        self == to
+            || matches!(
+                (self, to),
+                (SwapReady, Quoting | Cancelled)
+                    | (Quoting, Quoted | Failed | Cancelled)
+                    | (Quoted, Executing | Failed | Cancelled)
+                    | (Executing, Settled | Failed)
+            )
+    }
+}
+
+impl std::fmt::Display for SwapOrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwapOrderStatus::SwapReady => write!(f, "swap_ready"),
+            SwapOrderStatus::Quoting => write!(f, "quoting"),
+            SwapOrderStatus::Quoted => write!(f, "quoted"),
+            SwapOrderStatus::Executing => write!(f, "executing"),
+            SwapOrderStatus::Settled => write!(f, "settled"),
+            SwapOrderStatus::Failed => write!(f, "failed"),
+            SwapOrderStatus::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+impl FromStr for SwapOrderStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "swap_ready" => Ok(SwapOrderStatus::SwapReady),
+            "quoting" => Ok(SwapOrderStatus::Quoting),
+            "quoted" => Ok(SwapOrderStatus::Quoted),
+            "executing" => Ok(SwapOrderStatus::Executing),
+            "settled" => Ok(SwapOrderStatus::Settled),
+            "failed" => Ok(SwapOrderStatus::Failed),
+            "cancelled" => Ok(SwapOrderStatus::Cancelled),
+            _ => Err(format!("Invalid swap order status: {}", s)),
+        }
+    }
+}
+
+/// A swap quote issued by the Phase 2 engine. Immutable once persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SwapQuote {
+    pub id: Uuid,
+    pub tenant_id: Option<Uuid>,
+    pub stellar_account: String,
+    pub source_asset: String,
+    pub destination_asset: String,
+    pub source_amount: BigDecimal,
+    pub destination_amount: BigDecimal,
+    pub rate: BigDecimal,
+    pub fee_amount: BigDecimal,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A Phase 2 swap intent. Amounts are fixed-point `BigDecimal`, never floats.
+/// `status` is stored as text; parse it with [`SwapOrder::status`].
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub idempotency_key: String,
+    pub deposit_transaction_id: Option<Uuid>,
+    pub source_asset: String,
+    pub target_asset: String,
+    pub amount: BigDecimal,
+    pub status: String,
+    pub quote: Option<serde_json::Value>,
+    pub execution: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Debug, FromRow, Serialize, Deserialize, Clone)]
+pub struct SwapOrder {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub idempotency_key: String,
+    pub deposit_transaction_id: Option<Uuid>,
+    pub stellar_account: String,
+    pub source_asset: String,
+    pub destination_asset: String,
+    pub target_asset: String,
+    pub amount: BigDecimal,
+    pub quoted_amount: Option<BigDecimal>,
+    pub quote_id: Option<String>,
+    pub status: String,
+    pub version: i64,
+    pub quote: Option<serde_json::Value>,
+    pub execution: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl SwapOrder {
+    /// New order in `swap_ready`, not yet persisted.
+    pub fn new(
+        tenant_id: Uuid,
+        stellar_account: String,
+        source_asset: String,
+        destination_asset: String,
+        amount: BigDecimal,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            tenant_id,
+            stellar_account,
+            source_asset,
+            destination_asset,
+            target_asset: destination_asset.clone(),
+            amount,
+            quoted_amount: None,
+            quote_id: None,
+            status: SwapOrderStatus::SwapReady.to_string(),
+            version: 0,
+            idempotency_key: String::new(),
+            deposit_transaction_id: None,
+            quote: None,
+            execution: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Parsed lifecycle status. Errors only if the stored text is unknown.
+    pub fn status(&self) -> Result<SwapOrderStatus, String> {
+        self.status.parse()
+    }
+}
+
+/// An execution fill against a [`SwapOrder`]. Immutable once persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SwapFill {
+    pub id: Uuid,
+    pub order_id: Uuid,
+    pub order_created_at: DateTime<Utc>,
+    pub source_amount: BigDecimal,
+    pub destination_amount: BigDecimal,
+    pub rate: BigDecimal,
+    pub fee_amount: BigDecimal,
+    pub external_ref: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One entry in the append-only swap order lifecycle log.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SwapEvent {
+    pub id: Uuid,
+    pub order_id: Uuid,
+    pub order_created_at: DateTime<Utc>,
+    pub from_status: Option<String>,
+    pub to_status: String,
+    pub payload: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
 }
