@@ -153,6 +153,77 @@ impl TestApp {
         self.readiness.start_drain();
     }
 
+    /// Flip the swap subsystem into draining mode (stop accepting new orders)
+    /// without touching the HTTP-level readiness flag. Used by graceful
+    /// shutdown tests to assert new orders are rejected during drain.
+    #[allow(dead_code)]
+    pub async fn start_swap_drain(&self) {
+        self.readiness.start_swap_drain();
+    }
+
+    /// Returns true once the swap subsystem is draining.
+    #[allow(dead_code)]
+    pub fn is_swap_draining(&self) -> bool {
+        self.readiness.is_swap_draining()
+    }
+
+    /// Simulate a restart: drop the current HTTP server is out of scope for the
+    /// harness, but recovery logic can be exercised by re-running the startup
+    /// recovery path against the same pool. Returns the number of orders that
+    /// were resumed or safely failed.
+    #[allow(dead_code)]
+    pub async fn run_startup_recovery(&self) -> Result<u64, sqlx::Error> {
+        synapse_core::swap::recover_in_flight_orders(&self.pool).await
+    }
+
+    /// Count bridge handoff records emitted for a given swap/order id.
+    #[allow(dead_code)]
+    pub async fn count_handoffs_for(&self, order_id: &str) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bridge_handoffs WHERE order_id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    /// Fetch the current handoff status for a given order id, if any.
+    #[allow(dead_code)]
+    pub async fn handoff_status_for(&self, order_id: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bridge_handoffs WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Drive the read-model projector to catch up on all pending outbox events.
+    /// Returns the number of events processed.
+    #[allow(dead_code)]
+    pub async fn catch_up_read_model(&self) -> Result<u64, sqlx::Error> {
+        synapse_core::swap::read_model::catch_up(&self.pool).await
+    }
+
+    /// POST a JSON body to a batch endpoint and return the parsed response.
+    #[allow(dead_code)]
+    pub async fn post_batch(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value), Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+        let res = client
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-API-Key", TEST_API_KEY)
+            .json(body)
+            .send()
+            .await?;
+        let status = res.status();
+        let json = res.json::<serde_json::Value>().await?;
+        Ok((status, json))
+    }
+
     /// Truncate all tables for test isolation (call between tests if reusing TestApp).
     #[allow(dead_code)]
     pub async fn cleanup(&self) {

@@ -270,6 +270,10 @@ See [Database Failover](database_failover.md) for detailed procedures.
 | Telemetry errors by error kind | ≥20 in 5 min for 6 min | Warning | Inspect error kind, error count, threshold, and exporter/backend health |
 | Oversized telemetry webhook payloads | ≥10 in 5 min for 6 min | Warning | Check payload size band and sender request configuration |
 | Telemetry webhook timestamp skew | ≥10 in 5 min for 6 min | Warning | Check sender clock and the past/future skew band |
+| Swap order failure rate | >5% of hand-offs for 5 min | Critical | See "Swap Engine Alerts" below |
+| Swap order rejection rate | >10% of hand-offs for 10 min | Warning | See "Swap Engine Alerts" below |
+| Swap orders stuck executing | Hand-off in flight for all of 15 min | Critical | See "Swap Engine Alerts" below |
+| Swap settlement P95 latency | >5 min for 10 min | Warning | See "Swap Engine Alerts" below |
 
 ### Telemetry Silent-Failure Log Alerts
 
@@ -444,6 +448,39 @@ P95 ÷ budget, so you can see which other stages are close behind.
 5. Rebalancing budgets between stages is a deliberate config change
    (`LATENCY_BUDGET_*_MS`), not an incident response.
 
+### Swap Engine Alerts
+
+These alerts cover the Phase 2 swap engine boundary (`src/swap/`), instrumented
+by `ObservedSwapEngine`. Dashboard: `monitoring/swap-engine-dashboard.json`.
+
+| Alert | Signal |
+|-------|--------|
+| `SwapOrderFailureRateHigh` | `swap_orders_total{event="failed"}` over created + failed + rejected above 5% |
+| `SwapOrderRejectionRateHigh` | `swap_orders_total{event="rejected"}` over created + failed + rejected above 10% |
+| `SwapOrdersStuckExecuting` | `swap_orders_in_flight` never returns to zero over 15 minutes |
+| `SwapSettlementLagHigh` | P95 of `swap_stage_latency_ms{stage="settle"}` above 5 minutes |
+
+**Operator response:**
+1. Find the affected orders: filter logs on `swap.handoff` spans or the
+   `swap hand-off failed` message, grouped by `error_kind`
+   (`unavailable`, `invalid_handoff`, `internal`) and `engine`. Logs carry
+   `order_id` and `tenant_id`; metrics deliberately do not.
+2. **Failure rate:** `unavailable` points at the swap engine being down or
+   not ready. `internal` points at engine-side errors. Check the engine's own
+   health before retrying anything.
+3. **Rejection rate:** `invalid_handoff` means the engine refused the payload.
+   Check whether a recent Phase 1 change altered the `SwapHandoff` shape or
+   the metadata it carries.
+4. **Stuck executing:** the in-flight gauge has not drained for 15 minutes, so
+   at least one hand-off call has not returned. Identify the stuck
+   `order_id` from the open `swap.handoff` spans, then check the engine for
+   that order before any manual intervention. Hand-offs are idempotent on
+   `idempotency_key`, so re-delivery is safe once the engine is healthy.
+5. **Settlement lag:** the `settle` series is only emitted once the settlement
+   stage of the swap engine is wired, so this alert cannot fire before then.
+   When it does fire, compare `settle` latency against `handoff` latency to
+   tell whether the delay is in the engine or in settlement itself.
+
 ### Tokio Task Leak Suspected
 
 `TokioTaskLeakSuspected` fires when the live-task count for one spawn
@@ -483,6 +520,38 @@ See `docs/release-scorecard.md`.
    treat the attribution to that single release with care.
 
 ---
+
+### SLO Burn: Availability Fast Burn
+
+**Meaning:** HTTP 5xx ratio (tenant-caused 4xx excluded) is consuming the availability error budget faster than sustainable. Fast burn = 14.4x over 1h (and 5m). See `docs/slo.md`.
+
+**First steps:** Check `HighErrorRate`, `DatabasePoolExhausted` and `CircuitBreakerOpen`; inspect 5xx logs by route (`docs/structured-log-aggregation.md`); check the most recent deploy (`docs/blue-green-deployment.md`).
+
+**Escalation:** Page the on-call engineer; if a rollout is in progress, halt and roll back. If unresolved after 30 min, escalate to the engineering lead. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
+### SLO Burn: Availability Slow Burn
+
+**Meaning:** HTTP 5xx ratio (tenant-caused 4xx excluded) is consuming the availability error budget faster than sustainable. Slow burn = 6x over 6h (and 30m). See `docs/slo.md`.
+
+**First steps:** Check `HighErrorRate`, `DatabasePoolExhausted` and `CircuitBreakerOpen`; inspect 5xx logs by route (`docs/structured-log-aggregation.md`); check the most recent deploy (`docs/blue-green-deployment.md`).
+
+**Escalation:** Open a ticket for the owning team; review within one business day. Escalate to a page if it becomes a fast burn. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
+### SLO Burn: Latency Fast Burn
+
+**Meaning:** More than the budgeted share of requests exceed 1s. Fast burn = 14.4x over 1h (and 5m). See `docs/slo.md`.
+
+**First steps:** Check `HighResponseTime`, DB pool saturation and slow queries (`db_slow_queries_total`), and downstream dependency health (`docs/health-dependency-graph.md`).
+
+**Escalation:** Page the on-call engineer; if a rollout is in progress, halt and roll back. If unresolved after 30 min, escalate to the engineering lead. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
+
+### SLO Burn: Latency Slow Burn
+
+**Meaning:** More than the budgeted share of requests exceed 1s. Slow burn = 6x over 6h (and 30m). See `docs/slo.md`.
+
+**First steps:** Check `HighResponseTime`, DB pool saturation and slow queries (`db_slow_queries_total`), and downstream dependency health (`docs/health-dependency-graph.md`).
+
+**Escalation:** Open a ticket for the owning team; review within one business day. Escalate to a page if it becomes a fast burn. Budget-exhaustion policy: `docs/slo.md#budget-exhaustion-policy`.
 
 ## Incident Response
 

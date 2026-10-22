@@ -79,6 +79,34 @@ published coverage artifact.
 - `coverage` depends on successful unit and integration jobs, then creates a new
   runner session to collect and upload coverage. It does not reuse databases,
   Redis data, or build processes from earlier jobs.
+- `schema-validation` validates database migrations and schema state against a
+  runner-local Postgres service. It runs independently of the test jobs so schema
+  regressions are reported separately from test failures.
+- `testnet-integration` runs the Stellar testnet end-to-end swap settlement suite
+  (see [`tests/integration/`](../../tests/integration/README.md)). It is gated
+  behind the opt-in `testnet-integration` label on pull requests and also runs on
+  a nightly schedule so the suite is exercised even when no PR opts in. The job
+  brings up the testnet environment (containerized quickstart or hosted testnet
+  via configuration), runs the scenarios, and tears the environment down.
+
+### Testnet Integration Job
+
+The `testnet-integration` job separates environment bring-up from scenario
+execution so the same scenarios can run against a local quickstart container or
+hosted testnet selected by configuration. Key behaviors:
+
+- **Opt-in label:** PR runs only execute when the `testnet-integration` label is
+  present. Nightly scheduled runs always execute.
+- **Fail loud, never skip:** if the environment is unreachable (quickstart not
+  ready, Horizon unreachable, testnet reset, or friendbot rate limiting that
+  exceeds bounded backoff), the job fails with a clear diagnostic message rather
+  than silently skipping. A skipped suite must never be mistaken for a passing
+  one.
+- **Isolation:** each run uses unique accounts and assets and cleans up its
+  state, so parallel or repeated runs do not interfere.
+- **Bounded runtime:** ledger polling uses explicit timeouts and bounded waits,
+  keeping total runtime predictable for both per-PR and nightly runs.
+=======
 
 ### Security Rules
 
