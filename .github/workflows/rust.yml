@@ -299,6 +299,56 @@ jobs:
         echo "::error::Unit tests failed. Run 'cargo test --lib --bins' locally to debug."
         exit 1
 
+    # Validates every emitted swap lifecycle event sample against the
+    # machine-readable JSON Schemas in schemas/ (see docs/swap-events.md).
+    # Fails if the Rust event types and the checked-in schemas have drifted,
+    # or if a golden fixture no longer validates against its schema.
+    - name: Validate swap event schemas
+      id: validate_event_schemas
+      if: matrix.rust == 'stable'
+      run: |
+        set -e
+        echo "Validating swap lifecycle event schemas..."
+        if ! cargo xtask validate-event-schemas; then
+          echo "::error::Swap event schema validation failed. Run 'cargo xtask validate-event-schemas' locally to see issues."
+          exit 1
+        fi
+        echo "Swap event schema validation passed"
+      env:
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle event schema validation failure
+      if: failure() && steps.validate_event_schemas.outcome == 'failure'
+      run: |
+        echo "::error::Swap event schemas are out of sync with the Rust event types, or a golden fixture is invalid."
+        echo "::error::See docs/swap-events.md for the compatibility and versioning policy."
+        exit 1
+
+    # Contract + golden fixture tests for the swap lifecycle events. These
+    # assert that representative payloads for each event validate against
+    # their schema and that no field was accidentally renamed or retyped.
+    - name: Run swap event contract tests
+      id: run_event_contract_tests
+      if: matrix.rust == 'stable'
+      run: |
+        set -e
+        echo "Running swap event contract tests..."
+        if ! cargo test --test swap_event_schema_test --verbose; then
+          echo "::error::Swap event contract tests failed. Check test output above for failures."
+          exit 1
+        fi
+        echo "Swap event contract tests passed"
+      env:
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle event contract test failure
+      if: failure() && steps.run_event_contract_tests.outcome == 'failure'
+      run: |
+        echo "::error::Swap event contract tests failed. Run 'cargo test --test swap_event_schema_test' locally to debug."
+        exit 1
+
     - name: Report sccache statistics
       if: always()
       run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
@@ -508,6 +558,50 @@ jobs:
       if: failure() && steps.run_webhook_exactly_once.outcome == 'failure'
       run: |
         echo "::error::Run 'cargo test --test webhook_concurrent_delivery_test -- --ignored' locally to debug."
+        exit 1
+
+    # Re-runs the schema validation and contract tests here as well so a
+    # schema drift is caught even if the unit-tests job is skipped or
+    # narrowed; the integration job is the one that always runs on PRs.
+    - name: Validate swap event schemas
+      id: validate_event_schemas
+      run: |
+        set -e
+        echo "Validating swap lifecycle event schemas..."
+        if ! cargo xtask validate-event-schemas; then
+          echo "::error::Swap event schema validation failed. Run 'cargo xtask validate-event-schemas' locally to see issues."
+          exit 1
+        fi
+        echo "Swap event schema validation passed"
+      env:
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle event schema validation failure
+      if: failure() && steps.validate_event_schemas.outcome == 'failure'
+      run: |
+        echo "::error::Swap event schemas are out of sync with the Rust event types, or a golden fixture is invalid."
+        echo "::error::See docs/swap-events.md for the compatibility and versioning policy."
+        exit 1
+
+    - name: Run swap event contract tests
+      id: run_event_contract_tests
+      run: |
+        set -e
+        echo "Running swap event contract tests..."
+        if ! cargo test --test swap_event_schema_test --verbose; then
+          echo "::error::Swap event contract tests failed. Check test output above for failures."
+          exit 1
+        fi
+        echo "Swap event contract tests passed"
+      env:
+        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
+      continue-on-error: false
+
+    - name: Handle event contract test failure
+      if: failure() && steps.run_event_contract_tests.outcome == 'failure'
+      run: |
+        echo "::error::Swap event contract tests failed. Run 'cargo test --test swap_event_schema_test' locally to debug."
         exit 1
 
     - name: Report sccache statistics
