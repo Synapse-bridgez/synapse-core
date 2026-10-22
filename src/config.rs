@@ -1,8 +1,13 @@
 use crate::secrets::SecretsManager;
+use crate::swap::fees::{FeeConfig, FeeRule};
+use crate::swap::circuit_breaker::BreakerConfig;
 use anyhow::Result;
 use dotenvy::dotenv;
 use ipnet::IpNet;
+use sqlx::types::BigDecimal;
 use std::env;
+use std::str::FromStr;
+use std::time::Duration;
 
 /// Active environment profile
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +165,130 @@ impl PerClassTimeoutConfig {
     }
 }
 
+/// Market-data ingestion settings for swap quoting (see `swap::market_data`).
+///
+/// Freshness: a cached price is usable for quoting only while its source
+/// timestamp is at most `max_age_secs` old. `cache_ttl_secs` bounds how long a
+/// fresh cache entry lives; a last-known copy is kept beyond it for stale fallback.
+#[derive(Debug, Clone)]
+pub struct MarketDataConfig {
+    /// Base URL of the HTTP price source (`PRICE_SOURCE_URL`). Unset disables HTTP ingestion.
+    pub source_url: Option<String>,
+    /// Per-request timeout in milliseconds (`PRICE_SOURCE_TIMEOUT_MS`). Default: 2000
+    pub source_timeout_ms: u64,
+    /// Retries after the first failed attempt (`PRICE_SOURCE_MAX_RETRIES`). Default: 2, max 10
+    pub source_max_retries: u32,
+    /// Base backoff between retries, doubled per attempt (`PRICE_SOURCE_RETRY_BACKOFF_MS`). Default: 200
+    pub source_retry_backoff_ms: u64,
+    /// Interval between scheduled ingestion runs (`PRICE_INGESTION_INTERVAL_SECS`). Default: 10
+    pub ingestion_interval_secs: u64,
+    /// TTL of the fresh snapshot cache entry (`PRICE_CACHE_TTL_SECS`). Default: 30
+    pub cache_ttl_secs: u64,
+    /// Maximum snapshot age accepted for quoting (`PRICE_MAX_AGE_SECS`). Default: 15
+    pub max_age_secs: u64,
+}
+
+impl MarketDataConfig {
+    fn from_env() -> anyhow::Result<Self> {
+        let config = Self {
+            source_url: env::var("PRICE_SOURCE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            source_timeout_ms: env::var("PRICE_SOURCE_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()?,
+            source_max_retries: env::var("PRICE_SOURCE_MAX_RETRIES")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()?,
+            source_retry_backoff_ms: env::var("PRICE_SOURCE_RETRY_BACKOFF_MS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()?,
+            ingestion_interval_secs: env::var("PRICE_INGESTION_INTERVAL_SECS")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+            cache_ttl_secs: env::var("PRICE_CACHE_TTL_SECS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()?,
+            max_age_secs: env::var("PRICE_MAX_AGE_SECS")
+                .unwrap_or_else(|_| "15".to_string())
+                .parse()?,
+        };
+
+        if let Some(url) = &config.source_url {
+            url::Url::parse(url)?;
+        }
+        anyhow::ensure!(config.source_timeout_ms > 0, "PRICE_SOURCE_TIMEOUT_MS must be > 0");
+        anyhow::ensure!(
+            config.source_max_retries <= 10,
+            "PRICE_SOURCE_MAX_RETRIES must be <= 10"
+        );
+        anyhow::ensure!(
+            config.ingestion_interval_secs > 0,
+            "PRICE_INGESTION_INTERVAL_SECS must be > 0"
+        );
+        anyhow::ensure!(config.cache_ttl_secs > 0, "PRICE_CACHE_TTL_SECS must be > 0");
+        anyhow::ensure!(config.max_age_secs > 0, "PRICE_MAX_AGE_SECS must be > 0");
+
+        Ok(config)
+    }
+}
+
+/// Phase 2 swap engine settings. All variables are optional; the engine is
+/// disabled by default and nothing in `src/swap` is wired while it is off.
+#[derive(Debug, Clone)]
+pub struct SwapConfig {
+    /// Master switch for the swap engine (`SWAP_ENGINE_ENABLED`). Default: false
+    pub engine_enabled: bool,
+    /// Largest order accepted, in source-asset units (`SWAP_MAX_ORDER_AMOUNT`). Default: 10000
+    pub max_order_amount: BigDecimal,
+    /// Engine fee in basis points, 1 bp = 0.01% (`SWAP_FEE_BPS`). Default: 0
+    pub fee_bps: u32,
+    /// Lifetime of an issued quote in seconds (`SWAP_QUOTE_TTL_SECONDS`). Default: 30
+    pub quote_ttl_seconds: u64,
+}
+
+impl Default for SwapConfig {
+    fn default() -> Self {
+        Self {
+            engine_enabled: false,
+            max_order_amount: BigDecimal::from(10_000),
+            fee_bps: 0,
+            quote_ttl_seconds: 30,
+        }
+    }
+}
+
+impl SwapConfig {
+    /// Load swap settings from the environment, falling back to
+    /// [`SwapConfig::default`] for any variable that is unset. Invalid values
+    /// fail startup and name the offending variable.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        let config = Self {
+            engine_enabled: parse_bool_env("SWAP_ENGINE_ENABLED", defaults.engine_enabled)?,
+            max_order_amount: parse_env_or("SWAP_MAX_ORDER_AMOUNT", defaults.max_order_amount)?,
+            fee_bps: parse_env_or("SWAP_FEE_BPS", defaults.fee_bps)?,
+            quote_ttl_seconds: parse_env_or("SWAP_QUOTE_TTL_SECONDS", defaults.quote_ttl_seconds)?,
+        };
+
+        if config.max_order_amount <= BigDecimal::from(0) {
+            anyhow::bail!("SWAP_MAX_ORDER_AMOUNT must be greater than 0");
+        }
+        if config.fee_bps > 10_000 {
+            anyhow::bail!("SWAP_FEE_BPS must be between 0 and 10000 (100%)");
+        }
+        if config.quote_ttl_seconds == 0 {
+            anyhow::bail!("SWAP_QUOTE_TTL_SECONDS must be greater than 0");
+        }
+
+        Ok(config)
+    }
+}
+
+        Ok(config)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -226,8 +355,64 @@ pub struct Config {
     pub partition_lookahead_months: u32,
     pub partition_lookahead_min: u32,
     pub partition_lookahead_max: u32,
+    // Stuck-transaction watchdog (src/swap/recovery.rs)
+    pub stuck_processing_threshold_secs: u64,
+    pub watchdog_interval_secs: u64,
+    pub dlq_depth_alert_threshold: i64,
+    pub dlq_age_alert_secs: u64,
+    // Months of swap order/quote/fill/event partitions to retain before detaching
+    pub swap_retention_months: i32,
     // Per-class query timeout configuration
     pub per_class_timeout_config: PerClassTimeoutConfig,
+    /// How often the asset registry reloads from Postgres, in seconds.
+    /// Failed reloads keep the last known good registry.
+    pub asset_registry_refresh_secs: u64,
+    /// Global swap order intake switch (`SWAP_ACCEPTING_ORDERS`). When false,
+    /// new swap orders are rejected; in-flight orders are unaffected.
+    pub swap_accepting_orders: bool,
+    /// Per-tenant and per-provider swap circuit breaker thresholds.
+    pub swap_breaker: BreakerConfig,
+    // Swap engine rollout gate (process-wide kill switch + tenant allowlist)
+    pub swap_engine_enabled: bool,
+    pub swap_engine_tenant_allowlist: Vec<String>,
+    // Swap fee defaults (per-tenant/pair overrides are layered on at runtime)
+    pub swap_fees: FeeConfig,
+    // Swap quote cache
+    /// TTL for cached swap quotes, in seconds. Default: 10
+    pub quote_cache_ttl_secs: u64,
+    /// Max age of the price snapshot a cached quote was derived from, in seconds. Default: 5
+    pub quote_cache_max_staleness_secs: u64,
+    // Phase 2 swap engine (disabled by default)
+    pub swap: SwapConfig,
+    // Market data ingestion for swap quoting
+    pub market_data: MarketDataConfig,
+    // Phase 2 swap quoting
+    pub swap_quote: SwapQuoteConfig,
+}
+
+/// A liquidity venue polled for quotes, parsed from `SWAP_LIQUIDITY_SOURCES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiquiditySourceEndpoint {
+    /// Stable identifier used in logs and on the selected quote.
+    pub id: String,
+    /// Quote endpoint of the venue.
+    pub url: String,
+}
+
+/// Swap quoting configuration (`crate::swap::quoting`).
+#[derive(Debug, Clone)]
+pub struct SwapQuoteConfig {
+    /// Venues polled in parallel for quotes. Format: `id=url,id=url`.
+    pub liquidity_sources: Vec<LiquiditySourceEndpoint>,
+    /// Optional bearer token sent to every liquidity source.
+    pub liquidity_api_key: Option<String>,
+    /// Per-source timeout in milliseconds. Default: 2000
+    pub source_timeout_ms: u64,
+    /// Validity window of a quote in seconds. Default: 30
+    pub quote_ttl_secs: u64,
+    /// Maximum tolerated shortfall against a reference amount, in basis points
+    /// (1 bps = 0.01%). Quotes below the floor are hard-rejected. Default: 100
+    pub max_slippage_bps: u32,
 }
 
 pub mod assets;
@@ -380,6 +565,9 @@ impl Config {
             partition_lookahead_max: env::var("PARTITION_LOOKAHEAD_MAX")
                 .unwrap_or_else(|_| "12".to_string())
                 .parse()?,
+            swap_retention_months: env::var("SWAP_RETENTION_MONTHS")
+                .unwrap_or_else(|_| "12".to_string())
+                .parse()?,
             partition_lookahead_months: {
                 let min: u32 = env::var("PARTITION_LOOKAHEAD_MIN")
                     .unwrap_or_else(|_| "1".to_string())
@@ -401,6 +589,18 @@ impl Config {
                 }
                 lookahead
             },
+            stuck_processing_threshold_secs: env::var("STUCK_PROCESSING_THRESHOLD_SECS")
+                .unwrap_or_else(|_| "900".to_string())
+                .parse()?,
+            watchdog_interval_secs: env::var("WATCHDOG_INTERVAL_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()?,
+            dlq_depth_alert_threshold: env::var("DLQ_DEPTH_ALERT_THRESHOLD")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()?,
+            dlq_age_alert_secs: env::var("DLQ_AGE_ALERT_SECS")
+                .unwrap_or_else(|_| "3600".to_string())
+                .parse()?,
             per_class_timeout_config: PerClassTimeoutConfig {
                 interactive_timeout_ms: env::var("DB_TIMEOUT_INTERACTIVE_MS")
                     .unwrap_or_else(|_| "5000".to_string())
@@ -412,8 +612,71 @@ impl Config {
                     .unwrap_or_else(|_| "60000".to_string())
                     .parse()?,
             },
+            market_data: MarketDataConfig::from_env()?,
+            swap: SwapConfig::from_env()?,
         })
     }
+
+    /// Env-level gate for new swap hand-offs. `false` when the process-wide kill
+    /// switch (`SWAP_ENGINE_ENABLED`) is off, or when the tenant is not listed in
+    /// `SWAP_ENGINE_TENANT_ALLOWLIST` (`*` admits every tenant). Callers must
+    /// also check the per-tenant `swap_engine` feature flag. Only gates *new*
+    /// hand-offs; orders already routed are not affected.
+    pub fn swap_engine_allows_tenant(&self, tenant_id: &str) -> bool {
+        self.swap_engine_enabled
+            && self
+                .swap_engine_tenant_allowlist
+                .iter()
+                .any(|entry| entry == "*" || entry == tenant_id)
+    }
+}
+
+fn parse_bool(raw: &str, key: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" | "" => Ok(false),
+        _ => anyhow::bail!("{key} must be 'true' or 'false'"),
+    }
+}
+
+fn load_swap_quote_config() -> anyhow::Result<SwapQuoteConfig> {
+    let max_slippage_bps: u32 = env::var("SWAP_QUOTE_MAX_SLIPPAGE_BPS")
+        .unwrap_or_else(|_| "100".to_string())
+        .parse()?;
+    if max_slippage_bps > 10_000 {
+        anyhow::bail!("SWAP_QUOTE_MAX_SLIPPAGE_BPS ({max_slippage_bps}) cannot exceed 10000");
+    }
+
+    Ok(SwapQuoteConfig {
+        liquidity_sources: parse_liquidity_sources(
+            &env::var("SWAP_LIQUIDITY_SOURCES").unwrap_or_default(),
+        )?,
+        liquidity_api_key: env::var("SWAP_LIQUIDITY_API_KEY").ok(),
+        source_timeout_ms: env::var("SWAP_QUOTE_SOURCE_TIMEOUT_MS")
+            .unwrap_or_else(|_| "2000".to_string())
+            .parse()?,
+        quote_ttl_secs: env::var("SWAP_QUOTE_TTL_SECS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()?,
+        max_slippage_bps,
+    })
+}
+
+fn parse_liquidity_sources(raw: &str) -> anyhow::Result<Vec<LiquiditySourceEndpoint>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (id, url) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("SWAP_LIQUIDITY_SOURCES entry '{entry}' must be id=url")
+            })?;
+            url::Url::parse(url.trim())?;
+            Ok(LiquiditySourceEndpoint {
+                id: id.trim().to_string(),
+                url: url.trim().to_string(),
+            })
+        })
+        .collect()
 }
 
 fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
@@ -436,10 +699,157 @@ fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
     Ok(AllowedIps::Cidrs(cidrs))
 }
 
+/// Parse an optional env var, returning `default` when it is unset. A bad value
+/// is reported with the variable name so startup failures are easy to trace.
+fn parse_env_or<T>(key: &str, default: T) -> anyhow::Result<T>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    match env::var(key) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<T>()
+            .map_err(|e| anyhow::anyhow!("{key} has invalid value '{raw}': {e}")),
+        Err(_) => Ok(default),
+    }
+}
+
+/// Parse an optional boolean env var. Only `true`/`false` and `1`/`0`
+/// (case-insensitive) are accepted; anything else is rejected at startup
+/// rather than guessed at.
+fn parse_bool_env(key: &str, default: bool) -> anyhow::Result<bool> {
+    match env::var(key) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => anyhow::bail!("{key} must be 'true', 'false', '1' or '0' (got '{raw}')"),
+        },
+        Err(_) => Ok(default),
+    }
+}
+
 fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "text" => Ok(LogFormat::Text),
         "json" => Ok(LogFormat::Json),
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
     }
+}
+
+/// Pre-trade risk limits for swap orders, evaluated by
+/// [`crate::swap::risk::RiskPolicy`].
+///
+/// Loaded once via [`SwapRiskConfig::from_env`]. Every limit except the
+/// kill switch and the allow/deny lists is required, and any value that is
+/// missing or unparseable is a startup error (fail closed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapRiskConfig {
+    /// `SWAP_KILL_SWITCH`: when `true`, every swap order is rejected. Default `false`.
+    pub kill_switch: bool,
+    /// `SWAP_ALLOWED_PAIRS` (e.g. `USDC>XLM,XLM>USDC`): the only permitted
+    /// source/target asset pairs. Required and non-empty.
+    pub allowed_pairs: Vec<(String, String)>,
+    /// `SWAP_MAX_ORDER_AMOUNT`: maximum amount of a single order, in source-asset units.
+    pub max_order_amount: BigDecimal,
+    /// `SWAP_MAX_ACCOUNT_VOLUME`: maximum rolling volume per account over the window.
+    pub max_account_volume: BigDecimal,
+    /// `SWAP_MAX_TENANT_VOLUME`: maximum rolling volume per tenant over the window.
+    pub max_tenant_volume: BigDecimal,
+    /// `SWAP_ROLLING_WINDOW_SECS`: length of the rolling volume window, in seconds.
+    pub rolling_window_secs: i64,
+    /// `SWAP_ACCOUNT_ALLOWLIST`: optional. When non-empty, only listed accounts may swap.
+    pub account_allowlist: Vec<String>,
+    /// `SWAP_ACCOUNT_DENYLIST`: optional. Listed accounts are always rejected, even if allowlisted.
+    pub account_denylist: Vec<String>,
+}
+
+impl SwapRiskConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let kill_switch = match env::var("SWAP_KILL_SWITCH") {
+            Ok(v) => parse_bool("SWAP_KILL_SWITCH", &v)?,
+            Err(_) => false,
+        };
+
+        let allowed_pairs = parse_pairs(&required_env("SWAP_ALLOWED_PAIRS")?)?;
+        let max_order_amount = parse_positive_decimal(
+            "SWAP_MAX_ORDER_AMOUNT",
+            &required_env("SWAP_MAX_ORDER_AMOUNT")?,
+        )?;
+        let max_account_volume = parse_positive_decimal(
+            "SWAP_MAX_ACCOUNT_VOLUME",
+            &required_env("SWAP_MAX_ACCOUNT_VOLUME")?,
+        )?;
+        let max_tenant_volume = parse_positive_decimal(
+            "SWAP_MAX_TENANT_VOLUME",
+            &required_env("SWAP_MAX_TENANT_VOLUME")?,
+        )?;
+
+        let rolling_window_secs: i64 = required_env("SWAP_ROLLING_WINDOW_SECS")?
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("SWAP_ROLLING_WINDOW_SECS must be an integer: {e}"))?;
+        if rolling_window_secs <= 0 {
+            anyhow::bail!("SWAP_ROLLING_WINDOW_SECS must be greater than 0");
+        }
+
+        Ok(Self {
+            kill_switch,
+            allowed_pairs,
+            max_order_amount,
+            max_account_volume,
+            max_tenant_volume,
+            rolling_window_secs,
+            account_allowlist: parse_list(&env::var("SWAP_ACCOUNT_ALLOWLIST").unwrap_or_default()),
+            account_denylist: parse_list(&env::var("SWAP_ACCOUNT_DENYLIST").unwrap_or_default()),
+        })
+    }
+}
+
+fn required_env(key: &str) -> anyhow::Result<String> {
+    env::var(key).map_err(|_| anyhow::anyhow!("{key} is required"))
+}
+
+fn parse_bool(key: &str, raw: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => anyhow::bail!("{key} must be 'true' or 'false'"),
+    }
+}
+
+fn parse_positive_decimal(key: &str, raw: &str) -> anyhow::Result<BigDecimal> {
+    let value = BigDecimal::from_str(raw.trim())
+        .map_err(|e| anyhow::anyhow!("{key} must be a decimal number: {e}"))?;
+    if value <= BigDecimal::from(0) {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(value)
+}
+
+fn parse_pairs(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let pairs = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('>') {
+            Some((source, target)) if !source.trim().is_empty() && !target.trim().is_empty() => {
+                Ok((source.trim().to_string(), target.trim().to_string()))
+            }
+            _ => anyhow::bail!("SWAP_ALLOWED_PAIRS entries must be 'SOURCE>TARGET', got '{entry}'"),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if pairs.is_empty() {
+        anyhow::bail!("SWAP_ALLOWED_PAIRS must list at least one pair");
+    }
+    Ok(pairs)
+}
+
+fn parse_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
 }

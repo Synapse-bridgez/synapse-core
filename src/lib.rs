@@ -295,8 +295,30 @@ pub fn create_app(app_state: AppState) -> Router {
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
         )
+        // Swap orders (#1423): tenant-scoped, TenantContext-authenticated.
+        .route(
+            "/swaps",
+            get(handlers::swaps::list_swap_orders).post(handlers::swaps::create_swap_order),
+        )
+        .route("/swaps/:id", get(handlers::swaps::get_swap_order))
+        .route("/swaps/:id/cancel", post(handlers::swaps::cancel_swap_order))
         // Tenant-facing usage: the caller's own latency histograms (#1337).
         .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
+
+    // Swap API (#1440). Tenant identity comes from the SwapCaller extractor;
+    // request bodies are capped well below the global default.
+    let swap_routes = Router::new()
+        .route("/swap/quotes", post(handlers::swap::create_quote))
+        .route(
+            "/swap/orders",
+            post(handlers::swap::create_order).get(handlers::swap::list_orders),
+        )
+        .route("/swap/orders/:id", get(handlers::swap::get_order))
+        .route("/swap/orders/:id/cancel", post(handlers::swap::cancel_order))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            handlers::swap::SWAP_MAX_BODY_BYTES,
+        ));
+    let data_routes = data_routes.merge(swap_routes);
 
     // core_routes intentionally does NOT layer api_key_auth across the board:
     // callback_routes/webhook_routes authenticate inbound anchor calls via
@@ -351,6 +373,11 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/admin/canary",
             get(handlers::admin::get_canary_dashboard),
+        )
+        // Admin: global swap order intake kill switch
+        .route(
+            "/admin/swap/kill-switch",
+            get(handlers::admin::get_swap_kill_switch).post(handlers::admin::set_swap_kill_switch),
         )
         .route(
             "/admin/canary/:release_name",
@@ -494,6 +521,8 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/settlements/:id/status",
             axum::routing::patch(handlers::settlements::update_settlement_status),
         )
+        // Admin: swap surveillance + market data archive (#1505, #1508)
+        .nest("/admin/swap", swap::versioning::admin_swap_router())
         // Admin: reconciliation reports
         .nest(
             "/admin/reconciliation",
@@ -503,6 +532,19 @@ pub fn create_app(app_state: AppState) -> Router {
         .nest(
             "/admin",
             handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
+        )
+        // Admin: stuck-transaction DLQ interventions (#1446)
+        .route(
+            "/admin/transactions/:id/dlq/retry",
+            post(handlers::dlq::retry_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-complete",
+            post(handlers::dlq::force_complete_dlq_transaction),
+        )
+        .route(
+            "/admin/transactions/:id/dlq/force-cancel",
+            post(handlers::dlq::force_cancel_dlq_transaction),
         )
         // Admin: transaction notes API (#1257)
         .route(
@@ -570,6 +612,8 @@ pub fn create_app(app_state: AppState) -> Router {
         // Versioned route groups
         .nest("/api/v1", v1_routes)
         .nest("/api/v2", v2_routes)
+        // Swap API (#1507): versioned under /swap/v{N}
+        .nest("/swap", swap::versioning::swap_router())
         .merge(admin_only_routes)
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
