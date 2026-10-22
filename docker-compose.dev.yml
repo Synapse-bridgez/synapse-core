@@ -224,10 +224,17 @@ services:
       DB_IDLE_TIMEOUT_SECS: "30"
       DB_STATEMENT_TIMEOUT_MS: "30000"
       DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS: "120000"
+      # Graceful shutdown: stop accepting new swap orders, drain in-flight work
+      # within this grace period, then flush the outbox and close the DB pool.
+      SHUTDOWN_GRACE_PERIOD_SECS: "30"
+      SHUTDOWN_DRAIN_POLL_INTERVAL_MS: "250"
+      SHUTDOWN_OUTBOX_FLUSH_TIMEOUT_SECS: "10"
     ports:
       - "3000:3000"
       # Debug port for IDE debugger attachment (lldb-server / rust-gdb)
       - "9229:9229"
+    # Give the app time to drain in-flight swaps before Docker escalates to SIGKILL.
+    stop_grace_period: 45s
     deploy:
       resources:
         limits:
