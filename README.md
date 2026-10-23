@@ -62,6 +62,11 @@ STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.
 REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
 ```
 
+**Phase 2 Swap Engine Documentation:**
+- [Swap Operator Runbook](docs/swap-operator-runbook.md) — dashboards, alerts, kill switch, stuck orders, escalation
+- [Swap Developer Integration Guide](docs/swap-developer-integration-guide.md) — lifecycle, auth, worked example (quote → order), error reference
+- [Swap DR Runbook](docs/swap-dr-runbook.md) — backup, restore, and disaster-recovery procedures
+
 3. Start PostgresSQL Using Docker (recommended for development):
 
 ```bash
