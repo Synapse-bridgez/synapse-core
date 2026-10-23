@@ -66,10 +66,7 @@ mod chaos_swap_engine {
             .start()
             .await
             .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("get port");
+        let port = container.get_host_port_ipv4(5432).await.expect("get port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", port);
         let pool = PgPool::connect(&url).await.expect("connect");
 
@@ -299,10 +296,7 @@ mod chaos_swap_engine {
                 self.pass,
                 "Invariant violations after '{}': \
                  partial_swap_orders={}, stuck_locks={}, idle_in_tx={}",
-                self.label,
-                self.partial_swap_orders,
-                self.stuck_advisory_locks,
-                self.idle_in_tx
+                self.label, self.partial_swap_orders, self.stuck_advisory_locks, self.idle_in_tx
             );
         }
     }
@@ -387,12 +381,16 @@ mod chaos_swap_engine {
                 .expect("write should succeed after reconnect");
             }
 
-            let report = assert_swap_invariants(&pool, &format!("db-connection-loss-round-{round}")).await;
+            let report =
+                assert_swap_invariants(&pool, &format!("db-connection-loss-round-{round}")).await;
             report.assert_pass();
         }
 
         let fault = SwapFaultMode::DbConnectionLoss;
-        assert_eq!(fault.expected_behavior(), ExpectedBehavior::RetryWithReconnect);
+        assert_eq!(
+            fault.expected_behavior(),
+            ExpectedBehavior::RetryWithReconnect
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -409,14 +407,20 @@ mod chaos_swap_engine {
 
         // The engine must fall through and not panic
         let fallback_quote = "1.05"; // simulates DB-derived rate
-        assert!(!fallback_quote.is_empty(), "Fallback rate must be non-empty");
+        assert!(
+            !fallback_quote.is_empty(),
+            "Fallback rate must be non-empty"
+        );
 
         // Verify call was counted
         assert!(redis.call_count.load(Ordering::Relaxed) >= 1);
 
         // Document expected behavior
         let fault = SwapFaultMode::RedisUnavailable;
-        assert_eq!(fault.expected_behavior(), ExpectedBehavior::DegradedFallthrough);
+        assert_eq!(
+            fault.expected_behavior(),
+            ExpectedBehavior::DegradedFallthrough
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -426,9 +430,14 @@ mod chaos_swap_engine {
     #[tokio::test]
     async fn test_oracle_timeout_opens_circuit() {
         // Timeout: oracle returns nothing (simulated as a 120s stale snapshot)
-        let oracle = StalePriceOracle { stale_age_secs: 120 };
+        let oracle = StalePriceOracle {
+            stale_age_secs: 120,
+        };
         let snap = oracle.price().expect("oracle returns something on timeout");
-        assert!(!snap.is_usable(15), "Snapshot older than 15s must not be usable");
+        assert!(
+            !snap.is_usable(15),
+            "Snapshot older than 15s must not be usable"
+        );
 
         // The engine must open the circuit and reject quoting
         let fault = SwapFaultMode::OracleTimeout;
@@ -445,7 +454,10 @@ mod chaos_swap_engine {
 
         // Engine degrades: returns last-known quote, marks it as potentially stale
         let fault = SwapFaultMode::OracleStaleData;
-        assert_eq!(fault.expected_behavior(), ExpectedBehavior::DegradedFallthrough);
+        assert_eq!(
+            fault.expected_behavior(),
+            ExpectedBehavior::DegradedFallthrough
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -477,10 +489,16 @@ mod chaos_swap_engine {
         // Simulate retry logic: disable partial flag, retry once
         lp.partial.store(false, Ordering::SeqCst);
         let retry_result = lp.call();
-        assert!(retry_result.is_ok(), "Retry after partial response must succeed");
+        assert!(
+            retry_result.is_ok(),
+            "Retry after partial response must succeed"
+        );
 
         let fault = SwapFaultMode::LpPartialResponse;
-        assert_eq!(fault.expected_behavior(), ExpectedBehavior::RetryWithBackoff);
+        assert_eq!(
+            fault.expected_behavior(),
+            ExpectedBehavior::RetryWithBackoff
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -512,7 +530,9 @@ mod chaos_swap_engine {
                     let _ = redis.get("any-key");
                 }
                 SwapFaultMode::OracleTimeout | SwapFaultMode::OracleStaleData => {
-                    let oracle = StalePriceOracle { stale_age_secs: 120 };
+                    let oracle = StalePriceOracle {
+                        stale_age_secs: 120,
+                    };
                     let _ = oracle.price();
                 }
                 SwapFaultMode::LpEndpointDown => {
@@ -610,6 +630,9 @@ fn fault_taxonomy_covers_all_required_scenarios() {
     // documentation test always runs and proves intent.
     for scenario in &required_scenarios {
         // Simply assert they are non-empty strings (the real tests cover them)
-        assert!(!scenario.is_empty(), "Scenario {scenario} must be documented");
+        assert!(
+            !scenario.is_empty(),
+            "Scenario {scenario} must be documented"
+        );
     }
 }
