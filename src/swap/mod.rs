@@ -1,23 +1,68 @@
 //! Phase 2 swap-engine service boundary.
+
+pub mod accounting;
+pub mod liquidity;
 //!
-//! This repository is Phase 1 of Synapse Bridge (transaction preparation). A
-//! future swap engine - in this repo, a separate service, or an external
+//! This repository prepares Phase 1 transactions and persists Phase 2 intake
+//! orders. An execution engine - in this repo, a separate service, or an external
 //! contract-based system - takes over once a transaction reaches the
-//! [`swap_ready`](crate::validation) state. This module defines **only** the
-//! hand-off contract and the trait that a swap-engine implementation must
-//! satisfy; it contains no swap or DEX-routing logic.
+//! [`swap_ready`](crate::validation) state. This module defines the hand-off
+//! contract, deposit order intake, quote streaming, and priority admission.
+//! Liquidity sourcing, execution, and DEX routing remain external integrations.
 //!
 //! See `docs/state-machine.md` (`### swap_ready`, "Phase 2 hand-off") for how
-//! this fits the existing transaction pipeline.
+//! this fits the existing transaction pipeline. [`deposits`] owns atomic
+//! callback-to-order preparation without executing or settling swaps.
 //!
-//! Nothing in Phase 1 constructs a [`SwapHandoff`] or calls a [`SwapEngine`]
-//! yet. The default wiring is [`NoopSwapEngine`], which is inert, and
+//! Callback intake persists orders directly; the execution trait remains an
+//! extension point. Its default wiring is [`NoopSwapEngine`], which is inert, and
 //! [`swap_enabled_for`] returns `false` unless a tenant explicitly opts in via
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
+//!
+//! # Arithmetic
+//!
+//! All swap math (quotes, fees, allocations, fills) uses the shared
+//! fixed-point [`decimal::Decimal`] type and the explicit
+//! [`rounding::RoundingPolicy`]. Amounts cross every boundary as strings with
+//! documented precision; see `docs/swap-engine.md`.
+//!
+//! # Quoting and routing
+//!
+//! [`engine::SwapService`] serves quotes through [`routing::Router`], which
+//! discovers and scores multi-hop paths across every registered
+//! [`liquidity::LiquidityProvider`], so a quote can be served even when no
+//! direct pair exists. The chosen [`routing::Route`] is part of the quote and
+//! is executed leg by leg, with compensation if a leg fails.
+
+pub mod allocation;
+pub mod asset;
+pub mod decimal;
+pub mod engine;
+pub mod fees;
+pub mod leg_fees;
+pub mod rate_conversion;
+pub mod http;
+pub mod liquidity;
+pub mod oracle;
+pub mod pricing;
+pub mod protection;
+pub mod rounding;
+pub mod routing;
+pub mod runtime;
+pub mod store;
 
 pub mod compensation;
 pub mod events;
+pub mod admission;
+pub mod deposits;
+pub mod streaming;
+
+pub mod invariant_engine;
+pub mod invariants;
+
+pub use invariant_engine::*;
+pub use invariants::*;
 
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
@@ -32,6 +77,7 @@ pub mod circuit_breaker;
 
 /// Execution-algorithm layer for slicing large swap orders (#1481).
 pub mod execution;
+pub mod risk;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
@@ -76,6 +122,12 @@ impl SwapHandoff {
             metadata: tx.metadata.clone(),
         }
     }
+
+    /// The hand-off amount as a swap-engine [`decimal::Decimal`], keeping
+    /// the precision Phase 1 stored.
+    pub fn amount_decimal(&self) -> Result<decimal::Decimal, decimal::DecimalError> {
+        decimal::Decimal::from_bigdecimal(&self.amount)
+    }
 }
 
 /// Outcome of handing a transaction to the swap engine.
@@ -87,6 +139,8 @@ pub enum SwapOutcome {
     Deferred { retry_after_secs: u64 },
     /// The engine accepted the hand-off and started a swap.
     Routed { swap_id: String },
+    /// The risk gate blocked the order for manual approval; it was not routed.
+    Held { reason: risk::RiskBreach },
 }
 
 /// Error returned by a [`SwapEngine`].

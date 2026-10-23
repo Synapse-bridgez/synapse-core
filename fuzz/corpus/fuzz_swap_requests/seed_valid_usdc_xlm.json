@@ -1,0 +1,1 @@
+{"order_id":"seed-usdc-xlm-001","source_asset":"USDC","destination_asset":"XLM","side":"exact_in","input_amount":10000000,"min_output_amount":90000000,"fee_bps":30,"flat_fee":500,"spread_bps":20,"ttl_secs":300}

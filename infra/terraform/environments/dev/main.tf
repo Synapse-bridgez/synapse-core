@@ -58,3 +58,43 @@ module "app" {
   db_url      = module.postgres.database_url
   redis_url   = module.redis.url
 }
+
+# ── Swap Engine Services — Issue #1490 (dev overlay) ─────────────────────────
+module "swap_engine" {
+  source = "../../modules/swap_engine"
+
+  name             = "synapse-dev"
+  environment      = "dev"
+  aws_region       = var.aws_region
+  vpc_id           = "vpc-example"
+  subnet_ids       = ["subnet-example-a", "subnet-example-b"]
+  ecs_cluster_arn  = "arn:aws:ecs:us-east-1:123456789012:cluster/synapse-dev-cluster"
+  ecs_cluster_name = "synapse-dev-cluster"
+
+  image        = "ghcr.io/synapse-bridgez/synapse-core"
+  image_digest = "sha256:replace-with-dev-digest"
+
+  execution_role_arn = "arn:aws:iam::123456789012:role/ecsExecutionRole"
+  task_role_arn      = "arn:aws:iam::123456789012:role/ecsTaskRole"
+
+  db_url_secret_arn          = "arn:aws:secretsmanager:us-east-1:123456789012:secret:synapse-dev/db-url"
+  redis_url_secret_arn       = "arn:aws:secretsmanager:us-east-1:123456789012:secret:synapse-dev/redis-url"
+  vault_role_id_secret_arn   = "arn:aws:secretsmanager:us-east-1:123456789012:secret:synapse-dev/vault-role-id"
+  vault_secret_id_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:synapse-dev/vault-secret-id"
+  webhook_secret_arn         = "arn:aws:secretsmanager:us-east-1:123456789012:secret:synapse-dev/webhook-secret"
+
+  horizon_url  = "https://horizon-testnet.stellar.org"
+  sdex_enabled = true
+  amm_enabled  = true
+  rust_log     = "debug"
+
+  # Dev: minimal resources, single replica
+  worker_cpu           = 256
+  worker_memory        = 256
+  worker_desired_count = 1
+  worker_min_count     = 1
+  worker_max_count     = 3
+  scheduler_cpu        = 256
+  scheduler_memory     = 256
+  log_retention_days   = 7
+}

@@ -22,7 +22,7 @@ synapse-core/
 └── src/
 ├── main.rs # Entry point, server setup, migrations
 ├── config.rs # Configuration from environment
-├── error.rs # (Planned) Custom error types
+├── error.rs # Application errors and stable swap problem details
 ├── db/ # Database module
 │ ├── mod.rs # Connection pool creation
 │ ├── models.rs # Transaction struct and tests
@@ -33,6 +33,15 @@ synapse-core/
 ```
 
 ## 🚀 Getting Started
+
+Phase 2 integration now includes tenant-authenticated quote streams over
+WebSocket and SSE, bounded priority admission, and feature-gated deposit order
+creation. See [quote streaming](docs/quote-streaming.md),
+[swap error codes](docs/swap-errors.md),
+[backpressure configuration](docs/swap-backpressure.md), and
+[deposit handoff](docs/deposit-swap-intake.md). Quote producers inject a shared
+broker through `create_app_with_swap` and publish through `QuoteBroker::publish`;
+liquidity sourcing and execution remain separate integrations.
 
 ### Prerequisites
 
@@ -364,3 +373,9 @@ This project is licensed under the MIT License. See the LICENSE file for details
 
 <!-- handsoff-issue-1479 -->
 - #1479: Implement Tenant Self-Service Onboarding and Configuration for Swap Parameters
+
+<!-- handsoff-issue-1467 -->
+- #1467: Add Consumer-Driven Contract Tests Against the Stellar Anchor Platform and Horizon
+
+<!-- handsoff-issue-1469 -->
+- #1469: Implement Data Retention, Erasure, and PII Handling Compliance for Swap Data

@@ -7,8 +7,16 @@
 //!
 //! Routes orders to external venues and, when enabled, crosses offsetting
 //! tenant flows internally before falling back to external execution.
+//!
+//! Also wires in the balance reservation ledger that prevents concurrent
+//! in-flight orders from over-committing the same funds.
 
 pub mod crossing;
+pub mod reservation;
+
+pub use reservation::{
+    AvailableBalance, ReservationError, ReservationLedger, ReservationRecord, ReservationState,
+};
 
 use std::collections::VecDeque;
 
@@ -93,9 +101,6 @@ impl std::fmt::Display for ExecutionError {
                 audit.reason.as_deref().unwrap_or("unknown")
             ),
             ExecutionError::Venue(msg) => write!(f, "venue execution failed: {msg}"),
-        }
-    }
-}
         }
     }
 }
