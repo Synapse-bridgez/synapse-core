@@ -1,3 +1,0 @@
---prometheus.url=http://prometheus:9090
---tsdb.path=/prometheus
---objstore.config-file=/etc/thanos/objstore.yml

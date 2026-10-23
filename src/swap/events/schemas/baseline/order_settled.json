@@ -1,9 +1,0 @@
-{
-  "type": "object",
-  "properties": {
-    "order_id": {"type": "string"},
-    "tenant_id": {"type": "string"},
-    "settlement_tx": {"type": "string"}, "pricing_plan_version": {"type": "integer"}
-  },
-  "required": ["order_id", "tenant_id"]
-}

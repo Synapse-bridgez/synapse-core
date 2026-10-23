@@ -55,9 +55,6 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 1G
-  SCCACHE_GHA_ENABLED: "true"
-  LOAD_TEST_P95_THRESHOLD_MS: "500"
-  LOAD_TEST_ERROR_RATE_THRESHOLD_PERCENT: "5"
   # Regex used by cargo-llvm-cov to exclude generated/test files from coverage
   # reports. Pagination test helpers in tests/ are excluded here so that only
   # production pagination code (src/) counts toward the threshold.
@@ -132,7 +129,6 @@ jobs:
       run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
-      id: cargo-cache
       uses: actions/cache@v4
       with:
         path: |
@@ -140,9 +136,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
+        key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-stable-workspace-
+          ${{ runner.os }}-${{ matrix.rust }}-cargo-
           ${{ runner.os }}-cargo-
 
     - name: Check formatting
@@ -299,60 +295,6 @@ jobs:
         echo "::error::Unit tests failed. Run 'cargo test --lib --bins' locally to debug."
         exit 1
 
-    # Validates every emitted swap lifecycle event sample against the
-    # machine-readable JSON Schemas in schemas/ (see docs/swap-events.md).
-    # Fails if the Rust event types and the checked-in schemas have drifted,
-    # or if a golden fixture no longer validates against its schema.
-    - name: Validate swap event schemas
-      id: validate_event_schemas
-      if: matrix.rust == 'stable'
-      run: |
-        set -e
-        echo "Validating swap lifecycle event schemas..."
-        if ! cargo xtask validate-event-schemas; then
-          echo "::error::Swap event schema validation failed. Run 'cargo xtask validate-event-schemas' locally to see issues."
-          exit 1
-        fi
-        echo "Swap event schema validation passed"
-      env:
-        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-      continue-on-error: false
-
-    - name: Handle event schema validation failure
-      if: failure() && steps.validate_event_schemas.outcome == 'failure'
-      run: |
-        echo "::error::Swap event schemas are out of sync with the Rust event types, or a golden fixture is invalid."
-        echo "::error::See docs/swap-events.md for the compatibility and versioning policy."
-        exit 1
-
-    # Contract + golden fixture tests for the swap lifecycle events. These
-    # assert that representative payloads for each event validate against
-    # their schema and that no field was accidentally renamed or retyped.
-    - name: Run swap event contract tests
-      id: run_event_contract_tests
-      if: matrix.rust == 'stable'
-      run: |
-        set -e
-        echo "Running swap event contract tests..."
-        if ! cargo test --test swap_event_schema_test --verbose; then
-          echo "::error::Swap event contract tests failed. Check test output above for failures."
-          exit 1
-        fi
-        echo "Swap event contract tests passed"
-      env:
-        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-      continue-on-error: false
-
-    - name: Handle event contract test failure
-      if: failure() && steps.run_event_contract_tests.outcome == 'failure'
-      run: |
-        echo "::error::Swap event contract tests failed. Run 'cargo test --test swap_event_schema_test' locally to debug."
-        exit 1
-
-    - name: Report sccache statistics
-      if: always()
-      run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
-
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -412,7 +354,6 @@ jobs:
       run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
-      id: cargo-cache
       uses: actions/cache@v4
       with:
         path: |
@@ -420,9 +361,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
+        key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-stable-workspace-
+          ${{ runner.os }}-${{ matrix.rust }}-cargo-
           ${{ runner.os }}-cargo-
 
     - name: Install sqlx-cli
@@ -474,10 +415,7 @@ jobs:
       run: |
         set -e
         echo "Running integration tests..."
-        # exactly_once_* live in tests/webhook_concurrent_delivery_test.rs and
-        # get their own dedicated step below, so skip them here to avoid
-        # running the (container-heavy) harness twice in one job.
-        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow --skip exactly_once_; then
+        if ! cargo test --verbose -- --ignored --skip test_api_versioning_headers --skip test_invalid_signature_flow; then
           echo "::error::Integration tests failed. Check test output for failures."
           exit 1
         fi
@@ -535,78 +473,6 @@ jobs:
 
     - name: Check every tests/ file is reachable by some CI cargo test invocation
       run: ./scripts/check-test-file-ci-coverage.sh
-
-    # Standing proof of the exactly-once delivery guarantee
-    # (migrations/20260601000000_webhook_exactly_once_delivery.sql +
-    # src/services/webhook_dispatcher.rs). Run as its own step so a
-    # regression here is attributable at a glance rather than buried in the
-    # broad --ignored run above. See docs/webhook-exactly-once-harness.md.
-    - name: Run webhook exactly-once delivery harness
-      id: run_webhook_exactly_once
-      run: |
-        set -e
-        if ! cargo test --verbose --test webhook_concurrent_delivery_test -- --ignored --nocapture; then
-          echo "::error::Webhook exactly-once delivery harness failed - the exactly-once guarantee may have regressed."
-          exit 1
-        fi
-      env:
-        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-        REDIS_URL: redis://localhost:6379
-      continue-on-error: false
-
-    - name: Handle webhook exactly-once harness failure
-      if: failure() && steps.run_webhook_exactly_once.outcome == 'failure'
-      run: |
-        echo "::error::Run 'cargo test --test webhook_concurrent_delivery_test -- --ignored' locally to debug."
-        exit 1
-
-    # Re-runs the schema validation and contract tests here as well so a
-    # schema drift is caught even if the unit-tests job is skipped or
-    # narrowed; the integration job is the one that always runs on PRs.
-    - name: Validate swap event schemas
-      id: validate_event_schemas
-      run: |
-        set -e
-        echo "Validating swap lifecycle event schemas..."
-        if ! cargo xtask validate-event-schemas; then
-          echo "::error::Swap event schema validation failed. Run 'cargo xtask validate-event-schemas' locally to see issues."
-          exit 1
-        fi
-        echo "Swap event schema validation passed"
-      env:
-        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-      continue-on-error: false
-
-    - name: Handle event schema validation failure
-      if: failure() && steps.validate_event_schemas.outcome == 'failure'
-      run: |
-        echo "::error::Swap event schemas are out of sync with the Rust event types, or a golden fixture is invalid."
-        echo "::error::See docs/swap-events.md for the compatibility and versioning policy."
-        exit 1
-
-    - name: Run swap event contract tests
-      id: run_event_contract_tests
-      run: |
-        set -e
-        echo "Running swap event contract tests..."
-        if ! cargo test --test swap_event_schema_test --verbose; then
-          echo "::error::Swap event contract tests failed. Check test output above for failures."
-          exit 1
-        fi
-        echo "Swap event contract tests passed"
-      env:
-        DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-      continue-on-error: false
-
-    - name: Handle event contract test failure
-      if: failure() && steps.run_event_contract_tests.outcome == 'failure'
-      run: |
-        echo "::error::Swap event contract tests failed. Run 'cargo test --test swap_event_schema_test' locally to debug."
-        exit 1
-
-    - name: Report sccache statistics
-      if: always()
-      run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
 
 
   coverage:
@@ -666,7 +532,6 @@ jobs:
       run: sccache --start-server || true
 
     - name: Cache Cargo registry and build artifacts
-      id: cargo-cache
       uses: actions/cache@v4
       with:
         path: |
@@ -674,9 +539,9 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
+        key: ${{ runner.os }}-coverage-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-stable-workspace-
+          ${{ runner.os }}-coverage-cargo-
           ${{ runner.os }}-cargo-
 
     - name: Install sqlx-cli
@@ -854,10 +719,6 @@ jobs:
         echo "::error::Coverage threshold enforcement failed. Increase test coverage to meet minimum requirements."
         exit 1
 
-    - name: Report sccache statistics
-      if: always()
-      run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
-
   # ── Job: supply-chain-audit ─────────────────────────────────────────────
   # Enforces deny.toml's [advisories]/[licenses]/[bans]/[sources] policy.
   # deny.toml existed in the repo before this job did but was never wired
@@ -946,112 +807,6 @@ jobs:
                 labels: ["supply-chain"],
               });
             }
-
-  # ── Job: benchmark-trend ────────────────────────────────────────────────
-  # Runs the criterion micro-benchmarks in benches/critical_paths.rs and
-  # publishes the results as a build artifact so performance can be tracked
-  # over time by comparing artifacts across runs. Does not gate the build —
-  # criterion timing on shared GitHub-hosted runners is too noisy to hard-
-  # fail on, unlike the load-test P95/error-rate gating in tests/load/.
-  benchmark-trend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    services:
-      postgres:
-        image: postgres:14-alpine
-        env:
-          POSTGRES_USER: synapse
-          POSTGRES_PASSWORD: synapse
-          POSTGRES_DB: synapse_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-          --health-start-period 10s
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Install sccache
-        uses: taiki-e/install-action@sccache
-
-      - name: Start sccache session
-        run: sccache --start-server || true
-
-      - name: Cache Cargo registry and build artifacts
-        id: cargo-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-stable-workspace-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/*.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-stable-workspace-
-            ${{ runner.os }}-cargo-
-
-      - name: Install sqlx-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli@0.7.4
-
-      - name: Create restricted app DB role (NOBYPASSRLS)
-        run: |
-          PGPASSWORD=synapse psql -h localhost -U synapse -d synapse_test -v ON_ERROR_STOP=1 <<'SQL'
-          DO $$
-          BEGIN
-              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'synapse_app') THEN
-                  CREATE ROLE synapse_app WITH LOGIN PASSWORD 'synapse_app' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-              END IF;
-          END
-          $$;
-          GRANT ALL PRIVILEGES ON DATABASE synapse_test TO synapse_app;
-          GRANT ALL ON SCHEMA public TO synapse_app;
-          ALTER ROLE synapse_app SET app.is_admin = 'true';
-          SQL
-
-      - name: Run migrations
-        run: |
-          for i in 1 2 3; do
-            sqlx migrate run && break
-            echo "Migration attempt $i/3 failed, retrying in 5 seconds..."
-            sleep 5
-            [ "$i" -eq 3 ] && { echo "All migration attempts failed"; exit 1; }
-          done
-        env:
-          DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-
-      # criterion writes a full HTML/JSON report per run under target/criterion,
-      # including estimates.json per benchmark which is what the artifact
-      # comparison across runs actually tracks over time.
-      - name: Run critical-paths benchmarks
-        run: cargo bench --bench critical_paths
-        env:
-          DATABASE_URL: postgres://synapse_app:synapse_app@localhost:5432/synapse_test
-        continue-on-error: true
-
-      - name: Upload benchmark trend artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: criterion-benchmark-trend-${{ github.sha }}
-          path: target/criterion/
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ── Job: docker-image-security ──────────────────────────────────────────
   # Builds the production image from `dockerfile` and fails if it doesn't

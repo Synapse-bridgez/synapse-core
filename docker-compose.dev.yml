@@ -43,151 +43,6 @@ services:
     environment:
       ADMINER_DEFAULT_SERVER: postgres
 
-  vault:
-    image: hashicorp/vault:latest
-    container_name: synapse-vault-dev
-    ports:
-      - "8200:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "root"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-    cap_add:
-      - IPC_LOCK
-    command: server -dev
-
-  # Containerized Stellar quickstart network used by the integration suite
-  # (tests/integration). It runs a local standalone network with a built-in
-  # friendbot and Horizon, so end-to-end swap settlement tests can exercise
-  # real ledger behaviour without depending on hosted testnet resets or rate
-  # limits. Start it with:
-  #   docker compose -f docker-compose.dev.yml up -d stellar-quickstart
-  # Horizon is exposed on http://localhost:8000 and friendbot on
-  # http://localhost:8000/friendbot. Tear down (and wipe ledger state) with:
-  #   docker compose -f docker-compose.dev.yml down -v
-  stellar-quickstart:
-    image: stellar/quickstart:latest
-    container_name: synapse-stellar-quickstart
-    command: --standalone --enable-soroban-rpc
-    ports:
-      - "8000:8000"
-    healthcheck:
-      # Horizon's root endpoint only returns 200 once the network has
-      # finished bootstrapping and the ledger is advancing.
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ >/dev/null || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-
-  # Swap engine dependencies. Only started when the `swap` profile is enabled
-  # (e.g. `docker compose -f docker-compose.dev.yml --profile swap up -d`), so
-  # the default Phase 1 flow is unaffected. All images are pinned and pulled
-  # from the local registry cache; no other external network access is needed.
-  swap-postgres:
-    image: postgres:14-alpine
-    container_name: synapse-swap-postgres-dev
-    profiles: ["swap"]
-    environment:
-      POSTGRES_USER: synapse
-      POSTGRES_PASSWORD: synapse
-      POSTGRES_DB: synapse_swap
-    ports:
-      - "5433:5432"
-    volumes:
-      - swap_postgres_dev_data:/var/lib/postgresql/data
-      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse_swap"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  swap-redis:
-    image: redis:7-alpine
-    container_name: synapse-swap-redis-dev
-    profiles: ["swap"]
-    ports:
-      - "6380:6379"
-    volumes:
-      - swap_redis_dev_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  swap-app:
-    image: rust:latest
-    container_name: synapse-swap-app-dev
-    profiles: ["swap"]
-    working_dir: /app
-    depends_on:
-      swap-postgres:
-        condition: service_healthy
-      swap-redis:
-        condition: service_healthy
-      vault:
-        condition: service_started
-    environment:
-      APP_ENV: development
-      SWAP_ENGINE_ENABLED: "true"
-      SERVER_PORT: 3001
-      DATABASE_URL: postgres://synapse_app:synapse_app@swap-postgres:5432/synapse_swap
-      DATABASE_URL_TEMPLATE: postgres://synapse_app:{password}@swap-postgres:5432/synapse_swap
-      BACKUP_DATABASE_URL: postgres://synapse:synapse@swap-postgres:5432/synapse_swap
-      # Deterministic, offline market data source for local development.
-      STELLAR_HORIZON_URL: http://swap-horizon-stub:8000
-      SWAP_MARKET_DATA_SOURCE: stub
-      SWAP_LIQUIDITY_ADAPTER: stub
-      SWAP_SEED_PROFILE: local
-      VAULT_ADDR: http://vault:8200
-      VAULT_ROLE_ID: ""
-      VAULT_SECRET_ID: ""
-      REDIS_URL: redis://swap-redis:6379
-      RUST_LOG: debug
-      LOG_FORMAT: text
-      DEFAULT_RATE_LIMIT: "10000"
-      WHITELIST_RATE_LIMIT: "100000"
-      DB_MIN_CONNECTIONS: "2"
-      DB_MAX_CONNECTIONS: "10"
-      DB_IDLE_TIMEOUT_SECS: "30"
-      DB_STATEMENT_TIMEOUT_MS: "30000"
-      DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS: "120000"
-    ports:
-      - "3001:3001"
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 1G
-    volumes:
-      - ./src:/app/src
-      - ./migrations:/app/migrations
-      - ./Cargo.toml:/app/Cargo.toml
-      - ./Cargo.lock:/app/Cargo.lock
-      - cargo_registry:/usr/local/cargo/registry
-      - cargo_git:/usr/local/cargo/git
-      - target_cache:/app/target
-    command: >
-      bash -c "cargo install cargo-watch --locked 2>/dev/null || true &&
-               cargo watch -x 'run -- serve' -w src -w migrations"
-
-  # Minimal in-network stub so the swap profile never reaches out to the
-  # public Horizon endpoint during local development.
-  swap-horizon-stub:
-    image: python:3.12-alpine
-    container_name: synapse-swap-horizon-stub
-    profiles: ["swap"]
-    working_dir: /srv
-    volumes:
-      - ./scripts/swap-horizon-stub:/srv:ro
-    command: ["python", "-m", "http.server", "8000", "--bind", "0.0.0.0"]
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8000/ || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   app:
     image: rust:latest
     container_name: synapse-app-dev
@@ -197,49 +52,23 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      vault:
-        condition: service_started
     environment:
       APP_ENV: development
       SERVER_PORT: 3000
       # Restricted, non-superuser role — see scripts/db-init/01-create-app-role.sql.
       DATABASE_URL: postgres://synapse_app:synapse_app@postgres:5432/synapse
-      DATABASE_URL_TEMPLATE: postgres://synapse_app:{password}@postgres:5432/synapse
-      BACKUP_DATABASE_URL: postgres://synapse:synapse@postgres:5432/synapse
-      # Point at the local quickstart network by default; override with
-      # https://horizon-testnet.stellar.org to run against hosted testnet.
-      STELLAR_HORIZON_URL: http://stellar-quickstart:8000
-      VAULT_ADDR: http://vault:8200
-      VAULT_ROLE_ID: ""
-      VAULT_SECRET_ID: ""
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
       REDIS_URL: redis://redis:6379
       ANCHOR_WEBHOOK_SECRET: dev-secret
       RUST_LOG: debug
       LOG_FORMAT: text
-      # Keep development parity with production defaults while allowing local debugging.
+      # Relaxed limits for development
       DEFAULT_RATE_LIMIT: "10000"
       WHITELIST_RATE_LIMIT: "100000"
-      DB_MIN_CONNECTIONS: "2"
-      DB_MAX_CONNECTIONS: "10"
-      DB_IDLE_TIMEOUT_SECS: "30"
-      DB_STATEMENT_TIMEOUT_MS: "30000"
-      DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS: "120000"
-      # Graceful shutdown: stop accepting new swap orders, drain in-flight work
-      # within this grace period, then flush the outbox and close the DB pool.
-      SHUTDOWN_GRACE_PERIOD_SECS: "30"
-      SHUTDOWN_DRAIN_POLL_INTERVAL_MS: "250"
-      SHUTDOWN_OUTBOX_FLUSH_TIMEOUT_SECS: "10"
     ports:
       - "3000:3000"
       # Debug port for IDE debugger attachment (lldb-server / rust-gdb)
       - "9229:9229"
-    # Give the app time to drain in-flight swaps before Docker escalates to SIGKILL.
-    stop_grace_period: 45s
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 1G
     volumes:
       - ./src:/app/src
       - ./migrations:/app/migrations
@@ -255,8 +84,6 @@ services:
 volumes:
   postgres_dev_data:
   redis_dev_data:
-  swap_postgres_dev_data:
-  swap_redis_dev_data:
   cargo_registry:
   cargo_git:
   target_cache:

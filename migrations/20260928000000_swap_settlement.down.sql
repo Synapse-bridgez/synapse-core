@@ -1,3 +1,0 @@
-DROP TABLE IF EXISTS swap_events;
-DROP TABLE IF EXISTS swap_fills;
-DROP TABLE IF EXISTS swap_orders;

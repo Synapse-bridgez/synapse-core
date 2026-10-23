@@ -2,15 +2,13 @@ use crate::services::query_cache::QueryCache;
 use sqlx::PgPool;
 use std::time::Duration;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Partition manager that runs maintenance tasks periodically
 pub struct PartitionManager {
     pool: PgPool,
     interval: Duration,
     cache: Option<QueryCache>,
-    lookahead_months: u32,
-    swap_retention_months: i32,
 }
 
 impl PartitionManager {
@@ -19,30 +17,7 @@ impl PartitionManager {
             pool,
             interval: Duration::from_secs(interval_hours * 3600),
             cache,
-            lookahead_months: 3, // default
-            swap_retention_months: 12, // default
         }
-    }
-
-    pub fn with_lookahead(
-        pool: PgPool,
-        interval_hours: u64,
-        cache: Option<QueryCache>,
-        lookahead_months: u32,
-    ) -> Self {
-        Self {
-            pool,
-            interval: Duration::from_secs(interval_hours * 3600),
-            cache,
-            lookahead_months,
-            swap_retention_months: 12, // default
-        }
-    }
-
-    /// Set how many months of swap partitions are retained before detachment.
-    pub fn with_swap_retention_months(mut self, retention_months: i32) -> Self {
-        self.swap_retention_months = retention_months;
-        self
     }
 
     /// Whether this manager was constructed with a cache to warm on partition
@@ -75,77 +50,9 @@ impl PartitionManager {
 
     /// Run partition maintenance (create new partitions, detach old ones)
     async fn maintain_partitions(&self) -> Result<(), sqlx::Error> {
-        // Create partitions for lookahead window
-        sqlx::query("SELECT ensure_future_partitions($1)")
-            .bind(self.lookahead_months as i32)
+        sqlx::query("SELECT maintain_partitions()")
             .execute(&self.pool)
             .await?;
-
-        // Same lookahead for swap tables, then apply their retention policy.
-        // Errors propagate to start(), which logs them at error level.
-
-        sqlx::query("SELECT ensure_swap_partitions($1)")
-            .bind(self.lookahead_months as i32)
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("SELECT detach_swap_partitions($1)")
-            .bind(self.swap_retention_months)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("SELECT ensure_swap_partitions($1)")
-            .bind(self.lookahead_months as i32)
-            .execute(&self.pool)
-            .await?;
-        // Same lookahead for swap tables, then apply their retention policy.
-        // Errors propagate to start(), which logs them at error level.
-        sqlx::query("SELECT ensure_swap_partitions($1)")
-            .bind(self.lookahead_months as i32)
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("SELECT detach_swap_partitions($1)")
-            .bind(self.swap_retention_months)
-            .execute(&self.pool)
-            .await?;
-
-        // Check if future partitions are below the configured lookahead threshold
-        // and alert if needed
-        self.check_partition_health().await?;
-
-        Ok(())
-    }
-
-    /// Check partition health and alert if future partitions fall below configured lookahead
-    async fn check_partition_health(&self) -> Result<(), sqlx::Error> {
-        let partition_count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*)
-            FROM pg_class
-            WHERE relname ~ '^transactions_y\d{4}m\d{2}$'
-              AND relkind = 'r'
-              AND relname >= 'transactions_y' || TO_CHAR(NOW(), 'YYYY') || 'm' || TO_CHAR(NOW(), 'MM')
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        let future_partitions = partition_count as u32;
-        if future_partitions < self.lookahead_months {
-            warn!(
-                partition_count = future_partitions,
-                configured_lookahead = self.lookahead_months,
-                "Partition health alert: future partitions below configured lookahead. \
-                 This may indicate a missed or delayed partition creation job."
-            );
-        } else {
-            info!(
-                partition_count = future_partitions,
-                configured_lookahead = self.lookahead_months,
-                "Partition health check passed"
-            );
-        }
-
         Ok(())
     }
 
@@ -215,21 +122,6 @@ mod tests {
         let manager = PartitionManager::new(pool, 24, None);
 
         assert_eq!(manager.interval, Duration::from_secs(24 * 3600));
-        assert_eq!(manager.lookahead_months, 3); // default value
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_partition_manager_with_custom_lookahead() {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
-        });
-
-        let pool = PgPool::connect(&database_url).await.unwrap();
-        let manager = PartitionManager::with_lookahead(pool, 24, None, 6);
-
-        assert_eq!(manager.interval, Duration::from_secs(24 * 3600));
-        assert_eq!(manager.lookahead_months, 6);
     }
 
     /// Cache is warm after partition creation; no extra warming if partition already exists.

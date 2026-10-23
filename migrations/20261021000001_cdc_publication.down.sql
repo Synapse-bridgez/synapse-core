@@ -1,1 +1,0 @@
-DROP PUBLICATION IF EXISTS synapse_swap_cdc;
