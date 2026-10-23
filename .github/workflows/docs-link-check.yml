@@ -1,0 +1,81 @@
+name: Docs Link Check
+
+on:
+  push:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check internal doc links
+        run: |
+          set -euo pipefail
+          FAIL=0
+
+          check_link() {
+            local source_file="$1"
+            local link="$2"
+
+            # Skip external links and anchors
+            if [[ "$link" == http* ]] || [[ "$link" == "#"* ]]; then
+              return 0
+            fi
+
+            # Resolve relative path from the source file's directory
+            local source_dir
+            source_dir=$(dirname "$source_file")
+            local target
+            target=$(realpath -m "${source_dir}/${link}" 2>/dev/null || echo "")
+
+            # Strip anchor fragment if present
+            target="${target%%#*}"
+
+            if [[ -n "$target" ]] && [[ ! -f "$target" ]]; then
+              echo "BROKEN LINK in ${source_file}: ${link} → ${target} (not found)"
+              FAIL=1
+            fi
+          }
+
+          # Extract markdown links from all docs and README
+          while IFS= read -r file; do
+            while IFS= read -r link; do
+              check_link "$file" "$link"
+            done < <(grep -oP '\]\(\K[^)]+' "$file" 2>/dev/null || true)
+          done < <(find docs -name '*.md'; echo README.md)
+
+          if [[ "$FAIL" -ne 0 ]]; then
+            echo "❌ Broken internal links found."
+            exit 1
+          fi
+
+          echo "✅ All internal doc links resolved."
+
+      - name: Verify new swap docs are linked from README
+        run: |
+          set -euo pipefail
+          FAIL=0
+
+          for doc in \
+            "docs/swap-operator-runbook.md" \
+            "docs/swap-developer-integration-guide.md" \
+            "docs/swap-dr-runbook.md"; do
+            if ! grep -q "$doc" README.md; then
+              echo "README.md does not link to ${doc}"
+              FAIL=1
+            fi
+          done
+
+          if [[ "$FAIL" -ne 0 ]]; then
+            exit 1
+          fi
+
+          echo "✅ All new swap docs linked from README.md."

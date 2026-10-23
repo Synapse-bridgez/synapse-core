@@ -98,7 +98,7 @@ Example:
 ```markdown
 ## Status
 
-Superseded by [ADR-005: New Partitioning Strategy](005-new-partitioning-strategy.md)
+Superseded by [ADR-005: Transaction Completion Pipeline Authority](005-transaction-completion-pipeline-authority.md)
 ```
 
 ## ADR Lifecycle
