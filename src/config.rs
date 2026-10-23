@@ -1139,3 +1139,208 @@ fn parse_list(raw: &str) -> Vec<String> {
         .map(String::from)
         .collect()
 }
+// ── Venue / liquidity-adapter configuration ─────────────────────────────────
+//
+// Issue #1482: per-venue settings sourced exclusively from environment
+// variables so no credentials or URLs live in code or manifests.
+
+/// Runtime configuration for a single liquidity-provider venue.
+///
+/// Populated by [`VenueConfigs::from_env`] and injected into adapter
+/// constructors via the adapter registry.
+#[derive(Debug, Clone)]
+pub struct VenueConfig {
+    /// Whether this venue is open for new quotes and orders.
+    pub enabled: bool,
+    /// Horizon (or venue-specific) base URL.
+    pub base_url: String,
+    /// Per-request timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Maximum number of retries on transient failures.
+    pub max_retries: u32,
+    /// Base delay between retries in milliseconds.
+    pub retry_base_delay_ms: u64,
+    /// Maximum order-book depth to request from the venue.
+    pub max_depth: u32,
+    /// Optional API key. Sourced from a `*_API_KEY` env var — never hard-coded.
+    pub api_key: Option<String>,
+}
+
+impl Default for VenueConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            timeout_ms: 5_000,
+            max_retries: 3,
+            retry_base_delay_ms: 200,
+            max_depth: 20,
+            api_key: None,
+        }
+    }
+}
+
+impl VenueConfig {
+    /// Convert to the liquidity-layer [`crate::swap::liquidity::VenueConfig`].
+    pub fn to_liquidity_config(&self) -> crate::swap::liquidity::VenueConfig {
+        crate::swap::liquidity::VenueConfig {
+            enabled: self.enabled,
+            base_url: self.base_url.clone(),
+            timeout_ms: self.timeout_ms,
+            max_retries: self.max_retries,
+            retry_base_delay_ms: self.retry_base_delay_ms,
+            max_depth: self.max_depth,
+            api_key: self.api_key.clone(),
+        }
+    }
+}
+
+/// Aggregated venue configurations for all registered liquidity venues.
+///
+/// # Environment variables
+///
+/// | Variable | Default | Description |
+/// |---|---|---|
+/// | `SDEX_ENABLED` | `false` | Enable the SDEX adapter |
+/// | `SDEX_BASE_URL` | `$STELLAR_HORIZON_URL` | Horizon base URL |
+/// | `SDEX_TIMEOUT_MS` | `5000` | Request timeout |
+/// | `SDEX_MAX_RETRIES` | `3` | Retry budget |
+/// | `SDEX_RETRY_BASE_DELAY_MS` | `200` | Retry back-off base |
+/// | `SDEX_MAX_DEPTH` | `20` | Order-book depth |
+/// | `AMM_ENABLED` | `false` | Enable the AMM adapter |
+/// | `AMM_BASE_URL` | `$STELLAR_HORIZON_URL` | Horizon base URL |
+/// | `AMM_TIMEOUT_MS` | `5000` | Request timeout |
+/// | `AMM_MAX_RETRIES` | `3` | Retry budget |
+/// | `AMM_RETRY_BASE_DELAY_MS` | `200` | Retry back-off base |
+/// | `AMM_MAX_DEPTH` | `20` | Max pools to query |
+#[derive(Debug, Clone)]
+pub struct VenueConfigs {
+    /// Configuration for the Stellar SDEX adapter.
+    pub sdex: VenueConfig,
+    /// Configuration for the Stellar AMM adapter.
+    pub amm: VenueConfig,
+}
+
+impl VenueConfigs {
+    /// Load venue configuration from environment variables.
+    pub fn from_env() -> Self {
+        let horizon_url =
+            env::var("STELLAR_HORIZON_URL").unwrap_or_default();
+
+        let sdex_base = env::var("SDEX_BASE_URL").unwrap_or_else(|_| horizon_url.clone());
+        let amm_base = env::var("AMM_BASE_URL").unwrap_or_else(|_| horizon_url.clone());
+
+        Self {
+            sdex: VenueConfig {
+                enabled: env::var("SDEX_ENABLED")
+                    .map(|v| v.to_ascii_lowercase() == "true")
+                    .unwrap_or(false),
+                base_url: sdex_base,
+                timeout_ms: env::var("SDEX_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5_000),
+                max_retries: env::var("SDEX_MAX_RETRIES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3),
+                retry_base_delay_ms: env::var("SDEX_RETRY_BASE_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(200),
+                max_depth: env::var("SDEX_MAX_DEPTH")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(20),
+                api_key: env::var("SDEX_API_KEY").ok(),
+            },
+            amm: VenueConfig {
+                enabled: env::var("AMM_ENABLED")
+                    .map(|v| v.to_ascii_lowercase() == "true")
+                    .unwrap_or(false),
+                base_url: amm_base,
+                timeout_ms: env::var("AMM_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5_000),
+                max_retries: env::var("AMM_MAX_RETRIES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3),
+                retry_base_delay_ms: env::var("AMM_RETRY_BASE_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(200),
+                max_depth: env::var("AMM_MAX_DEPTH")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(20),
+                api_key: env::var("AMM_API_KEY").ok(),
+            },
+        }
+    }
+
+    /// Build an [`crate::swap::liquidity::AdapterRegistry`] from the loaded
+    /// venue configuration. Only enabled venues are registered.
+    pub fn build_registry(&self) -> crate::swap::liquidity::AdapterRegistry {
+        use crate::swap::liquidity::{
+            adapters::{amm::AmmAdapter, sdex::SdexAdapter},
+            AdapterRegistry,
+        };
+        use std::sync::Arc;
+
+        let mut registry = AdapterRegistry::new();
+
+        if self.sdex.enabled {
+            registry.register(Arc::new(SdexAdapter::new(self.sdex.to_liquidity_config())));
+        }
+        if self.amm.enabled {
+            registry.register(Arc::new(AmmAdapter::new(self.amm.to_liquidity_config())));
+        }
+
+        registry
+    }
+}
+
+#[cfg(test)]
+mod venue_config_tests {
+    use super::*;
+
+    #[test]
+    fn venue_config_defaults_to_disabled() {
+        let cfg = VenueConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.timeout_ms, 5_000);
+        assert_eq!(cfg.max_retries, 3);
+    }
+
+    #[test]
+    fn build_registry_empty_when_all_disabled() {
+        let configs = VenueConfigs {
+            sdex: VenueConfig::default(),
+            amm: VenueConfig::default(),
+        };
+        let registry = configs.build_registry();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn build_registry_registers_enabled_venues() {
+        let configs = VenueConfigs {
+            sdex: VenueConfig {
+                enabled: true,
+                base_url: "https://horizon-testnet.stellar.org".into(),
+                ..Default::default()
+            },
+            amm: VenueConfig {
+                enabled: true,
+                base_url: "https://horizon-testnet.stellar.org".into(),
+                ..Default::default()
+            },
+        };
+        let registry = configs.build_registry();
+        assert_eq!(registry.len(), 2);
+        assert!(registry.get("sdex").is_some());
+        assert!(registry.get("amm").is_some());
+    }
+}
