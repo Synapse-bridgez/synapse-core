@@ -87,6 +87,11 @@ SWAP_ENGINE_TENANT_ALLOWLIST – Comma-separated tenant ids admitted to swap (* 
 
 A tenant also needs the `swap_engine` feature flag enabled. The rollout sequence, kill switch, and stuck-order runbook are in [docs/swap-rollout.md](docs/swap-rollout.md).
 
+**Phase 2 Swap Engine Documentation:**
+- [Swap Operator Runbook](docs/swap-operator-runbook.md) — dashboards, alerts, kill switch, stuck orders, escalation
+- [Swap Developer Integration Guide](docs/swap-developer-integration-guide.md) — lifecycle, auth, worked example (quote → order), error reference
+- [Swap DR Runbook](docs/swap-dr-runbook.md) — backup, restore, and disaster-recovery procedures
+
 3. Start PostgresSQL Using Docker (recommended for development):
 
 ```bash
