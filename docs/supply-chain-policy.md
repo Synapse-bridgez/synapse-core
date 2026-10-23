@@ -92,14 +92,7 @@ entry instead of just bumping the review date.
 | RUSTSEC-2026-0194 / -0195 | quick-xml (via `pprof`'s flamegraph feature) | No safe upgrade without a newer `inferno` release; only parses profiler-generated SVGs, not untrusted input. |
 | RUSTSEC-2026-0204 / -0258 | h2 0.3.27 (via axum 0.6) | Fix requires an axum 0.6 → 0.7+/0.8 major upgrade. The h2 0.4.x instance in the same tree (used by tonic/reqwest) is already patched to 0.4.16. |
 
-| RUSTSEC-2023-0071 | rsa 0.9.x (lockfile-only, via sqlx-mysql) | No patched release upstream; mysql driver is not compiled into the binary. Added 2026-10-19. |
-| RUSTSEC-2024-0384 | instant 0.1.x | Unmaintained, no drop-in upgrade. Added 2026-10-19. |
-
 None of these are ignored blindly — each is a real, reviewed trade-off
 between the fix's blast radius and the risk it defers. The sqlx and axum
 upgrades in particular should be tracked as their own follow-up issues
 rather than attempted as part of routine dependency maintenance.
-
-As of August 28, 2026, this check should remain a required branch-protection
-gate rather than an informational-only workflow, otherwise dependency policy
-failures can still merge through an unrelated green path.

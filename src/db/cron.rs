@@ -75,17 +75,7 @@ pub async fn detach_and_archive_old_partitions(
             if part_date < cutoff {
                 // detach
                 let detach_sql = format!("ALTER TABLE transactions DETACH PARTITION \"{child}\"");
-                match sqlx::query(&detach_sql).execute(pool).await {
-                    Ok(_) => {}
-                    // Swap receipts/orders retain a source FK into the parent.
-                    // PostgreSQL checks this atomically against concurrent intake;
-                    // defer linked partitions while continuing unrelated archival.
-                    Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23503") => {
-                        tracing::warn!(partition = %child, "Deferring partition archive: retained source references require coordinated archival");
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
+                sqlx::query(&detach_sql).execute(pool).await?;
                 // move to archive schema
                 let set_schema = format!("ALTER TABLE \"{child}\" SET SCHEMA archive");
                 sqlx::query(&set_schema).execute(pool).await?;
@@ -127,69 +117,5 @@ pub async fn ensure_future_partitions(pool: &PgPool, months_ahead: u32) -> Resul
             m += 1;
         }
     }
-    Ok(())
-}
-
-// ── Cache-invalidation wrappers (#1115) ──────────────────────────────────────
-
-/// Create a new month partition and, if `cache` is provided, invalidate the
-/// transaction-aggregate cache keys that may span partition boundaries.
-///
-/// # Why invalidation is needed
-///
-/// `QueryCache` caches the results of queries like `COUNT(*) FROM transactions`
-/// or `SUM(amount) FROM transactions WHERE …`. These queries fan out across all
-/// `transactions_y*` child partitions via the parent table. When a new partition
-/// is attached, the underlying table set changes. Any entry cached *before* the
-/// partition was attached will reflect the old partition set and must be
-/// invalidated.
-///
-/// Importantly, only transaction-aggregate keys are affected; settlement,
-/// compliance, and other caches are untouched (no over-invalidation).
-pub async fn create_month_partition_and_invalidate_cache(
-    pool: &PgPool,
-    year: i32,
-    month: u32,
-    cache: Option<&crate::services::query_cache::QueryCache>,
-) -> Result<(), sqlx::Error> {
-    create_month_partition(pool, year, month).await?;
-
-    if let Some(cache) = cache {
-        if let Err(e) = cache.invalidate_partition_affected_keys().await {
-            tracing::error!(
-                "Failed to invalidate cache after creating partition y{}m{:02}: {}",
-                year, month, e
-            );
-            // Non-fatal: cache will self-correct on TTL expiry. Log and continue.
-        }
-    }
-
-    Ok(())
-}
-
-/// Detach old partitions and, if `cache` is provided, invalidate the
-/// transaction-aggregate cache keys.
-///
-/// When a partition is detached and moved to `archive`, the parent
-/// `transactions` table no longer routes queries to it. Any cached aggregate
-/// result that included rows from that partition is now stale. The targeted
-/// invalidation removes exactly those keys without flushing unrelated entries.
-pub async fn detach_and_archive_old_partitions_and_invalidate_cache(
-    pool: &PgPool,
-    retention_months: i64,
-    cache: Option<&crate::services::query_cache::QueryCache>,
-) -> Result<(), sqlx::Error> {
-    detach_and_archive_old_partitions(pool, retention_months).await?;
-
-    if let Some(cache) = cache {
-        if let Err(e) = cache.invalidate_partition_affected_keys().await {
-            tracing::error!(
-                "Failed to invalidate cache after detaching old partitions: {}",
-                e
-            );
-            // Non-fatal: cache will self-correct on TTL expiry. Log and continue.
-        }
-    }
-
     Ok(())
 }

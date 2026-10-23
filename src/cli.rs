@@ -30,17 +30,6 @@ pub enum Commands {
 
     /// Configuration validation
     Config,
-
-    /// Deployment preflight: validate configuration, dependency reachability
-    /// and migration state without mutating anything. Exits non-zero on failure.
-    Preflight {
-        /// Skip checks that need network access (for offline CI).
-        #[arg(long)]
-        offline: bool,
-        /// Per-dependency timeout in seconds.
-        #[arg(long, default_value_t = 5)]
-        timeout_secs: u64,
-    },
 }
 
 #[derive(Subcommand)]
@@ -178,53 +167,6 @@ pub fn handle_config_validate(config: &Config) -> anyhow::Result<()> {
     tracing::info!("Configuration is valid");
     println!("✓ Configuration is valid");
 
-    Ok(())
-}
-
-/// Static validation already ran in `Config::load` (which aborts with the
-/// full report); this adds secret presence, reachability and migration drift.
-pub async fn handle_preflight(
-    config: &Config,
-    offline: bool,
-    timeout_secs: u64,
-) -> anyhow::Result<()> {
-    use synapse_core::config::preflight;
-
-    println!("Secrets (values never shown):");
-    for (name, present) in preflight::secret_presence(|k| std::env::var(k).ok()) {
-        println!("  {name}: {}", if present { "present" } else { "absent" });
-    }
-
-    if offline {
-        println!("Skipping dependency and migration checks (--offline)");
-        println!("✓ Preflight passed");
-        return Ok(());
-    }
-
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    let mut report = preflight::check_dependencies(config, timeout).await;
-
-    if report.is_ok() {
-        let migrator = sqlx::migrate::Migrator::new(std::path::Path::new("./migrations")).await?;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(timeout)
-            .connect(&config.database_url)
-            .await?;
-        let pending = preflight::pending_migrations(&pool, &migrator).await?;
-        pool.close().await;
-        if !pending.is_empty() {
-            let msg = format!("{} pending migration(s): {pending:?}", pending.len());
-            if preflight::auto_migrate_enabled() {
-                println!("  note: {msg} (will be applied at startup; AUTO_MIGRATE=true)");
-            } else {
-                report.push("migrations", format!("{msg} and AUTO_MIGRATE=false"));
-            }
-        }
-    }
-
-    report.into_result()?;
-    println!("✓ Preflight passed");
     Ok(())
 }
 

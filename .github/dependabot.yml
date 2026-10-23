@@ -22,8 +22,6 @@ updates:
     pull-request-branch-name:
       separator: "/"
     rebase-strategy: "auto"
-    cooldown:
-      default-days: 3
     allow:
       - dependency-type: "direct"
       - dependency-type: "indirect"

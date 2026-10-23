@@ -9,10 +9,7 @@ Thank you for your interest in contributing to Synapse Core! This guide will hel
 - [Code Style Guide](#code-style-guide)
 - [Testing Requirements](#testing-requirements)
 - [Pull Request Process](#pull-request-process)
-- [Documentation Translations](#documentation-translations)
 - [Architecture Decision Records](#architecture-decision-records)
-- [Maintainer Rotation & On-Call](#maintainer-rotation--on-call)
-- [Code of Conduct](#code-of-conduct)
 - [Communication](#communication)
 
 ## Getting Started
@@ -103,21 +100,6 @@ cargo build
 cargo test
 ```
 
-8. **Bootstrap the swap engine dev profile (optional)**
-
-If you are working on the swap engine, you can bring up the full stack with
-deterministic demo data in a single idempotent command:
-
-```bash
-cargo xtask dev up
-```
-
-This starts the compose profile, applies migrations, seeds demo tenants,
-assets, liquidity provider stubs, sample orders and fills, and prints
-ready-to-use endpoints. See
-[Swap Engine Local Development Profile](#swap-engine-local-development-profile)
-for details.
-
 ## Development Setup
 
 ### Development Environment
@@ -200,107 +182,6 @@ All database migrations must pass the safety checker:
 ```
 
 This ensures migrations are compatible with blue-green deployments. See [docs/migration-safety.md](docs/migration-safety.md) for details.
-
-### Expand/Contract Migrations
-
-Swap engine tables (orders, quotes, fills, events, screenings, submissions)
-are migrated using an **expand/contract** practice so that multiple running
-replicas never observe a schema they cannot handle. The full policy lives in
-[docs/migrations/expand-contract.md](docs/migrations/expand-contract.md); the
-short version:
-
-1. **Expand** — add new columns/tables/indexes additively. New columns must be
-   nullable or have a default. Ship the migration *before* the code that uses
-   it.
-2. **Migrate** — deploy application code that writes both old and new shapes
-   and backfills data in a separate, batched step.
-3. **Contract** — only after all replicas run the new code, drop or rename the
-   old shape in a later release.
-
-Rules enforced in CI:
-
-- Dropping or renaming a column still referenced by the current schema is
-  rejected.
-- Adding a `NOT NULL` column without a default is rejected.
-- Long-running locks on high-volume/partitioned tables are flagged; split
-  index creation (`CREATE INDEX CONCURRENTLY`) and constraint validation
-  (`NOT VALID` + `VALIDATE CONSTRAINT`) into separate migrations.
-- Every migration must have a working down path. If a down path genuinely
-  cannot exist, record a dated exemption in the policy document and call it
-  out in the PR description.
-
-Run the checks locally before pushing:
-
-```bash
-cargo xtask migrate lint      # flag unsafe migrations
-cargo xtask migrate rehearse  # forward + rollback against a seeded database
-```
-
-### Liquidity Provider Adapter Onboarding & Certification
-
-New liquidity provider (LP) adapters must be onboarded through the registration manifest and pass the conformance suite before they can serve live traffic. The full workflow is documented in [docs/lp-adapter-onboarding.md](docs/lp-adapter-onboarding.md); the essentials are:
-
-1. **Declare an adapter manifest** under `src/swap/liquidity/` describing supported assets/pairs, rate limits, precision, and capabilities (streaming quotes, cancellation, partial fills). Manifests are validated at startup.
-2. **Load credentials** from environment/secret storage only — never commit secrets. Credential rotation must work without a process restart, and the secrets path must respect `.secrets-allowlist.txt` and pre-commit secret scanning.
-3. **Run the conformance suite** against your adapter (see below) and commit the generated certification report.
-
-#### Running the conformance suite locally
-
-The conformance kit lives in `tests/conformance/` and is independent of production wiring, so it can run against the mock adapter in CI or a live sandbox adapter manually:
-
-```bash
-# Run the full conformance suite against the mock adapter (as CI does)
-cargo test --test conformance
-
-# Run certification for a specific adapter and emit a machine-readable report
-cargo xtask certify-adapter --adapter <adapter-name> --output reports/<adapter-name>.json
-
-# Or via the helper script
-./scripts/certify-adapter.sh <adapter-name>
-```
-
-The suite exercises quote freshness, amount precision, error mapping, timeout behavior, cancellation semantics, and partial-fill reporting. Adapters that declare capabilities they do not honour fail certification rather than degrading silently.
-
-#### Certification requirement
-
-An adapter **must** have a passing certification report before it can be enabled outside test configurations. The registry refuses to activate uncertified adapters in non-test environments. When adding an adapter, include the certification report in your PR and reference it in the description.
-
-### Swap Engine Local Development Profile
-
-The swap engine has a first-class local development profile that is hermetic
-(no network access beyond container image pulls) and deterministic (fixed ids
-and timestamps) so local state and snapshots are comparable between
-contributors.
-
-**One-command bootstrap:**
-
-```bash
-cargo xtask dev up
-```
-
-This is idempotent — re-running it will not duplicate data. It:
-
-1. Starts the dependencies from `docker-compose.dev.yml` with healthy defaults
-   (PostgreSQL primary/replica, Redis, Adminer).
-2. Applies all migrations via `sqlx`.
-3. Seeds deterministic demo data: tenants, assets, liquidity provider stubs,
-   sample swap orders and fills.
-4. Prints ready-to-use endpoints (API base URL, Adminer, Redis).
-
-**Teardown / reset:**
-
-```bash
-cargo xtask dev seed --reset   # wipe seeded data and re-seed from scratch
-cargo xtask dev down           # stop the profile and remove volumes
-```
-
-**Safety guard:** seeding and teardown refuse to run against a non-local
-database host unless you pass `--force` *and* confirm interactively. The
-default profile only ever targets `localhost`. Never point the seed tool at a
-shared or production database.
-
-**Environment:** the profile reads `.env.development`. Copy it if you need to
-override ports or credentials locally; do not commit secrets.
 
 ## Code Style Guide
 
@@ -480,69 +361,231 @@ sqlx::query_as!(
 .await?
 ```
 
-## Testing Requirements
+#### Logging
 
-### Test Coverage
+Use `tracing` for structured logging:
 
-All new code must include tests. We aim for:
+```rust
+use tracing::{debug, info, warn, error, instrument};
 
-- **Unit tests** for business logic
-- **Integration tests** for API endpoints
-- **Property-based tests** for critical paths (using `proptest`)
+#[instrument(skip(pool))]
+pub async fn process_transaction(pool: &PgPool, tx_id: Uuid) -> Result<()> {
+    info!("Processing transaction");
+    
+    match save_transaction(pool, tx_id).await {
+        Ok(_) => {
+            debug!(transaction_id = %tx_id, "Transaction saved successfully");
+            Ok(())
+        }
+        Err(e) => {
+            error!(error = %e, transaction_id = %tx_id, "Failed to save transaction");
+            Err(e)
+        }
+    }
+}
+```
 
-### Writing Tests
+**Log levels:**
+- `error!` - Errors that require immediate attention
+- `warn!` - Potential issues that should be investigated
+- `info!` - Important business events (transaction created, webhook received)
+- `debug!` - Detailed diagnostic information
+- `trace!` - Very verbose debugging (query parameters, response bodies)
+
+#### Documentation
+
+**Document public APIs:**
+
+```rust
+/// Processes a transaction and updates its status.
+///
+/// # Arguments
+///
+/// * `pool` - Database connection pool
+/// * `transaction_id` - UUID of the transaction to process
+///
+/// # Returns
+///
+/// Returns `Ok(())` if successful, or an `AppError` if:
+/// - Transaction not found
+/// - Database connection fails
+/// - Stellar verification fails
+///
+/// # Examples
+///
+/// ```
+/// let result = process_transaction(&pool, transaction_id).await?;
+/// ```
+pub async fn process_transaction(pool: &PgPool, transaction_id: Uuid) -> Result<(), AppError> {
+    // Implementation
+}
+```
+
+**Add inline comments for complex logic:**
+
+```rust
+// Calculate exponential backoff with jitter to prevent thundering herd
+let base_delay = Duration::from_secs(2_u64.pow(attempt));
+let jitter = rand::random::<u64>() % 1000;
+let delay = base_delay + Duration::from_millis(jitter);
+```
+
+### Testing Patterns
+
+#### Unit Tests
+
+Place unit tests in the same file as the code:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_process_transaction_success() {
-        let pool = setup_test_db().await;
-        let tx = create_test_transaction();
+    
+    #[test]
+    fn test_transaction_status_transition() {
+        let mut tx = Transaction::new();
+        assert_eq!(tx.status, TransactionStatus::Pending);
         
-        let result = process_transaction(&pool, tx).await;
-        
-        assert!(result.is_ok());
+        tx.mark_processing();
+        assert_eq!(tx.status, TransactionStatus::Processing);
     }
-
+    
     #[tokio::test]
-    async fn test_process_transaction_invalid_amount() {
-        let pool = setup_test_db().await;
-        let mut tx = create_test_transaction();
-        tx.amount = -100;
+    async fn test_save_transaction() {
+        let pool = setup_test_pool().await;
+        let tx = Transaction::new();
         
-        let result = process_transaction(&pool, tx).await;
-        
-        assert!(matches!(result, Err(AppError::ValidationError(_))));
+        let result = save_transaction(&pool, &tx).await;
+        assert!(result.is_ok());
     }
 }
 ```
 
-### Running Tests
+#### Integration Tests
 
-```bash
-# Run all tests
-cargo test
+Place integration tests in `tests/` directory:
 
-# Run specific test
-cargo test test_process_transaction
+```rust
+// tests/transaction_api_test.rs
+use synapse_core::*;
 
-# Run tests with output
-cargo test -- --nocapture
-
-# Run tests in a specific module
-cargo test --lib transactions::
+#[tokio::test]
+async fn test_create_transaction_endpoint() {
+    let app = setup_test_app().await;
+    
+    let response = app
+        .post("/api/transactions")
+        .header("X-API-Key", "test_key")
+        .json(&json!({
+            "external_id": "test_001",
+            "amount": "100.00",
+            "asset_code": "USDC"
+        }))
+        .send()
+        .await;
+    
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
 ```
 
-### Test Database
+#### Property-Based Tests
 
-Tests use a separate database. Set it up with:
+Use `proptest` for property-based testing:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn test_amount_always_positive(amount in 0.0..1000000.0f64) {
+        let tx = Transaction::new_with_amount(amount);
+        assert!(tx.amount > BigDecimal::zero());
+    }
+}
+```
+
+## Testing Requirements
+
+### Test Coverage
+
+We maintain a minimum test coverage of **40%** (enforced in CI) with a target of **60%**.
+
+**Check coverage locally:**
 
 ```bash
-export DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test
-sqlx migrate run
+cargo install cargo-llvm-cov
+cargo llvm-cov --html
+open target/llvm-cov/html/index.html
+```
+
+### Test Categories
+
+1. **Unit Tests** - Test individual functions and modules
+   - Run with: `cargo test --lib`
+   - Should be fast (<1ms per test)
+   - Mock external dependencies
+
+2. **Integration Tests** - Test API endpoints and workflows
+   - Run with: `cargo test --test '*'`
+   - Use real database (test database)
+   - Clean up after each test
+
+3. **Ignored Tests** - Long-running or external dependency tests
+   - Run with: `cargo test -- --ignored`
+   - Include load tests, external API tests
+   - May take several minutes
+
+4. **Benchmarks** - Performance regression tests
+   - Run with: `cargo bench`
+   - Located in `benches/`
+   - Compare against baseline
+
+### Writing Good Tests
+
+**Test naming:**
+
+```rust
+#[test]
+fn test_<what>_<condition>_<expected_result>() {
+    // Example: test_transaction_creation_with_valid_data_succeeds
+}
+```
+
+**Arrange-Act-Assert pattern:**
+
+```rust
+#[tokio::test]
+async fn test_transaction_status_update() {
+    // Arrange
+    let pool = setup_test_pool().await;
+    let tx = create_test_transaction(&pool).await;
+    
+    // Act
+    let result = update_transaction_status(&pool, tx.id, TransactionStatus::Completed).await;
+    
+    // Assert
+    assert!(result.is_ok());
+    let updated_tx = get_transaction(&pool, tx.id).await.unwrap();
+    assert_eq!(updated_tx.status, TransactionStatus::Completed);
+}
+```
+
+**Clean up test data:**
+
+```rust
+#[tokio::test]
+async fn test_with_cleanup() {
+    let pool = setup_test_pool().await;
+    let tx_id = create_test_transaction(&pool).await.id;
+    
+    // Test logic here
+    
+    // Cleanup
+    sqlx::query!("DELETE FROM transactions WHERE id = $1", tx_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
 ```
 
 ## Pull Request Process
@@ -556,107 +599,167 @@ cargo fmt --all -- --check
 cargo clippy -- -D warnings
 cargo build
 cargo test
-cargo xtask migrate lint
-cargo xtask migrate rehearse
 ```
 
-If your PR touches swap-related migrations, confirm they follow the
-[expand/contract practice](#expandcontract-migrations) and note any dated
-exemptions in the PR description.
+2. **Check migration safety (if applicable):**
 
-2. **Update documentation** if you changed public APIs
-
-3. **Add tests** for new functionality
-
-4. **Update CHANGELOG.md** if applicable
-
-5. **Certify new LP adapters:** if your PR adds or changes a liquidity provider adapter, run the conformance suite and attach the certification report (see [Liquidity Provider Adapter Onboarding & Certification](#liquidity-provider-adapter-onboarding--certification))
-
-### PR Guidelines
-
-- **Keep PRs focused:** One feature or fix per PR
-- **Write clear descriptions:** Explain what and why, not just how
-- **Reference issues:** Use `Fixes #123` or `Closes #123`
-- **Respond to feedback:** Address review comments promptly
-- **Squash commits:** We use squash-merge, so keep commits clean
-
-### PR Title Format
-
+```bash
+./scripts/check-migration-safety.sh
 ```
-<type>: <description>
 
-Examples:
-feat: Add transaction batching endpoint
-fix: Resolve race condition in webhook delivery
-docs: Update API authentication guide
+3. **Update documentation:**
+   - Add/update doc comments for public APIs
+   - Update relevant docs in `docs/` directory
+   - Update CHANGELOG.md (if applicable)
+
+4. **Commit your changes:**
+
+```bash
+git add .
+git commit -m "feat: add transaction retry mechanism"
 ```
+
+Commit message format:
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `docs:` - Documentation changes
+- `refactor:` - Code refactoring
+- `test:` - Test additions/updates
+- `chore:` - Maintenance tasks
+
+5. **Push to your fork:**
+
+```bash
+git push origin feat/your-feature-name
+```
+
+### Creating the Pull Request
+
+1. **Open a PR against `develop` branch** (not `main`)
+
+2. **Fill out the PR template:**
+
+```markdown
+## Description
+Brief description of what this PR does.
+
+## Related Issue
+Closes #123
+
+## Changes Made
+- Added transaction retry mechanism
+- Updated error handling
+- Added integration tests
+
+## Testing
+- [ ] Unit tests added/updated
+- [ ] Integration tests added/updated
+- [ ] Manual testing performed
+- [ ] Migration safety checked (if applicable)
+
+## Checklist
+- [ ] Code follows style guidelines
+- [ ] All tests pass
+- [ ] Documentation updated
+- [ ] No breaking changes (or documented)
+```
+
+3. **Request review** from maintainers
 
 ### Review Process
 
-1. **Automated checks** run on every PR (CI, clippy, tests)
-2. **At least one maintainer review** is required
-3. **Address feedback** and push updates
-4. **Maintainer merges** once approved and CI passes
+**What reviewers look for:**
 
-See [Maintainer Rotation & On-Call](#maintainer-rotation--on-call) to find the current reviewer.
+1. **Correctness** - Does the code work as intended?
+2. **Security** - Are there any security vulnerabilities?
+3. **Performance** - Are there any performance concerns?
+4. **Maintainability** - Is the code easy to understand and modify?
+5. **Testing** - Are there adequate tests?
+6. **Documentation** - Is the code well-documented?
 
-## Documentation Translations
+**Responding to feedback:**
 
-Translations of the key onboarding docs (`README.md`, `CONTRIBUTING.md`, `docs/QUICK_START.md`) are welcome. They must be written by a human fluent in the target language; machine-translated content will not be merged.
+- Address all comments (or explain why you disagree)
+- Push additional commits to the same branch
+- Mark conversations as resolved when addressed
+- Be respectful and open to suggestions
 
-1. **Open an issue first** (or comment on an existing one) so two people don't translate the same file.
-2. **Copy the English source** to `docs/i18n/<lang>/`, using the BCP 47 language tag as the directory name (`es`, `pt-BR`, `zh-Hans`). Keep the file name of the source: `README.md`, `CONTRIBUTING.md`, or `QUICK_START.md`.
-3. **Add front matter** at the very top of the file that records what the translation reflects:
+### Merging
 
-   ```markdown
-   ---
-   source: docs/QUICK_START.md
-   source_commit: <full SHA of the last commit that changed the source file>
-   ---
-   ```
+Once approved:
 
-   Get the SHA with `git log -1 --format=%H -- docs/QUICK_START.md`. `source` must be one of the three key docs above, relative to the repo root.
-4. **Translate and open a PR** with the `docs` label.
-
-Every PR runs `scripts/check-i18n-staleness.py`. A translation is **stale** when its source file has changed between `source_commit` and `HEAD`; the check posts a warning annotation for each stale file. Stale translations are not deleted, but they must be brought up to date (or the `source_commit` bumped after a review of the source changes) before the next release. See [`docs/i18n/README.md`](docs/i18n/README.md) for the full process and the list of available languages.
+1. Ensure CI passes
+2. Squash commits if requested
+3. Maintainer will merge to `develop`
+4. Delete your feature branch
 
 ## Architecture Decision Records
 
-Significant architectural decisions are documented as ADRs in [`docs/rfcs/`](docs/rfcs/). If your change alters system architecture, add or update an ADR following the [template](docs/rfcs/000-template.md).
+We document significant architectural decisions in ADRs. See [docs/adr/](docs/adr/) for existing records.
 
-## Maintainer Rotation & On-Call
+**Key ADRs:**
 
-The project uses a version-controlled rotation schedule so contributors always know who is responsible for triage, review, and incident response.
+- [ADR-001: Database Partitioning Strategy](docs/adr/001-database-partitioning.md)
+- [ADR-002: Circuit Breaker Pattern](docs/adr/002-circuit-breaker.md)
+- [ADR-003: Multi-Tenant Isolation](docs/adr/003-multi-tenant-isolation.md)
 
-- **Schedule source of truth:** [`docs/governance/rotation.md`](docs/governance/rotation.md) — a structured, human-editable table of `who`, `role`, and `period` (start/end dates).
-- **Published view:** the current and upcoming rotation is generated from that schedule and surfaced in the governance docs and the scheduled publish workflow under `.github/workflows/`.
-- **Swaps & coverage:** because the schedule is just a file, requesting a swap or coverage is a normal pull request editing the relevant entry. Open a PR titled `chore(rotation): swap <date> <role>` and tag the incoming maintainer.
-- **Gaps:** if no maintainer is assigned for the current period, the published view explicitly reports a rotation gap rather than silently falling back to an unspecified default. If you see a gap, open a PR to fill it.
+**When to create an ADR:**
 
-## Code of Conduct
+- Choosing between architectural patterns
+- Selecting third-party libraries
+- Defining system boundaries
+- Making security decisions
+- Establishing performance targets
 
-All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
-It defines the standards for behavior, and the enforcement workflow for reports:
-intake, recusal, confidential review, decision, and communication.
-
-- **Report a concern privately:** email the address in the [Code of Conduct](CODE_OF_CONDUCT.md#1-reporting-intake) with the subject line `CONDUCT:`. Do not raise conduct concerns in public issues, PRs, or Discord.
-- **Security issues** go through [SECURITY.md](SECURITY.md), not the conduct channel.
+**ADR template:** See [docs/adr/000-template.md](docs/adr/000-template.md)
 
 ## Communication
 
-- **GitHub Issues:** Bug reports and feature requests
-- **GitHub Discussions:** Questions and design discussions
-- **Discord:** Real-time chat ([invite link](https://discord.gg/synapse))
-- **Weekly sync:** Thursdays at 15:00 UTC
-
 ### Getting Help
 
-If you're stuck:
+- **GitHub Issues** - Bug reports and feature requests
+- **GitHub Discussions** - Questions and general discussion
+- **Pull Request Comments** - Code-specific questions
 
-1. Check existing [documentation](docs/)
-2. Search [GitHub Issues](https://github.com/synapse-core/synapse-core/issues)
-3. Ask in Discord `#dev-help`
-4. Tag a maintainer in your PR (see [Maintainer Rotation & On-Call](#maintainer-rotation--on-call))
+### Reporting Bugs
+
+Use the bug report template and include:
+
+1. **Description** - What happened?
+2. **Expected Behavior** - What should have happened?
+3. **Steps to Reproduce** - How can we reproduce it?
+4. **Environment** - OS, Rust version, etc.
+5. **Logs** - Relevant error messages or logs
+
+### Suggesting Features
+
+Use the feature request template and include:
+
+1. **Problem Statement** - What problem does this solve?
+2. **Proposed Solution** - How should it work?
+3. **Alternatives** - What other approaches did you consider?
+4. **Additional Context** - Any other relevant information
+
+## Code of Conduct
+
+We are committed to providing a welcoming and inclusive environment. Please:
+
+- Be respectful and considerate
+- Welcome newcomers and help them learn
+- Focus on what is best for the community
+- Show empathy towards other community members
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the MIT License.
+
+## Additional Resources
+
+- [Rust Book](https://doc.rust-lang.org/book/)
+- [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
+- [Axum Documentation](https://docs.rs/axum/)
+- [SQLx Documentation](https://docs.rs/sqlx/)
+- [Tokio Tutorial](https://tokio.rs/tokio/tutorial)
 
 ---
 

@@ -144,8 +144,6 @@ let query = qb.build_query_as::<Transaction>();
 Until that migration is complete, all callers must validate inputs at the
 boundary.
 
-Fuzzing dynamic filter combinations remains the preferred regression layer for this boundary because it is the shortest path to catching interpolation edge cases before they become user-facing SQL paths.
-
 ## Tenant isolation
 
 All user-facing queries include a `tenant_id` filter derived from the

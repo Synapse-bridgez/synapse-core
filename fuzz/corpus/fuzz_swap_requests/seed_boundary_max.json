@@ -1,1 +1,0 @@
-{"order_id":"seed-boundary-max-002","source_asset":"EURC","destination_asset":"USDC","side":"exact_in","input_amount":100000000000000,"min_output_amount":1,"fee_bps":5000,"flat_fee":100000,"spread_bps":5000,"ttl_secs":604800}

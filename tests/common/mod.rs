@@ -111,10 +111,42 @@ impl TestApp {
         .await
         .unwrap();
 
-        // Build AppState via the shared fixture builder (also used by the CLI's
-        // events_watch_real_server_test.rs) instead of duplicating the struct
-        // literal here, so the two suites can't drift out of sync.
-        let app_state = AppState::test_new(&database_url).await;
+        // Build AppState
+        let (tx_broadcast, _) = tokio::sync::broadcast::channel(100);
+        let app_state = AppState {
+            db: pool.clone(),
+            pool_manager: synapse_core::db::pool_manager::PoolManager::new(&database_url, None, 5)
+                .await
+                .unwrap(),
+            horizon_client: synapse_core::stellar::HorizonClient::new(
+                "https://horizon-testnet.stellar.org".to_string(),
+            ),
+            feature_flags: synapse_core::services::feature_flags::FeatureFlagService::new(
+                pool.clone(),
+            ),
+            redis_url: "redis://localhost:6379".to_string(),
+            start_time: std::time::Instant::now(),
+            readiness: synapse_core::ReadinessState::new(),
+            tx_broadcast,
+            query_cache: synapse_core::services::QueryCache::new("redis://localhost:6379")
+                .await
+                .unwrap(),
+            allowed_ips: synapse_core::config::AllowedIps::Any,
+            trusted_proxy_depth: 1,
+            profiling_manager: synapse_core::handlers::profiling::ProfilingManager::new(),
+            tenant_configs: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            pending_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            current_batch_size: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(10)),
+            secrets_store: None,
+            metrics_handle: synapse_core::metrics::init_metrics().unwrap(),
+            ws_connection_pool: std::sync::Arc::new(
+                synapse_core::ws::connection_pool::ConnectionPool::new(
+                    synapse_core::ws::connection_pool::PoolConfig::default(),
+                ),
+            ),
+        };
 
         // Clone readiness before app_state is moved into create_app
         let readiness = app_state.readiness.clone();
@@ -151,77 +183,6 @@ impl TestApp {
     #[allow(dead_code)]
     pub async fn start_drain(&self) {
         self.readiness.start_drain();
-    }
-
-    /// Flip the swap subsystem into draining mode (stop accepting new orders)
-    /// without touching the HTTP-level readiness flag. Used by graceful
-    /// shutdown tests to assert new orders are rejected during drain.
-    #[allow(dead_code)]
-    pub async fn start_swap_drain(&self) {
-        self.readiness.start_swap_drain();
-    }
-
-    /// Returns true once the swap subsystem is draining.
-    #[allow(dead_code)]
-    pub fn is_swap_draining(&self) -> bool {
-        self.readiness.is_swap_draining()
-    }
-
-    /// Simulate a restart: drop the current HTTP server is out of scope for the
-    /// harness, but recovery logic can be exercised by re-running the startup
-    /// recovery path against the same pool. Returns the number of orders that
-    /// were resumed or safely failed.
-    #[allow(dead_code)]
-    pub async fn run_startup_recovery(&self) -> Result<u64, sqlx::Error> {
-        synapse_core::swap::recover_in_flight_orders(&self.pool).await
-    }
-
-    /// Count bridge handoff records emitted for a given swap/order id.
-    #[allow(dead_code)]
-    pub async fn count_handoffs_for(&self, order_id: &str) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM bridge_handoffs WHERE order_id = $1",
-        )
-        .bind(order_id)
-        .fetch_one(&self.pool)
-        .await
-    }
-
-    /// Fetch the current handoff status for a given order id, if any.
-    #[allow(dead_code)]
-    pub async fn handoff_status_for(&self, order_id: &str) -> Result<Option<String>, sqlx::Error> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT status FROM bridge_handoffs WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(order_id)
-        .fetch_optional(&self.pool)
-        .await
-    }
-
-    /// Drive the read-model projector to catch up on all pending outbox events.
-    /// Returns the number of events processed.
-    #[allow(dead_code)]
-    pub async fn catch_up_read_model(&self) -> Result<u64, sqlx::Error> {
-        synapse_core::swap::read_model::catch_up(&self.pool).await
-    }
-
-    /// POST a JSON body to a batch endpoint and return the parsed response.
-    #[allow(dead_code)]
-    pub async fn post_batch(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> Result<(reqwest::StatusCode, serde_json::Value), Box<dyn std::error::Error>> {
-        let client = reqwest::Client::new();
-        let res = client
-            .post(format!("{}{}", self.base_url, path))
-            .header("X-API-Key", TEST_API_KEY)
-            .json(body)
-            .send()
-            .await?;
-        let status = res.status();
-        let json = res.json::<serde_json::Value>().await?;
-        Ok((status, json))
     }
 
     /// Truncate all tables for test isolation (call between tests if reusing TestApp).

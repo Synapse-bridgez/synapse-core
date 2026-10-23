@@ -5,36 +5,6 @@ The primary pipeline is [`rust.yml`](./rust.yml), which runs formatting, migrati
 safety checks, clippy, builds, unit tests, integration tests, coverage collection,
 and coverage threshold enforcement.
 
-## Roadmap Sync
-
-The [`roadmap-sync.yml`](./roadmap-sync.yml) workflow keeps the public roadmap
-view synchronized with actual GitHub issue and milestone state. GitHub milestones
-and labels are the single source of truth; the generated roadmap is a derived
-artifact that is regenerated on every sync.
-
-### Source Of Truth
-
-- Milestones and labels on GitHub issues define roadmap placement. Maintainers
-  decide what goes into milestones; this workflow only reflects that state.
-- `docs/roadmap.md` is generated output. Do **not** hand-edit it. Any manual edit
-  is overwritten on the next sync, so changes must be made to the underlying
-  issues, milestones, or labels instead.
-- Issues without a milestone are excluded cleanly rather than being bucketed
-  into an arbitrary column.
-
-### Schedule And Staleness
-
-The workflow runs on a schedule (and on manual dispatch). Every generated
-roadmap includes a `Last synced` timestamp so staleness is never ambiguous. If
-the timestamp looks old, check the workflow run history for failures before
-trusting the roadmap contents.
-
-### Columns
-
-The roadmap is published as now/next/later columns derived from milestone and
-label state. Column mapping is defined in the sync script and covered by tests
-against fixture issue/milestone data.
-
 ## Session Management
 
 In this CI/CD module, a session is one isolated GitHub Actions job execution:
@@ -79,34 +49,6 @@ published coverage artifact.
 - `coverage` depends on successful unit and integration jobs, then creates a new
   runner session to collect and upload coverage. It does not reuse databases,
   Redis data, or build processes from earlier jobs.
-- `schema-validation` validates database migrations and schema state against a
-  runner-local Postgres service. It runs independently of the test jobs so schema
-  regressions are reported separately from test failures.
-- `testnet-integration` runs the Stellar testnet end-to-end swap settlement suite
-  (see [`tests/integration/`](../../tests/integration/README.md)). It is gated
-  behind the opt-in `testnet-integration` label on pull requests and also runs on
-  a nightly schedule so the suite is exercised even when no PR opts in. The job
-  brings up the testnet environment (containerized quickstart or hosted testnet
-  via configuration), runs the scenarios, and tears the environment down.
-
-### Testnet Integration Job
-
-The `testnet-integration` job separates environment bring-up from scenario
-execution so the same scenarios can run against a local quickstart container or
-hosted testnet selected by configuration. Key behaviors:
-
-- **Opt-in label:** PR runs only execute when the `testnet-integration` label is
-  present. Nightly scheduled runs always execute.
-- **Fail loud, never skip:** if the environment is unreachable (quickstart not
-  ready, Horizon unreachable, testnet reset, or friendbot rate limiting that
-  exceeds bounded backoff), the job fails with a clear diagnostic message rather
-  than silently skipping. A skipped suite must never be mistaken for a passing
-  one.
-- **Isolation:** each run uses unique accounts and assets and cleans up its
-  state, so parallel or repeated runs do not interfere.
-- **Bounded runtime:** ledger polling uses explicit timeouts and bounded waits,
-  keeping total runtime predictable for both per-PR and nightly runs.
-=======
 
 ### Security Rules
 
@@ -223,3 +165,29 @@ source, so cache reuse cannot bypass verification.
 - The lockfile hash bounds cache growth by invalidating only when dependencies
   change. The `SCCACHE_CACHE_SIZE=1G` environment variable bounds compiler cache
   usage during the job.
+- The workflow grants `id-token: write` only to the coverage job because Codecov
+  upload may require OIDC. Other jobs run with default read-only source access.
+
+### Change Checklist
+
+When editing `.github/workflows/rust.yml`:
+
+- Keep cache keys deterministic and secret-free.
+- Add a new namespace when a cache serves a materially different job or tool.
+- Prefer dependency or configuration hashes over commit-specific keys.
+- Verify a cold run still succeeds if every cache restore misses.
+- Run `cargo test` locally before committing workflow documentation or behavior
+  changes.
+
+### Validation
+
+For documentation-only changes, verify that the workflow still matches this
+contract by checking the cache keys in `.github/workflows/rust.yml` and running:
+
+```sh
+cargo test
+```
+
+For workflow behavior changes, also trigger a pull request run and confirm that
+the pipeline passes when cache restore misses occur. Cache misses should make the
+run slower, not less correct.

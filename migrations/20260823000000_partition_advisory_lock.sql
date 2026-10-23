@@ -30,8 +30,7 @@ BEGIN
     start_date := TO_CHAR(partition_date, 'YYYY-MM-DD');
     end_date := TO_CHAR(partition_date + INTERVAL '1 month', 'YYYY-MM-DD');
 
-    -- Serialize concurrent callers targeting the same partition name and
-    -- surface lock contention cleanly in downstream advisory-lock metrics.
+    -- Serialize concurrent callers targeting the same partition name.
     PERFORM pg_advisory_xact_lock(hashtext(partition_name));
 
     BEGIN

@@ -1,22 +1,10 @@
 pub mod audit;
 pub mod bulk_status;
 pub mod compliance;
-pub mod config_export;
-pub mod dependency_scorecard;
-pub mod health_graph;
 pub mod locks;
-pub mod operator_audit;
 pub mod quota;
 pub mod reconciliation;
-pub mod rules_preview;
-pub mod swap_console;
-pub mod tenant_secret;
-pub mod transaction_notes;
-pub mod webhook_endpoints;
-pub mod webhook_filter_rules;
-pub mod webhook_redirects;
 pub mod webhook_replay;
-pub mod webhook_retry_policy;
 
 use crate::error::AppError;
 use crate::validation::{validate_max_len, validate_required};
@@ -39,25 +27,6 @@ pub struct UpdateFlagRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateWebhookRateLimitRequest {
     pub max_delivery_rate: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CanaryReleaseRequest {
-    pub flag_name: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CanaryStepRequest {
-    pub dimension: crate::services::CanaryDimension,
-    pub percentage: i32,
-    pub actor: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CanaryErrorRateRequest {
-    pub dimension: crate::services::CanaryDimension,
-    pub error_rate: f64,
-    pub actor: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,14 +91,6 @@ pub fn webhook_replay_routes() -> Router<sqlx::PgPool> {
         )
 }
 
-/// Create webhook endpoint management routes
-pub fn webhook_endpoints_routes() -> Router<sqlx::PgPool> {
-    Router::new().route(
-        "/webhooks/endpoints/batch",
-        post(webhook_endpoints::batch_webhook_operations),
-    )
-}
-
 /// GET /admin/instances — list active processor instances via Redis heartbeat keys.
 pub async fn list_active_instances(
     State(state): State<crate::ApiState>,
@@ -152,109 +113,6 @@ pub async fn list_active_instances(
 pub async fn get_flags(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let flags = state.feature_flags.get_all().await?;
     Ok((StatusCode::OK, Json(flags)))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SwapKillSwitchRequest {
-    /// `true` resumes new swap order intake, `false` halts it.
-    pub accepting: bool,
-}
-
-/// GET /admin/swap/kill-switch
-pub async fn get_swap_kill_switch() -> impl IntoResponse {
-    let gate = crate::swap::circuit_breaker::swap_gate();
-    Json(serde_json::json!({ "accepting": gate.is_accepting() }))
-}
-
-/// POST /admin/swap/kill-switch
-///
-/// Halts or resumes new swap order intake globally. In-flight orders are not
-/// affected. The toggle is audit-logged with the acting admin.
-pub async fn set_swap_kill_switch(
-    Json(payload): Json<SwapKillSwitchRequest>,
-) -> impl IntoResponse {
-    let gate = crate::swap::circuit_breaker::swap_gate();
-    gate.set_accepting(payload.accepting, "admin");
-    Json(serde_json::json!({ "accepting": gate.is_accepting() }))
-}
-
-pub async fn get_canary_dashboard(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, AppError> {
-    let dashboard = crate::services::CanaryController::new(state.db.clone())
-        .dashboard()
-        .await?;
-    Ok((StatusCode::OK, Json(dashboard)))
-}
-
-pub async fn create_canary_release(
-    State(state): State<AppState>,
-    Path(release_name): Path<String>,
-    Json(payload): Json<CanaryReleaseRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    validate_required("release_name", &release_name)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    validate_required("flag_name", &payload.flag_name)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let release = crate::services::CanaryController::new(state.db.clone())
-        .upsert_release(&release_name, &payload.flag_name, "admin")
-        .await?;
-    Ok((StatusCode::OK, Json(release)))
-}
-
-pub async fn get_canary_release(
-    State(state): State<AppState>,
-    Path(release_name): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let release = crate::services::CanaryController::new(state.db.clone())
-        .status(&release_name)
-        .await?;
-    Ok((StatusCode::OK, Json(release)))
-}
-
-pub async fn step_canary_release(
-    State(state): State<AppState>,
-    Path(release_name): Path<String>,
-    Json(payload): Json<CanaryStepRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let actor = payload.actor.unwrap_or_else(|| "admin".to_string());
-    let controller = crate::services::CanaryController::new(state.db.clone());
-    let release = controller
-        .set_percentage(crate::services::CanaryUpdate {
-            release_name,
-            dimension: payload.dimension,
-            percentage: payload.percentage,
-            actor,
-        })
-        .await?;
-    if matches!(payload.dimension, crate::services::CanaryDimension::Flag) {
-        state
-            .feature_flags
-            .update_rollout_percentage(&release.flag_name, release.flag_rollout_percentage)
-            .await?;
-    }
-    Ok((StatusCode::OK, Json(release)))
-}
-
-pub async fn record_canary_error_rate(
-    State(state): State<AppState>,
-    Path(release_name): Path<String>,
-    Json(payload): Json<CanaryErrorRateRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let actor = payload.actor.unwrap_or_else(|| "monitor".to_string());
-    let controller = crate::services::CanaryController::new(state.db.clone());
-    let release = controller
-        .record_error_rate(&release_name, payload.dimension, payload.error_rate, &actor)
-        .await?;
-    if matches!(payload.dimension, crate::services::CanaryDimension::Flag)
-        && release.flag_rollback_active
-    {
-        state
-            .feature_flags
-            .update_rollout_percentage(&release.flag_name, 0)
-            .await?;
-    }
-    Ok((StatusCode::OK, Json(release)))
 }
 
 pub async fn update_flag(
@@ -471,190 +329,6 @@ pub async fn set_asset_enabled(
                 Json(serde_json::json!({ "error": e.to_string() })),
             )
                 .into_response()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Access control matrix for admin and compliance endpoints.
-    /// Each endpoint maps to its required permission level.
-    #[derive(Debug, Clone)]
-    struct EndpointPermission {
-        path: &'static str,
-        method: &'static str,
-        required_role: &'static str,
-    }
-
-    fn admin_endpoint_matrix() -> Vec<EndpointPermission> {
-        vec![
-            EndpointPermission {
-                path: "/admin/audit/search",
-                method: "GET",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/compliance/reports",
-                method: "POST",
-                required_role: "compliance_officer",
-            },
-            EndpointPermission {
-                path: "/admin/compliance/reports",
-                method: "GET",
-                required_role: "compliance_officer",
-            },
-            EndpointPermission {
-                path: "/admin/webhooks/failed",
-                method: "GET",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/webhooks/replay/:id",
-                method: "POST",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/webhooks/replay/batch",
-                method: "POST",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/webhooks/health",
-                method: "GET",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/assets",
-                method: "GET",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/assets",
-                method: "POST",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/assets/:id",
-                method: "DELETE",
-                required_role: "admin",
-            },
-            EndpointPermission {
-                path: "/admin/assets/:id/enabled",
-                method: "PATCH",
-                required_role: "admin",
-            },
-        ]
-    }
-
-    #[test]
-    fn test_admin_endpoint_access_control_matrix_defined() {
-        let matrix = admin_endpoint_matrix();
-        assert!(
-            !matrix.is_empty(),
-            "Access control matrix must not be empty"
-        );
-        assert!(
-            matrix.len() >= 11,
-            "Matrix should cover all documented endpoints"
-        );
-    }
-
-    #[test]
-    fn test_audit_endpoint_requires_admin_role() {
-        let matrix = admin_endpoint_matrix();
-        let audit_endpoint = matrix
-            .iter()
-            .find(|ep| ep.path == "/admin/audit/search")
-            .expect("Audit search endpoint must be in matrix");
-
-        assert_eq!(audit_endpoint.required_role, "admin");
-        assert_eq!(audit_endpoint.method, "GET");
-    }
-
-    #[test]
-    fn test_compliance_endpoints_require_compliance_officer_role() {
-        let matrix = admin_endpoint_matrix();
-        let compliance_endpoints: Vec<_> = matrix
-            .iter()
-            .filter(|ep| ep.path.starts_with("/admin/compliance"))
-            .collect();
-
-        assert!(!compliance_endpoints.is_empty());
-        for endpoint in compliance_endpoints {
-            assert_eq!(
-                endpoint.required_role, "compliance_officer",
-                "Compliance endpoint {} should require compliance_officer role",
-                endpoint.path
-            );
-        }
-    }
-
-    #[test]
-    fn test_webhook_endpoints_require_admin_role() {
-        let matrix = admin_endpoint_matrix();
-        let webhook_endpoints: Vec<_> = matrix
-            .iter()
-            .filter(|ep| ep.path.contains("webhooks"))
-            .collect();
-
-        assert!(!webhook_endpoints.is_empty());
-        for endpoint in webhook_endpoints {
-            assert_eq!(
-                endpoint.required_role, "admin",
-                "Webhook endpoint {} should require admin role",
-                endpoint.path
-            );
-        }
-    }
-
-    #[test]
-    fn test_asset_endpoints_require_admin_role() {
-        let matrix = admin_endpoint_matrix();
-        let asset_endpoints: Vec<_> = matrix
-            .iter()
-            .filter(|ep| ep.path.contains("/admin/assets"))
-            .collect();
-
-        assert!(!asset_endpoints.is_empty());
-        for endpoint in asset_endpoints {
-            assert_eq!(
-                endpoint.required_role, "admin",
-                "Asset endpoint {} should require admin role",
-                endpoint.path
-            );
-        }
-    }
-
-    #[test]
-    fn test_matrix_has_no_duplicate_endpoints() {
-        let matrix = admin_endpoint_matrix();
-        let mut seen = std::collections::HashSet::new();
-
-        for endpoint in &matrix {
-            let key = (endpoint.path, endpoint.method);
-            assert!(
-                seen.insert(key),
-                "Duplicate endpoint found: {} {}",
-                endpoint.method,
-                endpoint.path
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_matrix_endpoints_have_valid_roles() {
-        let matrix = admin_endpoint_matrix();
-        let valid_roles = vec!["admin", "compliance_officer"];
-
-        for endpoint in &matrix {
-            assert!(
-                valid_roles.contains(&endpoint.required_role),
-                "Endpoint {} has invalid role: {}",
-                endpoint.path,
-                endpoint.required_role
-            );
         }
     }
 }

@@ -20,84 +20,11 @@ pub trait Job: Send + Sync {
     async fn execute(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-/// Last-run outcome recorded for a job, used to distinguish "did not run at
-/// all" from "ran but failed" when checking job health.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LastRunOutcome {
-    Success,
-    Failure,
-}
-
-#[derive(Debug, Clone)]
-struct JobRunRecord {
-    at: DateTime<Utc>,
-    outcome: LastRunOutcome,
-}
-
-/// One alertable condition surfaced by [`JobScheduler::check_job_health`].
-/// `MissedRun` and `Failed` are deliberately distinct so an operator (or
-/// alerting rule) can tell "this job silently stopped running" apart from
-/// "this job is running but erroring every time" — the former usually means
-/// a crash loop or a stuck lock, the latter a logic/dependency bug.
-#[derive(Debug, Clone, PartialEq)]
-pub enum JobHealthAlert {
-    /// The job has not completed successfully within its expected interval
-    /// plus grace period. `last_success` is `None` if it has never run.
-    MissedRun {
-        job_name: String,
-        last_success: Option<DateTime<Utc>>,
-        expected_by: DateTime<Utc>,
-    },
-    /// The job's most recent run failed (regardless of whether earlier runs
-    /// succeeded within the window).
-    Failed {
-        job_name: String,
-        failed_at: DateTime<Utc>,
-    },
-}
-
-impl JobHealthAlert {
-    /// The alert payload for this condition, carrying its runbook link
-    /// (see `crate::alerting`).
-    pub fn to_alert(&self) -> crate::alerting::AlertPayload {
-        use crate::alerting::{names, AlertPayload, AlertSeverity};
-        match self {
-            JobHealthAlert::MissedRun {
-                job_name,
-                last_success,
-                expected_by,
-            } => AlertPayload::new(
-                names::SCHEDULED_JOB_MISSED_RUN,
-                AlertSeverity::Warning,
-                format!("scheduled job '{job_name}' has not completed since it was due"),
-            )
-            .with_label("job_name", job_name)
-            .with_label(
-                "last_success",
-                last_success.map_or_else(|| "never".to_string(), |t| t.to_rfc3339()),
-            )
-            .with_label("expected_by", expected_by.to_rfc3339()),
-            JobHealthAlert::Failed {
-                job_name,
-                failed_at,
-            } => AlertPayload::new(
-                names::SCHEDULED_JOB_FAILED,
-                AlertSeverity::Warning,
-                format!("scheduled job '{job_name}' failed on its last run"),
-            )
-            .with_label("job_name", job_name)
-            .with_label("failed_at", failed_at.to_rfc3339()),
-        }
-    }
-}
-
 /// A job scheduler that manages cron-based recurring tasks
 pub struct JobScheduler {
     jobs: Arc<Mutex<HashMap<String, Arc<dyn Job>>>>,
     active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
-    last_success: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
-    last_run: Arc<Mutex<HashMap<String, JobRunRecord>>>,
 }
 
 impl Default for JobScheduler {
@@ -114,8 +41,6 @@ impl JobScheduler {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             active_handles: Arc::new(Mutex::new(HashMap::new())),
             shutdown_tx,
-            last_success: Arc::new(Mutex::new(HashMap::new())),
-            last_run: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -139,12 +64,6 @@ impl JobScheduler {
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let jobs = self.jobs.lock().await;
         let active_handles = self.active_handles.clone();
-        // Each registered job owns exactly one loop task (see
-        // telemetry::task_leak::TaskCategory::tasks_per_load).
-        crate::telemetry::task_leak::global().set_load(
-            crate::telemetry::task_leak::TaskCategory::SchedulerJob,
-            jobs.len() as u64,
-        );
 
         for (name, job) in jobs.iter() {
             let job_clone = Arc::clone(job);
@@ -152,18 +71,13 @@ impl JobScheduler {
             let shutdown_rx = self.shutdown_tx.subscribe();
             let active_handles_clone = Arc::clone(&active_handles);
 
-            let handle = crate::telemetry::task_leak::spawn_tracked(
-                crate::telemetry::task_leak::TaskCategory::SchedulerJob,
-                Self::run_job_loop(
-                    name_clone,
-                    job_clone,
-                    self.shutdown_tx.clone(),
-                    shutdown_rx,
-                    active_handles_clone,
-                    self.last_success.clone(),
-                    self.last_run.clone(),
-                ),
-            );
+            let handle = tokio::spawn(Self::run_job_loop(
+                name_clone,
+                job_clone,
+                self.shutdown_tx.clone(),
+                shutdown_rx,
+                active_handles_clone,
+            ));
 
             active_handles.lock().await.insert(name.clone(), handle);
         }
@@ -220,130 +134,88 @@ impl JobScheduler {
         status
     }
 
-    /// Checks every registered job for missed or failed runs.
-    ///
-    /// A job alerts as [`JobHealthAlert::MissedRun`] if it has never
-    /// completed successfully, or if its last successful run is older than
-    /// its cron schedule's expected interval (computed from that job's own
-    /// cron expression, so irregular/non-fixed-interval schedules are
-    /// handled correctly) plus `grace_period`. It separately alerts as
-    /// [`JobHealthAlert::Failed`] if its most recent run attempt errored,
-    /// regardless of whether an earlier run succeeded within the window —
-    /// so a job can surface both alerts at once (ran too long ago, and the
-    /// last attempt also failed).
-    pub async fn check_job_health(&self, grace_period: Duration) -> Vec<JobHealthAlert> {
-        let jobs = self.jobs.lock().await;
-        let last_success = self.last_success.lock().await;
-        let last_run = self.last_run.lock().await;
-        let now = Utc::now();
-        let mut alerts = Vec::new();
-
-        for (name, job) in jobs.iter() {
-            let success_at = last_success.get(name).copied();
-
-            let expected_interval = match Schedule::from_str(job.schedule()) {
-                Ok(schedule) => {
-                    let anchor = success_at.unwrap_or(now);
-                    schedule
-                        .after(&anchor)
-                        .next()
-                        .map(|next| next - anchor)
-                        .unwrap_or_else(|| Duration::zero())
-                }
-                Err(_) => Duration::zero(),
-            };
-
-            let expected_by = match success_at {
-                Some(at) => at + expected_interval + grace_period,
-                None => now, // never succeeded: overdue immediately
-            };
-
-            if success_at.is_none() || expected_by < now {
-                alerts.push(JobHealthAlert::MissedRun {
-                    job_name: name.clone(),
-                    last_success: success_at,
-                    expected_by,
-                });
-            }
-
-            if let Some(record) = last_run.get(name) {
-                if record.outcome == LastRunOutcome::Failure {
-                    alerts.push(JobHealthAlert::Failed {
-                        job_name: name.clone(),
-                        failed_at: record.at,
-                    });
-                }
-            }
-        }
-
-        alerts
-    }
-
-    /// Compute the next run time for a cron expression, if parseable.
-    fn get_next_run_time(schedule: &str) -> Option<DateTime<Utc>> {
-        Schedule::from_str(schedule)
-            .ok()
-            .and_then(|s| s.upcoming(Utc).next())
-    }
-
-    /// The per-job execution loop. Runs the job on its cron schedule until
-    /// the shutdown signal is received.
+    /// Internal function that runs the job execution loop
     async fn run_job_loop(
         name: String,
         job: Arc<dyn Job>,
         _shutdown_tx: tokio::sync::broadcast::Sender<()>,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-        _active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
-        last_success: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
-        last_run: Arc<Mutex<HashMap<String, JobRunRecord>>>,
+        active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     ) {
+        info!("Starting job '{}' with schedule: {}", name, job.schedule());
+
         let schedule = match Schedule::from_str(job.schedule()) {
-            Ok(s) => s,
+            Ok(schedule) => schedule,
             Err(e) => {
-                error!("Job '{}' has invalid schedule: {}", name, e);
+                error!("Failed to parse cron schedule for job '{}': {}", name, e);
                 return;
             }
         };
 
         loop {
-            let next = match schedule.upcoming(Utc).next() {
-                Some(next) => next,
-                None => break,
+            // Calculate next run time
+            let now = Utc::now();
+            let next_run = schedule.after(&now).next();
+
+            let next_run_time = match next_run {
+                Some(next_time) => {
+                    let duration = (next_time - now)
+                        .to_std()
+                        .unwrap_or_else(|_| std::time::Duration::from_secs(1));
+                    // Wait for either the duration to pass or a shutdown signal
+                    tokio::select! {
+                        _ = tokio::time::sleep(duration) => {
+                            // Time to execute the job
+                        },
+                        _ = shutdown_rx.recv() => {
+                            info!("Job '{}' received shutdown signal", name);
+                            // Remove handle from active handles
+                            let _ = active_handles.lock().await.remove(&name);
+                            return;
+                        }
+                    }
+                    next_time
+                }
+                None => {
+                    error!("Job '{}' has no next run time, stopping", name);
+                    return;
+                }
             };
 
-            let now = Utc::now();
-            let sleep_for = (next - now).to_std().unwrap_or_default();
-
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_for) => {
-                    let outcome = match job.execute().await {
-                        Ok(()) => {
-                            last_success.lock().await.insert(name.clone(), Utc::now());
-                            LastRunOutcome::Success
-                        }
-                        Err(e) => {
-                            error!("Job '{}' failed: {}", name, e);
-                            LastRunOutcome::Failure
-                        }
-                    };
-                    last_run.lock().await.insert(
-                        name.clone(),
-                        JobRunRecord {
-                            at: Utc::now(),
-                            outcome,
-                        },
+            // Execute the job
+            match job.execute().await {
+                Ok(()) => {
+                    info!(
+                        "Job '{}' executed successfully at {}",
+                        name,
+                        next_run_time.format("%Y-%m-%d %H:%M:%S")
                     );
                 }
-                _ = shutdown_rx.recv() => {
-                    info!("Job '{}' received shutdown signal", name);
-                    break;
+                Err(e) => {
+                    error!(
+                        "Job '{}' failed at {}: {}",
+                        name,
+                        next_run_time.format("%Y-%m-%d %H:%M:%S"),
+                        e
+                    );
                 }
             }
         }
     }
+
+    /// Helper function to get the next run time for a schedule
+    fn get_next_run_time(schedule_expr: &str) -> Option<DateTime<Utc>> {
+        match Schedule::from_str(schedule_expr) {
+            Ok(schedule) => {
+                let now = Utc::now();
+                schedule.after(&now).next()
+            }
+            Err(_) => None,
+        }
+    }
 }
 
-/// Status information for a registered job
+/// Status information for a scheduled job
 #[derive(Debug, Clone)]
 pub struct JobStatus {
     pub name: String,
@@ -462,115 +334,5 @@ mod tests {
         scheduler.register_job(Box::new(test_job)).await.unwrap();
 
         assert_eq!(scheduler.jobs.lock().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_check_job_health_flags_a_job_that_has_never_run() {
-        let scheduler = JobScheduler::new();
-        // Hourly schedule, but never started/executed.
-        let job = TestJob::new("never_run_job", "0 0 * * * * *");
-        scheduler.register_job(Box::new(job)).await.unwrap();
-
-        let alerts = scheduler.check_job_health(Duration::minutes(5)).await;
-
-        assert!(alerts.iter().any(|a| matches!(
-            a,
-            JobHealthAlert::MissedRun { job_name, last_success: None, .. }
-                if job_name == "never_run_job"
-        )));
-        assert!(!alerts
-            .iter()
-            .any(|a| matches!(a, JobHealthAlert::Failed { .. })));
-    }
-
-    #[tokio::test]
-    async fn test_check_job_health_detects_missed_run_past_grace_period() {
-        let scheduler = JobScheduler::new();
-        let job = TestJob::new("stale_job", "0 * * * * * *"); // every minute
-        scheduler.register_job(Box::new(job)).await.unwrap();
-
-        // Simulate a success far enough in the past that it's now overdue
-        // even with a grace period.
-        let stale_success = Utc::now() - Duration::hours(2);
-        scheduler
-            .last_success
-            .lock()
-            .await
-            .insert("stale_job".to_string(), stale_success);
-        scheduler.last_run.lock().await.insert(
-            "stale_job".to_string(),
-            JobRunRecord {
-                at: stale_success,
-                outcome: LastRunOutcome::Success,
-            },
-        );
-
-        let alerts = scheduler.check_job_health(Duration::minutes(5)).await;
-
-        assert!(alerts.iter().any(|a| matches!(
-            a,
-            JobHealthAlert::MissedRun { job_name, last_success: Some(_), .. }
-                if job_name == "stale_job"
-        )));
-    }
-
-    #[tokio::test]
-    async fn test_check_job_health_distinguishes_failed_from_missed_run() {
-        let scheduler = JobScheduler::new();
-        let job = TestJob::new("failing_job", "0 * * * * * *"); // every minute
-        scheduler.register_job(Box::new(job)).await.unwrap();
-
-        // The job ran recently (so it is not a "missed run"), but its most
-        // recent attempt failed.
-        let recent = Utc::now();
-        scheduler.last_run.lock().await.insert(
-            "failing_job".to_string(),
-            JobRunRecord {
-                at: recent,
-                outcome: LastRunOutcome::Failure,
-            },
-        );
-
-        let alerts = scheduler.check_job_health(Duration::minutes(5)).await;
-
-        assert!(alerts.iter().any(|a| matches!(
-            a,
-            JobHealthAlert::Failed { job_name, .. } if job_name == "failing_job"
-        )));
-        // Never succeeded, so it should still also alert as a missed run —
-        // these are separate, independently-checked conditions.
-        assert!(alerts.iter().any(|a| matches!(
-            a,
-            JobHealthAlert::MissedRun { job_name, .. } if job_name == "failing_job"
-        )));
-    }
-
-    #[test]
-    fn job_health_alerts_carry_runbook_links() {
-        let missed = JobHealthAlert::MissedRun {
-            job_name: "daily_reconciliation".into(),
-            last_success: None,
-            expected_by: Utc::now(),
-        }
-        .to_alert();
-        assert_eq!(
-            missed.alert,
-            crate::alerting::names::SCHEDULED_JOB_MISSED_RUN
-        );
-        assert_eq!(missed.labels["last_success"], "never");
-        assert!(missed
-            .runbook_url
-            .as_deref()
-            .unwrap()
-            .ends_with("#scheduled-job-health-alerts"));
-
-        let failed = JobHealthAlert::Failed {
-            job_name: "daily_reconciliation".into(),
-            failed_at: Utc::now(),
-        }
-        .to_alert();
-        assert_eq!(failed.alert, crate::alerting::names::SCHEDULED_JOB_FAILED);
-        assert_eq!(failed.labels["job_name"], "daily_reconciliation");
-        assert!(failed.runbook_url.is_some());
     }
 }
