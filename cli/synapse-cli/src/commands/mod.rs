@@ -9,6 +9,7 @@ pub mod settlements;
 pub mod stats;
 pub mod swap;
 pub mod transactions;
+pub mod webhook_listen;
 pub mod webhooks;
 
 pub use bridge::BridgeCmd;
@@ -136,6 +137,9 @@ pub enum Commands {
                       Output defaults to a human-readable table; add --json for raw JSON."
     )]
     Transactions(transactions::TransactionsCmd),
+
+    /// Local webhook testing commands (listen)
+    Webhooks(webhook_listen::WebhooksCmd),
 
     /// Send a raw GraphQL query to the Synapse API
     Graphql(graphql::GraphqlCmd),

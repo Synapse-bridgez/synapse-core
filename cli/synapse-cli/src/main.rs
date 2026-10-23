@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         Commands::Swap(cmd) => swap::run(cmd.command, &base_url, &api_key).await,
         Commands::Settlements(cmd) => settlements::run(cmd.command, &base_url, &api_key).await,
         Commands::Transactions(cmd) => transactions::run(cmd.command, &base_url, &api_key).await,
+        Commands::Webhooks(cmd) => webhook_listen::run(cmd.command, &base_url, &api_key).await,
         Commands::Graphql(cmd) => graphql::run(cmd.command, &base_url, &api_key).await,
         Commands::ReadModel(cmd) => read_model::run(cmd.command, &base_url, &api_key).await,
         Commands::Bridge(cmd) => bridge::run(cmd.command, &base_url, &api_key).await,
