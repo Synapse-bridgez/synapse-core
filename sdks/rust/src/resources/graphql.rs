@@ -1,5 +1,6 @@
 use crate::client::SynapseClient;
 use crate::error::SynapseError;
+use crate::graphql_typed::{GraphQLOperation, TypedGraphQLResponse};
 use crate::models::{GraphQLRequest, GraphQLResponse};
 
 /// Access the `POST /graphql` endpoint.
@@ -51,6 +52,57 @@ impl<'a> GraphQL<'a> {
         let resp: GraphQLResponse = self.client.post("/graphql", body).await?;
         if !resp.errors.is_empty() {
             let messages: Vec<&str> = resp.errors.iter().map(|e| e.message.as_str()).collect();
+            return Err(SynapseError::GraphQL(messages.join("; ")));
+        }
+        Ok(resp)
+    }
+
+    /// Execute a **typed** GraphQL operation defined by a [`GraphQLOperation`]
+    /// impl (issue #1351).
+    ///
+    /// This is the strongly-typed companion to [`Self::query`].  Pass one of
+    /// the operation structs from [`crate::graphql_typed`] to get a
+    /// `TypedGraphQLResponse<Op::ResponseData>` back instead of a
+    /// `serde_json::Value`.
+    ///
+    /// Application-level GraphQL errors in the `errors` array are surfaced as
+    /// [`SynapseError::GraphQL`] (same as `query`), so the `Ok` branch always
+    /// means the server responded with data.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use synapse_sdk::SynapseClient;
+    /// use synapse_sdk::graphql_typed::{GetTransactionQuery, GetTransactionVariables};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let client = SynapseClient::new("https://api.example.com", "key");
+    ///
+    /// let vars = GetTransactionVariables {
+    ///     id: "550e8400-e29b-41d4-a716-446655440000".into(),
+    /// };
+    /// let resp = client.graphql().execute::<GetTransactionQuery>(vars).await.unwrap();
+    /// if let Some(data) = resp.data {
+    ///     println!("status: {}", data.transaction.status);
+    /// }
+    /// # }
+    /// ```
+    pub async fn execute<Op: GraphQLOperation>(
+        &self,
+        variables: Op::Variables,
+    ) -> Result<TypedGraphQLResponse<Op::ResponseData>, SynapseError> {
+        let body = GraphQLRequest {
+            query: Op::document().to_string(),
+            variables: Some(serde_json::to_value(&variables).map_err(|e| {
+                SynapseError::Decode(format!("failed to serialize GraphQL variables: {e}"))
+            })?),
+        };
+        let resp: TypedGraphQLResponse<Op::ResponseData> =
+            self.client.post("/graphql", body).await?;
+        if resp.has_errors() {
+            let messages: Vec<&str> =
+                resp.errors.iter().map(|e| e.message.as_str()).collect();
             return Err(SynapseError::GraphQL(messages.join("; ")));
         }
         Ok(resp)

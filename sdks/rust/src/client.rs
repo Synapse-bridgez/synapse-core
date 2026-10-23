@@ -2,6 +2,7 @@ use crate::error::{
     build_api_error, map_status_to_error, parse_api_error, CatalogEntry, CatalogResponse,
     SynapseError,
 };
+use crate::logging::{LogConfig, SdkLogger};
 use crate::resources::admin::{
     AdminBulkStatus, AdminDlq, AdminLocks, AdminReconciliation, AdminSettlements,
     AdminWebhookReplay,
@@ -62,6 +63,8 @@ pub struct SynapseClient {
     pub(crate) max_attempts: u32,
     pub(crate) base_delay_ms: u64,
     pub(crate) catalog: Arc<OnceCell<HashMap<String, CatalogEntry>>>,
+    /// Optional request/response logger. `None` means logging is disabled.
+    pub(crate) logger: Option<Arc<SdkLogger>>,
 }
 
 /// Builder for [`SynapseClient`].
@@ -73,6 +76,8 @@ pub struct SynapseClientBuilder {
     pool_max_idle_per_host: usize,
     pool_idle_timeout: Option<Duration>,
     tcp_keepalive: Option<Duration>,
+    /// Optional logging configuration. `None` (default) disables logging.
+    log_config: Option<LogConfig>,
 }
 
 impl SynapseClient {
@@ -96,6 +101,7 @@ impl SynapseClient {
             pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
             pool_idle_timeout: Some(DEFAULT_POOL_IDLE_TIMEOUT),
             tcp_keepalive: Some(DEFAULT_TCP_KEEPALIVE),
+            log_config: None,
         }
     }
 
@@ -185,20 +191,48 @@ impl SynapseClient {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let logger = self.logger.clone();
         let raw = retry_with_backoff(self.max_attempts, self.base_delay_ms, || {
             let url = url.clone();
             let key = key.clone();
             let http = http.clone();
             let query = query.clone();
+            let logger = logger.clone();
             async move {
-                let resp = http
+                let req = http
                     .get(&url)
                     .query(&query)
-                    .header("X-API-Key", &key)
+                    .header("X-API-Key", &key);
+
+                // Log the outgoing request (before it is sent).
+                let start = if let Some(ref l) = logger {
+                    let built = req.try_clone().and_then(|r| r.build().ok());
+                    let hdrs = built
+                        .as_ref()
+                        .map(|r| r.headers().clone())
+                        .unwrap_or_default();
+                    Some(l.log_request("GET", &url, &hdrs, None))
+                } else {
+                    None
+                };
+
+                let resp = req
                     .send()
                     .await
-                    .map_err(SynapseError::Network)?;
+                    .map_err(|e| {
+                        if let (Some(ref l), Some(s)) = (&logger, start) {
+                            l.log_error("GET", &url, &e.to_string(), s);
+                        }
+                        SynapseError::Network(e)
+                    })?;
+
                 let status = resp.status().as_u16();
+
+                // Log the response headers.
+                if let (Some(ref l), Some(s)) = (&logger, start) {
+                    l.log_response(status, &url, resp.headers(), None, s);
+                }
+
                 if status >= 400 {
                     let retry_after_ms = parse_retry_after_ms(&resp);
                     let body = resp.text().await.unwrap_or_default();
@@ -336,6 +370,31 @@ impl SynapseClientBuilder {
         self
     }
 
+    /// Enable request/response logging with the given [`LogConfig`].
+    ///
+    /// When set, every outbound request and inbound response is logged via
+    /// [`SdkLogger`].  API keys and other secrets in request headers are
+    /// automatically redacted — they are replaced with `[REDACTED]` before
+    /// any log line is emitted.  See [`crate::logging`] for the full list of
+    /// redacted header names and customisation options.
+    ///
+    /// Logging is **disabled** by default.  Pass `LogConfig::default()` to
+    /// enable with sensible defaults (headers logged, bodies not logged).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use synapse_sdk::{SynapseClient, logging::LogConfig};
+    ///
+    /// let client = SynapseClient::builder("https://api.example.com", "secret")
+    ///     .log_config(LogConfig::default().with_log_bodies(true))
+    ///     .build();
+    /// ```
+    pub fn log_config(mut self, config: LogConfig) -> Self {
+        self.log_config = Some(config);
+        self
+    }
+
     /// Build the [`SynapseClient`], applying the configured connection-pooling
     /// and retry settings to the underlying HTTP client.
     pub fn build(self) -> SynapseClient {
@@ -352,6 +411,7 @@ impl SynapseClientBuilder {
             max_attempts: self.max_attempts,
             base_delay_ms: self.base_delay_ms,
             catalog: Arc::new(OnceCell::new()),
+            logger: self.log_config.map(|cfg| Arc::new(SdkLogger::new(cfg))),
         }
     }
 }
