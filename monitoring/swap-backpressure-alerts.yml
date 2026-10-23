@@ -1,0 +1,27 @@
+groups:
+  - name: swap-admission
+    rules:
+      - alert: SwapAdmissionSaturated
+        expr: swap_admission_saturation > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Swap admission capacity is nearly exhausted
+          description: Inspect upstream and database latency before increasing concurrency.
+      - alert: SwapMutationAdmissionRejected
+        expr: sum by (job, instance) (rate(swap_admission_rejected_total{tier="mutation"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Swap order admission is rejecting requests
+          description: Mutation waiting capacity or deadlines are exhausted; check engine health and retry volume.
+      - alert: SwapReadTrafficShedding
+        expr: sum by (job, instance) (rate(swap_admission_rejected_total{tier=~"quote|analytics"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Swap read traffic is being shed
+          description: Inspect queue depth and handler latency; clients should honor Retry-After with jitter.

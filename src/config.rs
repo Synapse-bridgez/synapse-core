@@ -664,6 +664,11 @@ pub struct Config {
 }
 
 pub mod assets;
+// Swap subsystems keep their independently testable configuration schemas here
+// without changing the Phase 1 Config struct's construction contract.
+pub use crate::swap::admission::AdmissionConfig as SwapAdmissionConfig;
+pub use crate::swap::deposits::DepositSwapConfig;
+pub use crate::swap::streaming::QuoteStreamConfig;
 impl Config {
     pub async fn load() -> anyhow::Result<Self> {
         // Determine profile before loading env files

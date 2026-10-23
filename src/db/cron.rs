@@ -75,7 +75,17 @@ pub async fn detach_and_archive_old_partitions(
             if part_date < cutoff {
                 // detach
                 let detach_sql = format!("ALTER TABLE transactions DETACH PARTITION \"{child}\"");
-                sqlx::query(&detach_sql).execute(pool).await?;
+                match sqlx::query(&detach_sql).execute(pool).await {
+                    Ok(_) => {}
+                    // Swap receipts/orders retain a source FK into the parent.
+                    // PostgreSQL checks this atomically against concurrent intake;
+                    // defer linked partitions while continuing unrelated archival.
+                    Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23503") => {
+                        tracing::warn!(partition = %child, "Deferring partition archive: retained source references require coordinated archival");
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
                 // move to archive schema
                 let set_schema = format!("ALTER TABLE \"{child}\" SET SCHEMA archive");
                 sqlx::query(&set_schema).execute(pool).await?;
