@@ -39,7 +39,7 @@ Swap engine
                   or failed  ← terminal failure (see failure_code)
 ```
 
-For the lifecycle state diagram see [STATE_MACHINE_DIAGRAMS.md](STATE_MACHINE_DIAGRAMS.md).
+For the lifecycle state diagram see [STATE_MACHINE_DIAGRAMS.md](../STATE_MACHINE_DIAGRAMS.md).
 
 ### Status meanings
 
@@ -279,8 +279,7 @@ curl -s http://localhost:3000/admin/feature-flags/swap_engine?tenant_id=<your_te
 
 ## Links and Further Reading
 
-- [Swap API Reference](swap-api.md) — full endpoint schemas
-- [State Machine Diagrams](STATE_MACHINE_DIAGRAMS.md) — transaction lifecycle and swap order transitions
+- [State Machine Diagrams](../STATE_MACHINE_DIAGRAMS.md) — transaction lifecycle and swap order transitions
 - [Swap Operator Runbook](swap-operator-runbook.md) — how operators monitor and intervene
 - [Swap DR Runbook](swap-dr-runbook.md) — backup, restore, and disaster recovery
 - [Architecture Overview](architecture.md) — how the swap engine fits the broader system
