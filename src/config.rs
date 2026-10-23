@@ -883,3 +883,190 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
     }
 }
+
+/// Settings for the swap quoting engine (`src/swap/quote.rs`).
+///
+/// Kept separate from [`Config`] so the quoting layer can be built and tested
+/// without the full application configuration.
+#[derive(Debug, Clone)]
+pub struct SwapQuoteConfig {
+    /// Platform fee in basis points, charged on the output after source spread.
+    /// `SWAP_FEE_BPS`, default `0`, must be within `0..=10000`.
+    pub fee_bps: u32,
+    /// How long an issued quote stays executable. `SWAP_QUOTE_TTL_SECONDS`,
+    /// default `30`, must be greater than zero.
+    pub quote_ttl_seconds: u64,
+    /// Per-source timeout applied to each price fan-out call.
+    /// `SWAP_SOURCE_TIMEOUT_MS`, default `2000`.
+    pub source_timeout_ms: u64,
+    /// Smallest accepted order, in base-asset units. `SWAP_MIN_ORDER_SIZE`, default `1`.
+    pub min_order_size: sqlx::types::BigDecimal,
+    /// Largest accepted order, in base-asset units. `SWAP_MAX_ORDER_SIZE`, default `1000000`.
+    pub max_order_size: sqlx::types::BigDecimal,
+    /// Maximum number of ranked candidates persisted per quote.
+    /// `SWAP_MAX_QUOTE_CANDIDATES`, default `10`, must be at least one.
+    pub max_candidates: usize,
+}
+
+impl SwapQuoteConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let config = Self {
+            fee_bps: env::var("SWAP_FEE_BPS")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()?,
+            quote_ttl_seconds: env::var("SWAP_QUOTE_TTL_SECONDS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()?,
+            source_timeout_ms: env::var("SWAP_SOURCE_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()?,
+            min_order_size: env::var("SWAP_MIN_ORDER_SIZE")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse()?,
+            max_order_size: env::var("SWAP_MAX_ORDER_SIZE")
+                .unwrap_or_else(|_| "1000000".to_string())
+                .parse()?,
+            max_candidates: env::var("SWAP_MAX_QUOTE_CANDIDATES")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.fee_bps > 10_000 {
+            anyhow::bail!("SWAP_FEE_BPS must be within 0..=10000");
+        }
+        if self.quote_ttl_seconds == 0 {
+            anyhow::bail!("SWAP_QUOTE_TTL_SECONDS must be greater than zero");
+        }
+        if self.max_candidates == 0 {
+            anyhow::bail!("SWAP_MAX_QUOTE_CANDIDATES must be at least one");
+        }
+        let zero = sqlx::types::BigDecimal::from(0);
+        if self.min_order_size <= zero || self.min_order_size > self.max_order_size {
+            anyhow::bail!(
+                "SWAP_MIN_ORDER_SIZE must be positive and not exceed SWAP_MAX_ORDER_SIZE"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Pre-trade risk limits for swap orders, evaluated by
+/// [`crate::swap::risk::RiskPolicy`].
+///
+/// Loaded once via [`SwapRiskConfig::from_env`]. Every limit except the
+/// kill switch and the allow/deny lists is required, and any value that is
+/// missing or unparseable is a startup error (fail closed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwapRiskConfig {
+    /// `SWAP_KILL_SWITCH`: when `true`, every swap order is rejected. Default `false`.
+    pub kill_switch: bool,
+    /// `SWAP_ALLOWED_PAIRS` (e.g. `USDC>XLM,XLM>USDC`): the only permitted
+    /// source/target asset pairs. Required and non-empty.
+    pub allowed_pairs: Vec<(String, String)>,
+    /// `SWAP_MAX_ORDER_AMOUNT`: maximum amount of a single order, in source-asset units.
+    pub max_order_amount: BigDecimal,
+    /// `SWAP_MAX_ACCOUNT_VOLUME`: maximum rolling volume per account over the window.
+    pub max_account_volume: BigDecimal,
+    /// `SWAP_MAX_TENANT_VOLUME`: maximum rolling volume per tenant over the window.
+    pub max_tenant_volume: BigDecimal,
+    /// `SWAP_ROLLING_WINDOW_SECS`: length of the rolling volume window, in seconds.
+    pub rolling_window_secs: i64,
+    /// `SWAP_ACCOUNT_ALLOWLIST`: optional. When non-empty, only listed accounts may swap.
+    pub account_allowlist: Vec<String>,
+    /// `SWAP_ACCOUNT_DENYLIST`: optional. Listed accounts are always rejected, even if allowlisted.
+    pub account_denylist: Vec<String>,
+}
+
+impl SwapRiskConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let kill_switch = match env::var("SWAP_KILL_SWITCH") {
+            Ok(v) => parse_bool("SWAP_KILL_SWITCH", &v)?,
+            Err(_) => false,
+        };
+
+        let allowed_pairs = parse_pairs(&required_env("SWAP_ALLOWED_PAIRS")?)?;
+        let max_order_amount = parse_positive_decimal(
+            "SWAP_MAX_ORDER_AMOUNT",
+            &required_env("SWAP_MAX_ORDER_AMOUNT")?,
+        )?;
+        let max_account_volume = parse_positive_decimal(
+            "SWAP_MAX_ACCOUNT_VOLUME",
+            &required_env("SWAP_MAX_ACCOUNT_VOLUME")?,
+        )?;
+        let max_tenant_volume = parse_positive_decimal(
+            "SWAP_MAX_TENANT_VOLUME",
+            &required_env("SWAP_MAX_TENANT_VOLUME")?,
+        )?;
+
+        let rolling_window_secs: i64 = required_env("SWAP_ROLLING_WINDOW_SECS")?
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("SWAP_ROLLING_WINDOW_SECS must be an integer: {e}"))?;
+        if rolling_window_secs <= 0 {
+            anyhow::bail!("SWAP_ROLLING_WINDOW_SECS must be greater than 0");
+        }
+
+        Ok(Self {
+            kill_switch,
+            allowed_pairs,
+            max_order_amount,
+            max_account_volume,
+            max_tenant_volume,
+            rolling_window_secs,
+            account_allowlist: parse_list(&env::var("SWAP_ACCOUNT_ALLOWLIST").unwrap_or_default()),
+            account_denylist: parse_list(&env::var("SWAP_ACCOUNT_DENYLIST").unwrap_or_default()),
+        })
+    }
+}
+
+fn required_env(key: &str) -> anyhow::Result<String> {
+    env::var(key).map_err(|_| anyhow::anyhow!("{key} is required"))
+}
+
+fn parse_bool(key: &str, raw: &str) -> anyhow::Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => anyhow::bail!("{key} must be 'true' or 'false'"),
+    }
+}
+
+fn parse_positive_decimal(key: &str, raw: &str) -> anyhow::Result<BigDecimal> {
+    let value = BigDecimal::from_str(raw.trim())
+        .map_err(|e| anyhow::anyhow!("{key} must be a decimal number: {e}"))?;
+    if value <= BigDecimal::from(0) {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(value)
+}
+
+fn parse_pairs(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let pairs = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.split_once('>') {
+            Some((source, target)) if !source.trim().is_empty() && !target.trim().is_empty() => {
+                Ok((source.trim().to_string(), target.trim().to_string()))
+            }
+            _ => anyhow::bail!("SWAP_ALLOWED_PAIRS entries must be 'SOURCE>TARGET', got '{entry}'"),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    if pairs.is_empty() {
+        anyhow::bail!("SWAP_ALLOWED_PAIRS must list at least one pair");
+    }
+    Ok(pairs)
+}
+
+fn parse_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
+}
