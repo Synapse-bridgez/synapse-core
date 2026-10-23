@@ -8,6 +8,40 @@ ERRORS=0
 
 BASELINE_FILE="$(dirname "$0")/migration-safety-known-index-locks.txt"
 
+# Dated exemptions recorded in the expand/contract policy document.
+# Format (one per line, inside a fenced code block or plain lines):
+#   EXEMPTION: <migration-file>:<RULE_ID> expires=YYYY-MM-DD reason=<text>
+POLICY_DOC="$(dirname "$0")/../docs/expand-contract-migrations.md"
+
+# Swap engine tables that are expected to grow large / be high-volume.
+SWAP_TABLE_PATTERN='(swap_)?(orders|quotes|fills|events|screenings|submissions)'
+
+# Returns 0 if an unexpired exemption exists for <file-base>:<RULE_ID>.
+has_exemption() {
+  local file_base="$1" rule_id="$2"
+  [[ -f "$POLICY_DOC" ]] || return 1
+  local today
+  today="$(date -u +%Y-%m-%d)"
+  while IFS= read -r line; do
+    [[ "$line" == *"EXEMPTION:"* ]] || continue
+    local key expires
+    key=$(echo "$line" | sed -E 's/.*EXEMPTION:[[:space:]]*([^[:space:]]+).*/\1/')
+    expires=$(echo "$line" | sed -nE 's/.*expires=([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p')
+    [[ "$key" == "${file_base}:${rule_id}" ]] || continue
+    if [[ -z "$expires" ]]; then
+      echo "::warning file=$POLICY_DOC::Exemption for ${key} has no expires=YYYY-MM-DD date; ignoring."
+      continue
+    fi
+    if [[ "$expires" < "$today" ]]; then
+      echo "::warning file=$POLICY_DOC::Exemption for ${key} expired on ${expires}; ignoring."
+      continue
+    fi
+    echo "::notice file=$file_base::${rule_id} exempted until ${expires} via docs/expand-contract-migrations.md."
+    return 0
+  done < "$POLICY_DOC"
+  return 1
+}
+
 UNSAFE_PATTERNS=(
   "DROP TABLE"
   "DROP COLUMN"
@@ -99,6 +133,8 @@ for file in "$MIGRATIONS_DIR"/*.sql; do
   if [[ "$_rename_col_hits" -gt 0 ]]; then
     if [[ -f "$BASELINE_FILE" ]] && tr -d '\r' < "$BASELINE_FILE" | grep -qxF "${_fb}:RENAME_COLUMN"; then
       echo "::notice file=$file::RENAME COLUMN detected -- grandfathered via scripts/migration-safety-known-index-locks.txt."
+    elif has_exemption "$_fb" "RENAME_COLUMN"; then
+      :
     else
       echo "::warning file=$file::RENAME COLUMN detected. Breaks any running app instance referencing the old column name. Use the expand/contract pattern instead."
       ERRORS=$((ERRORS + 1))
@@ -111,11 +147,69 @@ for file in "$MIGRATIONS_DIR"/*.sql; do
   if [[ "$_rename_to_hits" -gt 0 ]]; then
     if [[ -f "$BASELINE_FILE" ]] && tr -d '\r' < "$BASELINE_FILE" | grep -qxF "${_fb}:RENAME_TO"; then
       echo "::notice file=$file::ALTER TABLE ... RENAME TO detected -- grandfathered via scripts/migration-safety-known-index-locks.txt."
+    elif has_exemption "$_fb" "RENAME_TO"; then
+      :
     else
       echo "::warning file=$file::ALTER TABLE ... RENAME TO detected. Breaks any running app instance referencing the old table name. Use a view shim or phased add/migrate/drop pattern instead."
       ERRORS=$((ERRORS + 1))
     fi
   fi
+
+  # Rule: DROP COLUMN on swap tables
+  # Breaks running app instances that still SELECT/INSERT the column.
+  # Must only happen in the contract phase, after the app no longer references it.
+  while IFS= read -r drop_col_line; do
+    [[ -z "${drop_col_line// }" ]] && continue
+    table=$(echo "$drop_col_line" | grep -ioE 'ALTER[[:space:]]+TABLE[[:space:]]+[a-zA-Z0-9_."]+' | awk '{print $NF}' | tr -d '"' | tr '[:upper:]' '[:lower:]')
+    if echo "$table" | grep -qiE "$SWAP_TABLE_PATTERN"; then
+      if has_exemption "$_fb" "DROP_COLUMN_SWAP"; then
+        continue
+      fi
+      echo "::warning file=$file::DROP COLUMN on swap table \"$table\" detected. Only allowed in the contract phase after the application no longer references the column. Record a dated exemption in docs/expand-contract-migrations.md if unavoidable."
+      ERRORS=$((ERRORS + 1))
+    fi
+  done < <(grep -v '^[[:space:]]*--' "$file" | grep -iE '\bALTER\s+TABLE\b' | grep -iE '\bDROP\s+COLUMN\b')
+
+  # Rule: DROP TABLE on swap tables
+  # Destroys data still needed by running replicas during rollout.
+  while IFS= read -r drop_tbl_line; do
+    [[ -z "${drop_tbl_line// }" ]] && continue
+    table=$(echo "$drop_tbl_line" | grep -ioE 'DROP[[:space:]]+TABLE([[:space:]]+IF[[:space:]]+EXISTS)?[[:space:]]+[a-zA-Z0-9_."]+' | awk '{print $NF}' | tr -d '"' | tr '[:upper:]' '[:lower:]')
+    if echo "$table" | grep -qiE "$SWAP_TABLE_PATTERN"; then
+      if has_exemption "$_fb" "DROP_TABLE_SWAP"; then
+        continue
+      fi
+      echo "::warning file=$file::DROP TABLE on swap table \"$table\" detected. Destructive changes require an explicit, dated exemption in docs/expand-contract-migrations.md reviewed in the PR."
+      ERRORS=$((ERRORS + 1))
+    fi
+  done < <(grep -v '^[[:space:]]*--' "$file" | grep -iE '\bDROP\s+TABLE\b')
+
+  # Rule: ADD COLUMN NOT NULL without DEFAULT on swap tables
+  # Old replicas that INSERT without the column will fail during rollout.
+  while IFS= read -r add_col_line; do
+    [[ -z "${add_col_line// }" ]] && continue
+    table=$(echo "$add_col_line" | grep -ioE 'ALTER[[:space:]]+TABLE[[:space:]]+[a-zA-Z0-9_."]+' | awk '{print $NF}' | tr -d '"' | tr '[:upper:]' '[:lower:]')
+    echo "$table" | grep -qiE "$SWAP_TABLE_PATTERN" || continue
+    if has_exemption "$_fb" "ADD_NOT_NULL_SWAP"; then
+      continue
+    fi
+    echo "::warning file=$file::ADD COLUMN ... NOT NULL without DEFAULT on swap table \"$table\". Expand phase must add the column nullable (or with a DEFAULT) and backfill separately."
+    ERRORS=$((ERRORS + 1))
+  done < <(grep -v '^[[:space:]]*--' "$file" | grep -iE '\bALTER\s+TABLE\b' | grep -iE 'ADD COLUMN[[:space:]]' | grep -iE '\bNOT[[:space:]]+NULL\b' | grep -viE '\bDEFAULT\b')
+
+  # Rule: long-running locks on large swap tables
+  # SET NOT NULL / ADD CONSTRAINT ... CHECK / VALIDATE-less constraints take
+  # ACCESS EXCLUSIVE or long SHARE locks and block writes on high-volume tables.
+  while IFS= read -r lock_line; do
+    [[ -z "${lock_line// }" ]] && continue
+    table=$(echo "$lock_line" | grep -ioE 'ALTER[[:space:]]+TABLE[[:space:]]+[a-zA-Z0-9_."]+' | awk '{print $NF}' | tr -d '"' | tr '[:upper:]' '[:lower:]')
+    echo "$table" | grep -qiE "$SWAP_TABLE_PATTERN" || continue
+    if has_exemption "$_fb" "LONG_LOCK_SWAP"; then
+      continue
+    fi
+    echo "::warning file=$file::Long-running lock on large swap table \"$table\" detected. Split into ADD CONSTRAINT ... NOT VALID followed by VALIDATE CONSTRAINT, or SET NOT NULL after a validated CHECK."
+    ERRORS=$((ERRORS + 1))
+  done < <(grep -v '^[[:space:]]*--' "$file" | grep -iE '\bALTER\s+TABLE\b' | grep -iE 'SET[[:space:]]+NOT[[:space:]]+NULL|ADD[[:space:]]+CONSTRAINT' | grep -viE 'NOT[[:space:]]+VALID')
 
 done
 

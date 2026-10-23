@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use synapse_cli::commands::{
-    doctor, events, graphql, health, settlements, stats, transactions, webhook_listen, Cli,
+    bridge, doctor, events, graphql, health, read_model, settlements, stats, swap, transactions, Cli,
     Commands,
 };
 use synapse_cli::profile::{self, ProfileStore};
@@ -46,10 +46,13 @@ async fn main() -> Result<()> {
         }
         Commands::Health(cmd) => health::run(cmd, &base_url, &api_key).await,
         Commands::Stats(cmd) => stats::run(cmd, &base_url, &api_key).await,
+        Commands::Swap(cmd) => swap::run(cmd.command, &base_url, &api_key).await,
         Commands::Settlements(cmd) => settlements::run(cmd.command, &base_url, &api_key).await,
         Commands::Transactions(cmd) => transactions::run(cmd.command, &base_url, &api_key).await,
         Commands::Webhooks(cmd) => webhook_listen::run(cmd.command, &base_url, &api_key).await,
         Commands::Graphql(cmd) => graphql::run(cmd.command, &base_url, &api_key).await,
+        Commands::ReadModel(cmd) => read_model::run(cmd.command, &base_url, &api_key).await,
+        Commands::Bridge(cmd) => bridge::run(cmd.command, &base_url, &api_key).await,
         Commands::Profile(cmd) => profile::run(cmd, &mut ProfileStore::load()?),
         Commands::Completions { shell } => print_completions(&shell),
         Commands::External(args) => run_external(&args, base_url, api_key),
@@ -185,9 +188,13 @@ fn prompt(label: &str, default: &str) -> Result<String> {
 fn is_mutating(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Admin(_) | Commands::Webhooks(_) | Commands::Settlements(_) | Commands::Transactions(_)
+        Commands::Admin(_)
+            | Commands::Settlements(_)
+            | Commands::Swap(_)
+            | Commands::Transactions(_)
+            | Commands::ReadModel(_)
+            | Commands::Bridge(_)
     )
-}
 }
 
 fn print_completions(shell: &str) -> Result<()> {
