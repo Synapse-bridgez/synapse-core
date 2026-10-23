@@ -7,9 +7,14 @@
 //!
 //! Versioning: these routes are part of `data_routes`, so they are served
 //! under `/api/v1` and `/api/v2`. Changes within a version are additive only.
+//!
+//! Also hosts tenant analytics (#1506) and operator surveillance / archive
+//! endpoints (#1505, #1508), routed via `swap::versioning`.
 
 use crate::error::AppError;
+use crate::swap::analytics::Granularity;
 use crate::swap::execution::{self, SwapOrder, SwapOrderStatus};
+use crate::swap::market_data::{self, PriceQuery, QuoteQuery};
 use crate::swap::quote::{self, SwapQuote};
 use crate::tenant::TenantContext;
 use crate::utils::cursor as cursor_util;

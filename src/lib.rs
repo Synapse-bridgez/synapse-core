@@ -1,7 +1,9 @@
 pub mod alerting;
+pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod governance;
@@ -17,8 +19,11 @@ pub mod security;
 pub mod services;
 pub mod startup;
 pub mod stellar;
+pub mod cdc;
+pub mod observability;
 pub mod swap;
 pub mod telemetry;
+pub mod time;
 pub mod tenant;
 pub mod utils;
 pub mod validation;
@@ -291,9 +296,24 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route(
+            "/swap/disputes",
+            post(handlers::disputes::create_dispute).get(handlers::disputes::list_disputes),
+        )
+        .route(
+            "/swap/disputes/:id",
+            patch(handlers::disputes::update_dispute),
+        )
+        .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
         )
+        // Swap orders (#1423): tenant-scoped, TenantContext-authenticated.
+        .route(
+            "/swaps",
+            get(handlers::swaps::list_swap_orders).post(handlers::swaps::create_swap_order),
+        )
+        .route("/swaps/:id", get(handlers::swaps::get_swap_order))
+        .route("/swaps/:id/cancel", post(handlers::swaps::cancel_swap_order))
         // Tenant-facing usage: the caller's own latency histograms (#1337).
         .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
 
@@ -492,6 +512,15 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/audit/cold/pointers",
             get(handlers::admin::audit::list_cold_pointers_handler),
         )
+        // Admin: operator audit log for administrative swap actions (#1518)
+        .route(
+            "/admin/operator-audit",
+            get(handlers::admin::operator_audit::list_operator_audit),
+        )
+        .route(
+            "/admin/operator-audit/export",
+            get(handlers::admin::operator_audit::export_operator_audit),
+        )
         // Admin: compliance report generation/listing — same gap as audit
         // search above.
         .route(
@@ -504,6 +533,8 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/settlements/:id/status",
             axum::routing::patch(handlers::settlements::update_settlement_status),
         )
+        // Admin: swap surveillance + market data archive (#1505, #1508)
+        .nest("/admin/swap", swap::versioning::admin_swap_router())
         // Admin: reconciliation reports
         .nest(
             "/admin/reconciliation",
@@ -593,6 +624,8 @@ pub fn create_app(app_state: AppState) -> Router {
         // Versioned route groups
         .nest("/api/v1", v1_routes)
         .nest("/api/v2", v2_routes)
+        // Swap API (#1507): versioned under /swap/v{N}
+        .nest("/swap", swap::versioning::swap_router())
         .merge(admin_only_routes)
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,

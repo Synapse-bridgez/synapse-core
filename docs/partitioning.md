@@ -76,6 +76,68 @@ manager.create_partition().await?;
 manager.detach_old_partitions(6).await?; // Keep 6 months
 ```
 
+## Expand/Contract Migration Policy
+
+All schema changes to swap engine tables (orders, quotes, fills, events, screenings, submissions) and to the partitioned `transactions` table MUST follow the expand/contract practice described below. Naive migrations that drop or rename columns break running replicas and block zero-downtime deploys, so they are not permitted outside the contract phase.
+
+### Phases
+
+1. **Expand** — ship an additive, backward-compatible migration:
+   - Add new columns as `NULL`-able, or `NOT NULL` **with** a `DEFAULT` (or a `DEFAULT` added in the same statement).
+   - Add new tables, indexes, and constraints as separate statements.
+   - Never drop or rename a column, table, or constraint that a running application version still references.
+   - Old and new application versions must both work against the expanded schema.
+2. **Migrate** — deploy the application version that writes to the new columns/tables while still reading the old ones. Backfill of existing rows is handled by its own issue and must be idempotent and resumable.
+3. **Contract** — only after every replica runs a version that no longer references the old shape, ship a cleanup migration that drops/renames the obsolete columns, tables, or constraints. Contract migrations are destructive and require the exemption process below.
+
+### Ordering relative to application deploys
+
+| Step | Migration | Application deploy |
+|------|-----------|--------------------|
+| 1 | Expand (additive) | — |
+| 2 | — | Deploy version writing new + reading old |
+| 3 | — | Backfill (separate issue) |
+| 4 | — | Deploy version reading/writing new only |
+| 5 | Contract (destructive) | — |
+
+A migration must never require the new application code to be live before it is applied, and application code must never require a migration that has not yet been applied. When in doubt, split the change into more releases.
+
+### Handling destructive changes
+
+Destructive changes (dropping/renaming columns or tables, narrowing types, adding `NOT NULL` without a default, adding constraints that existing rows may violate) are only allowed in a contract migration. If a down path genuinely cannot exist, the PR MUST:
+
+- Record a **dated exemption** in the table below, including the migration name, the reason, and the date it was reviewed.
+- Link the exemption from the migration file header as a comment.
+- Be reviewed by a second engineer in the PR.
+
+#### Dated exemptions
+
+| Migration | Destructive change | Reason no down path | Reviewed |
+|-----------|--------------------|---------------------|----------|
+| _(none yet)_ | | | |
+
+Exemptions are reviewed at each release; stale entries are removed once the change is fully rolled out.
+
+### Avoiding `ACCESS EXCLUSIVE` locks
+
+On partitioned and high-volume tables, prefer operations that take weaker locks and split work into steps:
+
+- **Indexes**: use `CREATE INDEX CONCURRENTLY` (outside a transaction) instead of `CREATE INDEX`. On partitioned tables create the index on the parent with `ONLY` and then attach per-partition indexes, or create per-partition indexes concurrently and attach them.
+- **Constraints**: add `CHECK`/`FOREIGN KEY` constraints as `NOT VALID`, then run `VALIDATE CONSTRAINT` in a separate migration/transaction. `VALIDATE` takes only a `SHARE UPDATE EXCLUSIVE` lock.
+- **`NOT NULL`**: add the column nullable, backfill, add a `NOT VALID` check, validate it, then set `NOT NULL` (PostgreSQL 12+ can use a validated check to avoid a full table scan).
+- **Column type changes**: add a new column, dual-write, backfill, then contract the old column.
+- **Defaults**: adding a column with a constant `DEFAULT` is metadata-only on PostgreSQL 11+; volatile defaults rewrite the table and must be avoided.
+
+## Migration Linting and Rollback Rehearsal
+
+CI enforces the policy above for every migration under `migrations/`:
+
+- **Lint** (`cargo xtask migrate lint` / `scripts/migration_lint.sh`): flags obviously unsafe migrations — `DROP COLUMN`, `RENAME COLUMN`, `ADD COLUMN ... NOT NULL` without `DEFAULT`, `CREATE INDEX` without `CONCURRENTLY` on large/partitioned tables, and `ALTER TABLE ... SET NOT NULL` without a validated check. A deliberately unsafe fixture migration proves the linter fails.
+- **Forward run**: all migrations are applied to an empty database.
+- **Rollback rehearsal**: each migration's down path (or documented equivalent) is applied against a database seeded with representative data, verifying the schema is safely reversible.
+
+The linter is a fast heuristic and does not prove data-dependent safety; reviewers remain responsible for judging backfills and constraint validity against production data.
+
 ## Swap Tables
 
 The Phase 2 swap tables use the same monthly `created_at` range partitioning as `transactions`
@@ -135,7 +197,7 @@ SELECT detach_swap_partitions(6);
 
 `ensure_swap_partitions()` and `detach_swap_partitions()` are idempotent. Re-running them is safe.
 
-## Migration Process
+## Partitioning Migration Process
 
 The migration (`20250217000000_partition_transactions.sql`) performs:
 
@@ -309,9 +371,103 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 - PostgreSQL 14+ (native declarative partitioning)
 - No external dependencies (pg_partman not required)
 
+## Read-Model Projection (Swap Orders, Quotes, Fills)
+
+The swap read model is a CQRS-style projection that consumes swap lifecycle events
+from the outbox/event consumer path and maintains denormalized views for tenant
+queries. Write-side tables remain normalized; the read model is a stable,
+rebuildable surface for listing, filtering, and aggregation.
+
+### Table Layout
+
+| Table | Purpose | Key columns |
+|-------|---------|-------------|
+| `swap_order_summary` | One row per swap order, denormalized with latest quote/fill state | `order_id` (PK), `tenant_id`, `status`, `base_asset`, `quote_asset`, `created_at`, `updated_at`, `filled_amount`, `projection_version` |
+| `swap_fill_summary` | One row per fill, linked to its order | `fill_id` (PK), `order_id`, `tenant_id`, `asset`, `amount`, `filled_at`, `projection_version` |
+| `swap_tenant_aggregates` | Per-tenant rollups (counts, volumes by status/asset pair) | `(tenant_id, bucket_start, status, asset_pair)` (PK), `order_count`, `fill_count`, `volume`, `projection_version` |
+| `swap_projection_checkpoint` | Consumer checkpoint and projection version | `projection_name` (PK), `last_event_id`, `last_event_at`, `projection_version`, `updated_at` |
+
+All read-model tables carry `tenant_id` so every query can apply tenant isolation
+filters at the index level.
+
+### Indexes Matching Query Patterns
+
+Documented query patterns and their supporting indexes:
+
+- List orders by tenant + status + time window:
+  `idx_swap_order_summary_tenant_status_created (tenant_id, status, created_at DESC)`
+- Filter orders by asset pair:
+  `idx_swap_order_summary_tenant_pair (tenant_id, base_asset, quote_asset, created_at DESC)`
+- Look up fills for an order:
+  `idx_swap_fill_summary_order (order_id, filled_at)`
+- List fills by tenant + time window:
+  `idx_swap_fill_summary_tenant_filled (tenant_id, filled_at DESC)`
+- Aggregate lookups by tenant + bucket:
+  `idx_swap_tenant_aggregates_tenant_bucket (tenant_id, bucket_start DESC)`
+
+These indexes are designed for keyset (cursor) pagination on `created_at`/`filled_at`
+so that list queries avoid deep OFFSET scans.
+
+### Projection Versioning
+
+Each read-model row stores a `projection_version`. The projector also records the
+current version in `swap_projection_checkpoint`. When the projection schema or
+handler logic changes, bump the version constant; the projector refuses to apply
+events at a mismatched version and requires an explicit rebuild. This prevents
+silently mixing rows produced by different projection logic.
+
+### Checkpoint and Lag Characteristics
+
+- The projector processes events in order per aggregate (keyed by `order_id`) and
+  idempotently: duplicate events are detected via `last_event_id` and per-row
+  version/sequence checks, and out-of-order events are buffered or ignored once a
+  newer sequence has been applied.
+- The checkpoint (`last_event_id`, `last_event_at`) is advanced in the same
+  transaction as the read-model writes, so catch-up after downtime resumes exactly
+  where it left off.
+- Lag is the difference between the newest outbox event timestamp and
+  `last_event_at`. Under normal load the projector is expected to trail the write
+  side by well under a second; during high throughput or after downtime, lag grows
+  with backlog size and is drained by batched catch-up.
+- Partial fills arriving after an order is marked complete are applied to
+  `swap_fill_summary` and reconciled into `swap_order_summary.filled_amount`
+  without regressing terminal status.
+
+### Rebuild / Backfill Procedure
+
+The rebuild command (under `cli/` or `xtask/`) reconstructs the read model from
+event history:
+
+1. Truncate read-model tables (or write to shadow tables for zero-downtime swaps).
+2. Reset `swap_projection_checkpoint` for the projection.
+3. Replay events from the beginning of history in aggregate order, in batches.
+4. Verify row counts and aggregate totals against the write-side truth.
+5. Atomically swap shadow tables into place (if used) and record the new
+   `projection_version`.
+
+For large histories, replay in time-bounded batches and rely on the same
+time-based access patterns described above; if event volume grows substantially,
+consider applying the same monthly range-partitioning strategy used for
+`transactions` to the read-model tables (partition by `created_at`/`filled_at`)
+so rebuilds and retention can detach old ranges.
+
+### Retention
+
+Read-model tables follow the same retention posture as the write side: rows older
+than the retention window can be detached/archived using the partition management
+functions documented above once the tables are partitioned.
+
 ## Future Enhancements
 
 - [ ] Automatic compression of old partitions
 - [ ] Metrics/alerts for partition health
 - [ ] Dynamic retention policy based on storage
 - [ ] Sub-partitioning by status or account (if needed)
+- [ ] Partition read-model tables by time once volume warrants it
+
+## Swap market-data archive partitions (#1508)
+
+`swap_quote_archive` and `swap_price_snapshots` use monthly range partitions managed by the SQL
+functions `ensure_swap_archive_partitions(months_ahead)` and `detach_swap_archive_partitions(retention_months)`
+(see `docs/swap-platform-hardening.md`). Detached partitions are tracked in `swap_archive_exports`
+and dropped only after a successful export.

@@ -1,33 +1,49 @@
--- #1418: Swap order domain model and persisted lifecycle
+-- #1418/#1423: Swap order domain model and persisted lifecycle for the REST surface
+-- (POST/GET /swaps).
 --
 -- Durable Phase 2 swap intent. Monthly range-partitioned by created_at, the
 -- same convention as `transactions` (see docs/partitioning.md), so the primary
 -- key includes created_at.
 --
--- The lifecycle is enforced in Rust (SwapOrderStatus::can_transition_to); the
--- CHECK on status is only a backstop against unknown values.
--- `version` is the optimistic-concurrency token: every transition is a
--- compare-and-set on (id, created_at, version).
+-- An order is created either from a completed deposit transaction
+-- (deposit_transaction_id) or from an explicit request. The lifecycle is
+-- enforced in Rust (SwapOrderStatus::can_transition_to); the CHECK on status is
+-- only a backstop against unknown values. `version` is the optimistic-concurrency
+-- token: every transition is a compare-and-set on (id, created_at, version).
+-- quote and execution are populated by the Phase 2 swap engine; they stay NULL
+-- until it exists.
 
 CREATE TABLE IF NOT EXISTS swap_orders (
-    id                UUID            NOT NULL DEFAULT gen_random_uuid(),
-    tenant_id         UUID            NOT NULL REFERENCES tenants(tenant_id),
-    stellar_account   VARCHAR(56)     NOT NULL,
-    source_asset      VARCHAR(12)     NOT NULL,
-    destination_asset VARCHAR(12)     NOT NULL,
+    id                      UUID            NOT NULL DEFAULT gen_random_uuid(),
+    tenant_id               UUID            NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    -- Client-supplied key; a retried create with the same key returns the original order.
+    idempotency_key         TEXT            NOT NULL CHECK (char_length(idempotency_key) BETWEEN 1 AND 128),
+    stellar_account         VARCHAR(56)     NOT NULL,
+    -- Plain UUID, not a FK: transactions is partitioned and cannot be a FK target.
+    deposit_transaction_id  UUID,
+    source_asset            VARCHAR(12)     NOT NULL,
+    destination_asset       VARCHAR(12)     NOT NULL,
     -- Fixed-point, never float. Stellar amounts carry 7 decimal places.
-    amount            NUMERIC(28, 7)  NOT NULL CHECK (amount > 0),
-    quoted_amount     NUMERIC(28, 7),
-    quote_id          VARCHAR(255),
-    status            VARCHAR(32)     NOT NULL DEFAULT 'swap_ready'
+    amount                  NUMERIC(28, 7)  NOT NULL CHECK (amount > 0),
+    quoted_amount           NUMERIC(28, 7),
+    quote_id                VARCHAR(255),
+    status                  VARCHAR(32)     NOT NULL DEFAULT 'swap_ready'
         CHECK (status IN ('swap_ready', 'quoting', 'quoted', 'executing', 'settled', 'failed', 'cancelled')),
-    version           BIGINT          NOT NULL DEFAULT 0,
-    created_at        TIMESTAMPTZ     NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ     NOT NULL DEFAULT now(),
-    PRIMARY KEY (id, created_at)
+    version                 BIGINT          NOT NULL DEFAULT 0,
+    quote                   JSONB,
+    execution               JSONB,
+    created_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    PRIMARY KEY (id, created_at),
+    CONSTRAINT swap_orders_tenant_idempotency_key UNIQUE (tenant_id, idempotency_key)
 ) PARTITION BY RANGE (created_at);
 
-CREATE INDEX IF NOT EXISTS idx_swap_orders_tenant_created ON swap_orders(tenant_id, created_at DESC);
+-- A completed deposit can back at most one swap order per tenant.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_swap_orders_tenant_deposit
+    ON swap_orders(tenant_id, deposit_transaction_id)
+    WHERE deposit_transaction_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_swap_orders_tenant_created ON swap_orders(tenant_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_swap_orders_status ON swap_orders(status);
 
 -- Initial monthly partitions (current month + next 2), matching the

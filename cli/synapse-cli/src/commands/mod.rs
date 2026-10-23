@@ -1,15 +1,19 @@
 pub mod admin;
+pub mod bridge;
 pub mod doctor;
 pub mod events;
 pub mod graphql;
 pub mod health;
+pub mod read_model;
 pub mod settlements;
 pub mod stats;
 pub mod swap;
 pub mod transactions;
 pub mod webhooks;
 
+pub use bridge::BridgeCmd;
 pub use events::{EventsCmd, EventsSubcommand};
+pub use read_model::ReadModelCmd;
 pub use settlements::SettlementsCmd;
 pub use transactions::TransactionsCmd;
 
@@ -135,6 +139,31 @@ pub enum Commands {
 
     /// Send a raw GraphQL query to the Synapse API
     Graphql(graphql::GraphqlCmd),
+
+    /// Read-model projection commands (rebuild, backfill, status)
+    #[command(
+        subcommand,
+        about = "Read-model projection commands",
+        long_about = "Manage the CQRS read-model projection for swap orders, quotes, and fills.\n\n\
+                      Subcommands:\n  \
+                      rebuild  — Reconstruct the read model from the event history\n  \
+                      backfill — Catch up the projection from its last checkpoint\n  \
+                      status   — Show projection version, checkpoint, and lag"
+    )]
+    ReadModel(read_model::ReadModelCmd),
+
+    /// Cross-chain bridge handoff commands (list, get, replay)
+    #[command(
+        subcommand,
+        about = "Cross-chain bridge handoff commands",
+        long_about = "Inspect and replay cross-chain bridge handoffs produced for settled swaps.\n\n\
+                      Subcommands:\n  \
+                      list    — List handoffs filtered by status\n  \
+                      get     — Get a specific handoff by idempotency key\n  \
+                      replay  — Retry/replay a failed handoff\n\n\
+                      Output defaults to a human-readable table; add --json for raw JSON."
+    )]
+    Bridge(bridge::BridgeCmd),
 
     /// Generate shell completion scripts.
     Completions {

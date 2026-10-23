@@ -11,6 +11,18 @@
 pub mod names;
 pub mod runbook;
 
+/// Alert names raised by the settlement fee strategy (issue #1484).
+///
+/// These are re-exported here so call sites in `src/swap/settlement/fee.rs`
+/// can reference them without importing the whole `names` module. Each name
+/// must have an entry in `alerting/runbook-links.json` (either a runbook
+/// anchor or a reviewed exemption) and a matching rule in
+/// `alerting/prometheus-rules.yml`.
+pub use names::{
+    SETTLEMENT_FEE_BUMP_FAILED, SETTLEMENT_FEE_BUMP_ISSUED, SETTLEMENT_FEE_BUMP_RATE_HIGH,
+    SETTLEMENT_FEE_CAP_REJECTED, SETTLEMENT_FEE_SPIKE,
+};
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;

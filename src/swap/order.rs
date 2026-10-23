@@ -115,3 +115,5 @@ pub fn validate_transition(from: &str, to: &str) -> Result<(), String> {
         Err(format!("invalid swap order transition: {from} -> {to}"))
     }
 }
+    }
+}

@@ -1,84 +1,12 @@
-//! Swap order execution engine.
-//!
-//! A worker loop leases executable orders (`FOR UPDATE SKIP LOCKED` plus a
-//! visibility-timeout lease), submits them to the order's [`ExecutionVenue`]
-//! with an idempotency key derived from the order ID, records fills in
-//! `swap_fills`, and moves status only through the domain transition guard
-//! with a conditional (compare-and-set) update.
-//!
-//! Timeouts where the venue outcome is unknown move the order to
-//! `reconciling`; from there the engine only *looks up* the venue state by
-//! idempotency key and never re-submits blindly.
-
-use async_trait::async_trait;
-use serde_json::json;
-use sqlx::types::BigDecimal;
-use sqlx::{PgPool, Row};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use uuid::Uuid;
-
-use super::events::{record_event, SwapEventType};
-use super::order::*;
-
-/// A single fill reported by a venue. `venue_fill_id` must be stable across
-/// repeated reports of the same fill.
-#[derive(Debug, Clone)]
-pub struct VenueFill {
-    pub venue_fill_id: String,
-    pub amount: BigDecimal,
-    pub price: BigDecimal,
-}
-
-/// Typed result of a venue interaction.
-#[derive(Debug, Clone)]
-pub enum VenueOutcome {
-    /// Order completely filled (fills may be cumulative).
-    Filled(Vec<VenueFill>),
-    /// Order partially filled; more execution is needed.
-    PartiallyFilled(Vec<VenueFill>),
-    /// Retryable failure; the order definitely was not executed.
-    Transient(String),
-    /// Non-retryable failure with a venue reason.
-    Permanent(String),
-    /// Timeout / unknown result: must reconcile, never blindly retry.
-    Unknown,
-}
-
-#[async_trait]
-pub trait ExecutionVenue: Send + Sync {
-    fn name(&self) -> &str;
-
-    /// Submit the order. Must be idempotent on `idempotency_key`.
-    async fn submit(&self, order: &SwapOrder, idempotency_key: &str) -> VenueOutcome;
-
-    /// Look up the state of a previously submitted order by idempotency key.
-    async fn lookup(&self, order: &SwapOrder, idempotency_key: &str) -> VenueOutcome;
-}
-
-#[derive(Debug, Clone)]
-pub struct ExecutionConfig {
-    pub worker_id: String,
-    pub batch_size: i64,
-    /// Visibility timeout: a crashed worker's orders are reclaimed after this.
-    pub lease_timeout: Duration,
-    pub max_attempts: i32,
-    pub base_backoff: Duration,
-    pub max_backoff: Duration,
-    pub poll_interval: Duration,
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            worker_id: format!("swap-worker-{}", Uuid::new_v4()),
-            batch_size: 10,
-            lease_timeout: Duration::from_secs(60),
-            max_attempts: 5,
-            base_backoff: Duration::from_secs(2),
-            max_backoff: Duration::from_secs(60),
-            poll_interval: Duration::from_secs(2),
+/// Executes one quoted swap order against `venue` and returns the persisted
+/// record.
+///
+/// A `failed` outcome (slippage breach, venue rejection, or exhausted retries)
+/// is still `Ok`, with `failure_reason` set. `Err` means the order could not be
+/// claimed, or its outcome could not be persisted. In the latter case the order
+/// stays `executing` and [`requeue_stale_orders`] will pick it up.
+///
+/// A partial fill settles with the amounts actually executed.
         }
     }
 }

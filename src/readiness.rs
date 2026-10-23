@@ -13,6 +13,10 @@ pub struct ReadinessState {
     drain_timeout_secs: u64,
     /// Flag indicating if drain has started
     is_draining: Arc<AtomicBool>,
+    /// Flag indicating if the swap subsystem is draining (no longer accepting
+    /// new swap quotes/orders). Set as soon as shutdown begins so that
+    /// orchestrators stop routing traffic before in-flight work finishes.
+    swap_draining: Arc<AtomicBool>,
 }
 
 impl ReadinessState {
@@ -23,6 +27,7 @@ impl ReadinessState {
             is_ready: Arc::new(AtomicBool::new(false)),
             drain_timeout_secs: 30,
             is_draining: Arc::new(AtomicBool::new(false)),
+            swap_draining: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -33,6 +38,7 @@ impl ReadinessState {
             is_ready: Arc::new(AtomicBool::new(false)),
             drain_timeout_secs,
             is_draining: Arc::new(AtomicBool::new(false)),
+            swap_draining: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -46,6 +52,29 @@ impl ReadinessState {
         self.is_draining.load(Ordering::SeqCst)
     }
 
+    /// Check if the swap subsystem is draining.
+    ///
+    /// While true, new swap quotes/orders must be rejected and `/ready` must
+    /// report not-ready so orchestrators stop routing traffic to this instance.
+    pub fn is_swap_draining(&self) -> bool {
+        self.swap_draining.load(Ordering::SeqCst)
+    }
+
+    /// Flip the swap subsystem into draining mode.
+    ///
+    /// This is idempotent and safe to call from multiple concurrent shutdown
+    /// signal handlers. It also flips overall readiness to not-ready so that
+    /// orchestrators stop routing traffic before in-flight work finishes.
+    pub fn start_swap_drain(&self) {
+        if !self.swap_draining.swap(true, Ordering::SeqCst) {
+            tracing::info!("Swap subsystem entering draining mode — rejecting new orders");
+        }
+        // Readiness must flip synchronously so orchestrators stop routing
+        // traffic immediately, not after the grace period elapses.
+        self.is_ready.store(false, Ordering::SeqCst);
+        self.is_draining.store(true, Ordering::SeqCst);
+    }
+
     /// Get the drain timeout duration
     pub fn drain_timeout(&self) -> Duration {
         Duration::from_secs(self.drain_timeout_secs)
@@ -55,6 +84,7 @@ impl ReadinessState {
     pub fn set_ready(&self) {
         self.is_ready.store(true, Ordering::SeqCst);
         self.is_draining.store(false, Ordering::SeqCst);
+        self.swap_draining.store(false, Ordering::SeqCst);
     }
 
     /// Mark the application as not ready (draining)
@@ -68,6 +98,7 @@ impl ReadinessState {
     /// Returns the drain timeout duration
     pub fn start_drain(&self) -> Duration {
         self.set_not_ready();
+        self.start_swap_drain();
         tracing::info!(
             "Starting connection draining with timeout of {} seconds",
             self.drain_timeout_secs
@@ -434,6 +465,37 @@ mod tests {
         state.set_ready();
         assert!(state.is_ready());
         assert!(!state.is_draining());
+        assert!(!state.is_swap_draining());
+    }
+
+    #[test]
+    fn test_start_swap_drain_flips_readiness_and_is_idempotent() {
+        let state = ReadinessState::new();
+        state.set_ready();
+        assert!(state.is_ready());
+        assert!(!state.is_swap_draining());
+
+        state.start_swap_drain();
+        assert!(state.is_swap_draining());
+        assert!(
+            !state.is_ready(),
+            "readiness must flip to not-ready as soon as swap drain starts"
+        );
+        assert!(state.is_draining());
+
+        // Multiple concurrent signals must be harmless.
+        state.start_swap_drain();
+        assert!(state.is_swap_draining());
+        assert!(!state.is_ready());
+    }
+
+    #[test]
+    fn test_start_drain_also_drains_swap() {
+        let state = ReadinessState::new();
+        state.set_ready();
+        state.start_drain();
+        assert!(state.is_swap_draining());
+        assert!(!state.is_ready());
     }
 
     #[test]

@@ -230,6 +230,46 @@ Result: Task B gets 409 Conflict
 | Concurrent settlement mod | `StaleTransition` | 409 | **SETTLEMENT_003** |
 | Settlement not found | `NotFound` | 404 | NOT_FOUND_001 |
 
+## Swap Order State Machine
+
+Phase 2 (`src/swap/order.rs`). Pure domain logic: `SwapState::transition_to`
+enforces the table below, and `SwapOrder` applies it with caller-supplied UTC
+timestamps and actor metadata.
+
+```
+swap_ready → quote_requested → quoted → order_created → executing → executed → settlement_pending → settled
+
+Off-path exits:
+  quoted → expired                  (quote TTL elapsed)
+  any non-terminal state → failed
+  swap_ready / quote_requested / quoted / order_created → cancelled
+
+Terminal states: settled, failed, cancelled, expired (no outgoing edges)
+```
+
+Valid transitions (`SwapState::allowed_next`):
+
+| From | To |
+|------|----|
+| `swap_ready` | `quote_requested`, `cancelled`, `failed` |
+| `quote_requested` | `quoted`, `cancelled`, `failed` |
+| `quoted` | `order_created`, `expired`, `cancelled`, `failed` |
+| `order_created` | `executing`, `cancelled`, `failed` |
+| `executing` | `executed`, `failed` |
+| `executed` | `settlement_pending`, `failed` |
+| `settlement_pending` | `settled`, `failed` |
+
+Guards:
+
+- Self-transitions (`X → X`) are rejected with `SelfTransition`. Unlike the
+  transaction states above, swap states are not idempotent.
+- `quoted` is entered only via `SwapOrder::record_quote`, which rejects a quote
+  for another pair or one already expired.
+- `order_created` requires an unexpired quote at the transition instant.
+  An expired quote is rejected with `QuoteExpired` and the state is unchanged;
+  the order may only move forward to `expired`, never back to `quoted`.
+- Stable string names (`as_str`, serde, `FromStr`) match the snake_case names above.
+
 ## Summary Statistics
 
 | Metric | Count |
@@ -271,3 +311,19 @@ Flow per attempt (events in `swap_order_events`: started, submitted, partially_f
    `submit`. Exhaustion → `failed` (`RECONCILIATION_FAILED`).
 
 The worker is started in `main.rs` only when `SWAP_ENGINE_ENABLED=true`.
+
+## Swap Order Settlement
+
+```
+executed ──► settlement_pending ──► settled
+                  │
+                  └──► failed (reason code, on definitive rejection)
+```
+
+- `executed → settlement_pending`: an atomic claim increments `settlement_attempt`; idempotency key is `swap-settle:{order_id}:{attempt}`.
+- The payout tx hash is persisted in `swap_orders.settlement_tx_hash` **before** submission, and each attempt is logged in `swap_events`.
+- Horizon timeouts/5xx are *unknown*, not failed: submission is retried (same signed envelope, same hash) with exponential backoff, then left `settlement_pending`.
+- If a hash already exists, the order is only reconciled (Horizon `GET /transactions/{hash}`), never re-submitted.
+- `settlement_pending → settled`: on confirmation; a `swap_fills` row records the hash. The raw external status is stored in `settlement_external_status`.
+- `settlement_pending → failed`: on definitive rejection, with `failure_reason_code`.
+- The reconciliation loop (started in `main.rs`) re-checks orders pending longer than `SETTLEMENT_STUCK_THRESHOLD_SECS` (default 300) every `SETTLEMENT_RECONCILE_INTERVAL_SECS` (default 60) and emits a `swap_settlement_stuck` error-level alert if still unresolved. Also configurable: `SETTLEMENT_MAX_SUBMIT_ATTEMPTS`, `SETTLEMENT_MAX_BACKOFF_SECS`. Horizon endpoint: `STELLAR_HORIZON_URL`.
