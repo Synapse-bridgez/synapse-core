@@ -52,19 +52,6 @@ Note the DB fallback path (`check_idempotency_key`/`insert_idempotency_key`) is 
 
 For on-call triage of a reported duplicate action from a past Redis outage window, see the runbook's "Triaging a Reported Duplicate Action from a Past Redis Outage" section — short version: `SELECT * FROM idempotency_keys WHERE key = '<key>'`.
 
-### 6. Batch Requests
-
-Batch endpoints (batch quote, batch order submission, bulk cancel, bulk status) use the same idempotency mechanism, but at two levels:
-
-- **Batch-level key**: the caller supplies one `X-Idempotency-Key` for the whole batch, exactly as for a single request. A retried batch with the same key is recognized as a duplicate and does not re-execute any item.
-- **Per-item keys**: each item in the batch gets a deterministic idempotency key derived from the batch key plus the item's index, e.g. `batch:<batch_key>:<index>`. Because the derivation is deterministic, a retried batch (or a retry of a single item within a re-submitted batch) maps to the same per-item key and is deduplicated by the same Redis/DB machinery described above.
-
-Consequences worth knowing:
-
-- Retrying a batch after a partial failure is safe: items that already succeeded are recognized as duplicates and are not submitted twice; only the items that failed are re-executed.
-- Reordering items within a batch changes their indices, and therefore their derived per-item keys. Callers that want retry deduplication to hold must keep item order stable across retries (or retry individual items using the single-item endpoints).
-- The per-item keys are scoped by tenant in Redis (`idempotency:<tenant_id>:batch:<batch_key>:<index>`), so two tenants using the same batch key do not collide on the healthy path. The DB fallback path retains the pre-existing tenant-scoping gap noted in section 4.
-
 ## Configuration
 
 ### Environment Variables
@@ -206,40 +193,6 @@ docker exec -it synapse-redis redis-cli
 2. **TTL Limits**: Keys automatically expire to prevent Redis memory exhaustion
 3. **Fail Open**: Redis failures don't block legitimate requests
 4. **No Sensitive Data**: Only status codes and success flags stored in Redis
-
-## Batch Semantics
-
-Batch endpoints accept multiple items in one call and report a per-item outcome. The rules below apply uniformly to batch quote, batch order submission, bulk cancel, and bulk status.
-
-### Ordering
-
-- Results are returned in the same order as the submitted items; the response's `results` array is index-aligned with the request's `items` array.
-- Each result carries the item's `index` so callers can correlate without relying on array position alone.
-- Items are fanned out to the single-item code paths in-process with bounded concurrency, so execution order is not guaranteed — only the *reporting* order is. Do not depend on item N completing before item N+1.
-
-### Atomicity
-
-- Batches are **not** atomic. There is no all-or-nothing guarantee: some items may succeed while others fail.
-- Each item is processed independently through the same single-item path, including all risk and compliance checks. Batch submission does not bypass or relax any per-item validation.
-- A failure of one item never rolls back or prevents the processing of other items.
-
-### Partial Failure Reporting
-
-- The batch call itself returns `200 OK` (or `207 Multi-Status` where the spec uses it) whenever the batch was accepted and processed, even if some items failed. Per-item failures are reported in the body, not as a top-level error.
-- Each item result has a `status` of `succeeded` or `failed`. Failed items include a machine-readable `error_code` and a human-readable `message`.
-- A top-level error (non-2xx) is returned only for batch-level problems: malformed request, missing idempotency key, batch size cap exceeded, or quota exhausted before any item could be charged.
-- One oversized or invalid item does **not** reject the entire batch; it fails on its own with its own error code. The whole batch is rejected only when the number of items exceeds the configured per-batch cap.
-
-### Quota Accounting
-
-- Quota is charged **per item**, not per batch call. A batch of N items consumes N units of the tenant's quota.
-- Items that fail validation before consuming quota are not charged; items that reach the submission path are charged individually.
-- If quota runs out mid-batch, the remaining items fail with a quota error code while already-processed items keep their outcomes. The batch is not rolled back.
-- The per-batch size cap is enforced before fan-out, so an over-cap batch is rejected without charging any quota.
-
-### Idempotency
-
-- Batch retries are deduplicated at both the batch level and the per-item level; see section 6 above for the key derivation and its ordering caveat.
 
 ## Future Enhancements
 

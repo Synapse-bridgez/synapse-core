@@ -73,23 +73,10 @@ services:
       VAULT_ROLE_ID: ""
       VAULT_SECRET_ID: ""
       REDIS_URL: redis://redis:6379
-      # Graceful shutdown: on SIGTERM/SIGINT the service stops accepting new
-      # swap quotes/orders, drains in-flight executions for up to
-      # SHUTDOWN_GRACE_PERIOD_SECS, flushes the outbox, then closes the DB pool.
-      SHUTDOWN_GRACE_PERIOD_SECS: 30
-      # Max time to wait for the outbox publisher to finish its current batch
-      # during shutdown before giving up.
-      SHUTDOWN_OUTBOX_FLUSH_TIMEOUT_SECS: 10
     ports:
       - "3000:3000"
     volumes:
       - ./migrations:/app/migrations # optional: for live migration updates
-    # Give the container enough time to complete the drain before Docker
-    # escalates to SIGKILL. Must exceed SHUTDOWN_GRACE_PERIOD_SECS +
-    # SHUTDOWN_OUTBOX_FLUSH_TIMEOUT_SECS.
-    stop_grace_period: 60s
-    # synapse-core handles SIGTERM/SIGINT itself for ordered shutdown.
-    stop_signal: SIGTERM
     command: ["/app/synapse-core"]
 
 volumes:

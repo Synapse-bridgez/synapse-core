@@ -12,6 +12,3 @@
 
 ALTER TABLE reconciliation_reports
     ADD CONSTRAINT reconciliation_reports_period_unique UNIQUE (period_start, period_end);
-
-COMMENT ON CONSTRAINT reconciliation_reports_period_unique ON reconciliation_reports IS
-    'Guards reconciliation period uniqueness so repeated schedulers collapse to one logical report window.';

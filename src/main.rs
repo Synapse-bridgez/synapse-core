@@ -74,25 +74,18 @@ async fn main() -> anyhow::Result<()> {
     let tracer_manager =
         synapse_core::telemetry::init_tracer("synapse-core", config.otlp_endpoint.as_deref())
             .expect("failed to initialise OpenTelemetry tracer");
-    let otel_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer_manager.tracer())
-        .with_error_events_to_status(true);
 
     match config.log_format {
         config::LogFormat::Json => {
             tracing_subscriber::registry()
                 .with(env_filter)
-                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json())
-                .with(synapse_core::telemetry::latency_budget::layer())
                 .init();
         }
         config::LogFormat::Text => {
             tracing_subscriber::registry()
                 .with(env_filter)
-                .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer())
-                .with(synapse_core::telemetry::latency_budget::layer())
                 .init();
         }
     }
@@ -128,10 +121,6 @@ async fn main() -> anyhow::Result<()> {
             BackupCommands::Cleanup => cli::handle_backup_cleanup(&config).await,
         },
         Some(Commands::Config) => cli::handle_config_validate(&config),
-        Some(Commands::Preflight {
-            offline,
-            timeout_secs,
-        }) => cli::handle_preflight(&config, offline, timeout_secs).await,
     }
 }
 
@@ -139,12 +128,6 @@ async fn serve(
     config: config::Config,
     tracer_manager: synapse_core::telemetry::TracerManager,
 ) -> anyhow::Result<()> {
-    // The Phase 2 swap engine registers no routes or background tasks yet;
-    // this only records that the flag is on so operators can see it at boot.
-    if config.swap.engine_enabled {
-        tracing::info!("Swap engine enabled via SWAP_ENGINE_ENABLED; no swap routes or workers are registered yet");
-    }
-
     let pool = db::create_pool(&config).await?;
 
     // Initialize pool manager for multi-region failover.
@@ -185,21 +168,10 @@ async fn serve(
          instance's max_connections"
     );
 
-    // Run migrations, or with AUTO_MIGRATE=false refuse to start on drift.
+    // Run migrations
     let migrator = Migrator::new(Path::new("./migrations")).await?;
-    if config::preflight::auto_migrate_enabled() {
-        migrator.run(&pool).await?;
-        tracing::info!("Database migrations completed");
-    } else {
-        let pending = config::preflight::pending_migrations(&pool, &migrator).await?;
-        if !pending.is_empty() {
-            anyhow::bail!(
-                "{} pending migration(s) {:?} and AUTO_MIGRATE=false; run `synapse-core db migrate` first",
-                pending.len(),
-                pending
-            );
-        }
-    }
+    migrator.run(&pool).await?;
+    tracing::info!("Database migrations completed");
 
     // Hard startup gate: refuse to serve traffic if the connected role can
     // bypass Row-Level Security. See startup::assert_no_bypassrls for why.
@@ -228,31 +200,15 @@ async fn serve(
     // Initialize partition manager (runs every 24 hours). Startup-time assertion:
     // fail loudly rather than silently regress to the dead-cache-warming bug this
     // fixes if a future refactor reintroduces the construction-order mistake.
-    let partition_manager = db::partition::PartitionManager::with_lookahead(
-        pool.clone(),
-        24,
-        Some(query_cache.clone()),
-        config.partition_lookahead_months,
-    )
-    .with_swap_retention_months(config.swap_retention_months);
+    let partition_manager =
+        db::partition::PartitionManager::new(pool.clone(), 24, Some(query_cache.clone()));
     assert!(
         partition_manager.has_cache(),
         "PartitionManager must be constructed with a cache so create_partition's \
          warming path actually runs; see query_cache initialization above"
     );
     partition_manager.start();
-
-    // Swap Phase 2 background jobs (#1505, #1506, #1508); each is opt-in via env.
-    synapse_core::swap::compliance::surveillance::spawn(pool.clone());
-    synapse_core::swap::analytics::spawn(pool.clone());
-    synapse_core::swap::market_data::spawn_maintenance(pool.clone(), None);
-
-    // Stuck-transaction watchdog and DLQ depth/age alerting (#1446)
-    synapse_core::swap::recovery::spawn_watchdog(pool.clone(), &config);
-    tracing::info!(
-        lookahead_months = config.partition_lookahead_months,
-        "Partition manager started with configurable lookahead"
-    );
+    tracing::info!("Partition manager started");
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -341,43 +297,6 @@ async fn serve(
     tracing::info!("Metrics initialized successfully");
     metrics::spawn_pool_metrics_task(pool.clone(), 30);
 
-    // Dependency health scorecard (#1334): flush per-minute samples into
-    // dependency_health_rollups and expose rolling-window gauges.
-    let _scorecard_flush =
-        synapse_core::services::dependency_scorecard::spawn_flush_task(pool.clone());
-    let _scorecard_gauges =
-        synapse_core::services::dependency_scorecard::register_scorecard_gauges();
-    // Per-tenant latency histograms (#1337), top-K bounded.
-    let _tenant_latency_gauges = synapse_core::tenant::latency::register_tenant_latency_gauges();
-
-    // Tokio task leak detection (telemetry::task_leak): per-category live
-    // task / load gauges, plus a monitor that alerts on task growth the load
-    // doesn't explain.
-    let _task_leak_gauges = metrics::register_task_leak_gauges();
-    tokio::spawn(synapse_core::telemetry::task_leak::run_leak_monitor(
-        std::sync::Arc::clone(synapse_core::telemetry::task_leak::global()),
-        synapse_core::telemetry::task_leak::LeakDetectorConfig::from_env(),
-        std::time::Duration::from_secs(
-            std::env::var("TASK_LEAK_SAMPLE_INTERVAL_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
-        ),
-    ));
-
-    // End-to-end latency budget (telemetry::latency_budget): stage samples
-    // come from the tracing layer installed above; evaluate them per window.
-    let _latency_budget_gauges = metrics::register_latency_budget_gauges();
-    tokio::spawn(synapse_core::telemetry::latency_budget::run_evaluator(
-        std::sync::Arc::clone(synapse_core::telemetry::latency_budget::global()),
-        std::time::Duration::from_secs(
-            std::env::var("LATENCY_BUDGET_EVAL_INTERVAL_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(300),
-        ),
-    ));
-
     // Initialize rate limiting
     tracing::info!(
         "Rate limiting configured: {} req/min (default), {} req/min (whitelisted)",
@@ -421,25 +340,8 @@ async fn serve(
                 let anchor_secret = manager.get_anchor_secret().await?;
                 let admin_key = manager.get_admin_api_key().await?;
                 let store = SecretsStore::new(anchor_secret, admin_key);
-                if let (Ok(role), Ok(template)) = (
-                    std::env::var("VAULT_DATABASE_ROLE"),
-                    std::env::var("VAULT_DATABASE_URL_TEMPLATE"),
-                ) {
-                    manager.start_database_rotation_task(
-                        pool_manager.clone(),
-                        role,
-                        template,
-                    );
-                    tracing::info!("Vault database lease renewal and credential rotation enabled");
-                }
                 manager.start_refresh_task(store.clone(), config.redis_url.clone());
-                // Leaked deliberately: the gauges must live for the process.
-                std::mem::forget(store.register_vault_gauges());
-                tracing::info!(
-                    fallback_max_age_secs = store.fallback_config().max_age.as_secs(),
-                    "Secrets rotation enabled: refreshing from Vault every 5 minutes; \
-                     bounded last-known-good fallback during Vault outages"
-                );
+                tracing::info!("Secrets rotation enabled: refreshing from Vault every 5 minutes");
                 Some(store)
             }
             Err(e) => {
@@ -457,17 +359,10 @@ async fn serve(
     let current_batch_size = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
         config.processor_min_batch as u64,
     ));
-    // Initialize asset registry cache (refresh interval: ASSET_REGISTRY_REFRESH_SECS)
-    let _asset_cache = synapse_core::AssetCache::start(
-        pool.clone(),
-        std::time::Duration::from_secs(config.asset_registry_refresh_secs),
-    )
-    .await;
+    // Initialize asset registry cache (refreshes every 5 minutes)
+    let _asset_cache =
+        synapse_core::AssetCache::start(pool.clone(), std::time::Duration::from_secs(300)).await;
     tracing::info!("Asset registry cache initialized");
-    synapse_core::swap::circuit_breaker::init_swap_gate(
-        config.swap_accepting_orders,
-        config.swap_breaker,
-    );
     let app_state = AppState {
         db: pool.clone(),
         pool_manager,
@@ -522,25 +417,6 @@ async fn serve(
     tokio::spawn(async move {
         pool_monitor_task(monitor_pool).await;
     });
-
-    // Swap order execution worker (#1436), opt-in via SWAP_ENGINE_ENABLED.
-    // Orders for a venue with no registration here are released back to the
-    // queue (never failed) so a replica that has the venue can pick them up.
-    if std::env::var("SWAP_ENGINE_ENABLED")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-    {
-        let venues: std::collections::HashMap<
-            String,
-            Arc<dyn synapse_core::swap::execution::ExecutionVenue>,
-        > = std::collections::HashMap::new();
-        tokio::spawn(synapse_core::swap::execution::run_worker(
-            pool.clone(),
-            venues,
-            synapse_core::swap::execution::ExecutionConfig::default(),
-        ));
-        tracing::info!("Swap execution worker started");
-    }
 
     // Background task: alert if the dead quota:config:* Redis key space
     // (see handlers::admin::quota::set_tenant_quota and
@@ -606,15 +482,6 @@ async fn serve(
     }
     let processor_shutdown = processor_pool.start();
 
-    // Outbox publisher for lifecycle events. Local dev uses the log sink; deployed
-    // environments should pass a broker-backed `EventPublisher` here.
-    let (outbox_shutdown, outbox_shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(synapse_core::db::outbox::run_outbox_worker(
-        pool.clone(),
-        Arc::new(synapse_core::db::outbox::LogEventPublisher),
-        outbox_shutdown_rx,
-    ));
-
     // Register and start scheduled jobs
     let scheduler = synapse_core::services::JobScheduler::new();
     let stellar_account = std::env::var("RECONCILIATION_ACCOUNT").ok();
@@ -673,16 +540,6 @@ async fn serve(
         tracing::warn!("Failed to register audit log retention job: {}", e);
     }
 
-    // #1287: Register the tenant data quota measurement job (runs every 15 minutes).
-    let tenant_data_quota_job =
-        synapse_core::services::TenantDataQuotaJob::new(pool.clone());
-    if let Err(e) = scheduler
-        .register_job(Box::new(tenant_data_quota_job))
-        .await
-    {
-        tracing::warn!("Failed to register tenant data quota job: {}", e);
-    }
-
     if let Err(e) = scheduler.start().await {
         tracing::warn!("Failed to start job scheduler: {}", e);
     }
@@ -708,19 +565,6 @@ async fn serve(
                 tracing::error!("Initialization checks failed: {e}");
             }
         });
-    }
-
-    // Reconcile swap orders stuck in settlement_pending (status checks only, never re-submits).
-    {
-        use synapse_core::swap::settlement::{
-            run_reconciliation_loop, HorizonSettlementAdapter, SettlementConfig, SettlementService,
-        };
-        let service = SettlementService::new(
-            pool.clone(),
-            HorizonSettlementAdapter::new(config.stellar_horizon_url.clone()),
-            SettlementConfig::from_env(),
-        );
-        tokio::spawn(run_reconciliation_loop(service));
     }
 
     // Mount Swagger UI at /api/docs and serve OpenAPI JSON at /api/docs/openapi.json
@@ -753,86 +597,46 @@ async fn serve(
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
 
-    // Shutdown coordination (#1465). A single cancellation token is shared by
-    // the swap subsystem and the HTTP graceful-shutdown path so that repeated
-    // signals (SIGTERM then SIGINT, or a second SIGTERM) are idempotent: the
-    // first signal flips the token, subsequent signals are logged and ignored.
-    let shutdown_token = tokio_util::sync::CancellationToken::new();
-    let swap_drain = synapse_core::swap::drain::SwapDrainController::new(
-        shutdown_token.clone(),
-        config.swap_shutdown_grace_period,
-    );
-    // Install the swap drain controller into the app state so handlers can
-    // reject new order acceptance with a clear error while draining.
-    app_state.install_swap_drain(swap_drain.clone());
-
-    // Signal listener task: flips the cancellation token on the first signal.
-    // The HTTP server's graceful shutdown future below waits on the same token,
-    // so ordering is: stop-accepting (readiness) -> drain -> flush outbox -> close DB.
-    {
-        let shutdown_token = shutdown_token.clone();
-        let readiness = readiness.clone();
-        tokio::spawn(async move {
-            wait_for_shutdown_signal().await;
-            if shutdown_token.is_cancelled() {
-                tracing::info!("Shutdown already in progress; ignoring repeat signal");
-                return;
-            }
-            tracing::info!("Shutdown signal received; entering draining mode");
-            // Flip readiness first so orchestrators stop routing traffic.
-            if !readiness.is_draining() {
-                readiness.start_drain();
-            }
-            // Then cancel the shared token, which flips the swap subsystem to
-            // draining mode (rejecting new orders) and unblocks the server.
-            shutdown_token.cancel();
-        });
-    }
-
-    let server_shutdown_token = shutdown_token.clone();
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
-            server_shutdown_token.cancelled().await;
-            // Wait for readiness drain to complete (in-flight HTTP requests).
+            // Wait for SIGTERM or SIGINT
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
+                tokio::select! {
+                    _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+                    _ = sigint.recv() => tracing::info!("Received SIGINT"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to register Ctrl-C handler");
+                tracing::info!("Received Ctrl-C");
+            }
+
+            // If not already draining (e.g. /admin/drain was not called), start drain now
+            if !readiness.is_draining() {
+                readiness.start_drain();
+            }
             readiness.wait_for_drain().await;
         })
         .await?;
 
-    // --- Shutdown sequencing (mirrors startup ordering) ---
-    // 1. Stop-accepting: already done via readiness + token above.
-    // 2. Drain in-flight swap work within the configured grace period. This
-    //    lets bounded executions finish; anything still running when the grace
-    //    period elapses is parked for recovery on next startup.
-    match swap_drain.drain_in_flight().await {
-        Ok(report) => {
-            tracing::info!(
-                completed = report.completed,
-                parked = report.parked,
-                "Swap subsystem drained"
-            );
-        }
-        Err(e) => {
-            tracing::warn!("Swap drain encountered errors (continuing shutdown): {e}");
-        }
-    }
-
-    // 3. Stop background workers from claiming new work *before* draining DB
-    //    connections, so in-flight queries aren't force-cut when the pool closes.
+    // Stop background workers from claiming new work *before* draining DB
+    // connections, so in-flight queries aren't force-cut when the pool closes.
     let _ = processor_shutdown.send(true);
-    let _ = outbox_shutdown.send(true);
     if let Err(e) = scheduler.stop().await {
         tracing::warn!("Error stopping job scheduler: {}", e);
     }
 
-    // 4. Flush the outbox. Safe to interrupt mid-batch: the publisher only
-    //    marks rows published after the downstream effect is confirmed, so an
-    //    interrupted batch is simply re-published on the next startup.
-    if let Err(e) = synapse_core::services::outbox::flush_outbox(&pool).await {
-        tracing::warn!("Outbox flush during shutdown failed (will retry on restart): {e}");
-    }
-
-    // 5. Gracefully drain and close the database pools before exiting.
+    // Gracefully drain and close the database pools before exiting.
     synapse_core::db::graceful_shutdown(&pool).await;
     app_state.pool_manager.graceful_shutdown().await;
 
@@ -840,30 +644,6 @@ async fn serve(
     tracer_manager.shutdown();
 
     Ok(())
-}
-
-/// Wait for a shutdown signal (SIGTERM or SIGINT). Returns after the first
-/// signal; callers are responsible for idempotency via the cancellation token.
-async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-        let mut sigint =
-            signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
-        tokio::select! {
-            _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
-            _ = sigint.recv() => tracing::info!("Received SIGINT"),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to register Ctrl-C handler");
-        tracing::info!("Received Ctrl-C");
-    }
 }
 
 /// Background task to monitor database connection pool usage

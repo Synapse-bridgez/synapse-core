@@ -24,11 +24,6 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "pending",
         to: "failed",
     },
-    // v2: verification disagreement routes to manual review
-    Transition {
-        from: "pending",
-        to: "pending_review",
-    },
     // From processing
     Transition {
         from: "processing",
@@ -38,44 +33,14 @@ pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
         from: "processing",
         to: "failed",
     },
-    Transition {
-        from: "processing",
-        to: "pending_review",
-    },
-    // Stuck-transaction watchdog quarantines stalled processing rows (#1446)
-    Transition {
-        from: "processing",
-        to: "dlq",
-    },
     // From failed (reprocess)
     Transition {
         from: "failed",
         to: "pending",
     },
-    // From dlq (requeue, or operator force-complete / force-cancel #1446)
+    // From dlq (requeue)
     Transition {
         from: "dlq",
-        to: "pending",
-    },
-    Transition {
-        from: "dlq",
-        to: "completed",
-    },
-    Transition {
-        from: "dlq",
-        to: "failed",
-    },
-    // From pending_review: ops can resolve to completed, failed, or requeue
-    Transition {
-        from: "pending_review",
-        to: "completed",
-    },
-    Transition {
-        from: "pending_review",
-        to: "failed",
-    },
-    Transition {
-        from: "pending_review",
         to: "pending",
     },
 ];
@@ -148,10 +113,6 @@ mod tests {
         assert!(transitions.contains(&Transition {
             from: "dlq",
             to: "pending"
-        }));
-        assert!(transitions.contains(&Transition {
-            from: "completed",
-            to: "swap_ready"
         }));
     }
 

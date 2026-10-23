@@ -42,15 +42,15 @@ ignore = [
     # Tracked separately. Reviewed 2026-08-24.
     "RUSTSEC-2026-0204",
     "RUSTSEC-2026-0258",
-    # rsa 0.9.x (transitive, via sqlx-mysql's lockfile entry). RUSTSEC-2023-0071
-    # (Marvin timing side channel) has no patched release upstream. We use
-    # Postgres only; the mysql driver is never compiled into the binary.
-    # Reviewed 2026-10-19.
-    "RUSTSEC-2023-0071",
-    # instant 0.1.x (transitive, via backoff-style retry crates) is
-    # unmaintained; no drop-in upgrade without upstream changes.
-    # Reviewed 2026-10-19.
-    "RUSTSEC-2024-0384",
+    # zip 0.6.6, a build-dependency of utoipa-swagger-ui 4.x, used only to
+    # unpack the pinned Swagger UI bundle at build time — never at runtime and
+    # never on untrusted archives. RUSTSEC-2026-0367/0368/0369 (SUID bits and
+    # symlink escapes in extract()) fix in zip >=9, which needs
+    # utoipa-swagger-ui 5+, which in turn needs the same axum 0.6 -> 0.7+
+    # upgrade as the h2 entries above. Tracked separately. Reviewed 2026-10-23.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]
 
 [licenses]

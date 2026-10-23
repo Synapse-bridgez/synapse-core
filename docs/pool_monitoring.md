@@ -45,25 +45,6 @@ The following pool statistics are available:
 - `max_connections`: Maximum pool size (configured in `src/db/mod.rs`)
 - `usage_percent`: Percentage of pool capacity in use
 
-### Background Task Resource-Limit Metrics
-
-`src/services/resource_limits.rs` tracks per-category concurrency limits for
-background tasks (`ResourceLimiter`). Every limiter self-registers into a
-process-global registry on construction; `resource_category_snapshots()`
-reads that registry and reports, per category:
-
-- `resource_limiter_active_tasks` (gauge, labeled `category`): tasks
-  currently in flight for that category.
-- `resource_limiter_limit` (gauge, labeled `category`): the category's
-  configured `max_concurrent`.
-
-Call `crate::metrics::register_resource_limiter_gauges()` once at startup
-(keep the returned gauges alive) to wire these into the OTel metrics
-pipeline; add a panel for them alongside the dashboards-as-code work. A
-category consistently near its limit (`active` ≈ `limit`) indicates tasks in
-that category are queuing/throttling — check the corresponding background
-job's logs for why.
-
 ## Configuration
 
 Pool size is configured in `src/db/mod.rs`:
@@ -93,11 +74,6 @@ The health endpoint can be scraped by monitoring tools like:
 - New Relic
 - CloudWatch
 
-For long-term metric retention and downsampled capacity trends, see the
-[Prometheus metrics retention policy](metrics-retention-policy.md). The
-current `xtask pool-advisor` command still uses synthetic data and is not a
-production Prometheus forecasting consumer.
-
 Example Prometheus alert rule:
 ```yaml
 - alert: DatabasePoolHighUsage
@@ -109,75 +85,6 @@ Example Prometheus alert rule:
     summary: "Database connection pool usage is high"
     description: "Pool usage is {{ $value }}% on {{ $labels.instance }}"
 ```
-
-## Autoscaling Policy: queue depth and pool saturation
-
-The service already emits the two core scaling signals needed for an application-level autoscaling policy:
-
-- `pending_queue_depth`: backlog depth for the pending transaction queue.
-- `db_pool_saturation_ratio`: active DB pool share (`active / max_connections`).
-
-A scaling policy should react when either signal crosses a threshold and should include hysteresis so the fleet does not flap when the workload sits near the boundary.
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: synapse-core
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: synapse-core
-  minReplicas: 2
-  maxReplicas: 12
-  behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 120
-      policies:
-        - type: Percent
-          value: 100
-          periodSeconds: 60
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-        - type: Percent
-          value: 20
-          periodSeconds: 300
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 65
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 75
-    - type: Pods
-      pods:
-        metric:
-          name: pending_queue_depth
-        target:
-          type: AverageValue
-          averageValue: "50"
-    - type: Pods
-      pods:
-        metric:
-          name: db_pool_saturation_ratio
-        target:
-          type: AverageValue
-          averageValue: "0.80"
-```
-
-Recommended psychology:
-
-- Scale up when `pending_queue_depth > 50` or `db_pool_saturation_ratio > 0.80` for 2 consecutive evaluation windows.
-- Scale down only when `pending_queue_depth < 25` and `db_pool_saturation_ratio < 0.60` for the full stabilization window.
-- Maintain the standard CPU/memory checks as guardrails, but do not use them as the primary overload signal.
 
 ## Testing
 

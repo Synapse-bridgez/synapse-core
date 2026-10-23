@@ -60,32 +60,12 @@ DATABASE_URL – PostgresSQL connection string (e.g., postgres://synapse:synapse
 SERVER_PORT – Port for the web server (default 3000)
 STELLAR_HORIZON_URL – Stellar Horizon endpoint (e.g., https://horizon-testnet.stellar.org)
 REDIS_URL – Redis connection string (e.g., redis://localhost:6379)
-QUOTE_CACHE_TTL_SECS – TTL for cached swap quotes in seconds (default 10)
-QUOTE_CACHE_MAX_STALENESS_SECS – Max age of the price snapshot a cached quote may be served from, in seconds (default 5)
 ```
 
-Optional market-data (price feed for swap quoting) settings:
-
-```
-PRICE_SOURCE_URL – HTTP price source base URL; calls GET {url}/price?base=&quote= (unset disables HTTP ingestion)
-PRICE_SOURCE_TIMEOUT_MS – Per-request timeout (default 2000)
-PRICE_SOURCE_MAX_RETRIES – Retries after a failed fetch, max 10 (default 2)
-PRICE_SOURCE_RETRY_BACKOFF_MS – Base retry backoff, doubled per attempt (default 200)
-PRICE_INGESTION_INTERVAL_SECS – Scheduled ingestion interval (default 10)
-PRICE_CACHE_TTL_SECS – Fresh snapshot cache TTL in Redis (default 30)
-PRICE_MAX_AGE_SECS – Max snapshot age accepted for quoting (default 15)
-```
-
-A snapshot is usable for quoting only if it is not flagged `stale` and its source timestamp is within `PRICE_MAX_AGE_SECS`. When the source is unavailable, the last known snapshot is served with `stale = true`.
-
-Swap engine rollout (optional, defaults to off). Set per environment in `.env.development`, `.env.production`, or `.env.example.failover`:
-
-```
-SWAP_ENGINE_ENABLED – Process-wide kill switch for swap hand-offs (true/false, default false)
-SWAP_ENGINE_TENANT_ALLOWLIST – Comma-separated tenant ids admitted to swap (* = all, empty = none)
-```
-
-A tenant also needs the `swap_engine` feature flag enabled. The rollout sequence, kill switch, and stuck-order runbook are in [docs/swap-rollout.md](docs/swap-rollout.md).
+**Phase 2 Swap Engine Documentation:**
+- [Swap Operator Runbook](docs/swap-operator-runbook.md) — dashboards, alerts, kill switch, stuck orders, escalation
+- [Swap Developer Integration Guide](docs/swap-developer-integration-guide.md) — lifecycle, auth, worked example (quote → order), error reference
+- [Swap DR Runbook](docs/swap-dr-runbook.md) — backup, restore, and disaster-recovery procedures
 
 3. Start PostgresSQL Using Docker (recommended for development):
 
@@ -117,64 +97,6 @@ cargo run
 
 You should see logs indicating the server started and migrations completed.
 
-### ⚡ One-Command Local Development (Swap Engine Profile)
-
-For swap engine work there is a dedicated, idempotent bootstrap that brings up
-the full local stack, applies migrations, seeds deterministic demo data, and
-prints ready-to-use endpoints:
-
-```bash
-cargo xtask dev up
-```
-
-This command:
-
-1. Starts the `dev` docker-compose profile (`docker-compose.dev.yml`) with
-   PostgreSQL, Redis, and the swap engine dependencies, using the healthy
-   defaults from `.env.development`.
-2. Applies all `migrations/` via `sqlx` (the same migrations the service runs on
-   startup).
-3. Seeds deterministic demo data through the service's persistence layer:
-   tenants, assets, liquidity provider stubs, sample swap orders, and fills.
-   Fixed ids and timestamps are used so local runs and snapshots are
-   comparable.
-4. Prints the endpoints you can hit immediately, e.g.:
-
-   ```text
-   API:        http://localhost:3000
-   Health:     http://localhost:3000/health
-   Webhook:    http://localhost:3000/webhook
-   PostgreSQL: postgres://synapse:synapse@localhost:5432/synapse
-   Redis:      redis://localhost:6379
-   ```
-
-The bootstrap is safe to re-run: seeding is idempotent and will not duplicate
-rows. It requires no external network access beyond container image pulls and
-contains no real secrets (local-only credentials from `.env.development`).
-
-#### Seed & Teardown
-
-```bash
-# Seed demo data (idempotent)
-cargo xtask dev seed
-
-# Tear down seeded demo data and stop the stack
-cargo xtask dev down
-
-# Reset: tear down, re-apply migrations, and re-seed from scratch
-cargo xtask dev reset
-```
-
-`reset`/teardown is guarded: it refuses to run against a non-local database
-host (anything other than `localhost`/`127.0.0.1`) unless you explicitly pass
-`--force`, and it will prompt for confirmation when the target database does
-not look like a development database. This keeps the tooling safe against
-accidental use on shared or production databases.
-
-The dev profile is additive and does not change the existing Phase 1 flow:
-`docker-compose up -d` and `cargo run` continue to work as documented above.
-=======
-
 ### Testing
 
 Create a test database
@@ -191,75 +113,7 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 
 NOTE: Some warnings about unused imports or dead code are expected – they correspond to features planned for future issues.
 
-### 🌐 Stellar Testnet Integration Environment
-
-Unit tests and the simulation harness use mocks, so they cannot catch issues that only appear on a real network (sequence handling, trustline/authorization edge cases, ledger-close timing, transaction result codes, Horizon pagination). The end-to-end suite in `tests/integration/` drives a swap order from creation through quote, execution, settlement, and confirmation against real ledger behaviour.
-
-#### 1. Bring up the environment
-
-The suite separates **environment bring-up** from **scenario execution**, so the same scenarios can run against a local container or the hosted testnet.
-
-**Option A – Local Stellar Quickstart (default, used by CI):**
-
-```bash
-docker compose -f docker-compose.testnet.yml up -d
-# wait for Horizon to report a healthy ledger
-curl -sf http://localhost:8000/health || echo "Horizon not ready yet"
-```
-
-Tear it down (also removes the ephemeral ledger state):
-
-```bash
-docker compose -f docker-compose.testnet.yml down -v
-```
-
-**Option B – Hosted Stellar testnet:**
-
-```bash
-export STELLAR_TESTNET_MODE=hosted
-export STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
-export STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
-```
-
-No container is required; accounts are funded via friendbot (with backoff for rate limits). Tests never depend on external asset issuers — each run issues its own assets from a freshly funded account.
-
-#### 2. Run the suite locally
-
-The suite is gated behind an opt-in label so it does not run on every `cargo test`:
-
-```bash
-# local quickstart (default)
-STELLAR_TESTNET_MODE=local \
-DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test \
-cargo test --features integration --test integration -- --test-threads=1
-
-# against hosted testnet
-STELLAR_TESTNET_MODE=hosted \
-STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org \
-DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test \
-cargo test --features integration --test integration -- --test-threads=1
-```
-
-Each test creates unique accounts and assets and cleans up its state, so runs are isolated. The suite asserts on persisted swap records **and** on-chain state, not just HTTP responses.
-
-#### 3. Run in CI
-
-The integration job lives in `.github/workflows/` and runs:
-
-- **Per-PR:** only when the PR carries the `integration-testnet` label (opt-in).
-- **Nightly:** on a scheduled run against the hosted testnet.
-
-The job starts the quickstart container, waits for Horizon health, runs the suite with explicit timeouts and bounded ledger polling, then tears the container down. Total runtime is bounded; load/performance testing and chaos injection are out of scope (separate issues).
-
-#### 4. Interpreting failures
-
-- **Environment unreachable:** the suite fails loudly with a self-check error (`testnet environment unreachable at <url>`) instead of skipping silently. Check the container is up (`docker compose -f docker-compose.testnet.yml ps`) or that `STELLAR_HORIZON_URL` is correct.
-- **Testnet reset:** if Horizon returns `404` for a previously known account/ledger, the network was reset — re-run against a fresh environment; the failure message names the reset explicitly.
-- **Friendbot rate limits:** funding retries with exponential backoff; persistent `429`s surface as a clear failure rather than a hang.
-- **Ledger polling timeouts:** waits are bounded; a timeout reports the last observed ledger sequence and the pending transaction hash for diagnosis.
-
 ## 📊 Database Partitioning
-=======
 
 The `transactions` table uses time-based partitioning for high-volume scaling:
 
@@ -350,17 +204,3 @@ See the [open issues](https://github.com/synapse-bridgez/synapse-core/issues) fo
 
 📄 License
 This project is licensed under the MIT License. See the LICENSE file for details.
-
-## Handsoff notes
-
-<!-- handsoff-issue-1356 -->
-- #1356: [High] Add an audit-log tailing command to the CLI
-<!-- handsoff-issue-1345 -->
-- #1345: [High] Add SDK request/response logging with secret redaction
-<!-- handsoff-issue-1341 -->
-- #1341: [High] Build a Go SDK with parity to the Rust SDK
-<!-- handsoff-issue-1351 -->
-- #1351: [High] Add typed GraphQL codegen for the Rust SDK from the live schema
-
-<!-- handsoff-issue-1479 -->
-- #1479: Implement Tenant Self-Service Onboarding and Configuration for Swap Parameters

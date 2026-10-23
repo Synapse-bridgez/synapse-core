@@ -1,7 +1,4 @@
 use crate::error::AppError;
-use crate::swap::settlement::submission::{
-    SubmissionAttempt, SubmissionOutcome, SubmissionStore,
-};
 use crate::utils::cursor as cursor_util;
 use crate::validation::{validate_max_len, validate_required};
 use crate::ApiState;
@@ -64,7 +61,7 @@ pub async fn list_settlements(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
     let mut settlements = crate::db::queries::list_settlements_cursor_for_tenant(
-        &pool,
+        pool,
         fetch_limit,
         decoded_cursor,
         backward,
@@ -116,7 +113,7 @@ pub async fn get_settlement(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-    let settlement = crate::db::queries::get_settlement_for_tenant(&pool, id, tenant.tenant_id)
+    let settlement = crate::db::queries::get_settlement_for_tenant(pool, id, tenant.tenant_id)
         .await
         .map_err(|e| {
             if matches!(e, sqlx::Error::RowNotFound) {
@@ -142,70 +139,6 @@ pub async fn get_settlement(
     }
 
     Ok(response)
-}
-
-/// Query parameters for listing persisted submission attempts of a settlement.
-#[derive(Debug, Deserialize)]
-pub struct SubmissionAttemptsQuery {
-    pub cursor: Option<String>,
-    pub limit: Option<i64>,
-    /// "forward" (default) or "backward"
-    pub direction: Option<String>,
-}
-
-/// A single persisted submission attempt, exposed for reconciliation.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SubmissionAttemptView {
-    pub id: Uuid,
-    pub settlement_id: Uuid,
-    pub source_account: String,
-    pub channel_account: Option<String>,
-    pub sequence_number: i64,
-    pub transaction_hash: Option<String>,
-    pub status: String,
-    pub outcome: Option<String>,
-    pub error_code: Option<String>,
-    pub attempt_number: i32,
-    pub ledger: Option<i64>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl From<SubmissionAttempt> for SubmissionAttemptView {
-    fn from(attempt: SubmissionAttempt) -> Self {
-        let outcome = attempt.outcome.map(|o| match o {
-            SubmissionOutcome::Pending => "pending".to_string(),
-            SubmissionOutcome::Confirmed => "confirmed".to_string(),
-            SubmissionOutcome::Duplicate => "duplicate".to_string(),
-            SubmissionOutcome::Retryable => "retryable".to_string(),
-            SubmissionOutcome::Terminal => "terminal".to_string(),
-        });
-
-        Self {
-            id: attempt.id,
-            settlement_id: attempt.settlement_id,
-            source_account: attempt.source_account,
-            channel_account: attempt.channel_account,
-            sequence_number: attempt.sequence_number,
-            transaction_hash: attempt.transaction_hash,
-            status: attempt.status.as_str().to_string(),
-            outcome,
-            error_code: attempt.error_code,
-            attempt_number: attempt.attempt_number,
-            ledger: attempt.ledger,
-            created_at: attempt.created_at,
-            updated_at: attempt.updated_at,
-        }
-    }
-}
-
-/// Paginated list of submission attempts for a settlement.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SubmissionAttemptsResponse {
-    pub settlement_id: Uuid,
-    pub attempts: Vec<SubmissionAttemptView>,
-    pub next_cursor: Option<String>,
-    pub has_more: bool,
 }
 
 /// Request body for admin settlement status changes.
@@ -248,93 +181,6 @@ impl UpdateSettlementStatusRequest {
     }
 }
 
-#[utoipa::path(
-    get,
-    path = "/settlements/{id}/submissions",
-    params(
-        ("id" = Uuid, Path, description = "Settlement ID"),
-        ("cursor" = Option<String>, Query, description = "Pagination cursor"),
-        ("limit" = Option<i64>, Query, description = "Page size (1-100, default 20)"),
-        ("direction" = Option<String>, Query, description = "\"forward\" (default) or \"backward\""),
-    ),
-    responses(
-        (status = 200, description = "Submission attempts for the settlement", body = SubmissionAttemptsResponse),
-        (status = 400, description = "Invalid cursor"),
-        (status = 404, description = "Settlement not found"),
-        (status = 500, description = "Internal server error"),
-    ),
-    tag = "Settlements"
-)]
-pub async fn list_settlement_submissions(
-    State(state): State<ApiState>,
-    tenant: crate::tenant::TenantContext,
-    Path(id): Path<Uuid>,
-    Query(params): Query<SubmissionAttemptsQuery>,
-) -> Result<impl IntoResponse, AppError> {
-    let limit = params.limit.unwrap_or(20).clamp(1, 100);
-    let backward = params.direction.as_deref() == Some("backward");
-
-    let decoded_cursor = if let Some(ref c) = params.cursor {
-        match cursor_util::decode(c) {
-            Ok(pair) => Some(pair),
-            Err(e) => return Err(AppError::BadRequest(format!("invalid cursor: {}", e))),
-        }
-    } else {
-        None
-    };
-
-    let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
-
-    // Ensure the settlement exists and is visible to this tenant before exposing
-    // its submission attempts.
-    crate::db::queries::get_settlement_for_tenant(&pool, id, tenant.tenant_id)
-        .await
-        .map_err(|e| {
-            if matches!(e, sqlx::Error::RowNotFound) {
-                tracing::info!(
-                    counter.cross_tenant_denial_total = 1u64,
-                    tenant_id = %tenant.tenant_id,
-                    settlement_id = %id,
-                    "list_settlement_submissions: not found or not visible to this tenant"
-                );
-                AppError::NotFound(format!("Settlement {} not found", id))
-            } else {
-                AppError::from(e)
-            }
-        })?;
-
-    let store = SubmissionStore::new(pool.clone());
-    let fetch_limit = limit + 1;
-    let mut attempts = store
-        .list_attempts_for_settlement(id, fetch_limit, decoded_cursor, backward)
-        .await?;
-
-    let has_more = attempts.len() as i64 > limit;
-    if has_more {
-        attempts.truncate(limit as usize);
-    }
-
-    let next_cursor = attempts
-        .last()
-        .map(|a| cursor_util::encode(a.created_at, a.id));
-
-    let body = SubmissionAttemptsResponse {
-        settlement_id: id,
-        attempts: attempts.into_iter().map(SubmissionAttemptView::from).collect(),
-        next_cursor,
-        has_more,
-    };
-
-    let mut response: Response = Json(body).into_response();
-    if replica_used {
-        response
-            .headers_mut()
-            .insert("X-Read-Consistency", HeaderValue::from_static("eventual"));
-    }
-
-    Ok(response)
-}
-
 /// PATCH /admin/settlements/:id/status
 /// Allowed transitions: completed→pending_review, →disputed, pending_review→adjusted/voided/disputed,
 /// disputed→adjusted/voided/pending_review.
@@ -372,56 +218,6 @@ pub async fn update_settlement_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_submission_attempt_view_maps_outcome() {
-        let now = chrono::Utc::now();
-        let attempt = SubmissionAttempt {
-            id: Uuid::new_v4(),
-            settlement_id: Uuid::new_v4(),
-            source_account: "GSOURCE".to_string(),
-            channel_account: Some("GCHANNEL".to_string()),
-            sequence_number: 42,
-            transaction_hash: Some("abc123".to_string()),
-            status: crate::swap::settlement::submission::AttemptStatus::Submitted,
-            outcome: Some(SubmissionOutcome::Duplicate),
-            error_code: Some("tx_bad_seq".to_string()),
-            attempt_number: 2,
-            ledger: Some(100),
-            created_at: now,
-            updated_at: now,
-        };
-
-        let view = SubmissionAttemptView::from(attempt);
-        assert_eq!(view.outcome.as_deref(), Some("duplicate"));
-        assert_eq!(view.status, "submitted");
-        assert_eq!(view.attempt_number, 2);
-        assert_eq!(view.sequence_number, 42);
-    }
-
-    #[test]
-    fn test_submission_attempt_view_without_outcome() {
-        let now = chrono::Utc::now();
-        let attempt = SubmissionAttempt {
-            id: Uuid::new_v4(),
-            settlement_id: Uuid::new_v4(),
-            source_account: "GSOURCE".to_string(),
-            channel_account: None,
-            sequence_number: 1,
-            transaction_hash: None,
-            status: crate::swap::settlement::submission::AttemptStatus::Allocated,
-            outcome: None,
-            error_code: None,
-            attempt_number: 1,
-            ledger: None,
-            created_at: now,
-            updated_at: now,
-        };
-
-        let view = SubmissionAttemptView::from(attempt);
-        assert!(view.outcome.is_none());
-        assert_eq!(view.status, "allocated");
-    }
 
     #[test]
     fn test_update_settlement_status_valid() {

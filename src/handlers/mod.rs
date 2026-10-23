@@ -3,15 +3,12 @@ pub mod dlq;
 pub mod export;
 pub mod graphql;
 pub mod idempotency;
-pub mod import;
 pub mod pagination;
 pub mod profiling;
 pub mod search;
 pub mod session;
-pub mod disputes;
 pub mod settlements;
 pub mod stats;
-pub mod swap;
 pub mod v1;
 pub mod v2;
 pub mod webhook;
@@ -24,240 +21,9 @@ pub use pagination::{
 
 use crate::error::AppError;
 use crate::ApiState;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-
-/// Maximum number of items accepted in a single batch request.
-///
-/// Mirrors the configurable `batch_max_items` setting; used as a hard upper
-/// bound when the configuration is unavailable.
-pub const DEFAULT_BATCH_MAX_ITEMS: usize = 100;
-
-/// Maximum number of batch items processed concurrently.
-///
-/// Bounded fan-out keeps per-batch resource usage predictable and prevents a
-/// single large batch from starving other requests.
-pub const BATCH_CONCURRENCY_LIMIT: usize = 8;
-
-/// Error code returned when a swap order is submitted while the service is
-/// draining (graceful shutdown in progress).
-pub const SWAP_DRAINING_ERROR_CODE: &str = "SWAP_DRAINING";
-
-/// Error code returned when a batch exceeds the configured size cap.
-pub const BATCH_TOO_LARGE_ERROR_CODE: &str = "BATCH_TOO_LARGE";
-
-/// Returns `true` when the swap subsystem is draining and must reject new
-/// order acceptance.
-///
-/// Readiness is the single source of truth for the draining flag so that the
-/// readiness probe and the swap handlers can never disagree.
-pub fn swap_is_draining(state: &ApiState) -> bool {
-    state.app_state.readiness.is_draining()
-}
-
-/// Builds the clear, structured error returned when new swap orders are
-/// rejected because the service is draining.
-pub fn swap_draining_error() -> AppError {
-    AppError::ServiceUnavailable(format!(
-        "{}: service is draining for graceful shutdown; retry after restart completes",
-        SWAP_DRAINING_ERROR_CODE
-    ))
-}
-
-/// Rejects new swap order acceptance while draining.
-///
-/// Call this at the top of every swap order/quote acceptance path so that the
-/// stop-accepting phase of shutdown is enforced consistently.
-pub fn ensure_swap_accepting(state: &ApiState) -> Result<(), AppError> {
-    if swap_is_draining(state) {
-        Err(swap_draining_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// Derives a deterministic per-item idempotency key from a batch key and the
-/// item's index within the batch.
-///
-/// Retrying the same batch with the same batch key therefore maps each item to
-/// the same idempotency key, so already-processed items are deduplicated by the
-/// existing idempotency mechanism instead of being duplicated.
-pub fn derive_batch_item_idempotency_key(batch_key: &str, index: usize) -> String {
-    format!("{}:item:{}", batch_key, index)
-}
-
-/// Per-item outcome of a batch operation.
-///
-/// Every item in a batch produces exactly one of these, so partial success is
-/// always unambiguous: `ok == true` means the item succeeded, otherwise
-/// `error_code`/`error` describe the failure.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct BatchItemResult<T> {
-    /// Zero-based index of the item within the submitted batch.
-    pub index: usize,
-    /// Deterministic idempotency key used for this item.
-    pub idempotency_key: String,
-    /// Whether this item succeeded.
-    pub ok: bool,
-    /// Successful result payload, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<T>,
-    /// Machine-readable error code on failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_code: Option<String>,
-    /// Human-readable error message on failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-impl<T> BatchItemResult<T> {
-    /// Builds a successful per-item result.
-    pub fn success(index: usize, idempotency_key: String, result: T) -> Self {
-        Self {
-            index,
-            idempotency_key,
-            ok: true,
-            result: Some(result),
-            error_code: None,
-            error: None,
-        }
-    }
-
-    /// Builds a failed per-item result.
-    pub fn failure(
-        index: usize,
-        idempotency_key: String,
-        error_code: impl Into<String>,
-        error: impl Into<String>,
-    ) -> Self {
-        Self {
-            index,
-            idempotency_key,
-            ok: false,
-            result: None,
-            error_code: Some(error_code.into()),
-            error: Some(error.into()),
-        }
-    }
-}
-
-/// Envelope returned by every batch endpoint.
-///
-/// Items are reported in submission order (index ascending). Atomicity is
-/// per-item only: a batch never fails as a whole because of individual item
-/// failures, and successful items are never rolled back.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct BatchResponse<T> {
-    /// Per-item outcomes, ordered by ascending `index`.
-    pub items: Vec<BatchItemResult<T>>,
-    /// Number of items that succeeded.
-    pub succeeded: usize,
-    /// Number of items that failed.
-    pub failed: usize,
-}
-
-impl<T> BatchResponse<T> {
-    /// Builds a response from per-item results, sorting by index and computing
-    /// success/failure counts.
-    pub fn from_items(mut items: Vec<BatchItemResult<T>>) -> Self {
-        items.sort_by_key(|item| item.index);
-        let succeeded = items.iter().filter(|item| item.ok).count();
-        let failed = items.len() - succeeded;
-        Self {
-            items,
-            succeeded,
-            failed,
-        }
-    }
-}
-
-/// Enforces the per-batch size cap.
-///
-/// An oversized batch is rejected as a whole (before any item is processed) so
-/// that no quota is charged and no side effects occur. Individual oversized
-/// items are reported per-item instead.
-pub fn enforce_batch_cap(len: usize, max_items: usize) -> Result<(), AppError> {
-    if len == 0 {
-        return Err(AppError::Validation(
-            "batch must contain at least one item".to_string(),
-        ));
-    }
-    if len > max_items {
-        return Err(AppError::Validation(format!(
-            "{}: batch contains {} items, exceeding the maximum of {}",
-            BATCH_TOO_LARGE_ERROR_CODE, len, max_items
-        )));
-    }
-    Ok(())
-}
-
-/// Fans out a batch of items to an async per-item function with bounded
-/// concurrency, preserving submission order in the returned results.
-///
-/// Each item is processed independently: a failure in one item never aborts
-/// the others, and every item yields exactly one `BatchItemResult`.
-pub async fn fan_out_batch<T, F, Fut>(
-    batch_key: &str,
-    items: Vec<T>,
-    process: F,
-) -> BatchResponse<T::Output>
-where
-    T: Send + 'static,
-    T::Output: Send + 'static,
-    F: Fn(usize, String, T) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<T::Output, AppError>> + Send + 'static,
-{
-    use futures::stream::{FuturesUnordered, StreamExt};
-    use std::sync::Arc;
-
-    let process = Arc::new(process);
-    let mut pending = FuturesUnordered::new();
-    let mut results: Vec<BatchItemResult<T::Output>> = Vec::with_capacity(items.len());
-    let mut iter = items.into_iter().enumerate();
-
-    // Prime the pipeline up to the concurrency limit.
-    for _ in 0..BATCH_CONCURRENCY_LIMIT {
-        match iter.next() {
-            Some((index, item)) => {
-                let key = derive_batch_item_idempotency_key(batch_key, index);
-                let process = Arc::clone(&process);
-                let key_for_task = key.clone();
-                pending.push(async move {
-                    let outcome = process(index, key_for_task.clone(), item).await;
-                    (index, key_for_task, outcome)
-                });
-            }
-            None => break,
-        }
-    }
-
-    while let Some((index, key, outcome)) = pending.next().await {
-        match outcome {
-            Ok(value) => results.push(BatchItemResult::success(index, key, value)),
-            Err(err) => {
-                let (code, message) = err.batch_error_parts();
-                results.push(BatchItemResult::failure(index, key, code, message));
-            }
-        }
-        if let Some((next_index, item)) = iter.next() {
-            let next_key = derive_batch_item_idempotency_key(batch_key, next_index);
-            let process = Arc::clone(&process);
-            let key_for_task = next_key.clone();
-            pending.push(async move {
-                let outcome = process(next_index, key_for_task.clone(), item).await;
-                (next_index, key_for_task, outcome)
-            });
-        }
-    }
-
-    BatchResponse::from_items(results)
-}
 
 /// Helper service for checking dependency health.
 ///
@@ -360,34 +126,20 @@ pub async fn live() -> impl IntoResponse {
     ),
     tag = "Health"
 )]
-pub async fn ready(State(state): State<ApiState>) -> Result<Response, AppError> {
-    let dependencies = crate::readiness::dependency_readiness(
-        state.app_state.secrets_store.as_ref(),
-        std::time::Instant::now(),
-    );
-    let degraded = dependencies.degraded();
-    let is_ready = state.app_state.readiness.is_ready()
-        && !(dependencies.secrets_expired() && crate::readiness::fail_on_expired_secrets());
-    let draining = state.app_state.readiness.is_draining();
-    let response = ReadinessResponse {
-        status: if is_ready { "ready" } else { "not_ready" }.to_string(),
-        draining,
-        swap_draining: draining,
-        degraded: degraded.clone(),
-        dependencies: Some(dependencies),
-    };
-    let code = if is_ready {
-        StatusCode::OK
+pub async fn ready(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
+    if state.app_state.readiness.is_ready() {
+        let response = ReadinessResponse {
+            status: "ready".to_string(),
+            draining: state.app_state.readiness.is_draining(),
+        };
+        Ok((StatusCode::OK, Json(response)))
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    let mut resp = (code, Json(response)).into_response();
-    if !degraded.is_empty() {
-        if let Ok(v) = axum::http::HeaderValue::from_str(&degraded.join(",")) {
-            resp.headers_mut().insert("X-Degraded-Dependencies", v);
-        }
+        let response = ReadinessResponse {
+            status: "not_ready".to_string(),
+            draining: state.app_state.readiness.is_draining(),
+        };
+        Ok((StatusCode::SERVICE_UNAVAILABLE, Json(response)))
     }
-    Ok(resp)
 }
 
 /// Health check endpoint — aggregates dependency status and reports service health.
@@ -465,18 +217,6 @@ pub struct ReadinessResponse {
     pub status: String,
     /// true if the service is in graceful shutdown mode (/admin/drain was called)
     pub draining: bool,
-    /// true if the swap subsystem is draining and rejecting new orders.
-    /// Orchestrators should stop routing swap traffic when this is set.
-    #[serde(default)]
-    pub swap_draining: bool,
-    /// Dependencies currently running in degraded mode (`vault`, `redis`).
-    /// Degradation is reported here without failing readiness — see
-    /// `readiness::dependency_readiness`.
-    #[serde(default)]
-    pub degraded: Vec<String>,
-    /// Per-dependency degraded-mode detail.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependencies: Option<crate::readiness::DependencyReadiness>,
 }
 
 /// Response from the health check endpoint (/health).
@@ -517,180 +257,6 @@ pub struct DbPoolStats {
     pub usage_percent: f32,
 }
 
-/// Batch quote request body.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct BatchQuoteRequest {
-    /// Client-supplied batch idempotency key. Per-item keys are derived
-    /// deterministically as `{batch_key}:item:{index}`.
-    pub batch_key: String,
-    /// Individual quote requests, processed in order.
-    pub items: Vec<serde_json::Value>,
-}
-
-/// Batch order submission request body.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct BatchOrderRequest {
-    /// Client-supplied batch idempotency key. Per-item keys are derived
-    /// deterministically as `{batch_key}:item:{index}`.
-    pub batch_key: String,
-    /// Individual order submissions, processed in order.
-    pub items: Vec<serde_json::Value>,
-}
-
-/// Bulk cancel request body.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct BulkCancelRequest {
-    /// Client-supplied batch idempotency key.
-    pub batch_key: String,
-    /// Order identifiers to cancel.
-    pub order_ids: Vec<String>,
-}
-
-/// Bulk status request body.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct BulkStatusRequest {
-    /// Client-supplied batch idempotency key.
-    pub batch_key: String,
-    /// Order identifiers to look up.
-    pub order_ids: Vec<String>,
-}
-
-/// Batch quote endpoint.
-///
-/// Fans out to the single-item quote path in-process with bounded concurrency.
-/// Each item is charged to the tenant quota individually and reported with its
-/// own success/failure outcome; one failing item never fails the batch.
-#[utoipa::path(
-    post,
-    path = "/api/v1/swap/quotes/batch",
-    request_body = BatchQuoteRequest,
-    responses(
-        (status = 200, description = "Per-item batch quote results", body = BatchResponse<serde_json::Value>),
-        (status = 400, description = "Batch exceeds size cap or is empty"),
-        (status = 503, description = "Service is draining")
-    ),
-    tag = "Swap"
-)]
-pub async fn batch_quotes(
-    State(state): State<ApiState>,
-    Json(request): Json<BatchQuoteRequest>,
-) -> Result<Response, AppError> {
-    ensure_swap_accepting(&state)?;
-    let max_items = crate::config::batch_max_items();
-    enforce_batch_cap(request.items.len(), max_items)?;
-
-    let batch_key = request.batch_key.clone();
-    let response = fan_out_batch(&batch_key, request.items, move |_index, _key, item| {
-        let state = state.clone();
-        async move {
-            // Reuse the single-item quote path; quota is charged per item there.
-            crate::swap::quote_single(&state, item).await
-        }
-    })
-    .await;
-
-    Ok((StatusCode::OK, Json(response)).into_response())
-}
-
-/// Batch order submission endpoint.
-///
-/// Fans out to the single-item order submission path in-process with bounded
-/// concurrency. Risk/compliance checks and per-item quota charging are applied
-/// by the single-item path, so batching never bypasses them.
-#[utoipa::path(
-    post,
-    path = "/api/v1/swap/orders/batch",
-    request_body = BatchOrderRequest,
-    responses(
-        (status = 200, description = "Per-item batch order results", body = BatchResponse<serde_json::Value>),
-        (status = 400, description = "Batch exceeds size cap or is empty"),
-        (status = 503, description = "Service is draining")
-    ),
-    tag = "Swap"
-)]
-pub async fn batch_orders(
-    State(state): State<ApiState>,
-    Json(request): Json<BatchOrderRequest>,
-) -> Result<Response, AppError> {
-    ensure_swap_accepting(&state)?;
-    let max_items = crate::config::batch_max_items();
-    enforce_batch_cap(request.items.len(), max_items)?;
-
-    let batch_key = request.batch_key.clone();
-    let response = fan_out_batch(&batch_key, request.items, move |_index, _key, item| {
-        let state = state.clone();
-        async move {
-            // Reuse the single-item submission path (risk/compliance + quota).
-            crate::swap::submit_single(&state, item).await
-        }
-    })
-    .await;
-
-    Ok((StatusCode::OK, Json(response)).into_response())
-}
-
-/// Bulk cancel endpoint.
-///
-/// Cancels each order independently and reports per-item outcomes. Cancellation
-/// remains allowed while draining so in-flight work can be parked safely.
-#[utoipa::path(
-    post,
-    path = "/api/v1/swap/orders/bulk-cancel",
-    request_body = BulkCancelRequest,
-    responses(
-        (status = 200, description = "Per-item bulk cancel results", body = BatchResponse<serde_json::Value>),
-        (status = 400, description = "Batch exceeds size cap or is empty")
-    ),
-    tag = "Swap"
-)]
-pub async fn bulk_cancel(
-    State(state): State<ApiState>,
-    Json(request): Json<BulkCancelRequest>,
-) -> Result<Response, AppError> {
-    let max_items = crate::config::batch_max_items();
-    enforce_batch_cap(request.order_ids.len(), max_items)?;
-
-    let batch_key = request.batch_key.clone();
-    let response = fan_out_batch(&batch_key, request.order_ids, move |_index, _key, order_id| {
-        let state = state.clone();
-        async move { crate::swap::cancel_single(&state, order_id).await }
-    })
-    .await;
-
-    Ok((StatusCode::OK, Json(response)).into_response())
-}
-
-/// Bulk status endpoint.
-///
-/// Looks up each order independently and reports per-item outcomes. Status
-/// lookups remain allowed while draining.
-#[utoipa::path(
-    post,
-    path = "/api/v1/swap/orders/bulk-status",
-    request_body = BulkStatusRequest,
-    responses(
-        (status = 200, description = "Per-item bulk status results", body = BatchResponse<serde_json::Value>),
-        (status = 400, description = "Batch exceeds size cap or is empty")
-    ),
-    tag = "Swap"
-)]
-pub async fn bulk_status(
-    State(state): State<ApiState>,
-    Json(request): Json<BulkStatusRequest>,
-) -> Result<Response, AppError> {
-    let max_items = crate::config::batch_max_items();
-    enforce_batch_cap(request.order_ids.len(), max_items)?;
-
-    let batch_key = request.batch_key.clone();
-    let response = fan_out_batch(&batch_key, request.order_ids, move |_index, _key, order_id| {
-        let state = state.clone();
-        async move { crate::swap::status_single(&state, order_id).await }
-    })
-    .await;
-
-    Ok((StatusCode::OK, Json(response)).into_response())
-}
-
 /// Error catalog endpoint
 /// Returns all available error codes and their descriptions
 pub async fn error_catalog() -> Result<impl IntoResponse, AppError> {
@@ -723,76 +289,16 @@ mod tests {
         let ready = ReadinessResponse {
             status: "ready".to_string(),
             draining: false,
-            swap_draining: false,
-            degraded: vec![],
-            dependencies: None,
         };
         assert_eq!(ready.status, "ready");
         assert!(!ready.draining);
-        assert!(!ready.swap_draining);
 
         let not_ready = ReadinessResponse {
             status: "not_ready".to_string(),
             draining: true,
-            swap_draining: true,
-            degraded: vec!["vault".to_string()],
-            dependencies: None,
         };
         assert_eq!(not_ready.status, "not_ready");
         assert!(not_ready.draining);
-        assert!(not_ready.swap_draining);
-    }
-
-    #[test]
-    fn test_derive_batch_item_idempotency_key_is_deterministic() {
-        let a = derive_batch_item_idempotency_key("batch-123", 0);
-        let b = derive_batch_item_idempotency_key("batch-123", 0);
-        let c = derive_batch_item_idempotency_key("batch-123", 1);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        assert_eq!(a, "batch-123:item:0");
-    }
-
-    #[test]
-    fn test_enforce_batch_cap() {
-        assert!(enforce_batch_cap(0, 10).is_err());
-        assert!(enforce_batch_cap(1, 10).is_ok());
-        assert!(enforce_batch_cap(10, 10).is_ok());
-        assert!(enforce_batch_cap(11, 10).is_err());
-    }
-
-    #[test]
-    fn test_batch_response_counts_and_ordering() {
-        let items = vec![
-            BatchItemResult::failure(2, "k:item:2".to_string(), "E", "boom"),
-            BatchItemResult::success(0, "k:item:0".to_string(), "ok0"),
-            BatchItemResult::success(1, "k:item:1".to_string(), "ok1"),
-        ];
-        let response = BatchResponse::from_items(items);
-        assert_eq!(response.succeeded, 2);
-        assert_eq!(response.failed, 1);
-        let indices: Vec<usize> = response.items.iter().map(|i| i.index).collect();
-        assert_eq!(indices, vec![0, 1, 2]);
-    }
-
-    #[tokio::test]
-    async fn test_fan_out_batch_partial_failure() {
-        let items: Vec<u32> = vec![1, 2, 3, 4];
-        let response = fan_out_batch("bk", items, |index, _key, value| async move {
-            if value % 2 == 0 {
-                Err(AppError::Validation(format!("even item {}", index)))
-            } else {
-                Ok(value * 10)
-            }
-        })
-        .await;
-        assert_eq!(response.succeeded, 2);
-        assert_eq!(response.failed, 2);
-        assert_eq!(response.items.len(), 4);
-        for (pos, item) in response.items.iter().enumerate() {
-            assert_eq!(item.index, pos);
-            assert_eq!(item.idempotency_key, format!("bk:item:{}", pos));
-        }
     }
 
     #[test]

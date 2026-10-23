@@ -36,18 +36,12 @@ query {
       "message": "Limit must not exceed 100",
       "path": ["transactions"],
       "extensions": {
-        "code": "ERR_VALIDATION_001"
+        "code": "VALIDATION_ERROR"
       }
     }
   ]
 }
 ```
-
-All `extensions.code` values are drawn from the shared error catalog
-(`docs/error-catalog.md`), the same codes the REST API returns. Resolvers
-never build errors by hand; they convert domain errors through
-`graphql::error::IntoGraphQlError`, which sets the code and applies the same
-redaction as the REST layer.
 
 ### 2. Authentication Errors
 
@@ -69,7 +63,7 @@ query {
     {
       "message": "Authentication required",
       "extensions": {
-        "code": "ERR_UNAUTHORIZED_001"
+        "code": "AUTHENTICATION_ERROR"
       }
     }
   ]
@@ -87,7 +81,7 @@ Authorization errors occur when an authenticated user attempts to access resourc
     {
       "message": "Access denied to this resource",
       "extensions": {
-        "code": "ERR_AUTH_002"
+        "code": "AUTHORIZATION_ERROR"
       }
     }
   ]
@@ -112,10 +106,10 @@ query {
 {
   "errors": [
     {
-      "message": "Not found: Resource not found",
+      "message": "Transaction not found",
       "path": ["transaction"],
       "extensions": {
-        "code": "ERR_NOT_FOUND_001"
+        "code": "NOT_FOUND"
       }
     }
   ]
@@ -131,9 +125,9 @@ Database errors occur when there's an issue with the underlying database operati
 {
   "errors": [
     {
-      "message": "A database error occurred",
+      "message": "Database operation failed",
       "extensions": {
-        "code": "ERR_DATABASE_001"
+        "code": "DATABASE_ERROR"
       }
     }
   ]
@@ -164,7 +158,7 @@ query {
     {
       "message": "Query complexity exceeds limit of 1000",
       "extensions": {
-        "code": "ERR_QUERY_COMPLEXITY_001"
+        "code": "COMPLEXITY_ERROR"
       }
     }
   ]
@@ -173,51 +167,44 @@ query {
 
 ## Error Handling Patterns
 
-### Pattern 1: Convert through the taxonomy, never `?` on a domain error
+### Pattern 1: Early Validation
 
-`async_graphql` has a blanket `From<T: Display>` for its `Error`, so a bare
-`?` on an `AppError` or `sqlx::Error` produces a code-less, unredacted error.
-Convert explicitly with `.into_gql()` (from `graphql::error::GqlResultExt`):
+Validate inputs at the resolver entry point before any business logic:
 
 ```rust
-use crate::graphql::error::{GqlResultExt, IntoGraphQlError};
-
-async fn transactions(
-    &self,
-    ctx: &Context<'_>,
-    limit: Option<i64>,
-) -> Result<Vec<Transaction>> {
-    validate_limit(limit.unwrap_or(20)).into_gql()?;
-
-    let state = ctx.data::<AppState>()?;
-    queries::list_transactions(&state.db, limit.unwrap_or(20), None, false)
-        .await
-        .into_gql()
+#[Object]
+impl TransactionQuery {
+    async fn transactions(
+        &self,
+        ctx: &Context<'_>,
+        limit: Option<i64>,
+    ) -> Result<Vec<Transaction>> {
+        // Validate early
+        let validated_limit = validate_limit(limit)
+            .map_err(|e| async_graphql::Error::new(e))?;
+        
+        // Proceed with business logic
+        // ...
+    }
 }
 ```
 
 ### Pattern 2: Database Error Mapping
 
-`sqlx::Error` converts through `AppError::from`, so `RowNotFound` becomes
-`ERR_NOT_FOUND_001` and every other database error becomes a redacted
-`ERR_DATABASE_001`. The raw cause is logged by the conversion, not by the
-resolver:
+Convert database errors to appropriate GraphQL errors:
 
 ```rust
 async fn transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
     let state = ctx.data::<AppState>()?;
-    queries::get_transaction(&state.db, id).await.into_gql()
+    queries::get_transaction(&state.db, id)
+        .await
+        .map_err(|e| {
+            // Log the actual error server-side
+            tracing::error!("Failed to fetch transaction: {}", e);
+            // Return generic error to client
+            async_graphql::Error::new("Failed to fetch transaction")
+        })
 }
-```
-
-For a hand-built domain error, construct the `AppError` variant and call
-`.into_graphql_error()`:
-
-```rust
-return Err(AppError::ConcurrentModification(
-    "transaction status changed before completion could be applied".to_string(),
-)
-.into_graphql_error());
 ```
 
 ### Pattern 3: Contextual Error Messages
@@ -249,7 +236,9 @@ The GraphQL module uses error extensions to provide additional context:
     {
       "message": "Error message here",
       "extensions": {
-        "code": "ERR_CATEGORY_NNN"
+        "code": "ERROR_CODE",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "requestId": "550e8400-e29b-41d4-a716-446655440000"
       }
     }
   ]
@@ -258,21 +247,13 @@ The GraphQL module uses error extensions to provide additional context:
 
 ### Standard Error Codes
 
-Error codes are defined once in `src/error.rs` (`codes` module) and catalogued
-in `docs/error-catalog.md`. The REST API returns them in the response body's
-`code` field; GraphQL returns the same values in `extensions.code`. The codes
-most often seen from GraphQL resolvers:
-
-- `ERR_VALIDATION_001`: Input validation failed
-- `ERR_UNAUTHORIZED_001` / `ERR_AUTH_001`: Authentication required or failed
-- `ERR_AUTH_002`: Caller lacks permission
-- `ERR_NOT_FOUND_001`: Resource not found
-- `ERR_DATABASE_001`: Database operation failed (details redacted)
-- `ERR_QUERY_COMPLEXITY_001`: Query exceeds depth, complexity, or alias limits
-- `ERR_RATE_LIMIT_001`: Rate limit exceeded (carries `retryAfter`)
-- `ERR_TRANSACTION_005`: Invalid transaction status transition
-- `ERR_TRANSACTION_006`: Concurrent modification during a mutation
-- `ERR_INTERNAL_001`: Unexpected server error (details redacted)
+- `VALIDATION_ERROR`: Input validation failed
+- `AUTHENTICATION_ERROR`: Authentication required or failed
+- `AUTHORIZATION_ERROR`: User lacks permission
+- `NOT_FOUND`: Resource not found
+- `DATABASE_ERROR`: Database operation failed
+- `COMPLEXITY_ERROR`: Query too complex
+- `INTERNAL_ERROR`: Unexpected server error
 
 ## Security Considerations
 

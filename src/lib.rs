@@ -1,12 +1,8 @@
-pub mod alerting;
-pub mod audit;
 pub mod auth;
 pub mod cache;
 pub mod config;
-pub mod crypto;
 pub mod db;
 pub mod error;
-pub mod governance;
 pub mod graphql;
 pub mod handlers;
 pub mod health;
@@ -19,11 +15,7 @@ pub mod security;
 pub mod services;
 pub mod startup;
 pub mod stellar;
-pub mod cdc;
-pub mod observability;
-pub mod swap;
 pub mod telemetry;
-pub mod time;
 pub mod tenant;
 pub mod utils;
 pub mod validation;
@@ -173,18 +165,6 @@ pub fn create_app(app_state: AppState) -> Router {
     // IpFilterLayer is outermost among these three so a request from a
     // non-whitelisted source is rejected before quota/signature validation
     // spend any work on it.
-    // Per-tenant latency histograms (#1337) wrap the whole ingestion
-    // pipeline (IP filter, signature, validation, quota, handler), so they
-    // are applied last — i.e. outermost — on each ingestion route group.
-    let ingestion_latency = crate::tenant::latency::TenantLatencyLayer {
-        app_state: app_state.clone(),
-        route: crate::tenant::latency::RouteClass::WebhookIngestion,
-    };
-    let graphql_latency = crate::tenant::latency::TenantLatencyLayer {
-        app_state: app_state.clone(),
-        route: crate::tenant::latency::RouteClass::GraphQl,
-    };
-
     let callback_routes = Router::new()
         .route("/callback", post(handlers::webhook::callback))
         .route("/callback/transaction", post(handlers::webhook::callback))
@@ -202,10 +182,6 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(crate::middleware::ip_filter::IpFilterLayer::new(
             app_state.allowed_ips.clone(),
             app_state.trusted_proxy_depth,
-        ))
-        .layer(axum_middleware::from_fn_with_state(
-            ingestion_latency.clone(),
-            crate::tenant::latency::tenant_latency_middleware,
         ));
 
     // Webhook route with signature verification + validation + quota middleware
@@ -221,56 +197,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .layer(axum_middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::webhook_signature::verify_anchor_signature,
-        ))
-        .layer(axum_middleware::from_fn_with_state(
-            ingestion_latency,
-            crate::tenant::latency::tenant_latency_middleware,
         ));
-
-    // Signed external probes use no tenant identity and never write business
-    // data. The authentication layer attaches SyntheticProbe before quota runs,
-    // allowing the quota middleware to exclude only authenticated probe traffic.
-    let synthetic_callback_routes = Router::new()
-        .route(
-            "/__synthetic/callback",
-            post(handlers::webhook::synthetic_callback),
-        )
-        .layer(axum_middleware::from_fn_with_state(
-            app_state.clone(),
-            crate::middleware::quota::rate_limit_middleware,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::validate::validate_callback,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::synthetic_probe::authorize_synthetic_probe,
-        ))
-        .layer(crate::middleware::ip_filter::IpFilterLayer::new(
-            app_state.allowed_ips.clone(),
-            app_state.trusted_proxy_depth,
-        ))
-        .with_state(api_state.clone());
-
-    let synthetic_graphql_routes = Router::new()
-        .route(
-            "/__synthetic/graphql",
-            post(handlers::graphql::graphql_handler),
-        )
-        .layer(axum_middleware::from_fn_with_state(
-            app_state.clone(),
-            crate::middleware::quota::rate_limit_middleware,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::synthetic_probe::validate_synthetic_graphql,
-        ))
-        .layer(axum_middleware::from_fn(
-            crate::middleware::synthetic_probe::authorize_synthetic_probe,
-        ))
-        .layer(crate::middleware::ip_filter::IpFilterLayer::new(
-            app_state.allowed_ips.clone(),
-            app_state.trusted_proxy_depth,
-        ))
-        .with_state(api_state.clone());
 
     // Tenant-scoped data routes. These previously had zero auth of any kind —
     // core_routes was built on a bare `Router::new()` with no `.layer()` of
@@ -296,41 +223,9 @@ pub fn create_app(app_state: AppState) -> Router {
         )
         .route("/settlements", get(handlers::settlements::list_settlements))
         .route(
-            "/swap/disputes",
-            post(handlers::disputes::create_dispute).get(handlers::disputes::list_disputes),
-        )
-        .route(
-            "/swap/disputes/:id",
-            patch(handlers::disputes::update_dispute),
-        )
-        .route(
             "/settlements/:id",
             get(handlers::settlements::get_settlement),
-        )
-        // Swap orders (#1423): tenant-scoped, TenantContext-authenticated.
-        .route(
-            "/swaps",
-            get(handlers::swaps::list_swap_orders).post(handlers::swaps::create_swap_order),
-        )
-        .route("/swaps/:id", get(handlers::swaps::get_swap_order))
-        .route("/swaps/:id/cancel", post(handlers::swaps::cancel_swap_order))
-        // Tenant-facing usage: the caller's own latency histograms (#1337).
-        .route("/usage/latency", get(handlers::stats::tenant_latency_usage));
-
-    // Swap API (#1440). Tenant identity comes from the SwapCaller extractor;
-    // request bodies are capped well below the global default.
-    let swap_routes = Router::new()
-        .route("/swap/quotes", post(handlers::swap::create_quote))
-        .route(
-            "/swap/orders",
-            post(handlers::swap::create_order).get(handlers::swap::list_orders),
-        )
-        .route("/swap/orders/:id", get(handlers::swap::get_order))
-        .route("/swap/orders/:id/cancel", post(handlers::swap::cancel_order))
-        .layer(axum::extract::DefaultBodyLimit::max(
-            handlers::swap::SWAP_MAX_BODY_BYTES,
-        ));
-    let data_routes = data_routes.merge(swap_routes);
+        );
 
     // core_routes intentionally does NOT layer api_key_auth across the board:
     // callback_routes/webhook_routes authenticate inbound anchor calls via
@@ -364,11 +259,7 @@ pub fn create_app(app_state: AppState) -> Router {
         .route("/live", get(handlers::live))
         .route("/ready", get(handlers::ready))
         .route("/health", get(handlers::health))
-        .route("/errors", get(handlers::error_catalog))
-        .route(
-            "/health/graph",
-            get(handlers::admin::health_graph::get_health_graph_view),
-        );
+        .route("/errors", get(handlers::error_catalog));
 
     // Admin-only routes. `admin_auth` exists in src/middleware/auth.rs but,
     // before this fix, had zero callers anywhere in the router — every route
@@ -379,73 +270,16 @@ pub fn create_app(app_state: AppState) -> Router {
     // covered these) — see "Also fixes" in the PR description.
     let mut admin_only_routes = Router::new()
         .route(
-            "/admin/health/graph",
-            get(handlers::admin::health_graph::get_health_graph),
-        )
-        .route(
-            "/admin/canary",
-            get(handlers::admin::get_canary_dashboard),
-        )
-        // Admin: global swap order intake kill switch
-        .route(
-            "/admin/swap/kill-switch",
-            get(handlers::admin::get_swap_kill_switch).post(handlers::admin::set_swap_kill_switch),
-        )
-        .route(
-            "/admin/canary/:release_name",
-            get(handlers::admin::get_canary_release)
-                .post(handlers::admin::create_canary_release),
-        )
-        .route(
-            "/admin/canary/:release_name/step",
-            post(handlers::admin::step_canary_release),
-        )
-        .route(
-            "/admin/canary/:release_name/error-rate",
-            post(handlers::admin::record_canary_error_rate),
-        )
-        .route(
             "/admin/transactions/bulk-status",
             patch(handlers::admin::bulk_status::bulk_update_status_api),
         )
-        .route(
-            "/admin/transactions/bulk-status/jobs/:id",
-            get(handlers::admin::bulk_status::get_job_status),
-        )
-        .route(
-            "/graphql",
-            post(handlers::graphql::graphql_handler).layer(axum_middleware::from_fn_with_state(
-                graphql_latency,
-                crate::tenant::latency::tenant_latency_middleware,
-            )),
-        )
+        .route("/graphql", post(handlers::graphql::graphql_handler))
         .route("/export", get(handlers::export::export_transactions))
-        .route(
-            "/admin/config/export",
-            get(handlers::admin::config_export::export_config),
-        )
         // Stats endpoints
         .route("/stats/status", get(handlers::stats::status_counts))
         .route("/stats/daily", get(handlers::stats::daily_totals))
         .route("/stats/assets", get(handlers::stats::asset_stats))
         .route("/cache/metrics", get(handlers::stats::cache_metrics))
-        .route(
-            "/stats/tenant-latency",
-            get(handlers::stats::tenant_latency_overview),
-        )
-        // Admin: dependency health scorecard (#1334)
-        .route(
-            "/admin/dependencies/scorecard",
-            get(handlers::admin::dependency_scorecard::get_scorecard),
-        )
-        .route(
-            "/admin/dependencies/scorecard/raw",
-            get(handlers::admin::dependency_scorecard::get_raw_rollups),
-        )
-        .route(
-            "/admin/dependencies/scorecard/dashboard",
-            get(handlers::admin::dependency_scorecard::get_dashboard),
-        )
         // Admin: webhook endpoint health scores
         .route(
             "/admin/webhooks/health",
@@ -472,29 +306,10 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/quotas/:tenant_id/reset",
             axum::routing::delete(handlers::admin::quota::reset_tenant_quota),
         )
-        // Admin: per-tenant data quota (storage + row-count) (#1287)
-        .route(
-            "/admin/quotas/:tenant_id/data",
-            axum::routing::put(handlers::admin::quota::set_tenant_data_quota)
-                .get(handlers::admin::quota::get_tenant_data_quota),
-        )
-        // Admin: tenant secret rotation and revocation
-        .route(
-            "/admin/tenants/:tenant_id/rotate-secret",
-            post(handlers::admin::tenant_secret::rotate_tenant_secret),
-        )
-        .route(
-            "/admin/tenants/:tenant_id/revoke-secret",
-            post(handlers::admin::tenant_secret::revoke_tenant_secret),
-        )
         // Admin: active distributed locks
         .route(
             "/admin/locks",
             get(handlers::admin::locks::list_active_locks),
-        )
-        .route(
-            "/admin/locks/:resource/force-release",
-            post(handlers::admin::locks::force_release_lock),
         )
         // Admin: audit log search — fully implemented and unit-tested since
         // before this fix, but never mounted anywhere; see
@@ -502,24 +317,6 @@ pub fn create_app(app_state: AppState) -> Router {
         .route(
             "/admin/audit/search",
             get(handlers::admin::audit::search_audit_logs_handler),
-        )
-        // Admin: cold-storage unified audit log query (#1285)
-        .route(
-            "/admin/audit/unified",
-            get(handlers::admin::audit::query_unified_audit_logs_handler),
-        )
-        .route(
-            "/admin/audit/cold/pointers",
-            get(handlers::admin::audit::list_cold_pointers_handler),
-        )
-        // Admin: operator audit log for administrative swap actions (#1518)
-        .route(
-            "/admin/operator-audit",
-            get(handlers::admin::operator_audit::list_operator_audit),
-        )
-        .route(
-            "/admin/operator-audit/export",
-            get(handlers::admin::operator_audit::export_operator_audit),
         )
         // Admin: compliance report generation/listing — same gap as audit
         // search above.
@@ -533,57 +330,10 @@ pub fn create_app(app_state: AppState) -> Router {
             "/admin/settlements/:id/status",
             axum::routing::patch(handlers::settlements::update_settlement_status),
         )
-        // Admin: swap surveillance + market data archive (#1505, #1508)
-        .nest("/admin/swap", swap::versioning::admin_swap_router())
         // Admin: reconciliation reports
         .nest(
             "/admin/reconciliation",
             handlers::admin::reconciliation::reconciliation_routes(),
-        )
-        // Admin: webhook filter rules CRUD (#1090)
-        .nest(
-            "/admin",
-            handlers::admin::webhook_filter_rules::webhook_filter_rules_routes(),
-        )
-        // Admin: stuck-transaction DLQ interventions (#1446)
-        .route(
-            "/admin/transactions/:id/dlq/retry",
-            post(handlers::dlq::retry_dlq_transaction),
-        )
-        .route(
-            "/admin/transactions/:id/dlq/force-complete",
-            post(handlers::dlq::force_complete_dlq_transaction),
-        )
-        .route(
-            "/admin/transactions/:id/dlq/force-cancel",
-            post(handlers::dlq::force_cancel_dlq_transaction),
-        )
-        // Admin: transaction notes API (#1257)
-        .route(
-            "/admin/transactions/:id/notes",
-            post(handlers::admin::transaction_notes::create_transaction_note)
-                .get(handlers::admin::transaction_notes::get_transaction_notes),
-        )
-        // Admin: webhook retry policy configuration (#1258)
-        .route(
-            "/admin/webhooks/endpoints/:id/retry-policy",
-            post(handlers::admin::webhook_retry_policy::update_webhook_retry_policy)
-                .get(handlers::admin::webhook_retry_policy::get_webhook_retry_policy),
-        )
-        // Admin: webhook endpoint redirects for migrations (#1259)
-        .route(
-            "/admin/webhooks/endpoints/:id/redirects",
-            post(handlers::admin::webhook_redirects::create_webhook_redirect)
-                .get(handlers::admin::webhook_redirects::list_active_redirects),
-        )
-        .route(
-            "/admin/webhooks/redirects/:id/cancel",
-            post(handlers::admin::webhook_redirects::cancel_webhook_redirect),
-        )
-        // Admin: asset processing rules dry-run/preview mode (#1260)
-        .route(
-            "/admin/rules/preview",
-            post(handlers::admin::rules_preview::preview_rules),
         )
         .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
 
@@ -596,26 +346,6 @@ pub fn create_app(app_state: AppState) -> Router {
         admin_only_routes = admin_only_routes.layer(axum::Extension(store.clone()));
     }
 
-    // #1288: Blue-green deployment admin routes.
-    // These are mounted separately from admin_only_routes because they use a
-    // different state type (BlueGreenState, not ApiState).  They are still
-    // protected by admin_auth via their own layer.
-    let bg_url_blue = std::env::var("BLUE_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
-    let bg_url_green = std::env::var("GREEN_URL")
-        .unwrap_or_else(|_| "http://localhost:3001".to_string());
-    let bg_rollback_secs = std::env::var("BLUE_GREEN_ROLLBACK_WINDOW_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(60);
-    let bg_state = services::BlueGreenState::new(
-        bg_url_blue,
-        bg_url_green,
-        std::time::Duration::from_secs(bg_rollback_secs),
-    );
-    let blue_green_admin_routes = services::blue_green::blue_green_routes(bg_state)
-        .layer(axum_middleware::from_fn(middleware::auth::admin_auth));
-
     public_health_routes
         // Unversioned routes default to V2 behaviour
         .merge(core_routes.layer(axum_middleware::from_fn(
@@ -624,8 +354,6 @@ pub fn create_app(app_state: AppState) -> Router {
         // Versioned route groups
         .nest("/api/v1", v1_routes)
         .nest("/api/v2", v2_routes)
-        // Swap API (#1507): versioned under /swap/v{N}
-        .nest("/swap", swap::versioning::swap_router())
         .merge(admin_only_routes)
         .layer(axum_middleware::from_fn(
             middleware::panic_recovery::panic_recovery_middleware,
@@ -646,13 +374,6 @@ pub fn create_app(app_state: AppState) -> Router {
                 .route("/ws", get(handlers::ws::ws_handler))
                 .with_state(app_state),
         )
-        // #1288: Blue-green deployment control plane.
-        // blue_green_admin_routes is Router<()> (state already baked in via
-        // with_state(bg_state)); merge after with_state(api_state) so both
-        // sides of the merge are Router<()>.
-        .merge(blue_green_admin_routes)
-        .merge(synthetic_callback_routes)
-        .merge(synthetic_graphql_routes)
         // NOTE: axum applies the *last* `.layer()` call as the *outermost* wrapper,
         // so it runs first on the request path and last on the response path.
         // `request_logger` must stay outermost relative to `error_enrichment`:
@@ -664,8 +385,5 @@ pub fn create_app(app_state: AppState) -> Router {
         ))
         .layer(axum_middleware::from_fn(
             middleware::request_logger::request_logger_middleware,
-        ))
-        .layer(axum_middleware::from_fn(
-            middleware::trace_context::trace_context_middleware,
         ))
 }

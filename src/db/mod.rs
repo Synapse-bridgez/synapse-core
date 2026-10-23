@@ -42,7 +42,7 @@
 //! - See [database reconnection logic](../../docs/database-reconnection-logic.md)
 //!   for design, security, and recovery guidance
 
-use crate::config::{Config, EndpointClass};
+use crate::config::Config;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,32 +53,12 @@ pub mod bridge_handoff;
 pub mod cold_storage;
 pub mod cron;
 pub mod models;
-pub mod outbox;
 pub mod partition;
-pub mod partition_migration;
 pub mod pool_manager;
 pub mod queries;
-pub mod read_model;
-pub mod replica_lag_monitor;
 pub mod session;
 pub mod slow_query;
-pub mod swap_queries;
 pub mod webhook;
-pub mod timeout;
-
-/// Re-exports of the bridge handoff persistence surface so callers can reach
-/// status tracking and retry/replay operations through `crate::db`.
-pub use bridge_handoff::{
-    BridgeHandoffRecord, BridgeHandoffRepository, BridgeHandoffStatus, HandoffReplayOutcome,
-};
-
-/// Re-exports of the swap read-model repository surface so the REST/GraphQL
-/// layers can query projections through `crate::db`.
-pub use read_model::{
-    FillSummaryFilter, FillSummaryPage, FillSummaryRepository, OrderSummaryFilter,
-    OrderSummaryPage, OrderSummaryRepository, ProjectionCheckpoint, ProjectionCheckpointRepository,
-    TenantAggregate, TenantAggregateRepository,
-};
 
 /// Maximum time to wait for in-flight queries to finish during graceful shutdown.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -233,38 +213,6 @@ pub async fn create_long_running_pool(config: &Config) -> Result<PgPool, sqlx::E
     )
     .await?;
     warm_up(&pool, config.db_min_connections).await?;
-    Ok(pool)
-}
-
-/// Builds a dedicated pool for the read-model projector and handoff replay
-/// workers.
-///
-/// These background consumers run long catch-up/backfill scans and must not
-/// starve the request-serving pool, so they get their own connection budget
-/// and the extended long-running statement timeout. The pool is intentionally
-/// small: projection is ordered per aggregate and replay is a low-frequency
-/// operation, so a handful of connections is sufficient.
-///
-/// # Configuration
-/// - `db_min_connections`: Connections to warm up at startup
-/// - `db_max_connections`: Hard limit on concurrent connections
-/// - `db_idle_timeout_secs`: Auto-close idle connections
-/// - `db_long_running_statement_timeout_ms`: Extended per-query timeout
-pub async fn create_worker_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
-    let pool = build_pool(
-        &config.database_url,
-        config.db_min_connections,
-        config.db_max_connections,
-        config.db_idle_timeout_secs,
-        config.db_long_running_statement_timeout_ms,
-    )
-    .await?;
-    warm_up(&pool, config.db_min_connections).await?;
-    tracing::info!(
-        min_connections = config.db_min_connections,
-        max_connections = config.db_max_connections,
-        "Worker pool initialized for projector and handoff replay"
-    );
     Ok(pool)
 }
 

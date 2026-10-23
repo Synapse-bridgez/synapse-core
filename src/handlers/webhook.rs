@@ -9,7 +9,7 @@ use crate::validation::{
 };
 use crate::{ApiState, AppState};
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -19,10 +19,8 @@ use sqlx::types::BigDecimal;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use tracing::instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use crate::middleware::synthetic_probe::SyntheticProbe;
 
 /// Payload received from the Stellar Anchor Platform callback endpoint.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -145,25 +143,9 @@ pub async fn transaction_callback(
     // Extract trace context from the current OpenTelemetry context.
     let trace_id = opentelemetry::global::get_text_map_propagator(|propagator| {
         let mut carrier = std::collections::HashMap::new();
-        propagator.inject_context(&tracing::Span::current().context(), &mut carrier);
+        propagator.inject_context(&opentelemetry::Context::current(), &mut carrier);
         carrier.get("traceparent").cloned()
     });
-
-    // Anchor callbacks are at-least-once: a redelivered callback must not create
-    // a second transaction. Callbacks without an anchor id cannot be deduped.
-    let dedupe_key = payload.anchor_transaction_id.as_deref().map(|anchor_id| {
-        anchor_callback_dedupe_key(
-            anchor_id,
-            payload.callback_type.as_deref(),
-            payload.callback_status.as_deref(),
-        )
-    });
-    if let Some(key) = &dedupe_key {
-        if !queries::claim_external_event(&state.db, CALLBACK_DEDUPE_TENANT, key).await? {
-            let body = serde_json::json!({ "status": "duplicate" });
-            return Ok((StatusCode::OK, Json(body)).into_response());
-        }
-    }
 
     let tx = Transaction::new(
         payload.stellar_address,
@@ -178,19 +160,7 @@ pub async fn transaction_callback(
     )
     .with_trace_id(trace_id);
 
-    let inserted = match queries::insert_transaction(&state.db, &tx, Some(&state.query_cache)).await
-    {
-        Ok(inserted) => inserted,
-        Err(e) => {
-            // Release the claim so the sender's retry is processed, not dropped.
-            if let Some(key) = &dedupe_key {
-                queries::release_external_event(&state.db, CALLBACK_DEDUPE_TENANT, key)
-                    .await
-                    .ok();
-            }
-            return Err(e.into());
-        }
-    };
+    let inserted = queries::insert_transaction(&state.db, &tx, Some(&state.query_cache)).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -198,33 +168,7 @@ pub async fn transaction_callback(
             id: inserted.id.to_string(),
             status: inserted.status,
         }),
-    )
-        .into_response())
-}
-
-/// Tenant namespace for anchor callback dedupe records. Callbacks arrive without
-/// tenant context, so they share the `default` namespace.
-const CALLBACK_DEDUPE_TENANT: &str = "default";
-
-/// Hashed dedupe key for an anchor callback. Hashing keeps raw anchor ids out of
-/// the `idempotency_keys` table and keeps the key within its 255-char column.
-fn anchor_callback_dedupe_key(
-    anchor_transaction_id: &str,
-    callback_type: Option<&str>,
-    callback_status: Option<&str>,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    for part in [
-        anchor_transaction_id,
-        callback_type.unwrap_or(""),
-        callback_status.unwrap_or(""),
-    ] {
-        hasher.update(part.as_bytes());
-        hasher.update([0u8]);
-    }
-    format!("anchor-callback:{:x}", hasher.finalize())
+    ))
 }
 
 #[cfg(test)]
@@ -379,24 +323,6 @@ fn validate_memo_type(memo_type: &Option<String>) -> Result<(), AppError> {
     }
 }
 
-fn callback_transaction(payload: CallbackPayload) -> Result<Transaction, AppError> {
-    validate_memo_type(&payload.memo_type)?;
-    let amount = BigDecimal::from_str(&payload.amount)
-        .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
-
-    Ok(Transaction::new(
-        payload.stellar_account,
-        amount,
-        payload.asset_code,
-        payload.anchor_transaction_id,
-        payload.callback_type,
-        payload.callback_status,
-        payload.memo,
-        payload.memo_type,
-        payload.metadata,
-    ))
-}
-
 /// Receive a fiat deposit callback from the Stellar Anchor Platform.
 ///
 /// Applies back-pressure when the pending queue exceeds `MAX_PENDING_QUEUE`
@@ -447,37 +373,28 @@ pub async fn callback(
         return Ok(response.into_response());
     }
 
-    let tx = callback_transaction(payload)?;
+    validate_memo_type(&payload.memo_type)?;
+
+    let amount = sqlx::types::BigDecimal::from_str(&payload.amount)
+        .map_err(|_| AppError::Validation(format!("Invalid amount: {}", payload.amount)))?;
+
+    let tx = Transaction::new(
+        payload.stellar_account,
+        amount,
+        payload.asset_code,
+        payload.anchor_transaction_id,
+        payload.callback_type,
+        payload.callback_status,
+        payload.memo,
+        payload.memo_type,
+        payload.metadata,
+    );
 
     let inserted =
         queries::insert_transaction(&state.app_state.db, &tx, Some(&state.app_state.query_cache))
             .await?;
 
     Ok((StatusCode::CREATED, Json(inserted)).into_response())
-}
-
-/// Synthetic callback probe. Exercises callback validation and database
-/// connectivity but deliberately never persists a transaction.
-#[instrument(name = "synthetic_probe.callback", skip(state, payload, probe), fields(synthetic_probe = true))]
-pub async fn synthetic_callback(
-    Extension(probe): Extension<SyntheticProbe>,
-    State(state): State<ApiState>,
-    Json(payload): Json<CallbackPayload>,
-) -> Result<impl IntoResponse, AppError> {
-    let _validated = callback_transaction(payload)?;
-    let _: i32 = sqlx::query_scalar("SELECT 1")
-        .fetch_one(&state.app_state.db)
-        .await?;
-    tracing::info!(
-        synthetic_probe = true,
-        counts_toward_customer_traffic = probe.counts_toward_customer_traffic(),
-        "Synthetic callback path is available"
-    );
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({"status": "accepted", "synthetic": true})),
-    )
-        .into_response())
 }
 
 /// Generic webhook receiver for event-driven integrations.
@@ -538,7 +455,7 @@ pub async fn get_transaction(
 ) -> Result<impl IntoResponse, AppError> {
     let (pool, replica_used) = state.app_state.pool_manager.read_pool().await;
 
-    let transaction = queries::get_transaction_for_tenant(&pool, id, tenant.tenant_id)
+    let transaction = queries::get_transaction_for_tenant(pool, id, tenant.tenant_id)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => {
@@ -656,7 +573,7 @@ pub async fn list_transactions(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = state.pool_manager.read_pool().await;
     let mut rows = queries::list_transactions_filtered(
-        &pool,
+        pool,
         fetch_limit,
         decoded_cursor,
         backward,
@@ -749,7 +666,7 @@ pub async fn list_transactions_api(
     let fetch_limit = limit + 1;
     let (pool, replica_used) = app_state.pool_manager.read_pool().await;
     let mut rows = queries::list_transactions_filtered_for_tenant(
-        &pool,
+        pool,
         fetch_limit,
         decoded_cursor,
         backward,
