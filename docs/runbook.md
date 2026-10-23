@@ -519,6 +519,25 @@ See `docs/release-scorecard.md`.
 3. If a window was clipped by an adjacent release, the scorecard says so;
    treat the attribution to that single release with care.
 
+### Swap Order Held by Risk Gate
+
+`SwapOrderHeld` is raised when the swap risk gate (`src/swap/risk.rs`) holds
+an order instead of routing it. The alert labels carry `tenant_id` and
+`transaction_id`; the summary names the breached limit (order size, daily
+exposure, velocity, or asset allow/deny list). Limits come from the
+`SWAP_RISK_*` environment variables.
+
+**Operator response:**
+1. Check the breach reason in the log event (`alert.payload`). Confirm the
+   order is legitimate before clearing it.
+2. To approve, mark the decision `approved` in `swap_risk_decisions` (set
+   `approved_by` and `approved_at`) for that `transaction_id`, then redeliver
+   the hand-off. Approval skips limit checks, so record the justification.
+3. If a limit is set too low for normal volume, change the `SWAP_RISK_*`
+   value and restart. Do not raise limits to clear a single held order.
+4. Per-tenant aggregates for today are available from
+   `queries::get_swap_risk_exposure_summary`.
+
 ---
 
 ### SLO Burn: Availability Fast Burn

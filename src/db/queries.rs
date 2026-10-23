@@ -1150,6 +1150,172 @@ pub async fn get_transaction_notes(
     .await
 }
 
+// --- Swap Risk Gate (Issue #1421) ---
+
+/// Accepted swap volume already counted against a tenant's risk limits.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct SwapRiskExposure {
+    /// Accepted amounts decided since the start of the current UTC day.
+    pub daily_amount: BigDecimal,
+    /// Accepted orders decided within the velocity window.
+    pub orders_in_window: i64,
+}
+
+/// Per-tenant swap risk aggregate for reporting, covering the current UTC day.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SwapRiskTenantSummary {
+    pub tenant_id: Uuid,
+    pub accepted_amount: BigDecimal,
+    pub accepted_orders: i64,
+    pub held_orders: i64,
+}
+
+/// Serialize swap risk decisions for one tenant. Taken at the start of every
+/// gate evaluation so concurrent orders for the same tenant are checked
+/// against each other's decisions. The lock is released at commit.
+pub async fn lock_swap_risk_tenant(
+    executor: &mut SqlxTransaction<'_, Postgres>,
+    tenant_id: Uuid,
+) -> Result<()> {
+    with_timeout(
+        QueryTier::Write,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(tenant_id)
+            .execute(&mut **executor),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Returns the stored decision (`accepted`, `held` or `approved`) and its
+/// breach JSON for a transaction, if the gate has already decided it.
+pub async fn get_swap_risk_decision(
+    executor: &mut SqlxTransaction<'_, Postgres>,
+    transaction_id: Uuid,
+) -> Result<Option<(String, Option<serde_json::Value>)>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT decision, breach FROM swap_risk_decisions WHERE transaction_id = $1",
+        sqlx::query_as::<_, (String, Option<serde_json::Value>)>(
+            "SELECT decision, breach FROM swap_risk_decisions WHERE transaction_id = $1",
+        )
+        .bind(transaction_id)
+        .fetch_optional(&mut **executor),
+    )
+    .await
+}
+
+/// Aggregates a tenant's accepted volume. `day_start` bounds the daily total
+/// and `window_start` bounds the velocity count; both are UTC.
+pub async fn get_swap_risk_exposure(
+    executor: &mut SqlxTransaction<'_, Postgres>,
+    tenant_id: Uuid,
+    day_start: DateTime<Utc>,
+    window_start: DateTime<Utc>,
+) -> Result<SwapRiskExposure> {
+    let sql = r#"
+        SELECT
+            COALESCE(SUM(amount) FILTER (WHERE decided_at >= $2), 0) AS daily_amount,
+            COUNT(*) AS orders_in_window
+        FROM swap_risk_decisions
+        WHERE tenant_id = $1
+          AND decision IN ('accepted', 'approved')
+          AND decided_at >= LEAST($2, $3)
+        "#;
+    with_timeout(
+        QueryTier::Read,
+        "SELECT swap risk exposure",
+        sqlx::query_as::<_, SwapRiskExposure>(sql)
+            .bind(tenant_id)
+            .bind(day_start)
+            .bind(window_start)
+            .fetch_one(&mut **executor),
+    )
+    .await
+}
+
+pub async fn insert_swap_risk_decision(
+    executor: &mut SqlxTransaction<'_, Postgres>,
+    transaction_id: Uuid,
+    tenant_id: Uuid,
+    asset_code: &str,
+    amount: &BigDecimal,
+    decision: &str,
+    breach: Option<&serde_json::Value>,
+) -> Result<()> {
+    let sql = r#"
+        INSERT INTO swap_risk_decisions (transaction_id, tenant_id, asset_code, amount, decision, breach)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#;
+    with_timeout(
+        QueryTier::Write,
+        "INSERT INTO swap_risk_decisions",
+        sqlx::query(sql)
+            .bind(transaction_id)
+            .bind(tenant_id)
+            .bind(asset_code)
+            .bind(amount)
+            .bind(decision)
+            .bind(breach)
+            .execute(&mut **executor),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Moves a held order to `approved` so it counts as accepted exposure and the
+/// gate lets its next hand-off through. Returns `false` if the transaction has
+/// no held decision (never held, already approved, or unknown).
+pub async fn approve_swap_risk_decision(
+    pool: &PgPool,
+    transaction_id: Uuid,
+    actor: &str,
+) -> Result<bool> {
+    let sql = r#"
+        UPDATE swap_risk_decisions
+        SET decision = 'approved', approved_by = $2, approved_at = NOW(), decided_at = NOW()
+        WHERE transaction_id = $1 AND decision = 'held'
+        "#;
+    let result = with_timeout(
+        QueryTier::Write,
+        "UPDATE swap_risk_decisions (approve)",
+        sqlx::query(sql)
+            .bind(transaction_id)
+            .bind(actor)
+            .execute(pool),
+    )
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Per-tenant swap risk aggregates for reporting, for decisions made on or
+/// after `day_start` (UTC).
+pub async fn get_swap_risk_exposure_summary(
+    pool: &PgPool,
+    day_start: DateTime<Utc>,
+) -> Result<Vec<SwapRiskTenantSummary>> {
+    let sql = r#"
+        SELECT
+            tenant_id,
+            COALESCE(SUM(amount) FILTER (WHERE decision IN ('accepted', 'approved')), 0) AS accepted_amount,
+            COUNT(*) FILTER (WHERE decision IN ('accepted', 'approved')) AS accepted_orders,
+            COUNT(*) FILTER (WHERE decision = 'held') AS held_orders
+        FROM swap_risk_decisions
+        WHERE decided_at >= $1
+        GROUP BY tenant_id
+        ORDER BY tenant_id
+        "#;
+    with_timeout(
+        QueryTier::Read,
+        "SELECT swap risk exposure summary",
+        sqlx::query_as::<_, SwapRiskTenantSummary>(sql)
+            .bind(day_start)
+            .fetch_all(pool),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod integration_tests {
     use super::*;

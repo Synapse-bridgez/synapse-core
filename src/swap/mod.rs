@@ -32,6 +32,7 @@ pub mod circuit_breaker;
 
 /// Execution-algorithm layer for slicing large swap orders (#1481).
 pub mod execution;
+pub mod risk;
 
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
@@ -87,6 +88,8 @@ pub enum SwapOutcome {
     Deferred { retry_after_secs: u64 },
     /// The engine accepted the hand-off and started a swap.
     Routed { swap_id: String },
+    /// The risk gate blocked the order for manual approval; it was not routed.
+    Held { reason: risk::RiskBreach },
 }
 
 /// Error returned by a [`SwapEngine`].
