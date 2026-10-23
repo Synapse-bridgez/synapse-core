@@ -58,6 +58,12 @@ pub mod admission;
 pub mod deposits;
 pub mod streaming;
 
+pub mod invariant_engine;
+pub mod invariants;
+
+pub use invariant_engine::*;
+pub use invariants::*;
+
 use async_trait::async_trait;
 use sqlx::types::BigDecimal;
 use std::fmt;
