@@ -19,6 +19,38 @@ pub mod liquidity;
 //! [`swap_enabled_for`] returns `false` unless a tenant explicitly opts in via
 //! the `swap_engine` feature flag - so transactions for tenants and assets not
 //! opted into swap are completely unaffected.
+//!
+//! # Arithmetic
+//!
+//! All swap math (quotes, fees, allocations, fills) uses the shared
+//! fixed-point [`decimal::Decimal`] type and the explicit
+//! [`rounding::RoundingPolicy`]. Amounts cross every boundary as strings with
+//! documented precision; see `docs/swap-engine.md`.
+//!
+//! # Quoting and routing
+//!
+//! [`engine::SwapService`] serves quotes through [`routing::Router`], which
+//! discovers and scores multi-hop paths across every registered
+//! [`liquidity::LiquidityProvider`], so a quote can be served even when no
+//! direct pair exists. The chosen [`routing::Route`] is part of the quote and
+//! is executed leg by leg, with compensation if a leg fails.
+
+pub mod allocation;
+pub mod asset;
+pub mod decimal;
+pub mod engine;
+pub mod fees;
+pub mod leg_fees;
+pub mod rate_conversion;
+pub mod http;
+pub mod liquidity;
+pub mod oracle;
+pub mod pricing;
+pub mod protection;
+pub mod rounding;
+pub mod routing;
+pub mod runtime;
+pub mod store;
 
 pub mod compensation;
 pub mod events;
@@ -83,6 +115,12 @@ impl SwapHandoff {
             idempotency_key: format!("swap:{}", tx.id),
             metadata: tx.metadata.clone(),
         }
+    }
+
+    /// The hand-off amount as a swap-engine [`decimal::Decimal`], keeping
+    /// the precision Phase 1 stored.
+    pub fn amount_decimal(&self) -> Result<decimal::Decimal, decimal::DecimalError> {
+        decimal::Decimal::from_bigdecimal(&self.amount)
     }
 }
 
