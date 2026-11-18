@@ -34,6 +34,9 @@ pub mod circuit_breaker;
 /// Execution-algorithm layer for slicing large swap orders (#1481).
 pub mod execution;
 
+/// Multi-source oracle quorum and failover handling for swap pricing (#1462).
+pub mod oracle;
+
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
 
