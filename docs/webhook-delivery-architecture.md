@@ -49,6 +49,41 @@ attempt_delivery_with_endpoint (concurrency-bounded via buffer_unordered, defaul
                   webhook_delivery_dlq (see "DLQ replay" below)
 ```
 
+## Retry policy
+
+The retry behaviour below is what `src/services/webhook_dispatcher.rs` actually
+implements today; it is documented as-is.
+
+- **Attempt count**: `MAX_ATTEMPTS = 5` (`webhook_dispatcher.rs`). `attempt_count`
+  is incremented *before* the outcome is evaluated, so a delivery gets at most
+  5 HTTP attempts in total (the initial send plus 4 retries). The 5th failed
+  attempt takes the `attempt_count >= MAX_ATTEMPTS` branch: the delivery is
+  marked `status='failed'` and copied into `webhook_delivery_dlq` with its full
+  attempt history.
+- **Backoff shape**: exponential, computed in `handle_failure` as
+  `BASE_DELAY_SECS * 2^attempt_count` with `BASE_DELAY_SECS = 10` seconds, then
+  passed through `crate::utils::retry::apply_jitter`, which applies a ±25%
+  band (`base/4` either side, minimum 1 unit) using wall-clock nanoseconds as
+  entropy. Concretely, the delays after failed attempts 1–4 are nominally
+  20s, 40s, 80s and 160s (each ±25%). There is **no max-delay clamp** on the
+  webhook path — the 10s cap in `retry_with_backoff` applies only to the
+  separate DB retry helper in `src/utils/retry.rs`, not to webhook delivery.
+  The jittered delay is added to `now` to produce `next_attempt_at`; the row
+  stays `status='pending'` and is picked up by the next poll cycle that finds
+  it due.
+- **Timeout**: the dispatcher's `reqwest::Client` is built with a 10s request
+  timeout (`HttpClient::builder().timeout(Duration::from_secs(10))`), so a
+  hung endpoint counts as a failed attempt after 10s and enters the same
+  backoff path. The half-open probe lease (`SET NX PX 30000`) is sized to
+  cover that timeout plus margin.
+- **Not retried**: rate-limited deliveries and deliveries rescheduled because
+  the endpoint's circuit breaker is `Open` (or lost the half-open probe lease)
+  are pushed to a later `next_attempt_at` **without** consuming an attempt.
+
+Replay interacts with this policy: a delivery that exhausted its 5 attempts
+sits in the DLQ, and replaying it (see `docs/webhook-replay.md`) starts a fresh
+delivery attempt sequence rather than resuming the exhausted counter.
+
 ## Circuit breaker
 
 Redis-backed, keyed per endpoint (`webhook_cb:<endpoint_id>`), shared across all instances (unlike the separate, unused `CircuitBreaker` type in `circuit_breaker.rs`, whose "half-open" state is an in-process mutex guard with no cross-instance coordination and whose Redis persistence is write-only). States:
@@ -69,7 +104,7 @@ Per-endpoint, `max_delivery_rate` requests per 60s window, tracked via `webhook_
 
 ## DLQ replay
 
-See the runbook's "Webhook Delivery DLQ Review" section for the operational procedure.
+See `docs/webhook-replay.md` for the replay interface and the runbook's "Webhook Delivery DLQ Review" section for the operational procedure.
 
 ## Known gaps
 
