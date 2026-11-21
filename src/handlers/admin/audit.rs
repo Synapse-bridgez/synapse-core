@@ -43,10 +43,42 @@ fn default_limit() -> i64 {
 #[derive(Debug, Serialize)]
 pub struct AuditSearchResponse {
     pub total: i64,
-    pub data: Vec<AuditLogRow>,
+    pub data: Vec<AuditLogEntry>,
     /// Opaque cursor to pass as `?cursor=` for the next page.
     /// `null` when there are no more results.
     pub next_cursor: Option<String>,
+}
+
+/// A single audit log entry as returned by the API.
+///
+/// `timestamp` is always an ISO 8601 / RFC 3339 string with an explicit UTC
+/// offset (e.g. `2026-04-26T12:00:00+00:00`), never a naive local time.
+#[derive(Debug, Serialize)]
+pub struct AuditLogEntry {
+    pub id: Uuid,
+    pub entity_id: Uuid,
+    pub entity_type: String,
+    pub action: String,
+    pub old_val: Option<serde_json::Value>,
+    pub new_val: Option<serde_json::Value>,
+    pub actor: String,
+    pub timestamp: String,
+}
+
+impl From<AuditLogRow> for AuditLogEntry {
+    fn from(row: AuditLogRow) -> Self {
+        let timestamp: DateTime<Utc> = row.timestamp;
+        Self {
+            id: row.id,
+            entity_id: row.entity_id,
+            entity_type: row.entity_type,
+            action: row.action,
+            old_val: row.old_val,
+            new_val: row.new_val,
+            actor: row.actor,
+            timestamp: timestamp.to_rfc3339(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +209,7 @@ pub async fn search_audit_logs_handler(
 
     Ok(Json(AuditSearchResponse {
         total,
-        data: rows,
+        data: rows.into_iter().map(AuditLogEntry::from).collect(),
         next_cursor,
     })
     .into_response())
@@ -236,5 +268,24 @@ mod tests {
     #[test]
     fn test_default_limit() {
         assert_eq!(default_limit(), 50);
+    }
+
+    #[test]
+    fn test_entry_timestamp_is_rfc3339_utc() {
+        let row = AuditLogRow {
+            id: Uuid::nil(),
+            entity_id: Uuid::nil(),
+            entity_type: "transaction".into(),
+            action: "status_update".into(),
+            old_val: None,
+            new_val: None,
+            actor: "admin".into(),
+            timestamp: Utc.with_ymd_and_hms(2026, 4, 26, 12, 0, 0).unwrap(),
+        };
+        let entry = AuditLogEntry::from(row);
+        assert_eq!(entry.timestamp, "2026-04-26T12:00:00+00:00");
+        assert!(entry.timestamp.contains('Z') || entry.timestamp.contains('+'));
+        let json = serde_json::to_string(&entry).expect("serialise entry");
+        assert!(json.contains("2026-04-26T12:00:00+00:00"));
     }
 }
