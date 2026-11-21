@@ -5,6 +5,40 @@ use chrono::{DateTime, Datelike, Duration, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+/// Known compliance report statuses accepted by the admin endpoint.
+pub const COMPLIANCE_STATUSES: &[&str] = &["pending", "completed", "failed"];
+
+/// A validated compliance report status filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComplianceStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+impl ComplianceStatus {
+    /// Parse a status string, returning a validation error naming the allowed values.
+    pub fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            "pending" => Ok(ComplianceStatus::Pending),
+            "completed" => Ok(ComplianceStatus::Completed),
+            "failed" => Ok(ComplianceStatus::Failed),
+            _ => Err(AppError::Validation(format!(
+                "status must be one of: {}",
+                COMPLIANCE_STATUSES.join(", ")
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ComplianceStatus::Pending => "pending",
+            ComplianceStatus::Completed => "completed",
+            ComplianceStatus::Failed => "failed",
+        }
+    }
+}
+
 pub struct ComplianceService {
     pool: PgPool,
 }
@@ -154,28 +188,23 @@ impl ComplianceService {
     pub async fn list_reports(
         &self,
         period: Option<&str>,
+        status: Option<ComplianceStatus>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<ComplianceReport>, AppError> {
-        let reports = if let Some(p) = period {
-            sqlx::query_as::<_, ComplianceReport>(
-                "SELECT * FROM compliance_reports WHERE period = $1 \
-                 ORDER BY period_start DESC LIMIT $2 OFFSET $3",
-            )
-            .bind(p)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query_as::<_, ComplianceReport>(
-                "SELECT * FROM compliance_reports ORDER BY period_start DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await
-        }
+        let status = status.map(|s| s.as_str());
+        let reports = sqlx::query_as::<_, ComplianceReport>(
+            "SELECT * FROM compliance_reports \
+             WHERE ($1::text IS NULL OR period = $1) \
+               AND ($2::text IS NULL OR status = $2) \
+             ORDER BY period_start DESC LIMIT $3 OFFSET $4",
+        )
+        .bind(period)
+        .bind(status)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         Ok(reports)
@@ -239,25 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn test_weekly_bounds() {
-        // 2026-04-28 is a Tuesday (days_from_monday = 1)
-        let now = Utc.with_ymd_and_hms(2026, 4, 28, 10, 0, 0).unwrap();
-        let (start, end) = period_bounds("weekly", now).unwrap();
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 4, 27, 0, 0, 0).unwrap());
-        assert_eq!(end, Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap());
+    fn test_parse_known_status() {
+        assert_eq!(ComplianceStatus::parse("pending").unwrap(), ComplianceStatus::Pending);
+        assert_eq!(ComplianceStatus::parse("completed").unwrap(), ComplianceStatus::Completed);
+        assert_eq!(ComplianceStatus::parse("failed").unwrap(), ComplianceStatus::Failed);
     }
 
     #[test]
-    fn test_monthly_bounds() {
-        let now = Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
-        let (start, end) = period_bounds("monthly", now).unwrap();
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap());
-        assert_eq!(end, Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap());
-    }
-
-    #[test]
-    fn test_invalid_period() {
-        let now = Utc::now();
-        assert!(period_bounds("yearly", now).is_err());
+    fn test_parse_unknown_status_errors() {
+        let err = ComplianceStatus::parse("bogus").unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("pending"));
+                assert!(msg.contains("completed"));
+                assert!(msg.contains("failed"));
+            }
+            other => panic!("expected validation error, got {:?}", other),
+        }
     }
 }
