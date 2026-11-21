@@ -469,9 +469,13 @@ pub async fn insert_transaction(
     with_timeout(
         QueryTier::Write,
         "INSERT INTO transactions ... RETURNING *",
-        crate::utils::retry::retry_with_backoff("insert_transaction", 3, 100, || async {
-            insert_transaction_once(pool, tx, cache).await
-        }),
+        crate::utils::retry::retry_with_backoff(
+            "insert_transaction",
+            3,
+            100,
+            crate::utils::retry::is_transient_db_error,
+            || async { insert_transaction_once(pool, tx, cache).await },
+        ),
     )
     .await
 }
