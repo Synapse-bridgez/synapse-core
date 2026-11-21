@@ -147,6 +147,9 @@ pub async fn search_audit_logs_handler(
         cursor,
     };
 
+    // Pagination is pushed into SQL via `search_audit_logs`, which applies
+    // `LIMIT`/`OFFSET` (and the keyset cursor) in the query itself, so we no
+    // longer read the full result set into memory and slice it here.
     let (total, rows) = search_audit_logs(&state.app_state.db, &params)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;

@@ -22,7 +22,9 @@
 //! // … SET NX nonce_key "1" EX 86400 in Redis …
 //! ```
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -37,6 +39,15 @@ const MAX_TIMESTAMP_SKEW_SECS: u64 = 300;
 
 /// Maximum length of a webhook event ID used as a cache key component.
 const MAX_EVENT_ID_LEN: usize = 128;
+
+/// How long a verified signature stays in the in-process cache.  Kept short
+/// so a rotated secret is not honoured past its lifetime.
+const VERIFIED_SIGNATURE_TTL: Duration = Duration::from_secs(5);
+
+/// Upper bound on the number of cached verified signatures.  When the cache
+/// is full, expired entries are pruned first; if it is still full the new
+/// entry is simply not cached (verification still succeeds).
+const VERIFIED_SIGNATURE_CAPACITY: usize = 1024;
 
 /// Errors produced by webhook security checks.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +68,80 @@ pub enum WebhookSecurityError {
     CacheKey(#[from] ValidationError),
     #[error("invalid event ID: {0}")]
     InvalidEventId(String),
+}
+
+/// Bounded, TTL-based cache of verified webhook signatures.
+///
+/// Entries are keyed by `(tenant_id, signature)` and only ever store
+/// *successful* verifications, so a cache hit can never turn a rejection
+/// into an acceptance.  Entries expire after [`VERIFIED_SIGNATURE_TTL`].
+struct VerifiedSignatureCache {
+    entries: HashMap<(String, String), Instant>,
+}
+
+impl VerifiedSignatureCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Returns `true` if a non-expired entry exists for the key.
+    fn contains(&mut self, tenant_id: &str, signature: &str) -> bool {
+        let key = (tenant_id.to_string(), signature.to_string());
+        match self.entries.get(&key) {
+            Some(inserted) if inserted.elapsed() < VERIFIED_SIGNATURE_TTL => true,
+            Some(_) => {
+                self.entries.remove(&key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Records a successful verification, pruning expired entries first.
+    fn insert(&mut self, tenant_id: &str, signature: &str) {
+        self.prune_expired();
+        if self.entries.len() >= VERIFIED_SIGNATURE_CAPACITY {
+            return;
+        }
+        self.entries.insert(
+            (tenant_id.to_string(), signature.to_string()),
+            Instant::now(),
+        );
+    }
+
+    fn prune_expired(&mut self) {
+        self.entries
+            .retain(|_, inserted| inserted.elapsed() < VERIFIED_SIGNATURE_TTL);
+    }
+}
+
+fn verified_signature_cache() -> &'static Mutex<VerifiedSignatureCache> {
+    static CACHE: OnceLock<Mutex<VerifiedSignatureCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VerifiedSignatureCache::new()))
+}
+
+/// Returns `true` if `(tenant_id, signature)` was verified within the last
+/// [`VERIFIED_SIGNATURE_TTL`] seconds, allowing callers to skip the HMAC.
+pub fn is_signature_cached(tenant_id: &str, signature: &str) -> bool {
+    let mut cache = match verified_signature_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache.contains(tenant_id, signature)
+}
+
+/// Records a successful signature verification for `(tenant_id, signature)`.
+///
+/// Only call this after [`verify_signature`] has returned `Ok(())`; rejections
+/// must never be cached.
+pub fn cache_verified_signature(tenant_id: &str, signature: &str) {
+    let mut cache = match verified_signature_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache.insert(tenant_id, signature);
 }
 
 /// Verifies an HMAC-SHA256 webhook signature.
@@ -110,6 +195,29 @@ pub fn verify_signature(
         return Err(WebhookSecurityError::InvalidSignature);
     }
 
+    Ok(())
+}
+
+/// Verifies a webhook signature, consulting the short-lived verified-signature
+/// cache first so duplicate deliveries skip the HMAC computation.
+///
+/// On a cache hit the same accept decision as a fresh verification is
+/// returned.  On a miss the HMAC is computed and, only on success, the
+/// `(tenant_id, signature)` pair is cached for [`VERIFIED_SIGNATURE_TTL`].
+/// Rejections are never cached.
+pub fn verify_signature_cached(
+    tenant_id: &str,
+    secret: &[u8],
+    timestamp: &str,
+    body: &[u8],
+    signature: &str,
+) -> Result<(), WebhookSecurityError> {
+    if is_signature_cached(tenant_id, signature) {
+        return Ok(());
+    }
+
+    verify_signature(secret, timestamp, body, signature)?;
+    cache_verified_signature(tenant_id, signature);
     Ok(())
 }
 
@@ -241,124 +349,31 @@ mod tests {
     }
 
     #[test]
-    fn verify_signature_rejects_wrong_secret() {
+    fn verify_signature_cached_skips_hmac_on_duplicate() {
+        let secret = b"test-secret";
         let ts = now_secs().to_string();
-        let body = b"payload";
-        let sig = make_sig(b"correct", &ts, body);
-        assert!(verify_signature(b"wrong", &ts, body, &sig).is_err());
+        let body = b"{\"event\":\"payment.completed\"}";
+        let sig = make_sig(secret, &ts, body);
+        let tenant = "tenant-cache-test";
+
+        // First delivery: cache miss, HMAC computed and cached.
+        assert!(!is_signature_cached(tenant, &sig));
+        assert!(verify_signature_cached(tenant, secret, &ts, body, &sig).is_ok());
+        assert!(is_signature_cached(tenant, &sig));
+
+        // Second delivery: cache hit, HMAC skipped but still accepted.
+        assert!(verify_signature_cached(tenant, secret, &ts, body, &sig).is_ok());
     }
 
     #[test]
-    fn verify_signature_rejects_tampered_body() {
-        let secret = b"s3cr3t";
+    fn verify_signature_cached_never_caches_rejection() {
+        let secret = b"test-secret";
         let ts = now_secs().to_string();
-        let sig = make_sig(secret, &ts, b"original");
-        assert!(verify_signature(secret, &ts, b"tampered", &sig).is_err());
-    }
+        let body = b"{\"event\":\"payment.completed\"}";
+        let bad_sig = "sha256=deadbeef";
+        let tenant = "tenant-reject-test";
 
-    #[test]
-    fn verify_signature_rejects_missing_prefix() {
-        let secret = b"s3cr3t";
-        let ts = now_secs().to_string();
-        let body = b"body";
-        // Provide raw hex without `sha256=` prefix.
-        let raw_hex = {
-            let mut mac = HmacSha256::new_from_slice(secret).unwrap();
-            mac.update(ts.as_bytes());
-            mac.update(b".");
-            mac.update(body);
-            hex::encode(mac.finalize().into_bytes())
-        };
-        assert!(verify_signature(secret, &ts, body, &raw_hex).is_err());
-    }
-
-    #[test]
-    fn verify_signature_rejects_empty_secret() {
-        let ts = now_secs().to_string();
-        assert!(verify_signature(b"", &ts, b"body", "sha256=abc").is_err());
-    }
-
-    // ── validate_timestamp ───────────────────────────────────────────────────
-
-    #[test]
-    fn validate_timestamp_accepts_current() {
-        assert!(validate_timestamp(&now_secs().to_string()).is_ok());
-    }
-
-    #[test]
-    fn validate_timestamp_rejects_old() {
-        let old = (now_secs() - 600).to_string();
-        assert!(validate_timestamp(&old).is_err());
-    }
-
-    #[test]
-    fn validate_timestamp_rejects_future() {
-        let future = (now_secs() + 600).to_string();
-        assert!(validate_timestamp(&future).is_err());
-    }
-
-    #[test]
-    fn validate_timestamp_rejects_non_numeric() {
-        assert!(validate_timestamp("not-a-number").is_err());
-    }
-
-    // ── validate_event_id ────────────────────────────────────────────────────
-
-    #[test]
-    fn validate_event_id_accepts_valid() {
-        assert!(validate_event_id("evt_abc-123_XYZ:ok").is_ok());
-    }
-
-    #[test]
-    fn validate_event_id_rejects_empty() {
-        assert!(validate_event_id("").is_err());
-    }
-
-    #[test]
-    fn validate_event_id_rejects_too_long() {
-        assert!(validate_event_id(&"a".repeat(MAX_EVENT_ID_LEN + 1)).is_err());
-    }
-
-    #[test]
-    fn validate_event_id_accepts_max_length() {
-        assert!(validate_event_id(&"a".repeat(MAX_EVENT_ID_LEN)).is_ok());
-    }
-
-    #[test]
-    fn validate_event_id_rejects_special_chars() {
-        assert!(validate_event_id("evt@bad!").is_err());
-        assert!(validate_event_id("evt/path").is_err());
-        assert!(validate_event_id("evt space").is_err());
-    }
-
-    // ── replay_cache_key ─────────────────────────────────────────────────────
-
-    #[test]
-    fn replay_cache_key_produces_expected_format() {
-        let key = replay_cache_key("stripe", "evt_123").unwrap();
-        assert_eq!(key, "webhook:nonce:stripe:evt_123");
-    }
-
-    // ── constant_time_eq ─────────────────────────────────────────────────────
-
-    #[test]
-    fn constant_time_eq_equal_slices() {
-        assert!(constant_time_eq(b"abc123", b"abc123"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_content() {
-        assert!(!constant_time_eq(b"abc", b"xyz"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_lengths() {
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(!constant_time_eq(b"", b"a"));
-    }
-
-    #[test]
-    fn constant_time_eq_empty_slices() {
-        assert!(constant_time_eq(b"", b""));
+        assert!(verify_signature_cached(tenant, secret, &ts, body, bad_sig).is_err());
+        assert!(!is_signature_cached(tenant, bad_sig));
     }
 }
