@@ -26,6 +26,38 @@ pub enum InputValidationError {
 
     #[error("Limit {value} exceeds the maximum of {max}")]
     LimitExceeded { value: i64, max: i64 },
+
+    #[error("Additional properties are not allowed (\"{field}\" was unexpected)")]
+    UnknownField { field: String },
+}
+
+impl InputValidationError {
+    /// Converts this validation error into a GraphQL error carrying the
+    /// stable `VALIDATION_ERROR` code (see [`crate::graphql::error`]).
+    pub fn into_gql_error(self) -> async_graphql::Error {
+        crate::graphql::error::GraphQlError::Validation(self.to_string()).into()
+    }
+}
+
+/// Rejects any input field that is not in `allowed`.
+///
+/// GraphQL itself ignores unknown input fields, so a mutation would otherwise
+/// silently succeed with a typo'd field dropped. Call this at the top of every
+/// resolver that accepts an input object so the offending field is named in a
+/// `VALIDATION_ERROR`, consistent with `docs/payload-validation.md`.
+pub fn validate_known_fields<'a, I>(fields: I, allowed: &[&str]) -> Result<(), InputValidationError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    for field in fields {
+        if !allowed.contains(&field) {
+            return Err(InputValidationError::UnknownField {
+                field: field.to_string(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Validates a `status` filter field.
@@ -180,5 +212,38 @@ mod tests {
         assert!(validate_asset_code(&long).is_err());
         assert!(validate_stellar_account(&long).is_err());
         assert!(validate_status(&long).is_err());
+    }
+
+    #[test]
+    fn test_known_fields_accepted() {
+        assert!(validate_known_fields(["status", "asset_code"], &["status", "asset_code"]).is_ok());
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_and_named() {
+        let err = validate_known_fields(["status", "unknown_field"], &["status"])
+            .expect_err("unknown field must be rejected");
+        assert!(matches!(
+            &err,
+            InputValidationError::UnknownField { field } if field == "unknown_field"
+        ));
+        assert!(err.to_string().contains("unknown_field"));
+    }
+
+    #[test]
+    fn test_unknown_field_error_has_validation_code() {
+        let err = validate_known_fields(["bogus"], &["status"])
+            .expect_err("unknown field must be rejected")
+            .into_gql_error();
+        let code = err
+            .extensions
+            .as_ref()
+            .and_then(|e| e.get("code"))
+            .and_then(|v| match v {
+                async_graphql::Value::String(s) => Some(s.clone()),
+                _ => None,
+            });
+        assert_eq!(code.as_deref(), Some(crate::graphql::error::CODE_VALIDATION));
+        assert!(err.message.contains("bogus"));
     }
 }
