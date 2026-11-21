@@ -9,14 +9,13 @@
 
                               dlq
                                │
-                               ├──────────────┐
-                               │              │
-                               v              │
-                            pending ─────────┴─→ processing
-                              │ │                    │
-                              │ │                    ├─→ completed
-                              │ │                    │
-                              │ │                    └─→ failed
+                               │ (requeue)
+                               v
+                            pending ──────────────→ processing
+                              │ │                       │
+                              │ │                       ├─→ completed
+                              │ │                       │
+                              │ │                       └─→ failed
                               │ │
                               │ │  (reprocess)
                               │ └──────────────────────→ pending
@@ -38,7 +37,17 @@ Same-state transitions: Always valid (idempotent)
 └─ X → X for any state      ✓
 ```
 
-## Settlement Status State Machine
+### Transaction Transitions Not Allowed
+
+| From       | To         | Reason                              |
+|------------|------------|-------------------------------------|
+| completed  | any        | Terminal state — cannot be reversed |
+| processing | pending    | Must complete or fail, not revert   |
+| failed     | processing | Must go through pending first       |
+| failed     | completed  | Must go through pending first       |
+| dlq        | processing | Must go through pending first       |
+| dlq        | completed  | Must go through pending first       |
+| dlq        | failed     | Must go through pending first       |
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
