@@ -141,6 +141,85 @@ impl From<GraphQlError> for GqlError {
     }
 }
 
+/// Maps an [`AppError`] to the stable GraphQL error code for its variant.
+///
+/// This keeps the `extensions.code` contract identical whether an error
+/// originates in a resolver (via [`GraphQlError`]) or in shared application
+/// code (via [`AppError`]).
+pub fn app_error_code(err: &crate::error::AppError) -> &'static str {
+    use crate::error::AppError;
+    match err {
+        AppError::Validation(_)
+        | AppError::BadRequest(_)
+        | AppError::InvalidTransactionAmount(_)
+        | AppError::AmountBelowMinimum(_)
+        | AppError::InvalidStellarAddress(_)
+        | AppError::InvalidStatusTransition(_)
+        | AppError::MalformedWebhookPayload(_)
+        | AppError::InvalidSettlementAmount(_) => CODE_VALIDATION,
+        AppError::NotFound(_) | AppError::TenantNotFound => CODE_NOT_FOUND,
+        AppError::Unauthorized(_)
+        | AppError::InvalidApiKey
+        | AppError::AuthenticationFailed(_)
+        | AppError::InvalidWebhookSignature => CODE_AUTHENTICATION,
+        AppError::InsufficientPermissions(_) => CODE_AUTHORIZATION,
+        AppError::RateLimitExceeded => CODE_RATE_LIMITED,
+        AppError::TransactionAlreadyProcessed(_)
+        | AppError::StaleTransition
+        | AppError::SettlementAlreadyExists(_) => CODE_VALIDATION,
+        AppError::Database(_) | AppError::DatabaseError(_) | AppError::Redis(_) => CODE_DATABASE,
+        AppError::Internal(_) | AppError::Anyhow(_) => CODE_INTERNAL,
+    }
+}
+
+impl From<crate::error::AppError> for GraphQlError {
+    fn from(e: crate::error::AppError) -> Self {
+        use crate::error::AppError;
+        match e {
+            AppError::Validation(m)
+            | AppError::BadRequest(m)
+            | AppError::InvalidTransactionAmount(m)
+            | AppError::AmountBelowMinimum(m)
+            | AppError::InvalidStellarAddress(m)
+            | AppError::InvalidStatusTransition(m)
+            | AppError::MalformedWebhookPayload(m)
+            | AppError::InvalidSettlementAmount(m) => GraphQlError::Validation(m),
+            AppError::NotFound(m) => GraphQlError::NotFound(m),
+            AppError::TenantNotFound => GraphQlError::NotFound("Tenant".to_string()),
+            AppError::Unauthorized(m) | AppError::AuthenticationFailed(m) => {
+                GraphQlError::Authentication
+            }
+            AppError::InvalidApiKey | AppError::InvalidWebhookSignature => {
+                GraphQlError::Authentication
+            }
+            AppError::InsufficientPermissions(_) => GraphQlError::Authorization,
+            AppError::RateLimitExceeded => GraphQlError::RateLimited {
+                retry_after_secs: 0,
+            },
+            AppError::TransactionAlreadyProcessed(m)
+            | AppError::StaleTransition
+            | AppError::SettlementAlreadyExists(m) => GraphQlError::Validation(m),
+            AppError::Database(e) => {
+                tracing::error!(cause = %e, "GraphQL: database error");
+                GraphQlError::Database("Database operation failed".to_string())
+            }
+            AppError::DatabaseError(raw) => {
+                tracing::error!(cause = %raw, "GraphQL: database error");
+                GraphQlError::Database("Database operation failed".to_string())
+            }
+            AppError::Redis(e) => {
+                tracing::error!(cause = %e, "GraphQL: backend service error");
+                GraphQlError::Database("Database operation failed".to_string())
+            }
+            AppError::Internal(m) => GraphQlError::Internal(m),
+            AppError::Anyhow(e) => {
+                tracing::error!(cause = %e, "GraphQL: internal error");
+                GraphQlError::Internal("An internal error occurred".to_string())
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Convenience constructors
 // ---------------------------------------------------------------------------
@@ -268,6 +347,30 @@ mod tests {
         let err = not_found_error("Settlement");
         assert!(err.message.contains("Settlement"));
         assert_eq!(ext_code(&err).as_deref(), Some(CODE_NOT_FOUND));
+    }
+
+    #[test]
+    fn app_error_conversion_attaches_code() {
+        use crate::error::AppError;
+
+        let cases: Vec<(AppError, &str)> = vec![
+            (AppError::Validation("bad".into()), CODE_VALIDATION),
+            (AppError::NotFound("x".into()), CODE_NOT_FOUND),
+            (AppError::Unauthorized("x".into()), CODE_AUTHENTICATION),
+            (
+                AppError::InsufficientPermissions("x".into()),
+                CODE_AUTHORIZATION,
+            ),
+            (AppError::RateLimitExceeded, CODE_RATE_LIMITED),
+            (AppError::DatabaseError("raw".into()), CODE_DATABASE),
+            (AppError::Internal("x".into()), CODE_INTERNAL),
+        ];
+
+        for (app_err, expected) in cases {
+            assert_eq!(app_error_code(&app_err), expected);
+            let err: GqlError = app_err.into();
+            assert_eq!(ext_code(&err).as_deref(), Some(expected));
+        }
     }
 
     #[test]
