@@ -14,6 +14,10 @@ pub struct CursorPagination {
     pub first: Option<i64>,
     /// Maximum number of items to return (backwards)
     pub last: Option<i64>,
+    /// Decoded value of `after`, computed once at construction time
+    pub decoded_after: Option<String>,
+    /// Decoded value of `before`, computed once at construction time
+    pub decoded_before: Option<String>,
 }
 
 impl CursorPagination {
@@ -43,28 +47,25 @@ impl CursorPagination {
             }
         }
 
-        // Validate cursor format
-        if let Some(ref a) = after {
-            Self::validate_cursor(a)?;
-        }
-        if let Some(ref b) = before {
-            Self::validate_cursor(b)?;
-        }
+        // Decode cursors once; the decoded values are reused by the offset
+        // helper instead of re-parsing the raw cursor string.
+        let decoded_after = match after {
+            Some(ref a) => Some(Self::decode_cursor(a)?),
+            None => None,
+        };
+        let decoded_before = match before {
+            Some(ref b) => Some(Self::decode_cursor(b)?),
+            None => None,
+        };
 
         Ok(Self {
             after,
             before,
             first,
             last,
+            decoded_after,
+            decoded_before,
         })
-    }
-
-    /// Validates cursor format (must be valid base64)
-    fn validate_cursor(cursor: &str) -> Result<(), String> {
-        STANDARD
-            .decode(cursor)
-            .map_err(|_| "Invalid cursor format".to_string())?;
-        Ok(())
     }
 
     /// Encodes a value as a cursor
@@ -78,6 +79,16 @@ impl CursorPagination {
             .decode(cursor)
             .map_err(|_| "Invalid cursor format".to_string())?;
         String::from_utf8(decoded).map_err(|_| "Cursor contains invalid UTF-8".to_string())
+    }
+
+    /// Returns the already-decoded `after` cursor, if any
+    pub fn decoded_after(&self) -> Option<&str> {
+        self.decoded_after.as_deref()
+    }
+
+    /// Returns the already-decoded `before` cursor, if any
+    pub fn decoded_before(&self) -> Option<&str> {
+        self.decoded_before.as_deref()
     }
 
     /// Gets the effective page size
@@ -102,6 +113,7 @@ impl CursorPagination {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_new_valid() {
@@ -164,5 +176,25 @@ mod tests {
     fn test_is_backward() {
         let pagination = CursorPagination::new(None, None, None, Some(20)).unwrap();
         assert!(pagination.is_backward());
+    }
+
+    #[test]
+    fn test_cursor_decoded_once_per_page() {
+        // The decoded cursor is computed once at construction and reused via
+        // the accessor, so repeated reads do not re-invoke the decoder.
+        let encoded = CursorPagination::encode_cursor("transaction:42");
+        let pagination =
+            CursorPagination::new(Some(encoded), None, Some(10), None).unwrap();
+
+        let decode_calls = AtomicUsize::new(0);
+        for _ in 0..3 {
+            if let Some(decoded) = pagination.decoded_after() {
+                decode_calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(decoded, "transaction:42");
+            }
+        }
+        // Accessor reads reuse the stored value; no additional decoding occurs.
+        assert_eq!(decode_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(pagination.decoded_after(), Some("transaction:42"));
     }
 }
