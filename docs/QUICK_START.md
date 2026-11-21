@@ -37,7 +37,12 @@ sqlx migrate run
 # 5. Build and test
 cargo build
 cargo test
+
+# 6. Run the app (migrations must be applied first, see step 4)
+cargo run
 ```
+
+> Full pre-push checklist: see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Development Workflow
 
