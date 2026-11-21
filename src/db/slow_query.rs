@@ -55,6 +55,61 @@ pub fn log_query_timing(
     }
 }
 
+/// Log a database query with timing information, formatting the SQL lazily.
+///
+/// Unlike [`log_query_timing`], the SQL text is produced by `format_sql` only
+/// when the query actually exceeds `slow_query_threshold_ms`. Fast queries
+/// never invoke the formatter, so they pay no formatting cost.
+///
+/// # Arguments
+/// * `query_name` - Human-readable name for the query (e.g., "fetch_transaction")
+/// * `format_sql` - Closure that builds the formatted SQL string; only called for slow queries
+/// * `duration_ms` - Duration in milliseconds
+/// * `rows_affected` - Number of rows returned or affected
+/// * `slow_query_threshold_ms` - Threshold in milliseconds for considering query as "slow"
+pub fn log_query_timing_lazy<F>(
+    query_name: &str,
+    format_sql: F,
+    duration_ms: u64,
+    rows_affected: usize,
+    slow_query_threshold_ms: u64,
+) where
+    F: FnOnce() -> String,
+{
+    let is_slow = duration_ms >= slow_query_threshold_ms;
+
+    // Development: log every query in debug builds.
+    // Production: only record slow query events.
+    if cfg!(debug_assertions) {
+        let sql = format_sql();
+        tracing::debug!(
+            query_name = query_name,
+            duration_ms = duration_ms,
+            rows_affected = rows_affected,
+            sql = sql,
+            slow_threshold_ms = slow_query_threshold_ms,
+            "query timing"
+        );
+    } else if is_slow {
+        // Only format the SQL once we know the query is slow.
+        let sql = format_sql();
+        tracing::warn!(
+            query_name = query_name,
+            duration_ms = duration_ms,
+            threshold_ms = slow_query_threshold_ms,
+            rows_affected = rows_affected,
+            sql = sql,
+            "slow query detected"
+        );
+    }
+
+    if is_slow {
+        // Track slow query count both in-process and via OpenTelemetry.
+        SLOW_QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::db_slow_queries_total().add(1, &[]);
+    }
+}
+
 /// Get the total count of slow queries recorded
 pub fn get_slow_query_count() -> u64 {
     SLOW_QUERY_COUNT.load(Ordering::Relaxed)
@@ -87,6 +142,7 @@ macro_rules! time_query {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn test_slow_query_logging_disabled_in_test() {
@@ -101,5 +157,50 @@ mod tests {
         assert_eq!(get_slow_query_count(), 0);
         log_query_timing("slow_query", "SELECT * FROM data", 600, 10, 500);
         // Counter should increment if we're not in debug mode
+    }
+
+    #[test]
+    fn test_fast_query_never_invokes_formatter() {
+        reset_slow_query_count();
+        let called = AtomicBool::new(false);
+        // Fast query: duration below threshold. In release builds the formatter
+        // must never run; in debug builds it runs for the debug log only.
+        log_query_timing_lazy(
+            "fast_query",
+            || {
+                called.store(true, Ordering::Relaxed);
+                "SELECT * FROM data".to_string()
+            },
+            10,
+            1,
+            500,
+        );
+        if !cfg!(debug_assertions) {
+            assert!(
+                !called.load(Ordering::Relaxed),
+                "formatter must not run for fast queries"
+            );
+        }
+        assert_eq!(get_slow_query_count(), 0);
+    }
+
+    #[test]
+    fn test_slow_query_invokes_formatter() {
+        reset_slow_query_count();
+        let called = AtomicBool::new(false);
+        log_query_timing_lazy(
+            "slow_query",
+            || {
+                called.store(true, Ordering::Relaxed);
+                "SELECT * FROM data".to_string()
+            },
+            600,
+            10,
+            500,
+        );
+        assert!(
+            called.load(Ordering::Relaxed),
+            "formatter must run for slow queries"
+        );
     }
 }

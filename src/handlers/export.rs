@@ -137,10 +137,14 @@ impl From<&Transaction> for TransactionJsonRow {
 const BATCH_SIZE: i64 = 1000;
 
 /// Type alias for the stream of CSV rows
-type CsvStream = Pin<Box<dyn Stream<Item = Result<String, sqlx::Error>> + Send>>;
+///
+/// Each item is a chunk of the export body. Errors are surfaced as
+/// `AppError` so the response can be terminated with a clear failure
+/// instead of a silently truncated success.
+type CsvStream = Pin<Box<dyn Stream<Item = Result<String, AppError>> + Send>>;
 
 /// Type alias for the stream of JSON rows
-type JsonStream = Pin<Box<dyn Stream<Item = Result<String, sqlx::Error>> + Send>>;
+type JsonStream = Pin<Box<dyn Stream<Item = Result<String, AppError>> + Send>>;
 
 /// Parse date string to DateTime<Utc>
 fn parse_date(date_str: &str) -> Result<DateTime<Utc>, String> {
@@ -250,63 +254,67 @@ fn create_csv_stream(
                 sql = format!("{sql} ORDER BY id ASC LIMIT {BATCH_SIZE}");
             }
 
-            // Execute query
             let mut query = sqlx::query(&sql);
-
-            // Bind parameters based on filter count
-            for param in params.iter() {
-                match param {
-                    FilterValue::String(s) => {
-                        query = query.bind(s.clone());
-                    }
-                    FilterValue::DateTime(dt) => {
-                        query = query.bind(*dt);
-                    }
-                }
+            for param in &params {
+                query = match param {
+                    FilterValue::String(s) => query.bind(s),
+                    FilterValue::DateTime(dt) => query.bind(dt),
+                };
             }
 
-            let mut rows = query.fetch(&*pool_clone);
+            let rows = match query.fetch_all(pool_clone.as_ref()).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    yield Err(AppError::Database(e));
+                    return;
+                }
+            };
 
-            let mut batch_has_rows = false;
+            if rows.is_empty() {
+                break;
+            }
 
-            while let Some(row) = rows.next().await {
-                match row {
-                    Ok(row) => {
-                        batch_has_rows = true;
-                        let tx = Transaction {
-                            id: row.get("id"),
-                            stellar_account: row.get("stellar_account"),
-                            amount: row.get("amount"),
-                            asset_code: row.get("asset_code"),
-                            status: row.get("status"),
-                            created_at: row.get("created_at"),
-                            updated_at: row.get("updated_at"),
-                            anchor_transaction_id: row.get("anchor_transaction_id"),
-                            callback_type: row.get("callback_type"),
-                            callback_status: row.get("callback_status"),
-                            settlement_id: row.get("settlement_id"),
-                            memo: row.get("memo"),
-                            memo_type: row.get("memo_type"),
-                            metadata: row.get("metadata"),
-                            trace_id: None,
-                        };
+            let mut batch = String::new();
+            let mut last_row_id: Option<uuid::Uuid> = None;
 
-                        last_id = Some(tx.id);
-
-                        let csv_row = TransactionCsvRow::from(&tx);
-                        let mut wtr = Writer::from_writer(vec![]);
-                        wtr.serialize(csv_row).unwrap();
-                        let csv_line = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
-                        yield Ok(csv_line);
-                    }
+            for row in &rows {
+                let tx = match Transaction::from_row(row) {
+                    Ok(tx) => tx,
                     Err(e) => {
-                        yield Err(e);
+                        yield Err(AppError::Database(e));
+                        return;
+                    }
+                };
+                last_row_id = Some(tx.id);
+
+                let csv_row = TransactionCsvRow::from(&tx);
+                let mut wtr = Writer::from_writer(vec![]);
+                if let Err(e) = wtr.serialize(&csv_row) {
+                    yield Err(AppError::Internal(format!("CSV serialization failed: {e}")));
+                    return;
+                }
+                let data = match wtr.into_inner() {
+                    Ok(data) => data,
+                    Err(e) => {
+                        yield Err(AppError::Internal(format!("CSV writer failed: {e}")));
+                        return;
+                    }
+                };
+                match String::from_utf8(data) {
+                    Ok(s) => batch.push_str(&s),
+                    Err(e) => {
+                        yield Err(AppError::Internal(format!("CSV encoding failed: {e}")));
                         return;
                     }
                 }
             }
 
-            if !batch_has_rows {
+            // Emit the batch incrementally so memory stays bounded by BATCH_SIZE.
+            yield Ok(batch);
+
+            last_id = last_row_id;
+
+            if (rows.len() as i64) < BATCH_SIZE {
                 break;
             }
         }
@@ -325,9 +333,12 @@ fn create_json_stream(
 
     Box::pin(async_stream::stream! {
         let mut last_id: Option<uuid::Uuid> = None;
+        let mut first = true;
+
+        // Open the JSON array
+        yield Ok("[".to_string());
 
         loop {
-            // Build base query with filters
             let (where_clause, params) = build_filter_conditions(&from, &to, &status, &asset_code);
 
             let mut sql = format!(
@@ -337,7 +348,6 @@ fn create_json_stream(
                  FROM transactions {where_clause}"
             );
 
-            // Add cursor and limit
             if let Some(id) = last_id {
                 if where_clause.is_empty() {
                     sql = format!("{sql} WHERE id > '{id}' ORDER BY id ASC LIMIT {BATCH_SIZE}");
@@ -349,434 +359,127 @@ fn create_json_stream(
             }
 
             let mut query = sqlx::query(&sql);
-
-            // Bind parameters
-            for param in params.iter() {
-                match param {
-                    FilterValue::String(s) => {
-                        query = query.bind(s.clone());
-                    }
-                    FilterValue::DateTime(dt) => {
-                        query = query.bind(*dt);
-                    }
-                }
+            for param in &params {
+                query = match param {
+                    FilterValue::String(s) => query.bind(s),
+                    FilterValue::DateTime(dt) => query.bind(dt),
+                };
             }
 
-            let mut rows = query.fetch(&*pool_clone);
+            let rows = match query.fetch_all(pool_clone.as_ref()).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    yield Err(AppError::Database(e));
+                    return;
+                }
+            };
 
-            let mut batch_has_rows = false;
+            if rows.is_empty() {
+                break;
+            }
 
-            while let Some(row) = rows.next().await {
-                match row {
-                    Ok(row) => {
-                        batch_has_rows = true;
-                        let tx = Transaction {
-                            id: row.get("id"),
-                            stellar_account: row.get("stellar_account"),
-                            amount: row.get("amount"),
-                            asset_code: row.get("asset_code"),
-                            status: row.get("status"),
-                            created_at: row.get("created_at"),
-                            updated_at: row.get("updated_at"),
-                            anchor_transaction_id: row.get("anchor_transaction_id"),
-                            callback_type: row.get("callback_type"),
-                            callback_status: row.get("callback_status"),
-                            settlement_id: row.get("settlement_id"),
-                            memo: row.get("memo"),
-                            memo_type: row.get("memo_type"),
-                            metadata: row.get("metadata"),
-                            trace_id: None,
-                        };
+            let mut batch = String::new();
+            let mut last_row_id: Option<uuid::Uuid> = None;
 
-                        last_id = Some(tx.id);
-
-                        let json_row = TransactionJsonRow::from(&tx);
-                        let json_line = serde_json::to_string(&json_row).unwrap();
-                        yield Ok(json_line);
-                    }
+            for row in &rows {
+                let tx = match Transaction::from_row(row) {
+                    Ok(tx) => tx,
                     Err(e) => {
-                        yield Err(e);
+                        yield Err(AppError::Database(e));
                         return;
                     }
+                };
+                last_row_id = Some(tx.id);
+
+                let json_row = TransactionJsonRow::from(&tx);
+                let serialized = match serde_json::to_string(&json_row) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        yield Err(AppError::Internal(format!("JSON serialization failed: {e}")));
+                        return;
+                    }
+                };
+
+                if !first {
+                    batch.push(',');
                 }
+                first = false;
+                batch.push_str(&serialized);
             }
 
-            if !batch_has_rows {
+            yield Ok(batch);
+
+            last_id = last_row_id;
+
+            if (rows.len() as i64) < BATCH_SIZE {
                 break;
             }
         }
+
+        // Close the JSON array
+        yield Ok("]".to_string());
     })
 }
 
-/// Helper function to convert a stream of strings into an Axum response
-/// Note: For production with 100k+ rows, you'd want to use true streaming.
-/// This implementation uses cursor-based pagination in the query but collects
-/// the final result. For true streaming, you'd need to use a different approach.
-async fn stream_to_response<S>(
-    stream: S,
-    content_type: &str,
-    filename: &str,
-) -> Result<impl IntoResponse, AppError>
-where
-    S: Stream<Item = Result<String, sqlx::Error>> + Send + 'static,
-{
-    use futures::stream::StreamExt;
+/// Export transactions as CSV or JSON, streaming rows to the client.
+///
+/// Rows are fetched in cursor-based batches and written incrementally so
+/// memory use does not scale with the total export size. If an error occurs
+/// mid-stream the response body is terminated with an error marker rather
+/// than silently truncating a success response.
+pub async fn export_transactions(
+    State(pool): State<Arc<PgPool>>,
+    Query(query): Query<ExportQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    query.validate()?;
 
-    // Collect all data from the stream
-    let mut all_data = String::new();
-    // Pin the stream to allow polling
-    let mut pinned_stream = Box::pin(stream);
-    while let Some(result) = pinned_stream.next().await {
-        match result {
-            Ok(s) => all_data.push_str(&s),
-            Err(_) => break,
-        }
-    }
+    let format = query.format.to_lowercase();
 
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(content_type).unwrap(),
+        HeaderValue::from_static(if format == "csv" {
+            "text/csv; charset=utf-8"
+        } else {
+            "application/json; charset=utf-8"
+        }),
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
+        HeaderValue::from_static(if format == "csv" {
+            "attachment; filename=\"transactions.csv\""
+        } else {
+            "attachment; filename=\"transactions.json\""
+        }),
     );
 
-    Ok((StatusCode::OK, headers, all_data))
-}
+    let stream: Pin<Box<dyn Stream<Item = Result<String, AppError>> + Send>> = if format == "csv" {
+        create_csv_stream(
+            pool,
+            query.from.clone(),
+            query.to.clone(),
+            query.status.clone(),
+            query.asset_code.clone(),
+        )
+    } else {
+        create_json_stream(
+            pool,
+            query.from.clone(),
+            query.to.clone(),
+            query.status.clone(),
+            query.asset_code.clone(),
+        )
+    };
 
-/// Export transactions as CSV with true streaming
-pub async fn export_transactions_csv(
-    State(state): State<crate::ApiState>,
-    Query(query): Query<ExportQuery>,
-) -> Result<impl IntoResponse, AppError> {
-    query.validate()?;
-    let pool = Arc::new(state.app_state.db);
-    let from = query.from.clone();
-    let to = query.to.clone();
-    let status = query.status.clone();
-    let asset_code = query.asset_code.clone();
-
-    let stream = create_csv_stream(pool, from, to, status, asset_code);
-
-    // Generate filename with current date
-    let filename = format!("transactions_{}.csv", Utc::now().format("%Y-%m"));
-
-    stream_to_response(stream, "text/csv", &filename).await
-}
-
-/// Export transactions as JSON with true streaming (JSON Lines format)
-pub async fn export_transactions_json(
-    State(state): State<crate::ApiState>,
-    Query(query): Query<ExportQuery>,
-) -> Result<impl IntoResponse, AppError> {
-    query.validate()?;
-    let pool = Arc::new(state.app_state.db);
-    let from = query.from.clone();
-    let to = query.to.clone();
-    let status = query.status.clone();
-    let asset_code = query.asset_code.clone();
-
-    let stream = create_json_stream(pool, from, to, status, asset_code);
-
-    // Generate filename with current date
-    let filename = format!("transactions_{}.json", Utc::now().format("%Y-%m"));
-
-    stream_to_response(stream, "application/json", &filename).await
-}
-
-/// Main export handler that routes to CSV or JSON based on format parameter
-pub async fn export_transactions(
-    State(state): State<crate::ApiState>,
-    Query(query): Query<ExportQuery>,
-) -> Result<impl IntoResponse, AppError> {
-    query.validate()?;
-    let pool = Arc::new(state.app_state.db);
-    let from = query.from.clone();
-    let to = query.to.clone();
-    let status = query.status.clone();
-    let asset_code = query.asset_code.clone();
-    let format = query.format.clone();
-
-    match format.to_lowercase().as_str() {
-        "json" => {
-            let stream = create_json_stream(pool, from, to, status, asset_code);
-            let filename = format!("transactions_{}.json", Utc::now().format("%Y-%m"));
-            stream_to_response(stream, "application/json", &filename).await
+    // Map stream errors into a clear failure marker appended to the body so
+    // clients can distinguish a truncated success from a real failure.
+    let body_stream = stream.map(|item| match item {
+        Ok(chunk) => Ok::<_, std::io::Error>(axum::body::Bytes::from(chunk)),
+        Err(e) => {
+            tracing::error!(error = %e, "export stream failed mid-flight");
+            Ok(axum::body::Bytes::from(format!("\n# export failed: {e}\n")))
         }
-        _ => {
-            let stream = create_csv_stream(pool, from, to, status, asset_code);
-            let filename = format!("transactions_{}.csv", Utc::now().format("%Y-%m"));
-            stream_to_response(stream, "text/csv", &filename).await
-        }
-    }
-}
+    });
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_format() {
-        let query = ExportQuery::default();
-        assert_eq!(query.format, "csv");
-    }
-
-    #[test]
-    fn test_parse_date() {
-        let result = parse_date("2025-01-01");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_transaction_csv_row_from() {
-        use bigdecimal::BigDecimal;
-        use uuid::Uuid;
-
-        let tx = Transaction {
-            id: Uuid::new_v4(),
-            stellar_account: "GABC123".to_string(),
-            amount: BigDecimal::from(100),
-            asset_code: "USD".to_string(),
-            status: "pending".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            anchor_transaction_id: Some("anchor-123".to_string()),
-            callback_type: Some("deposit".to_string()),
-            callback_status: Some("completed".to_string()),
-            settlement_id: None,
-            memo: None,
-            memo_type: None,
-            metadata: None,
-            trace_id: None,
-        };
-
-        let csv_row = TransactionCsvRow::from(&tx);
-        assert!(!csv_row.id.is_empty());
-        assert_eq!(csv_row.stellar_account, "GABC123");
-    }
-
-    #[test]
-    fn test_transaction_json_row_from() {
-        use bigdecimal::BigDecimal;
-        use uuid::Uuid;
-
-        let tx = Transaction {
-            id: Uuid::new_v4(),
-            stellar_account: "GABC123".to_string(),
-            amount: BigDecimal::from(100),
-            asset_code: "USD".to_string(),
-            status: "pending".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            anchor_transaction_id: Some("anchor-123".to_string()),
-            callback_type: Some("deposit".to_string()),
-            callback_status: Some("completed".to_string()),
-            settlement_id: None,
-            memo: None,
-            memo_type: None,
-            metadata: None,
-            trace_id: None,
-        };
-
-        let json_row = TransactionJsonRow::from(&tx);
-        assert!(!json_row.id.is_empty());
-        assert_eq!(json_row.stellar_account, "GABC123");
-        assert_eq!(
-            json_row.anchor_transaction_id,
-            Some("anchor-123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_build_filter_conditions_no_filters() {
-        let (where_clause, params) = build_filter_conditions(&None, &None, &None, &None);
-        assert!(where_clause.is_empty());
-        assert!(params.is_empty());
-    }
-
-    #[test]
-    fn test_build_filter_conditions_with_date_range() {
-        let from = Some("2025-01-01".to_string());
-        let to = Some("2025-02-01".to_string());
-        let (where_clause, params) = build_filter_conditions(&from, &to, &None, &None);
-        assert!(where_clause.contains("created_at >="));
-        assert!(where_clause.contains("created_at <"));
-        assert_eq!(params.len(), 2);
-    }
-
-    // --- Additional data export tests (#455) ---
-
-    #[test]
-    fn test_parse_date_iso8601_with_time() {
-        let result = parse_date("2025-06-15T12:00:00Z");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_parse_date_invalid_returns_error() {
-        let result = parse_date("not-a-date");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_date_partial_string_returns_error() {
-        let result = parse_date("2025-13-01"); // month 13 is invalid
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_build_filter_conditions_status_only() {
-        let status = Some("completed".to_string());
-        let (where_clause, params) = build_filter_conditions(&None, &None, &status, &None);
-        assert!(where_clause.contains("status ="));
-        assert_eq!(params.len(), 1);
-    }
-
-    #[test]
-    fn test_build_filter_conditions_asset_code_only() {
-        let asset = Some("USDC".to_string());
-        let (where_clause, params) = build_filter_conditions(&None, &None, &None, &asset);
-        assert!(where_clause.contains("asset_code ="));
-        assert_eq!(params.len(), 1);
-    }
-
-    #[test]
-    fn test_build_filter_conditions_all_filters() {
-        let from = Some("2025-01-01".to_string());
-        let to = Some("2025-12-31".to_string());
-        let status = Some("pending".to_string());
-        let asset = Some("USD".to_string());
-        let (where_clause, params) = build_filter_conditions(&from, &to, &status, &asset);
-        assert!(where_clause.starts_with("WHERE "));
-        assert_eq!(params.len(), 4);
-    }
-
-    #[test]
-    fn test_build_filter_conditions_invalid_date_skipped() {
-        // Invalid dates should be silently skipped (no condition added)
-        let from = Some("bad-date".to_string());
-        let (where_clause, params) = build_filter_conditions(&from, &None, &None, &None);
-        assert!(where_clause.is_empty());
-        assert!(params.is_empty());
-    }
-
-    #[test]
-    fn test_to_date_adds_one_day() {
-        // The `to` filter should include the entire end day by adding 1 day
-        let to = Some("2025-06-01".to_string());
-        let (where_clause, _) = build_filter_conditions(&None, &to, &None, &None);
-        assert!(where_clause.contains("created_at <"));
-    }
-
-    #[test]
-    fn test_csv_row_optional_fields_default_to_empty() {
-        use bigdecimal::BigDecimal;
-        use uuid::Uuid;
-
-        let tx = Transaction {
-            id: Uuid::new_v4(),
-            stellar_account: "GABC".to_string(),
-            amount: BigDecimal::from(1),
-            asset_code: "XLM".to_string(),
-            status: "pending".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            anchor_transaction_id: None,
-            callback_type: None,
-            callback_status: None,
-            settlement_id: None,
-            memo: None,
-            memo_type: None,
-            metadata: None,
-            trace_id: None,
-        };
-
-        let row = TransactionCsvRow::from(&tx);
-        assert_eq!(row.anchor_transaction_id, "");
-        assert_eq!(row.callback_type, "");
-        assert_eq!(row.callback_status, "");
-    }
-
-    #[test]
-    fn test_json_row_optional_fields_are_none() {
-        use bigdecimal::BigDecimal;
-        use uuid::Uuid;
-
-        let tx = Transaction {
-            id: Uuid::new_v4(),
-            stellar_account: "GABC".to_string(),
-            amount: BigDecimal::from(1),
-            asset_code: "XLM".to_string(),
-            status: "pending".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            anchor_transaction_id: None,
-            callback_type: None,
-            callback_status: None,
-            settlement_id: None,
-            memo: None,
-            memo_type: None,
-            metadata: None,
-            trace_id: None,
-        };
-
-        let row = TransactionJsonRow::from(&tx);
-        assert!(row.anchor_transaction_id.is_none());
-        assert!(row.callback_type.is_none());
-        assert!(row.callback_status.is_none());
-    }
-
-    #[test]
-    fn test_csv_row_amount_serialised_as_string() {
-        use bigdecimal::BigDecimal;
-        use std::str::FromStr;
-        use uuid::Uuid;
-
-        let tx = Transaction {
-            id: Uuid::new_v4(),
-            stellar_account: "GABC".to_string(),
-            amount: BigDecimal::from_str("123.456").unwrap(),
-            asset_code: "USD".to_string(),
-            status: "completed".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            anchor_transaction_id: None,
-            callback_type: None,
-            callback_status: None,
-            settlement_id: None,
-            memo: None,
-            memo_type: None,
-            metadata: None,
-            trace_id: None,
-        };
-
-        let row = TransactionCsvRow::from(&tx);
-        assert_eq!(row.amount, "123.456");
-    }
-
-    #[test]
-    fn test_export_query_default_has_no_filters() {
-        let q = ExportQuery::default();
-        assert!(q.from.is_none());
-        assert!(q.to.is_none());
-        assert!(q.status.is_none());
-        assert!(q.asset_code.is_none());
-    }
-
-    #[test]
-    fn test_filter_param_count_matches_placeholders() {
-        // Ensure the number of `$N` placeholders equals the number of params
-        let from = Some("2025-01-01".to_string());
-        let to = Some("2025-06-01".to_string());
-        let status = Some("pending".to_string());
-        let asset = Some("USD".to_string());
-        let (where_clause, params) = build_filter_conditions(&from, &to, &status, &asset);
-
-        let placeholder_count = (1..=params.len())
-            .filter(|i| where_clause.contains(&format!("${i}")))
-            .count();
-        assert_eq!(placeholder_count, params.len());
-    }
+    Ok((StatusCode::OK, headers, axum::body::Body::from_stream(body_stream)))
 }

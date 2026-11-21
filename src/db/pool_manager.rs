@@ -2,6 +2,40 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
+/// Snapshot of a pool's health-relevant statistics.
+///
+/// This is the single source of truth for what counts as a "healthy" pool.
+/// Both `/health` (liveness) and `/ready` (readiness) must derive their
+/// verdict from [`PoolStats::is_healthy`] so the two endpoints can never
+/// disagree about the database pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStats {
+    pub size: u32,
+    pub num_idle: u32,
+    pub is_closed: bool,
+}
+
+impl PoolStats {
+    /// Capture the current statistics of `pool`.
+    pub fn from_pool(pool: &PgPool) -> Self {
+        Self {
+            size: pool.size(),
+            num_idle: pool.num_idle() as u32,
+            is_closed: pool.is_closed(),
+        }
+    }
+
+    /// The one pool-health predicate shared by liveness and readiness.
+    ///
+    /// A pool is healthy only when it is open and has at least one idle
+    /// connection available to serve requests. Readiness is the stricter
+    /// endpoint, so this predicate is intentionally conservative: any state
+    /// that fails readiness also fails health.
+    pub fn is_healthy(&self) -> bool {
+        !self.is_closed && self.num_idle > 0
+    }
+}
+
 #[derive(Clone)]
 pub struct PoolManager {
     primary: PgPool,
@@ -46,6 +80,11 @@ impl PoolManager {
 
     pub fn replica(&self) -> Option<&PgPool> {
         self.replica.as_ref()
+    }
+
+    /// Statistics for the primary pool, used by the health/readiness checks.
+    pub fn primary_stats(&self) -> PoolStats {
+        PoolStats::from_pool(&self.primary)
     }
 
     pub async fn read_pool(&self) -> (&PgPool, bool) {
@@ -126,5 +165,31 @@ mod tests {
             manager.primary().is_closed(),
             "graceful_shutdown must close the primary pool, not just drop its handle"
         );
+    }
+
+    /// Issue #1654: the shared predicate must be conservative so that any
+    /// pool state failing readiness also fails health.
+    #[test]
+    fn pool_stats_predicate_is_conservative() {
+        let healthy = PoolStats {
+            size: 5,
+            num_idle: 2,
+            is_closed: false,
+        };
+        assert!(healthy.is_healthy());
+
+        let closed = PoolStats {
+            size: 5,
+            num_idle: 2,
+            is_closed: true,
+        };
+        assert!(!closed.is_healthy());
+
+        let exhausted = PoolStats {
+            size: 5,
+            num_idle: 0,
+            is_closed: false,
+        };
+        assert!(!exhausted.is_healthy());
     }
 }

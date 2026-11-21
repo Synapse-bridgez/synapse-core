@@ -37,6 +37,16 @@ pub enum DependencyStatus {
     },
 }
 
+/// Shared pool-health predicate used by both `/health` and `/ready`.
+///
+/// This is the single source of truth for whether a database pool is
+/// considered healthy. Readiness is the stricter consumer: a pool that fails
+/// this predicate fails readiness, and `/health` must not report the pool as
+/// healthy in that case either.
+pub fn is_pool_healthy(stats: &crate::db::pool_manager::PoolStats) -> bool {
+    stats.is_healthy()
+}
+
 #[async_trait]
 pub trait DependencyChecker: Send + Sync {
     async fn check(&self) -> DependencyStatus;

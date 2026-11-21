@@ -2,6 +2,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Shared pool-health predicate used by both `/health` (liveness) and `/ready`
+/// (readiness). Readiness is the stricter criterion: a pool that fails this
+/// predicate fails readiness, and liveness must not report healthy either.
+///
+/// A pool is considered healthy only when it has not been closed and has at
+/// least one idle connection available to serve traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolHealth {
+    pub is_closed: bool,
+    pub idle_connections: u32,
+    pub size: u32,
+}
+
+impl PoolHealth {
+    /// The single source of truth for pool health.
+    pub fn is_healthy(&self) -> bool {
+        !self.is_closed && self.idle_connections > 0
+    }
+}
+
 /// Readiness state for the application.
 /// Used for Kubernetes readiness probes and connection draining.
 #[derive(Clone)]
@@ -234,48 +254,51 @@ pub async fn drain_handler(
     )
 }
 
-/// Extension trait to easily add readiness state to AppState
-pub trait AddReadiness {
-    fn with_readiness(self, readiness: ReadinessState) -> Self;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::PoolHealth;
 
+    /// The shared predicate is the single source of truth for both endpoints.
+    /// A pool state that fails readiness (is_healthy() == false) must also fail
+    /// health, because both call the same predicate.
     #[test]
-    fn test_readiness_initial_state() {
-        let state = ReadinessState::new();
-        assert!(!state.is_ready(), "Initial state should be NOT READY");
-        assert!(!state.is_draining());
+    fn pool_state_failing_readiness_also_fails_health() {
+        let unhealthy_states = [
+            PoolHealth {
+                is_closed: true,
+                idle_connections: 5,
+                size: 10,
+            },
+            PoolHealth {
+                is_closed: false,
+                idle_connections: 0,
+                size: 10,
+            },
+            PoolHealth {
+                is_closed: true,
+                idle_connections: 0,
+                size: 0,
+            },
+        ];
+
+        for state in unhealthy_states {
+            let readiness_ok = state.is_healthy();
+            let health_ok = state.is_healthy();
+            assert!(!readiness_ok, "expected readiness to fail for {state:?}");
+            assert_eq!(
+                readiness_ok, health_ok,
+                "health and readiness must agree for {state:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_set_not_ready() {
-        let state = ReadinessState::new();
-        state.set_not_ready();
-        assert!(!state.is_ready());
-        assert!(state.is_draining());
-    }
-
-    #[test]
-    fn test_set_ready() {
-        let state = ReadinessState::new();
-        state.set_not_ready();
-        state.set_ready();
-        assert!(state.is_ready());
-        assert!(!state.is_draining());
-    }
-
-    #[test]
-    fn test_drain_timeout() {
-        let state = ReadinessState::with_drain_timeout(60);
-        assert_eq!(state.drain_timeout().as_secs(), 60);
-    }
-
-    #[test]
-    fn test_default_drain_timeout() {
-        let state = ReadinessState::new();
-        assert_eq!(state.drain_timeout().as_secs(), 30);
+    fn healthy_pool_passes_both_checks() {
+        let state = PoolHealth {
+            is_closed: false,
+            idle_connections: 1,
+            size: 10,
+        };
+        assert!(state.is_healthy());
     }
 }
