@@ -18,6 +18,9 @@ use std::sync::Arc;
 ///
 /// Combines Query, Mutation, and Subscription root types with applied
 /// health checks and security extensions.
+///
+/// All requests to this schema must include an `X-Tenant-Id` header identifying
+/// the tenant; requests without it are rejected by the tenant middleware.
 pub type AppSchema = async_graphql::Schema<Query, Mutation, Subscription>;
 
 /// Maximum query nesting depth allowed.
