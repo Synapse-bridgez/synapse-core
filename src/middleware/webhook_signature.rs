@@ -17,6 +17,14 @@
 //! - `X-Webhook-Signature`: `sha256=<hex>`, HMAC-SHA256 over
 //!   `{timestamp}.{body}` keyed by the current (or, during a rotation grace
 //!   window, previous) `anchor_webhook_secret`.
+//!
+//! # Verification cache
+//!
+//! Senders retry deliveries, so the same `(tenant_id, signature)` pair can
+//! arrive several times within a short window. A bounded, TTL-based cache of
+//! *successful* verifications lets duplicate deliveries skip the HMAC work.
+//! Only acceptances are cached (never rejections), and entries expire after a
+//! few seconds so a rotated secret is not honoured past its lifetime.
 
 use crate::cache::webhook::{validate_timestamp, verify_signature, WebhookSecurityError};
 use crate::AppState;
@@ -29,9 +37,77 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const TIMESTAMP_HEADER: &str = "X-Webhook-Timestamp";
 const SIGNATURE_HEADER: &str = "X-Webhook-Signature";
+
+/// How long a successful verification stays cached. Kept short so a rotated
+/// secret is not honoured past its lifetime.
+const VERIFIED_TTL: Duration = Duration::from_secs(5);
+
+/// Upper bound on cached entries; oldest entries are evicted first.
+const VERIFIED_CAPACITY: usize = 1024;
+
+/// Bounded, TTL-based cache of verified `(tenant_id, signature)` pairs.
+struct VerifiedCache {
+    entries: HashMap<(String, String), Instant>,
+}
+
+impl VerifiedCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, key: &(String, String)) -> bool {
+        match self.entries.get(key) {
+            Some(expires_at) if *expires_at > Instant::now() => true,
+            Some(_) => {
+                self.entries.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn insert(&mut self, key: (String, String)) {
+        let now = Instant::now();
+        self.entries.retain(|_, expires_at| *expires_at > now);
+        if self.entries.len() >= VERIFIED_CAPACITY {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(key, now + VERIFIED_TTL);
+    }
+}
+
+fn verified_cache() -> &'static Mutex<VerifiedCache> {
+    static CACHE: OnceLock<Mutex<VerifiedCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VerifiedCache::new()))
+}
+
+fn cache_get(key: &(String, String)) -> bool {
+    verified_cache()
+        .lock()
+        .map(|mut cache| cache.get(key))
+        .unwrap_or(false)
+}
+
+fn cache_insert(key: (String, String)) {
+    if let Ok(mut cache) = verified_cache().lock() {
+        cache.insert(key);
+    }
+}
 
 /// Returns every secret value that should currently be accepted: the
 /// rotation-aware values from `SecretsStore` when Vault-backed secrets are
@@ -103,6 +179,19 @@ pub async fn verify_anchor_signature(
         }
     };
 
+    let tenant_id = parts
+        .extensions
+        .get::<crate::middleware::tenant::TenantContext>()
+        .map(|ctx| ctx.tenant_id.clone())
+        .unwrap_or_default();
+    let cache_key = (tenant_id, signature.clone());
+
+    if cache_get(&cache_key) {
+        crate::metrics::record_webhook_signature_cache_hit();
+        let req = Request::from_parts(parts, Body::from(bytes.to_vec()));
+        return next.run(req).await;
+    }
+
     let secrets = valid_secrets(&state).await;
     let verified = secrets
         .iter()
@@ -114,6 +203,8 @@ pub async fn verify_anchor_signature(
             WebhookSecurityError::InvalidSignature,
         );
     }
+
+    cache_insert(cache_key);
 
     let req = Request::from_parts(parts, Body::from(bytes.to_vec()));
     next.run(req).await
@@ -157,6 +248,29 @@ mod tests {
                 verify_anchor_signature,
             ))
             .with_state(state)
+    }
+
+    #[test]
+    fn verified_cache_skips_duplicate_and_expires() {
+        let mut cache = VerifiedCache::new();
+        let key = ("tenant-a".to_string(), "sha256=deadbeef".to_string());
+
+        assert!(!cache.get(&key));
+        cache.insert(key.clone());
+        assert!(cache.get(&key));
+
+        // Expired entries are treated as misses.
+        cache.entries.insert(key.clone(), Instant::now());
+        assert!(!cache.get(&key));
+    }
+
+    #[test]
+    fn verified_cache_is_bounded() {
+        let mut cache = VerifiedCache::new();
+        for i in 0..(VERIFIED_CAPACITY + 10) {
+            cache.insert(("tenant".to_string(), format!("sig-{i}")));
+        }
+        assert!(cache.entries.len() <= VERIFIED_CAPACITY);
     }
 
     #[tokio::test]
@@ -215,5 +329,31 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires DATABASE_URL"]
+    async fn duplicate_delivery_hits_cache() {
+        let app = test_app("s3cr3t").await;
+        let body = b"{\"stellar_account\":\"G...\"}";
+        let ts = now_secs().to_string();
+        let sig = sign("s3cr3t", &ts, body);
+
+        let build = || {
+            Request::builder()
+                .method("POST")
+                .uri("/callback")
+                .header(TIMESTAMP_HEADER, ts.clone())
+                .header(SIGNATURE_HEADER, sig.clone())
+                .body(Body::from(body.to_vec()))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(build()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(cache_get(&(String::new(), sig.clone())));
+
+        let second = app.oneshot(build()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
     }
 }
