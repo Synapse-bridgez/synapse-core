@@ -45,25 +45,32 @@ pub fn apply_jitter(base_delay: u64) -> u64 {
 
 /// Retry a fallible async operation with exponential backoff + jitter.
 ///
+/// - `operation_name`: label used in logs and metrics
 /// - `max_retries`: maximum number of retry attempts (not counting the initial try)
 /// - `base_delay_ms`: base delay in milliseconds before the first retry
-/// - Retries only when `is_transient_db_error` returns true
+/// - `is_retryable`: predicate classifying an error as transient (retryable) or
+///   permanent. Permanent errors short-circuit after a single attempt; transient
+///   errors are retried up to `max_retries`. Pass [`is_transient_db_error`] for
+///   database operations, or a predicate matching the caller's own transient
+///   error variants.
 /// - Tracks `db_retry_total` metric by error type
-pub async fn retry_with_backoff<F, Fut, T>(
+pub async fn retry_with_backoff<F, Fut, T, P>(
     operation_name: &str,
     max_retries: u32,
     base_delay_ms: u64,
+    is_retryable: P,
     mut f: F,
 ) -> Result<T, sqlx::Error>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+    P: Fn(&sqlx::Error) -> bool,
 {
     let mut attempt = 0u32;
     loop {
         match f().await {
             Ok(val) => return Ok(val),
-            Err(err) if attempt < max_retries && is_transient_db_error(&err) => {
+            Err(err) if attempt < max_retries && is_retryable(&err) => {
                 attempt += 1;
                 // Exponential backoff: base * 2^(attempt-1), capped at 10s
                 let exp_delay = base_delay_ms * (1u64 << (attempt - 1).min(6));
@@ -132,7 +139,7 @@ mod tests {
         let cc = call_count.clone();
 
         // Simulate: first call fails with pool timeout, second succeeds
-        let result = retry_with_backoff("test_op", 3, 1, || {
+        let result = retry_with_backoff("test_op", 3, 1, is_transient_db_error, || {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, Ordering::SeqCst);
@@ -155,15 +162,16 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let cc = call_count.clone();
 
-        let result: Result<u32, sqlx::Error> = retry_with_backoff("test_op", 3, 1, || {
-            let cc = cc.clone();
-            async move {
-                cc.fetch_add(1, Ordering::SeqCst);
-                // RowNotFound is a permanent error
-                Err(sqlx::Error::RowNotFound)
-            }
-        })
-        .await;
+        let result: Result<u32, sqlx::Error> =
+            retry_with_backoff("test_op", 3, 1, is_transient_db_error, || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    // RowNotFound is a permanent error
+                    Err(sqlx::Error::RowNotFound)
+                }
+            })
+            .await;
 
         assert!(result.is_err());
         // Should only be called once — no retries for permanent errors
@@ -183,5 +191,56 @@ mod tests {
     #[test]
     fn test_is_transient_db_error_pool_closed() {
         assert!(!is_transient_db_error(&sqlx::Error::PoolClosed));
+    }
+
+    #[tokio::test]
+    async fn test_custom_predicate_permanent_error_returns_after_one_attempt() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+
+        // Predicate treats only PoolTimedOut as transient; RowNotFound is permanent.
+        let result: Result<u32, sqlx::Error> = retry_with_backoff(
+            "test_op",
+            5,
+            1,
+            |e| matches!(e, sqlx::Error::PoolTimedOut),
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    Err(sqlx::Error::RowNotFound)
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_custom_predicate_transient_error_retries_to_limit() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+
+        // Predicate treats PoolTimedOut as transient; it always fails, so the
+        // helper must exhaust the configured retry budget (1 + 2 attempts).
+        let result: Result<u32, sqlx::Error> = retry_with_backoff(
+            "test_op",
+            2,
+            1,
+            |e| matches!(e, sqlx::Error::PoolTimedOut),
+            || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    Err(sqlx::Error::PoolTimedOut)
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 }

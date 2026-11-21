@@ -226,9 +226,7 @@ impl Config {
 
         Ok(Config {
             app_env,
-            server_port: env::var("SERVER_PORT")
-                .unwrap_or_else(|_| "3000".to_string())
-                .parse()?,
+            server_port: parse_env("SERVER_PORT", "3000")?,
             database_url,
             database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
             backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
@@ -325,6 +323,44 @@ impl Config {
     }
 }
 
+/// Env var names whose values must never appear in error messages.
+const SECRET_KEYS: &[&str] = &[
+    "DATABASE_URL",
+    "DATABASE_URL_TEMPLATE",
+    "DATABASE_REPLICA_URL",
+    "BACKUP_DATABASE_URL",
+    "ANCHOR_WEBHOOK_SECRET",
+    "BACKUP_ENCRYPTION_KEY",
+    "REDIS_URL",
+    "VAULT_ROLE_ID",
+    "VAULT_SECRET_ID",
+];
+
+/// Redact a rejected config value so it can be safely included in an error.
+fn redact_value(key: &str, value: &str) -> String {
+    if SECRET_KEYS.contains(&key) {
+        "<redacted>".to_string()
+    } else {
+        format!("{value:?}")
+    }
+}
+
+/// Parse an env var, enriching any failure with the offending key name and
+/// (redacted) rejected value so startup errors say which config is wrong.
+fn parse_env<T>(key: &str, default: &str) -> anyhow::Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let raw = env::var(key).unwrap_or_else(|_| default.to_string());
+    raw.trim().parse::<T>().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid config {key}={}: {e}",
+            redact_value(key, raw.trim())
+        )
+    })
+}
+
 fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
     let value = raw.trim();
     if value == "*" {
@@ -336,10 +372,19 @@ fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .map(str::parse::<IpNet>)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "invalid config ALLOWED_IPS={}: {e}",
+                redact_value("ALLOWED_IPS", value)
+            )
+        })?;
 
     if cidrs.is_empty() {
-        anyhow::bail!("ALLOWED_IPS must be '*' or a comma-separated list of CIDRs");
+        anyhow::bail!(
+            "invalid config ALLOWED_IPS={}: must be '*' or a comma-separated list of CIDRs",
+            redact_value("ALLOWED_IPS", value)
+        );
     }
 
     Ok(AllowedIps::Cidrs(cidrs))
@@ -349,6 +394,9 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "text" => Ok(LogFormat::Text),
         "json" => Ok(LogFormat::Json),
-        _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
+        _ => anyhow::bail!(
+            "invalid config LOG_FORMAT={}: must be 'text' or 'json'",
+            redact_value("LOG_FORMAT", raw.trim())
+        ),
     }
 }

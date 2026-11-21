@@ -21,6 +21,8 @@ const BASE_DELAY_SECS: i64 = 10;
 /// How long (seconds) before a claimed in_progress delivery can be reclaimed
 /// by another worker (crash recovery).
 const CLAIM_TIMEOUT_SECS: i64 = 300;
+/// Maximum number of response-body bytes included in a failure log line.
+const MAX_LOGGED_RESPONSE_BODY_BYTES: usize = 512;
 /// Circuit breaker: consecutive failures before tripping open.
 const CB_FAILURE_THRESHOLD: u32 = 3;
 /// Circuit breaker: seconds before an open breaker transitions to half-open.
@@ -572,6 +574,15 @@ impl WebhookDispatcher {
                     );
                     Ok(true)
                 } else {
+                    // Log only the status code and a truncated response body:
+                    // never request headers, signatures or endpoint secrets.
+                    tracing::warn!(
+                        delivery_id = %delivery.id,
+                        endpoint_id = %delivery.endpoint_id,
+                        status_code = status_code,
+                        response_body = %truncate_for_log(&resp_body, MAX_LOGGED_RESPONSE_BODY_BYTES),
+                        "Webhook delivery failed with non-2xx response"
+                    );
                     self.handle_failure(
                         delivery,
                         new_attempt_count,

@@ -119,6 +119,13 @@ pub mod codes {
 
     // Redis errors
     pub const REDIS_001: (&str, u16, &str) = ("ERR_REDIS_001", 500, "Redis operation failed");
+
+    // Circuit breaker
+    pub const CIRCUIT_BREAKER_001: (&str, u16, &str) = (
+        "ERR_CIRCUIT_BREAKER_001",
+        503,
+        "Circuit breaker is open",
+    );
 }
 
 /// Get all error codes as a vector for catalog generation
@@ -304,6 +311,11 @@ pub enum AppError {
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),
 
+    /// The circuit breaker is open. Carries the error that tripped it (if
+    /// known) so the original cause is not swallowed.
+    #[error("Circuit breaker is open: {0}")]
+    CircuitBreakerOpen(String),
+
     #[error("Internal error: {0}")]
     Anyhow(#[from] anyhow::Error),
 }
@@ -334,6 +346,7 @@ impl AppError {
             AppError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
             AppError::InsufficientPermissions(_) => StatusCode::FORBIDDEN,
             AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::CircuitBreakerOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -365,6 +378,7 @@ impl AppError {
             AppError::AuthenticationFailed(_) => codes::AUTH_001.0,
             AppError::InsufficientPermissions(_) => codes::AUTH_002.0,
             AppError::Redis(_) => codes::REDIS_001.0,
+            AppError::CircuitBreakerOpen(_) => codes::CIRCUIT_BREAKER_001.0,
             AppError::Anyhow(_) => codes::INTERNAL_001.0,
         }
     }
