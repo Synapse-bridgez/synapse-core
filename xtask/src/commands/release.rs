@@ -51,10 +51,18 @@ fn ensure_clean_tree() -> anyhow::Result<()> {
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to run git status: {e}"))?;
 
-    if !output.stdout.is_empty() {
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to check git status: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let dirty = String::from_utf8_lossy(&output.stdout);
+    if !dirty.trim().is_empty() {
         anyhow::bail!(
             "Working tree is not clean. Commit or stash your changes before releasing.\n{}",
-            String::from_utf8_lossy(&output.stdout)
+            dirty
         );
     }
     println!("  Working tree is clean.");
