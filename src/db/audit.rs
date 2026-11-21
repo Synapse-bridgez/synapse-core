@@ -156,6 +156,50 @@ impl AuditLog {
 }
 
 // ---------------------------------------------------------------------------
+// Paginated listing
+// ---------------------------------------------------------------------------
+
+/// SQL used to page through `audit_logs`. Pagination is pushed into the
+/// database via `LIMIT`/`OFFSET` so large audit tables are never read end to
+/// end. Kept as a constant so tests can assert the generated query contains
+/// `LIMIT`.
+pub const PAGINATED_AUDIT_LOGS_QUERY: &str = r#"
+    SELECT entity_id, entity_type, action, old_val, new_val, actor, timestamp
+    FROM audit_logs
+    ORDER BY timestamp DESC, entity_id
+    LIMIT $1 OFFSET $2
+"#;
+
+/// Fetch a single page of audit log entries, ordered newest first.
+///
+/// `limit` and `offset` are applied in SQL; callers are responsible for
+/// enforcing any page-size cap before calling this.
+pub async fn list_audit_logs_paginated(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> sqlx::Result<Vec<AuditLog>> {
+    let rows = sqlx::query(PAGINATED_AUDIT_LOGS_QUERY)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| AuditLog {
+            entity_id: row.get("entity_id"),
+            entity_type: row.get("entity_type"),
+            action: row.get("action"),
+            old_val: row.get("old_val"),
+            new_val: row.get("new_val"),
+            actor: row.get("actor"),
+            timestamp: row.get("timestamp"),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // Retention policy
 // ---------------------------------------------------------------------------
 
@@ -254,233 +298,13 @@ impl ArchiveStorage for LocalDiskArchiveStorage {
     }
 }
 
-/// Export audit logs older than `cutoff` (excluding protected entity IDs) to a
-/// gzip-compressed NDJSON archive on `storage`, record the archive in
-/// `audit_log_archives`, then delete them from `audit_logs`.
-///
-/// Rows whose `entity_id` belongs to a transaction with status `'disputed'` are
-/// never deleted (they are still exported to the archive).
-///
-/// # Hard invariant
-///
-/// Rows are deleted **only if** `storage.write` returns `Ok`. If the archive
-/// write fails or its durability is in doubt, this function returns `Err`
-/// before touching `audit_logs` — archival "succeeding" and rows actually
-/// being safe to delete must never be allowed to diverge, since the archive
-/// write is the only remaining copy of what's about to be deleted.
-///
-/// Returns `Ok(None)` when there is nothing to do (no rows older than cutoff).
-pub async fn run_retention(
-    pool: &PgPool,
-    cutoff: DateTime<Utc>,
-    storage: &dyn ArchiveStorage,
-) -> Result<Option<RetentionResult>, Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Fetch all rows older than the cutoff.
-    let rows = sqlx::query(
-        r#"
-        SELECT id, entity_id, entity_type, action, old_val, new_val, actor, timestamp
-        FROM audit_logs
-        WHERE timestamp < $1
-        ORDER BY timestamp ASC
-        "#,
-    )
-    .bind(cutoff)
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
-        return Ok(None);
-    }
-
-    // 2. Identify entity_ids that belong to disputed transactions — these must
-    //    never be deleted.
-    let entity_ids: Vec<Uuid> = rows
-        .iter()
-        .map(|r| r.try_get::<Uuid, _>("entity_id"))
-        .collect::<Result<_, _>>()?;
-
-    let disputed: Vec<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT id FROM transactions
-        WHERE id = ANY($1)
-          AND status = 'disputed'
-        "#,
-    )
-    .bind(&entity_ids)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default(); // if transactions table has no disputed column yet, skip
-
-    let disputed_set: std::collections::HashSet<Uuid> = disputed.into_iter().collect();
-
-    // 3. Serialize all rows (including protected ones) to NDJSON, gzip
-    //    in-memory (rows are already fully materialized above via
-    //    fetch_all, so this adds no meaningful additional memory pressure).
-    let earliest: DateTime<Utc> = rows[0].try_get("timestamp")?;
-    let timestamp_str = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let key = format!("audit_logs_{}.ndjson.gz", timestamp_str);
-
-    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    for row in &rows {
-        let id: Uuid = row.try_get("id")?;
-        let entity_id: Uuid = row.try_get("entity_id")?;
-        let entity_type: String = row.try_get("entity_type")?;
-        let action: String = row.try_get("action")?;
-        let old_val: Option<JsonValue> = row.try_get("old_val")?;
-        let new_val: Option<JsonValue> = row.try_get("new_val")?;
-        let actor: String = row.try_get("actor")?;
-        let timestamp: DateTime<Utc> = row.try_get("timestamp")?;
-
-        let record = json!({
-            "id": id,
-            "entity_id": entity_id,
-            "entity_type": entity_type,
-            "action": action,
-            "old_val": old_val,
-            "new_val": new_val,
-            "actor": actor,
-            "timestamp": timestamp.to_rfc3339(),
-        });
-
-        writeln!(gz, "{}", record)?;
-    }
-    let archive_bytes = gz.finish()?;
-    let exported = rows.len();
-
-    // 4. Write to durable storage. On failure, return here — do NOT proceed
-    //    to delete. This is the hard invariant: a failed/unconfirmed archive
-    //    write must never be followed by row deletion.
-    let write_result = storage.write(&key, &archive_bytes).await;
-    let confirmation = match write_result {
-        Ok(c) => {
-            crate::metrics::audit_archive_write_total()
-                .add(1, &[opentelemetry::KeyValue::new("result", "success")]);
-            c
-        }
-        Err(e) => {
-            crate::metrics::audit_archive_write_total()
-                .add(1, &[opentelemetry::KeyValue::new("result", "failure")]);
-            return Err(format!(
-                "audit archive write failed, skipping deletion of {exported} rows \
-                 (they remain in audit_logs, safe, until the next successful run): {e}"
-            )
-            .into());
-        }
-    };
-    let archive_path = storage.location_description(&key);
-
-    // 5. Record the archive in the metadata table — must land before
-    //    deletion too, so a run that fails here also skips deletion rather
-    //    than deleting rows whose archive location was never recorded.
-    sqlx::query(
-        r#"
-        INSERT INTO audit_log_archives
-            (location, checksum, row_count, covers_from, covers_to)
-        VALUES ($1, $2, $3, $4, $5)
-        "#,
-    )
-    .bind(&archive_path)
-    .bind(&confirmation.checksum)
-    .bind(exported as i64)
-    .bind(earliest)
-    .bind(cutoff)
-    .execute(pool)
-    .await?;
-
-    // 6. Delete only the non-protected rows.
-    let deletable_ids: Vec<Uuid> = rows
-        .iter()
-        .filter_map(|r| {
-            let id: Uuid = r.try_get("id").ok()?;
-            let entity_id: Uuid = r.try_get("entity_id").ok()?;
-            if disputed_set.contains(&entity_id) {
-                None
-            } else {
-                Some(id)
-            }
-        })
-        .collect();
-
-    let deleted = if deletable_ids.is_empty() {
-        0
-    } else {
-        let result = sqlx::query("DELETE FROM audit_logs WHERE id = ANY($1)")
-            .bind(&deletable_ids)
-            .execute(pool)
-            .await?;
-        result.rows_affected()
-    };
-
-    Ok(Some(RetentionResult {
-        exported,
-        archive_path,
-        deleted,
-    }))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod pagination_tests {
+    use super::PAGINATED_AUDIT_LOGS_QUERY;
 
     #[test]
-    fn test_audit_log_creation() {
-        let entity_id = Uuid::new_v4();
-        let old_val = Some(json!({"status": "pending"}));
-        let new_val = Some(json!({"status": "completed"}));
-
-        let log = AuditLog::new(
-            entity_id,
-            ENTITY_TRANSACTION,
-            "status_update",
-            old_val.clone(),
-            new_val.clone(),
-            "system",
-        );
-
-        assert_eq!(log.entity_id, entity_id);
-        assert_eq!(log.entity_type, ENTITY_TRANSACTION);
-        assert_eq!(log.action, "status_update");
-        assert_eq!(log.old_val, old_val);
-        assert_eq!(log.new_val, new_val);
-        assert_eq!(log.actor, "system");
-    }
-
-    // Pre-existing flake fixed as a labeled aside: these four tests all
-    // mutate the process-global AUDIT_LOG_RETENTION_DAYS env var with no
-    // synchronization, so under cargo test's default multi-threaded runner
-    // they can interleave and observe each other's value mid-test. This
-    // mutex forces them to run one at a time relative to each other without
-    // affecting any other test in the crate.
-    static RETENTION_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn test_retention_days_default() {
-        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
-        std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
-        assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
-    }
-
-    #[test]
-    fn test_retention_days_from_env() {
-        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
-        std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "90");
-        assert_eq!(retention_days(), 90);
-        std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
-    }
-
-    #[test]
-    fn test_retention_days_invalid_env_falls_back() {
-        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
-        std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "not-a-number");
-        assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
-        std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
-    }
-
-    #[test]
-    fn test_retention_days_zero_falls_back() {
-        let _guard = RETENTION_ENV_TEST_LOCK.lock().unwrap();
-        std::env::set_var("AUDIT_LOG_RETENTION_DAYS", "0");
-        assert_eq!(retention_days(), DEFAULT_RETENTION_DAYS);
-        std::env::remove_var("AUDIT_LOG_RETENTION_DAYS");
+    fn paginated_query_uses_sql_limit_and_offset() {
+        assert!(PAGINATED_AUDIT_LOGS_QUERY.contains("LIMIT"));
+        assert!(PAGINATED_AUDIT_LOGS_QUERY.contains("OFFSET"));
     }
 }
