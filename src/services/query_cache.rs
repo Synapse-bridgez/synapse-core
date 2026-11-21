@@ -170,6 +170,21 @@ impl QueryCache {
         &self,
         key: &str,
     ) -> Result<Option<T>, redis::RedisError> {
+        self.get_timed(key, &mut crate::db::slow_query::QueryTimer::new())
+            .await
+    }
+
+    /// Cache lookup that coordinates with the slow-query logger.
+    ///
+    /// The supplied [`QueryTimer`] is only started when the lookup misses both
+    /// the in-memory and Redis caches, i.e. right before the caller has to hit
+    /// the database. A cache hit therefore short-circuits before timing begins
+    /// and can never appear in the slow-query log, regardless of wall time.
+    pub async fn get_timed<T: DeserializeOwned + Send>(
+        &self,
+        key: &str,
+        timer: &mut crate::db::slow_query::QueryTimer,
+    ) -> Result<Option<T>, redis::RedisError> {
         CacheValidator::validate_key(key).map_err(cache_validation_error)?;
 
         // Try in-memory cache first. An entry past its `expires_at` is treated
@@ -180,6 +195,7 @@ impl QueryCache {
                 if entry.expires_at > Instant::now() {
                     self.memory_hits.fetch_add(1, Ordering::Relaxed);
                     if let Ok(value) = serde_json::from_str::<T>(&entry.value) {
+                        // Cache hit: the timer is never started.
                         return Ok(Some(value));
                     }
                 } else {
@@ -199,7 +215,8 @@ impl QueryCache {
         let lru = self.lru.clone();
         let memory_ttl = self.memory_ttl;
 
-        self.cb
+        let result = self
+            .cb
             .call(|| async move {
                 // OPT: Get connection from pool (cheap clone of internal Arc)
                 let mut conn = pool.clone();
@@ -238,7 +255,15 @@ impl QueryCache {
                     (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
                 ),
                 crate::middleware::idempotency::RedisError::Redis(r) => r,
-            })
+            })?;
+
+        // Only a full cache miss means the caller will execute the query
+        // against the database, so only then does timing begin.
+        if result.is_none() {
+            timer.start();
+        }
+
+        Ok(result)
     }
 
     pub async fn set<T: Serialize + Send>(
