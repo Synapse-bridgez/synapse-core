@@ -50,6 +50,11 @@ mod tests {
         // Cannot skip from pending to failed without processing
         // (Actually this is valid in our state machine, so this test is removed)
 
+        // Cannot skip from created straight to completed
+        assert!(validate_status_transition("created", "completed").is_err());
+        assert!(validate_status_transition("created", "processing").is_err());
+        assert!(validate_status_transition("created", "pending").is_ok());
+
         // Cannot go from processing to pending
         assert!(validate_status_transition("processing", "pending").is_err());
 
