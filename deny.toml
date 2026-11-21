@@ -51,6 +51,13 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    # quick-xml 0.26.0, pinned by inferno 0.11.21 (pprof's flamegraph
+    # feature). RUSTSEC-2026-0412 (quadratic-time entity/attribute parsing)
+    # fixes in quick-xml >=0.37, which needs a newer inferno release; the
+    # only XML this tree parses is our own generated flamegraph SVG, never
+    # untrusted input. Tracked with the inferno/pprof upgrade.
+    # Reviewed 2026-11-20.
+    "RUSTSEC-2026-0412",
 ]
 
 [licenses]
