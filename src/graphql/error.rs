@@ -34,14 +34,37 @@ use async_graphql::ErrorExtensions;
 // Stable error codes
 // ---------------------------------------------------------------------------
 
-pub const CODE_VALIDATION: &str = "VALIDATION_ERROR";
-pub const CODE_NOT_FOUND: &str = "NOT_FOUND";
-pub const CODE_AUTHENTICATION: &str = "AUTHENTICATION_ERROR";
-pub const CODE_AUTHORIZATION: &str = "AUTHORIZATION_ERROR";
-pub const CODE_RATE_LIMITED: &str = "RATE_LIMITED";
-pub const CODE_COMPLEXITY: &str = "COMPLEXITY_ERROR";
-pub const CODE_DATABASE: &str = "DATABASE_ERROR";
-pub const CODE_INTERNAL: &str = "INTERNAL_ERROR";
+///
+/// Codes and messages mirror `docs/error-catalog.md`; they are stable and must
+/// never be renamed or reused for a different error.
+pub const CODE_VALIDATION: &str = "ERR_VALIDATION_001";
+pub const CODE_NOT_FOUND: &str = "ERR_NOT_FOUND_001";
+pub const CODE_AUTHENTICATION: &str = "ERR_AUTH_001";
+pub const CODE_AUTHORIZATION: &str = "ERR_AUTH_002";
+pub const CODE_RATE_LIMITED: &str = "ERR_RATE_LIMIT_001";
+pub const CODE_COMPLEXITY: &str = "ERR_BAD_REQUEST_001";
+pub const CODE_DATABASE: &str = "ERR_DATABASE_002";
+pub const CODE_INTERNAL: &str = "ERR_INTERNAL_001";
+pub const CODE_CONFLICT: &str = "ERR_TRANSACTION_004";
+
+/// Catalog message for [`CODE_VALIDATION`].
+pub const MSG_VALIDATION: &str = "Validation error - invalid input";
+/// Catalog message for [`CODE_NOT_FOUND`].
+pub const MSG_NOT_FOUND: &str = "Resource not found";
+/// Catalog message for [`CODE_AUTHENTICATION`].
+pub const MSG_AUTHENTICATION: &str = "Invalid authentication credentials";
+/// Catalog message for [`CODE_AUTHORIZATION`].
+pub const MSG_AUTHORIZATION: &str = "Insufficient permissions";
+/// Catalog message for [`CODE_RATE_LIMITED`].
+pub const MSG_RATE_LIMITED: &str = "Rate limit exceeded";
+/// Catalog message for [`CODE_COMPLEXITY`].
+pub const MSG_COMPLEXITY: &str = "Bad request - invalid parameters";
+/// Catalog message for [`CODE_DATABASE`].
+pub const MSG_DATABASE: &str = "Database query execution error";
+/// Catalog message for [`CODE_INTERNAL`].
+pub const MSG_INTERNAL: &str = "Internal server error";
+/// Catalog message for [`CODE_CONFLICT`].
+pub const MSG_CONFLICT: &str = "Transaction already processed (idempotency)";
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -85,6 +108,12 @@ pub enum GraphQlError {
     /// The `detail` string must be a generic, non-sensitive description.
     /// Log the raw error before constructing this variant.
     Internal(String),
+
+    /// The request conflicts with the current state of the resource
+    /// (e.g. a duplicate submission caught by idempotency).
+    ///
+    /// The `detail` string must be a generic, non-sensitive description.
+    Conflict(String),
 }
 
 impl GraphQlError {
@@ -99,14 +128,23 @@ impl GraphQlError {
             GraphQlError::Complexity(_) => CODE_COMPLEXITY,
             GraphQlError::Database(_) => CODE_DATABASE,
             GraphQlError::Internal(_) => CODE_INTERNAL,
+            GraphQlError::Conflict(_) => CODE_CONFLICT,
         }
     }
 
     /// Converts this error into an [`async_graphql::Error`] with a populated
     /// `extensions.code` field (and `retryAfter` for rate-limit errors).
+    ///
+    /// Known variants map to the catalog code and message from
+    /// `docs/error-catalog.md`. Unknown variants stay generic and the original
+    /// error is logged server-side.
     pub fn into_gql_error(self) -> GqlError {
         let code = self.code();
         let message = self.message();
+
+        if matches!(self, GraphQlError::Internal(_)) {
+            tracing::error!(error = ?self, "GraphQL resolver: unmapped internal error");
+        }
 
         let mut err = GqlError::new(message);
         err = err.extend_with(|_, e| e.set("code", code));
@@ -119,18 +157,20 @@ impl GraphQlError {
     }
 
     /// Returns the client-facing error message for this variant.
+    ///
+    /// Messages are the catalog messages; caller-supplied detail is appended
+    /// only where it is safe to expose (validation, not-found, complexity).
     fn message(&self) -> String {
         match self {
-            GraphQlError::Validation(msg) => msg.clone(),
-            GraphQlError::NotFound(resource) => format!("{} not found", resource),
-            GraphQlError::Authentication => "Authentication required".to_string(),
-            GraphQlError::Authorization => "Access denied to this resource".to_string(),
-            GraphQlError::RateLimited { .. } => {
-                "Too many requests — rate limit exceeded".to_string()
-            }
-            GraphQlError::Complexity(msg) => msg.clone(),
-            GraphQlError::Database(msg) => msg.clone(),
-            GraphQlError::Internal(msg) => msg.clone(),
+            GraphQlError::Validation(msg) => format!("{}: {}", MSG_VALIDATION, msg),
+            GraphQlError::NotFound(resource) => format!("{}: {}", MSG_NOT_FOUND, resource),
+            GraphQlError::Authentication => MSG_AUTHENTICATION.to_string(),
+            GraphQlError::Authorization => MSG_AUTHORIZATION.to_string(),
+            GraphQlError::RateLimited { .. } => MSG_RATE_LIMITED.to_string(),
+            GraphQlError::Complexity(msg) => format!("{}: {}", MSG_COMPLEXITY, msg),
+            GraphQlError::Database(_) => MSG_DATABASE.to_string(),
+            GraphQlError::Internal(_) => MSG_INTERNAL.to_string(),
+            GraphQlError::Conflict(_) => MSG_CONFLICT.to_string(),
         }
     }
 }
@@ -153,6 +193,11 @@ pub fn validation_error(field: &str, reason: &str) -> GqlError {
 /// Builds a not-found error for a named resource.
 pub fn not_found_error(resource: &str) -> GqlError {
     GraphQlError::NotFound(resource.to_string()).into()
+}
+
+/// Builds a conflict error (e.g. duplicate submission caught by idempotency).
+pub fn conflict_error(detail: &str) -> GqlError {
+    GraphQlError::Conflict(detail.to_string()).into()
 }
 
 /// Builds a database error, logging the raw cause server-side.

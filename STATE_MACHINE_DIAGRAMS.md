@@ -25,7 +25,9 @@
                               
                               └─→ failed
 
-Valid Transitions (7 total):
+Valid Transitions (9 total):
+├─ created → pending          ✓
+├─ created → failed           ✓
 ├─ pending → processing       ✓
 ├─ pending → completed        ✓
 ├─ pending → failed           ✓

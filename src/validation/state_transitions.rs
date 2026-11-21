@@ -10,7 +10,21 @@ pub struct Transition {
 
 /// Transaction status state machine.
 /// Valid transitions for transaction lifecycle (pending → processing → completed/failed, dlq → pending, …).
+///
+/// This is the single source of truth for transaction status transitions and
+/// mirrors `docs/state-machine.md` / `STATE_MACHINE_DIAGRAMS.md`. Notably a
+/// transaction cannot skip `pending`/`processing` and go straight to
+/// `completed` from `created`.
 pub const TRANSACTION_TRANSITIONS: &[Transition] = &[
+    // From created (initial state) — must be picked up or fail validation
+    Transition {
+        from: "created",
+        to: "pending",
+    },
+    Transition {
+        from: "created",
+        to: "failed",
+    },
     // From pending
     Transition {
         from: "pending",
@@ -174,6 +188,25 @@ mod tests {
             "adjusted",
             "disputed",
             SETTLEMENT_TRANSITIONS
+        ));
+    }
+
+    #[test]
+    fn test_created_to_completed_rejected() {
+        assert!(!is_valid_transition(
+            "created",
+            "completed",
+            TRANSACTION_TRANSITIONS
+        ));
+        assert!(!is_valid_transition(
+            "created",
+            "processing",
+            TRANSACTION_TRANSITIONS
+        ));
+        assert!(is_valid_transition(
+            "created",
+            "pending",
+            TRANSACTION_TRANSITIONS
         ));
     }
 }

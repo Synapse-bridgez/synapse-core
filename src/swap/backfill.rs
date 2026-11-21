@@ -45,6 +45,68 @@ pub struct BackfillRecord {
     pub order: SwapOrder,
 }
 
+/// Outcome of mapping one source row during a backfill batch.
+#[derive(Debug)]
+pub enum BackfillOutcome {
+    /// The row was mapped into a quote + order pair.
+    Created(BackfillRecord),
+    /// The row has no usable fiat amount and was skipped (issue #1623).
+    SkippedNullAmount,
+}
+
+/// Tally of a backfill batch: how many rows were created and how many were
+/// skipped because their fiat amount was null.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BackfillBatchSummary {
+    pub created: usize,
+    pub skipped_null_amount: usize,
+}
+
+impl BackfillBatchSummary {
+    /// Total number of source rows considered by the batch.
+    pub fn total(&self) -> usize {
+        self.created + self.skipped_null_amount
+    }
+}
+
+/// Map a batch of source rows, skipping (and counting) rows whose fiat amount
+/// is null instead of aborting the whole batch.
+///
+/// A null amount cannot be represented as a `BigDecimal`, so such rows are
+/// reported as [`BackfillOutcome::SkippedNullAmount`] and never reach the
+/// quote/order mapping.  The returned summary lets the runner report the skip
+/// count at the end of the run.
+pub fn map_batch(
+    rows: &[BackfillSourceRow],
+    dest_asset: &str,
+) -> (Vec<BackfillRecord>, BackfillBatchSummary) {
+    let mut records = Vec::with_capacity(rows.len());
+    let mut summary = BackfillBatchSummary::default();
+
+    for row in rows {
+        match map_row(row, dest_asset) {
+            BackfillOutcome::Created(record) => {
+                summary.created += 1;
+                records.push(record);
+            }
+            BackfillOutcome::SkippedNullAmount => {
+                summary.skipped_null_amount += 1;
+            }
+        }
+    }
+
+    (records, summary)
+}
+
+/// Map a single source row, returning [`BackfillOutcome::SkippedNullAmount`]
+/// when the row's fiat amount is null.
+pub fn map_row(row: &BackfillSourceRow, dest_asset: &str) -> BackfillOutcome {
+    if row.amount.is_none() {
+        return BackfillOutcome::SkippedNullAmount;
+    }
+    BackfillOutcome::Created(map_transaction_to_backfill_record(row, dest_asset))
+}
+
 /// Map a completed Phase 1 transaction into a synthetic quote + order pair.
 ///
 /// Both rows share the same `created_at` as the source transaction so
@@ -56,6 +118,10 @@ pub fn map_transaction_to_backfill_record(
     dest_asset: &str,
 ) -> BackfillRecord {
     let now = row.created_at; // anchor to the source row's timestamp
+    let amount = row
+        .amount
+        .clone()
+        .expect("map_transaction_to_backfill_record requires a non-null amount; use map_row");
     let rate = BACKFILL_SYNTHETIC_RATE
         .parse::<BigDecimal>()
         .expect("BACKFILL_SYNTHETIC_RATE is a valid decimal");
@@ -64,7 +130,7 @@ pub fn map_transaction_to_backfill_record(
         .expect("BACKFILL_FEE_AMOUNT is a valid decimal");
 
     // Synthetic destination amount = source amount * rate = source amount (1:1)
-    let dest_amount = row.amount.clone();
+    let dest_amount = amount.clone();
 
     let quote = SwapQuote {
         id: Uuid::new_v4(),
@@ -72,7 +138,7 @@ pub fn map_transaction_to_backfill_record(
         stellar_account: row.stellar_account.clone(),
         source_asset: row.asset_code.clone(),
         destination_asset: dest_asset.to_owned(),
-        source_amount: row.amount.clone(),
+        source_amount: amount.clone(),
         destination_amount: dest_amount.clone(),
         rate: rate.clone(),
         fee_amount: fee.clone(),

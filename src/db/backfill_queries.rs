@@ -21,7 +21,9 @@ use uuid::Uuid;
 pub struct BackfillSourceRow {
     pub id: Uuid,
     pub stellar_account: String,
-    pub amount: BigDecimal,
+    /// Fiat amount.  Nullable: rows with a null amount are skipped by the
+    /// backfill instead of aborting the batch (issue #1623).
+    pub amount: Option<BigDecimal>,
     pub asset_code: String,
     pub callback_status: Option<String>,
     pub anchor_transaction_id: Option<String>,

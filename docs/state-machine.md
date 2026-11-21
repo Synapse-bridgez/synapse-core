@@ -88,6 +88,8 @@ Invalid transitions return `AppError::InvalidStatusTransition` (HTTP 400, code `
 
 | From        | To          | Trigger                                 |
 |-------------|-------------|-----------------------------------------|
+| created     | pending     | Transaction accepted into the pipeline  |
+| created     | failed      | Validation error at creation            |
 | pending     | processing  | Processor picks up transaction          |
 | pending     | completed   | Account monitor direct completion       |
 | pending     | failed      | Validation or processing error          |
@@ -102,6 +104,8 @@ Invalid transitions return `AppError::InvalidStatusTransition` (HTTP 400, code `
 | completed   | pending     | Terminal state — cannot be reversed     |
 | completed   | processing  | Terminal state — cannot be reversed     |
 | completed   | failed      | Terminal state — cannot be reversed     |
+| created     | completed   | Must go through pending first           |
+| created     | processing  | Must go through pending first           |
 | processing  | pending     | Must complete or fail, not revert       |
 | failed      | processing  | Must go through pending first           |
 | failed      | completed   | Must go through pending first           |
