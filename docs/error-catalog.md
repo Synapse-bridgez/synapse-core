@@ -18,10 +18,10 @@ All error responses follow this format:
 
 ### Database Errors (ERR_DATABASE_xxx)
 
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| ERR_DATABASE_001 | 500 | Database connection error |
-| ERR_DATABASE_002 | 500 | Database query execution error |
+| Code | HTTP Status | Description | Retryable |
+|------|-------------|-------------|-----------|
+| ERR_DATABASE_001 | 500 | Database connection error (`AppError::Database`) | Yes |
+| ERR_DATABASE_002 | 500 | Database query execution error (`AppError::DatabaseError`) | Yes |
 
 ### Validation Errors (ERR_VALIDATION_xxx)
 
