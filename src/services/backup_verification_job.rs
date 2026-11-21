@@ -63,10 +63,21 @@ impl Job for BackupVerificationJob {
                             "success"
                         }
                         Err(e) => {
-                            tracing::error!(
-                                "Backup verification FAILED for {}: {e}",
-                                latest.filename
-                            );
+                            if let Some(mismatch) =
+                                e.downcast_ref::<crate::services::backup::ChecksumMismatch>()
+                            {
+                                tracing::error!(
+                                    filename = %mismatch.filename,
+                                    expected_checksum = %mismatch.expected_checksum,
+                                    actual_checksum = %mismatch.actual_checksum,
+                                    "Backup verification FAILED: checksum mismatch"
+                                );
+                            } else {
+                                tracing::error!(
+                                    "Backup verification FAILED for {}: {e}",
+                                    latest.filename
+                                );
+                            }
                             "failure"
                         }
                     }
@@ -131,11 +142,60 @@ mod tests {
         // for the outcome signal); assert on the underlying verification
         // call directly so this test fails loudly if detection breaks.
         let result = service.verify_backup_checksum(&metadata.filename).await;
-        assert!(
-            result.is_err(),
-            "corrupted backup must fail checksum verification"
-        );
+        let err = result.expect_err("corrupted backup must fail checksum verification");
+        let mismatch = err
+            .downcast_ref::<crate::services::backup::ChecksumMismatch>()
+            .expect("failure must be a structured ChecksumMismatch report");
+        assert_eq!(mismatch.filename, metadata.filename);
+        assert_eq!(mismatch.expected_checksum, metadata.checksum);
+        assert_ne!(mismatch.actual_checksum, metadata.checksum);
+        assert!(!mismatch.actual_checksum.is_empty());
         job.execute().await.unwrap();
+    }
+
+    /// Corrupted fixture (no pg_dump/Postgres needed): the structured
+    /// mismatch report must name the file and both checksums.
+    #[tokio::test]
+    async fn corrupted_fixture_reports_file_and_both_checksums() {
+        let (service, dir) = service_with_temp_dir().await;
+        let filename = "backup_hourly_20260101_000000.sql.gz";
+        let backup_path = dir.path().join(filename);
+        tokio::fs::write(&backup_path, b"corrupted fixture contents")
+            .await
+            .unwrap();
+
+        let metadata = crate::services::backup::BackupMetadata {
+            filename: filename.to_string(),
+            backup_type: BackupType::Hourly,
+            timestamp: chrono::Utc::now(),
+            size_bytes: 26,
+            compressed: true,
+            encrypted: false,
+            checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+        };
+        tokio::fs::write(
+            dir.path().join(format!("{filename}.meta")),
+            serde_json::to_string(&metadata).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let err = service
+            .verify_backup_checksum(filename)
+            .await
+            .expect_err("corrupted fixture must fail verification");
+        let mismatch = err
+            .downcast_ref::<crate::services::backup::ChecksumMismatch>()
+            .expect("failure must be a structured ChecksumMismatch report");
+
+        assert_eq!(mismatch.filename, filename);
+        assert_eq!(mismatch.expected_checksum, metadata.checksum);
+        assert_ne!(mismatch.actual_checksum, metadata.checksum);
+        assert!(!mismatch.actual_checksum.is_empty());
+        assert!(mismatch.to_string().contains(filename));
+        assert!(mismatch.to_string().contains(&metadata.checksum));
+        assert!(mismatch.to_string().contains(&mismatch.actual_checksum));
     }
 
     /// Task item 4 (second test): verification must never modify the
