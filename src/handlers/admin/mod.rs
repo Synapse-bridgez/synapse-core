@@ -133,6 +133,20 @@ pub async fn update_flag(
     Ok((StatusCode::OK, Json(flag)))
 }
 
+/// POST /admin/flags/refresh — force an immediate reload of the feature flag snapshot.
+pub async fn refresh_flags(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    state.feature_flags.refresh().await?;
+    let count = state.feature_flags.get_all().await?.len();
+    tracing::info!(count, "Feature flag snapshot refreshed via admin endpoint");
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "Feature flag snapshot refreshed",
+            "flag_count": count
+        })),
+    ))
+}
+
 pub async fn update_webhook_rate_limit(
     State(pool): State<sqlx::PgPool>,
     Path(endpoint_id): Path<uuid::Uuid>,
@@ -248,87 +262,4 @@ pub async fn create_asset(
         r#"
         INSERT INTO assets (asset_code, asset_issuer, metadata, enabled)
         VALUES ($1, $2, $3, TRUE)
-        ON CONFLICT (asset_code, asset_issuer) DO UPDATE
-            SET enabled = TRUE, updated_at = NOW()
-        RETURNING id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at
-        "#,
-    )
-    .bind(&asset_code)
-    .bind(&payload.asset_issuer)
-    .bind(&payload.metadata)
-    .fetch_one(&state.app_state.db)
-    .await
-    {
-        Ok(asset) => (StatusCode::CREATED, Json(serde_json::json!(asset))).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to create asset: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// DELETE /admin/assets/:id — remove an asset
-pub async fn delete_asset(
-    State(state): State<crate::ApiState>,
-    Path(id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    match sqlx::query("DELETE FROM assets WHERE id = $1")
-        .bind(id)
-        .execute(&state.app_state.db)
-        .await
-    {
-        Ok(result) if result.rows_affected() == 0 => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "asset not found" })),
-        )
-            .into_response(),
-        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "deleted": id }))).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to delete asset {}: {}", id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// PATCH /admin/assets/:id/enabled — enable or disable an asset
-pub async fn set_asset_enabled(
-    State(state): State<crate::ApiState>,
-    Path(id): Path<uuid::Uuid>,
-    Json(payload): Json<SetAssetEnabledRequest>,
-) -> impl IntoResponse {
-    match sqlx::query_as::<_, crate::db::models::Asset>(
-        r#"
-        UPDATE assets SET enabled = $1, updated_at = NOW()
-        WHERE id = $2
-        RETURNING id, asset_code, asset_issuer, metadata, enabled, created_at, updated_at
-        "#,
-    )
-    .bind(payload.enabled)
-    .bind(id)
-    .fetch_one(&state.app_state.db)
-    .await
-    {
-        Ok(asset) => (StatusCode::OK, Json(serde_json::json!(asset))).into_response(),
-        Err(sqlx::Error::RowNotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "asset not found" })),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to update asset {}: {}", id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
-}
+        ON CONFLICT (asset_code,

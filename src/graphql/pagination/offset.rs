@@ -24,6 +24,14 @@ impl OffsetPagination {
         Self { offset, limit }
     }
 
+    /// Creates offset pagination from an already-decoded cursor offset.
+    ///
+    /// The cursor is decoded once by the caller; this helper reuses the
+    /// decoded value instead of re-parsing the raw cursor string.
+    pub fn from_decoded_cursor(decoded_offset: i64, limit: Option<i64>) -> Self {
+        Self::new(Some(decoded_offset), limit)
+    }
+
     /// Returns the SQL OFFSET value
     pub fn sql_offset(&self) -> i64 {
         self.offset
@@ -82,6 +90,20 @@ mod tests {
     fn test_clamps_offset_to_non_negative() {
         let pagination = OffsetPagination::new(Some(-10), None);
         assert_eq!(pagination.offset, 0);
+    }
+
+    #[test]
+    fn test_from_decoded_cursor_reuses_offset() {
+        let pagination = OffsetPagination::from_decoded_cursor(40, Some(20));
+        assert_eq!(pagination.offset, 40);
+        assert_eq!(pagination.limit, 20);
+    }
+
+    #[test]
+    fn test_from_decoded_cursor_clamps_negative() {
+        let pagination = OffsetPagination::from_decoded_cursor(-5, None);
+        assert_eq!(pagination.offset, 0);
+        assert_eq!(pagination.limit, DEFAULT_PAGE_SIZE);
     }
 
     #[test]

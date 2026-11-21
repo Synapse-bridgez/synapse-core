@@ -49,6 +49,10 @@ attempt_delivery_with_endpoint (concurrency-bounded via buffer_unordered, defaul
                   webhook_delivery_dlq (see "DLQ replay" below)
 ```
 
+## HTTP client
+
+A single pooled `reqwest::Client` is built once when the dispatcher is constructed and reused for every delivery, so connection setup (TLS handshake, DNS, keep-alive) is not repeated per outbound webhook. Per-request timeouts are still honoured: the delivery path applies the configured timeout to each request via `RequestBuilder::timeout(...)` rather than relying on a client-wide default, so a slow endpoint cannot hold a connection indefinitely and each delivery keeps its own deadline.
+
 ## Circuit breaker
 
 Redis-backed, keyed per endpoint (`webhook_cb:<endpoint_id>`), shared across all instances (unlike the separate, unused `CircuitBreaker` type in `circuit_breaker.rs`, whose "half-open" state is an in-process mutex guard with no cross-instance coordination and whose Redis persistence is write-only). States:
