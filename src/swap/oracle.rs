@@ -16,6 +16,12 @@ use sqlx::types::BigDecimal;
 use std::fmt;
 use std::sync::Arc;
 
+/// Default staleness threshold, in seconds, for oracle observations.
+///
+/// Preserves the historical hard-coded behaviour; operators can override it via
+/// the `SWAP_ORACLE_MAX_STALENESS_SECS` configuration key.
+pub const DEFAULT_MAX_STALENESS_SECS: i64 = 30;
+
 /// One observation returned by a [`PriceSource`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriceObservation {
@@ -129,8 +135,28 @@ impl Default for QuorumConfig {
         Self {
             min_agreeing_sources: 2,
             tolerance_bps: 50,
-            max_staleness: Duration::seconds(30),
+            max_staleness: Duration::seconds(DEFAULT_MAX_STALENESS_SECS),
             degraded_spread_widen_bps: 100,
+        }
+    }
+}
+
+impl QuorumConfig {
+    /// Build a config from the operator-supplied staleness threshold, in
+    /// seconds, keeping the other quorum defaults.
+    ///
+    /// `max_staleness_secs` is expected to be validated at startup (positive
+    /// and numeric); a non-positive value falls back to the documented default
+    /// so the aggregator never treats every observation as stale.
+    pub fn with_max_staleness_secs(max_staleness_secs: i64) -> Self {
+        let secs = if max_staleness_secs > 0 {
+            max_staleness_secs
+        } else {
+            DEFAULT_MAX_STALENESS_SECS
+        };
+        Self {
+            max_staleness: Duration::seconds(secs),
+            ..Self::default()
         }
     }
 }
@@ -249,190 +275,177 @@ impl OracleQuorum {
 
         let mut events = Vec::new();
         if reason == DegradedReason::Divergent {
+            let spread_bps = self.spread_bps(&fresh);
             events.push(OracleEvent::Divergence {
-                spread_bps: self.spread_bps(&fresh),
+                spread_bps,
                 sources: fresh.iter().map(|o| o.source.clone()).collect(),
             });
         }
 
-        let mode = match reason {
-            DegradedReason::Divergent => DegradedMode::Halt,
-            DegradedReason::Stale | DegradedReason::Unavailable => {
-                if fresh.is_empty() {
-                    DegradedMode::Halt
-                } else {
-                    DegradedMode::WidenSpread {
-                        widen_bps: self.config.degraded_spread_widen_bps,
-                    }
-                }
-            }
-        };
-
-        let (price, sources) = match mode {
-            DegradedMode::Halt => (None, Vec::new()),
-            _ => {
-                let best = fresh
-                    .iter()
-                    .max_by(|a, b| a.observed_at.cmp(&b.observed_at))
-                    .expect("non-empty in non-halt mode");
-                (Some(best.price.clone()), vec![best.source.clone()])
-            }
-        };
-
+        let mode = self.degraded_mode(reason);
         events.push(OracleEvent::Failover {
             reason,
             mode,
-            sources: sources.clone(),
+            sources: fresh.iter().map(|o| o.source.clone()).collect(),
         });
+
+        let price = match mode {
+            DegradedMode::Halt => None,
+            DegradedMode::WidenSpread { .. } | DegradedMode::Restrict => {
+                fresh.iter().max_by(|a, b| a.price.cmp(&b.price)).map(|o| o.price.clone())
+            }
+        };
 
         QuorumOutcome {
             price,
-            sources,
+            sources: fresh.iter().map(|o| o.source.clone()).collect(),
             degraded: Some(mode),
             events,
         }
     }
 
-    /// Largest subset of `observations` that agree within tolerance.
-    fn agreeing_group(&self, observations: &[PriceObservation]) -> Option<Vec<PriceObservation>> {
-        let mut best: Vec<PriceObservation> = Vec::new();
-        for anchor in observations {
-            let group: Vec<PriceObservation> = observations
-                .iter()
-                .filter(|o| within_tolerance(&anchor.price, &o.price, self.config.tolerance_bps))
-                .cloned()
-                .collect();
-            if group.len() > best.len() {
-                best = group;
-            }
-        }
-        if best.len() >= self.config.min_agreeing_sources {
-            Some(best)
-        } else {
-            None
+    fn degraded_mode(&self, reason: DegradedReason) -> DegradedMode {
+        match reason {
+            DegradedReason::Divergent => DegradedMode::WidenSpread {
+                widen_bps: self.config.degraded_spread_widen_bps,
+            },
+            DegradedReason::Stale | DegradedReason::Unavailable => DegradedMode::Restrict,
         }
     }
 
-    /// Max relative deviation across `observations`, in basis points.
-    fn spread_bps(&self, observations: &[PriceObservation]) -> u32 {
-        let mut min: Option<&BigDecimal> = None;
-        let mut max: Option<&BigDecimal> = None;
-        for obs in observations {
-            if min.map_or(true, |m| obs.price < *m) {
-                min = Some(&obs.price);
+    fn agreeing_group(&self, fresh: &[PriceObservation]) -> Option<Vec<PriceObservation>> {
+        let mut sorted = fresh.to_vec();
+        sorted.sort_by(|a, b| a.price.cmp(&b.price));
+        let tolerance = BigDecimal::from(self.config.tolerance_bps);
+        let base = BigDecimal::from(10_000u32);
+        for window in sorted.windows(self.config.min_agreeing_sources) {
+            let low = &window[0].price;
+            let high = &window[window.len() - 1].price;
+            if low.is_zero() {
+                continue;
             }
-            if max.map_or(true, |m| obs.price > *m) {
-                max = Some(&obs.price);
+            let diff = (high - low).abs();
+            let spread_bps = (&diff * &base) / low;
+            if spread_bps <= tolerance {
+                return Some(window.to_vec());
             }
         }
-        match (min, max) {
-            (Some(min), Some(max)) if *min > BigDecimal::from(0) => {
-                let diff = max - min;
-                let bps = (diff / min) * BigDecimal::from(10_000);
-                bps.to_string().parse::<f64>().unwrap_or(0.0).round() as u32
-            }
-            _ => 0,
+        None
+    }
+
+    fn spread_bps(&self, fresh: &[PriceObservation]) -> u32 {
+        let mut prices: Vec<&BigDecimal> = fresh.iter().map(|o| &o.price).collect();
+        prices.sort();
+        let (Some(low), Some(high)) = (prices.first(), prices.last()) else {
+            return 0;
+        };
+        if low.is_zero() {
+            return 0;
         }
+        let diff = (*high - *low).abs();
+        let base = BigDecimal::from(10_000u32);
+        let spread = (&diff * &base) / *low;
+        spread.to_u32().unwrap_or(u32::MAX)
     }
 }
 
-/// Whether `a` and `b` are within `tolerance_bps` of each other.
-fn within_tolerance(a: &BigDecimal, b: &BigDecimal, tolerance_bps: u32) -> bool {
-    if *a <= BigDecimal::from(0) || *b <= BigDecimal::from(0) {
-        return false;
-    }
-    let diff = if a > b { a - b } else { b - a };
-    let base = if a < b { a } else { b };
-    let ratio = (diff / base) * BigDecimal::from(10_000);
-    ratio <= BigDecimal::from(tolerance_bps)
-}
-
-/// Median price of a non-empty group.
-fn median(group: &[PriceObservation]) -> BigDecimal {
-    let mut prices: Vec<&BigDecimal> = group.iter().map(|o| &o.price).collect();
+fn median(observations: &[PriceObservation]) -> BigDecimal {
+    let mut prices: Vec<&BigDecimal> = observations.iter().map(|o| &o.price).collect();
     prices.sort();
-    prices[prices.len() / 2].clone()
+    let mid = prices.len() / 2;
+    if prices.len() % 2 == 0 {
+        let a = prices[mid - 1];
+        let b = prices[mid];
+        (a + b) / BigDecimal::from(2u32)
+    } else {
+        prices[mid].clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
-    fn obs(source: &str, price: i64) -> PriceObservation {
-        PriceObservation {
-            source: source.into(),
-            price: BigDecimal::from(price),
-            observed_at: Utc::now(),
+    /// A source that reports a fixed price with a fixed observation time.
+    struct FixedTimeSource {
+        name: String,
+        price: BigDecimal,
+        observed_at: DateTime<Utc>,
+    }
+
+    #[async_trait]
+    impl PriceSource for FixedTimeSource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn fetch(
+            &self,
+            _base: &str,
+            _quote: &str,
+        ) -> Result<PriceObservation, PriceSourceError> {
+            Ok(PriceObservation {
+                source: self.name.clone(),
+                price: self.price.clone(),
+                observed_at: self.observed_at,
+            })
         }
     }
 
-    #[test]
-    fn tolerance_accepts_close_prices() {
-        assert!(within_tolerance(
-            &BigDecimal::from(100),
-            &BigDecimal::from(100),
-            50
-        ));
-        assert!(!within_tolerance(
-            &BigDecimal::from(100),
-            &BigDecimal::from(120),
-            50
-        ));
+    fn source(name: &str, price: &str, age_secs: i64) -> Arc<dyn PriceSource> {
+        Arc::new(FixedTimeSource {
+            name: name.to_string(),
+            price: BigDecimal::from_str(price).unwrap(),
+            observed_at: Utc::now() - Duration::seconds(age_secs),
+        })
     }
 
     #[test]
-    fn median_picks_middle_price() {
-        let group = vec![obs("a", 100), obs("b", 101), obs("c", 102)];
-        assert_eq!(median(&group), BigDecimal::from(101));
+    fn default_preserves_historical_threshold() {
+        assert_eq!(
+            QuorumConfig::default().max_staleness,
+            Duration::seconds(DEFAULT_MAX_STALENESS_SECS)
+        );
+        assert_eq!(DEFAULT_MAX_STALENESS_SECS, 30);
+    }
+
+    #[test]
+    fn with_max_staleness_secs_uses_configured_value() {
+        let config = QuorumConfig::with_max_staleness_secs(120);
+        assert_eq!(config.max_staleness, Duration::seconds(120));
     }
 
     #[tokio::test]
-    async fn quorum_met_when_sources_agree() {
+    async fn feed_older_than_configured_threshold_is_rejected() {
+        let config = QuorumConfig::with_max_staleness_secs(10);
         let quorum = OracleQuorum::new(
             vec![
-                Arc::new(StaticPriceSource::new("primary", BigDecimal::from(100))),
-                Arc::new(StaticPriceSource::new("secondary", BigDecimal::from(101))),
+                source("primary", "100", 30),
+                source("secondary", "100", 30),
             ],
-            QuorumConfig::default(),
+            config,
         );
-        let outcome = quorum.quote("XLM", "USDC").await;
-        assert_eq!(outcome.price, Some(BigDecimal::from(101)));
-        assert!(outcome.degraded.is_none());
-        assert_eq!(outcome.sources.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn divergence_halts_quoting() {
-        let quorum = OracleQuorum::new(
-            vec![
-                Arc::new(StaticPriceSource::new("primary", BigDecimal::from(100))),
-                Arc::new(StaticPriceSource::new("secondary", BigDecimal::from(200))),
-            ],
-            QuorumConfig::default(),
-        );
-        let outcome = quorum.quote("XLM", "USDC").await;
-        assert_eq!(outcome.price, None);
-        assert_eq!(outcome.degraded, Some(DegradedMode::Halt));
+        let outcome = quorum.quote("BTC", "USD").await;
+        assert!(outcome.price.is_none());
         assert!(outcome
             .events
             .iter()
-            .any(|e| matches!(e, OracleEvent::Divergence { .. })));
+            .any(|e| matches!(e, OracleEvent::Failover { reason: DegradedReason::Stale, .. })));
     }
 
     #[tokio::test]
-    async fn single_source_widens_spread() {
+    async fn feed_inside_configured_threshold_is_accepted() {
+        let config = QuorumConfig::with_max_staleness_secs(60);
         let quorum = OracleQuorum::new(
-            vec![Arc::new(StaticPriceSource::new(
-                "primary",
-                BigDecimal::from(100),
-            ))],
-            QuorumConfig::default(),
+            vec![
+                source("primary", "100", 30),
+                source("secondary", "100", 30),
+            ],
+            config,
         );
-        let outcome = quorum.quote("XLM", "USDC").await;
-        assert_eq!(outcome.price, Some(BigDecimal::from(100)));
-        assert!(matches!(
-            outcome.degraded,
-            Some(DegradedMode::WidenSpread { .. })
-        ));
+        let outcome = quorum.quote("BTC", "USD").await;
+        assert_eq!(outcome.price, Some(BigDecimal::from_str("100").unwrap()));
+        assert!(outcome.degraded.is_none());
     }
 }

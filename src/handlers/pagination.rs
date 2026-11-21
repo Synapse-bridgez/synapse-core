@@ -70,6 +70,49 @@ pub fn validate_pagination(
     Ok(())
 }
 
+/// Query parameters for endpoints that expose raw `limit`/`offset` pagination.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct LimitOffsetQuery {
+    /// Maximum number of records to return (default: 20, max: 100).
+    #[serde(default = "default_page_size")]
+    pub limit: u32,
+    /// Number of records to skip (default: 0).
+    #[serde(default)]
+    pub offset: u32,
+}
+
+impl LimitOffsetQuery {
+    /// Convert to the shared [`PaginationQuery`] representation.
+    pub fn to_pagination_query(&self) -> PaginationQuery {
+        PaginationQuery {
+            page: self.offset / self.limit.max(1) + 1,
+            page_size: self.limit,
+        }
+    }
+}
+
+/// Validate `limit`/`offset` query parameters using the shared pagination rules.
+pub fn validate_limit_offset(
+    query: &LimitOffsetQuery,
+    config: &ApiPaginationConfig,
+) -> Result<(), (StatusCode, String)> {
+    if query.limit < 1 {
+        return Err((StatusCode::BAD_REQUEST, "limit must be >= 1".to_string()));
+    }
+
+    if query.limit > config.max_page_size {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "limit {} exceeds maximum {}",
+                query.limit, config.max_page_size
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Generic paginated response envelope for API list endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PaginatedListResponse<T> {
@@ -192,6 +235,40 @@ mod tests {
         let (status, msg) = result.unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(msg.contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_validate_limit_offset_valid() {
+        let query = LimitOffsetQuery {
+            limit: 20,
+            offset: 0,
+        };
+        let config = ApiPaginationConfig::default();
+        assert!(validate_limit_offset(&query, &config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_limit_offset_exceeds_max() {
+        let query = LimitOffsetQuery {
+            limit: 1_000_000,
+            offset: 0,
+        };
+        let config = ApiPaginationConfig::default();
+        let result = validate_limit_offset(&query, &config);
+        assert!(result.is_err());
+        let (status, msg) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_validate_limit_offset_zero_limit() {
+        let query = LimitOffsetQuery {
+            limit: 0,
+            offset: 0,
+        };
+        let config = ApiPaginationConfig::default();
+        assert!(validate_limit_offset(&query, &config).is_err());
     }
 
     #[test]

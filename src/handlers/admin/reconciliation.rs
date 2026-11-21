@@ -1,3 +1,4 @@
+use crate::handlers::pagination::{validate_limit, validate_offset, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::services::reconciliation::{ReconciliationReport, ReconciliationService};
 use crate::stellar::HorizonClient;
 use crate::ApiState;
@@ -22,7 +23,7 @@ pub struct ListReportsQuery {
 }
 
 fn default_limit() -> Option<i32> {
-    Some(20)
+    Some(DEFAULT_LIMIT)
 }
 
 #[derive(Debug, Serialize)]
@@ -114,8 +115,30 @@ pub async fn list_reconciliation_reports(
     State(state): State<ApiState>,
     Query(query): Query<ListReportsQuery>,
 ) -> impl IntoResponse {
-    let limit = query.limit.unwrap_or(20);
-    let offset = query.offset.unwrap_or(0);
+    let limit = match validate_limit(query.limit) {
+        Ok(limit) => limit,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": message,
+                    "max_limit": MAX_LIMIT
+                })),
+            )
+                .into_response()
+        }
+    };
+
+    let offset = match validate_offset(query.offset) {
+        Ok(offset) => offset,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response()
+        }
+    };
 
     let pool = &state.app_state.db;
 
@@ -280,168 +303,3 @@ pub async fn get_reconciliation_report(
                     stellar_account: m.stellar_account.clone(),
                     amount: m.amount.clone(),
                     asset_code: m.asset_code.clone(),
-                    memo: m.memo.clone(),
-                    created_at: m.created_at,
-                })
-                .collect();
-
-            let orphaned: Vec<OrphanedPaymentOutput> = full_report
-                .orphaned_payments
-                .iter()
-                .map(|o| OrphanedPaymentOutput {
-                    payment_id: o.payment_id.clone(),
-                    from: o.from.clone(),
-                    to: o.to.clone(),
-                    amount: o.amount.clone(),
-                    asset_code: o.asset_code.clone(),
-                    memo: o.memo.clone(),
-                })
-                .collect();
-
-            let mismatches: Vec<AmountMismatchOutput> = full_report
-                .amount_mismatches
-                .iter()
-                .map(|a| AmountMismatchOutput {
-                    transaction_id: a.transaction_id,
-                    payment_id: a.payment_id.clone(),
-                    db_amount: a.db_amount.clone(),
-                    chain_amount: a.chain_amount.clone(),
-                    memo: a.memo.clone(),
-                })
-                .collect();
-
-            let report_id: Uuid = row.try_get("id").unwrap_or_default();
-            let generated_at: DateTime<Utc> = row.try_get("generated_at").unwrap_or_default();
-            let period_start: DateTime<Utc> = row.try_get("period_start").unwrap_or_default();
-            let period_end: DateTime<Utc> = row.try_get("period_end").unwrap_or_default();
-            let total_db: i32 = row.try_get("total_db_transactions").unwrap_or(0);
-            let total_chain: i32 = row.try_get("total_chain_payments").unwrap_or(0);
-            let missing_count: i32 = row.try_get("missing_on_chain_count").unwrap_or(0);
-            let orphaned_count: i32 = row.try_get("orphaned_payments_count").unwrap_or(0);
-            let mismatches_count: i32 = row.try_get("amount_mismatches_count").unwrap_or(0);
-            let has_discrepancies: bool = row.try_get("has_discrepancies").unwrap_or(false);
-
-            (
-                StatusCode::OK,
-                Json(ReportDetail {
-                    id: report_id,
-                    generated_at,
-                    period_start,
-                    period_end,
-                    summary: ReportSummary {
-                        total_db_transactions: total_db as usize,
-                        total_chain_payments: total_chain as usize,
-                        missing_on_chain_count: missing_count,
-                        orphaned_payments_count: orphaned_count,
-                        amount_mismatches_count: mismatches_count,
-                        has_discrepancies,
-                    },
-                    missing_on_chain: missing,
-                    orphaned_payments: orphaned,
-                    amount_mismatches: mismatches,
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "Reconciliation report not found"
-            })),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get reconciliation report {}: {}", id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to retrieve reconciliation report"
-                })),
-            )
-                .into_response()
-        }
-    }
-}
-
-pub async fn run_reconciliation(
-    State(state): State<ApiState>,
-    Json(payload): Json<RunReconciliationRequest>,
-) -> impl IntoResponse {
-    let account = payload.account;
-    let period_hours = payload.period_hours.unwrap_or(24);
-
-    if account.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "account is required"
-            })),
-        )
-            .into_response();
-    }
-
-    let horizon_client = HorizonClient::new(state.app_state.horizon_client.base_url.clone());
-    let pool = state.app_state.db.clone();
-
-    let svc = ReconciliationService::new(horizon_client.clone(), pool.clone());
-
-    let end = Utc::now();
-    let start = end - Duration::hours(period_hours as i64);
-
-    let report = match svc.reconcile(&account, start, end).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Reconciliation failed: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Reconciliation failed: {}", e)
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    match ReconciliationService::store_report(&pool, &report).await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::info!(
-                "Reconciliation report for this exact period already existed; not duplicated"
-            );
-        }
-        Err(e) => {
-            tracing::error!("Failed to store reconciliation report: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to store reconciliation report"
-                })),
-            )
-                .into_response();
-        }
-    }
-
-    let summary = ReconciliationReportSummary::from((
-        Uuid::new_v4(),
-        report.generated_at,
-        report.period_start,
-        report.period_end,
-        report.total_db_transactions as i32,
-        report.total_chain_payments as i32,
-        report.missing_on_chain.len() as i32,
-        report.orphaned_payments.len() as i32,
-        report.amount_mismatches.len() as i32,
-        !report.missing_on_chain.is_empty()
-            || !report.orphaned_payments.is_empty()
-            || !report.amount_mismatches.is_empty(),
-    ));
-
-    (
-        StatusCode::OK,
-        Json(RunReconciliationResponse {
-            message: "Reconciliation completed successfully".to_string(),
-            report: summary,
-        }),
-    )
-        .into_response()
-}
