@@ -28,6 +28,7 @@
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
+//! | `dlq_quarantined_total`           | Counter    | DLQ messages that failed to deserialize and were quarantined raw |
 //!
 //! ## Configuration
 //!
@@ -456,6 +457,18 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
     meter()
         .u64_counter("admin_compliance_report_requests_total")
         .with_description("Requests to the admin compliance report endpoints, labeled by operation")
+        .init()
+}
+
+/// DLQ messages that could not be deserialized into `TransactionDlq` and were
+/// therefore quarantined (retained raw) instead of being dropped.
+pub fn dlq_quarantined_total() -> Counter<u64> {
+    meter()
+        .u64_counter("dlq_quarantined_total")
+        .with_description(
+            "DLQ messages that failed to deserialize and were quarantined in raw form \
+             instead of being silently dropped",
+        )
         .init()
 }
 

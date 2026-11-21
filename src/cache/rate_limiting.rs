@@ -178,6 +178,8 @@ impl RateLimiter {
         loop {
             let current = self.inner.tokens.load(Ordering::Acquire);
             if current < count {
+                // Rejected requests must not count against the window: the
+                // bucket state (tokens + window start) is left untouched.
                 self.inner.rejected.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
@@ -192,6 +194,7 @@ impl RateLimiter {
                 )
                 .is_ok()
             {
+                // Only accepted requests count against the window.
                 self.inner.acquired.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
@@ -533,6 +536,30 @@ mod tests {
         assert!(limiter.try_acquire());
         assert!(limiter.try_acquire());
         assert!(!limiter.try_acquire());
+    }
+
+    #[test]
+    fn test_rejected_requests_do_not_extend_window() {
+        // Rejected requests must not extend the window: after the window
+        // elapses, the very first request must be allowed again.
+        let config = RateLimitConfig {
+            max_requests: 2,
+            window: Duration::from_millis(50),
+            strategy: RateLimitStrategy::TokenBucket,
+        };
+        let limiter = RateLimiter::with_config(config);
+
+        assert!(limiter.try_acquire());
+        assert!(limiter.try_acquire());
+        // Hammer the limiter while exhausted; these must not extend the window.
+        for _ in 0..10 {
+            assert!(!limiter.try_acquire());
+        }
+
+        std::thread::sleep(Duration::from_millis(60));
+
+        // First request after the window must succeed.
+        assert!(limiter.try_acquire());
     }
 
     #[test]

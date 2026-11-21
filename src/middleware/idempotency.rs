@@ -149,6 +149,13 @@ fn _cache_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:{tenant_id}:{key}")
 }
 
+/// Compose the stored idempotency key with the tenant identifier so that the
+/// same client-supplied key from two different tenants maps to two independent
+/// records.
+pub fn scoped_idempotency_key(tenant_id: &str, key: &str) -> String {
+    format!("{tenant_id}:{key}")
+}
+
 fn _lock_key(tenant_id: &str, key: &str) -> String {
     format!("idempotency:lock:{tenant_id}:{key}")
 }
