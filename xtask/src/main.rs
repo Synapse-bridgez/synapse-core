@@ -38,6 +38,38 @@ enum Commands {
     Release(commands::release::ReleaseArgs),
 }
 
+/// Redact the password portion of a database URL, if present.
+///
+/// `postgres://user:secret@host/db` becomes `postgres://user:***@host/db`.
+/// URLs without a password are returned unchanged.
+pub fn redact_database_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|i| authority_start + i)
+        .unwrap_or(url.len());
+    let authority = &url[authority_start..authority_end];
+
+    let Some(at) = authority.rfind('@') else {
+        return url.to_string();
+    };
+    let userinfo = &authority[..at];
+    let Some(colon) = userinfo.find(':') else {
+        return url.to_string();
+    };
+
+    let mut redacted = String::with_capacity(url.len());
+    redacted.push_str(&url[..authority_start]);
+    redacted.push_str(&userinfo[..colon]);
+    redacted.push_str(":***");
+    redacted.push_str(&authority[at..]);
+    redacted.push_str(&url[authority_end..]);
+    redacted
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
