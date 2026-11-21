@@ -14,6 +14,15 @@ enforces limits on every request.
 write this same column now. There is no second config store in the write
 path.
 
+## Allowed range for `custom_limit`
+
+`PUT /admin/quotas/:tenant_id` requires `custom_limit` to be a **positive
+integer** (`custom_limit >= 1`, requests per minute). A value of `0` or any
+negative number is rejected at the API boundary with `400 Bad Request` and
+the stored value is left unchanged — a non-positive limit would make every
+request fail the quota check. Validation lives in the request handler
+(`src/handlers/admin/quota.rs`), not in the middleware.
+
 ## Why there were two paths before this fix
 
 `QuotaManager` (`src/middleware/quota.rs`) also has a Redis-backed
