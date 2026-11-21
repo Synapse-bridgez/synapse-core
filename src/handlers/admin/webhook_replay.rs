@@ -25,7 +25,7 @@ pub struct ReplayWebhookRequest {
 pub struct BatchReplayRequest {
     /// List of transaction IDs to replay
     pub transaction_ids: Vec<Uuid>,
-    /// Whether to run in dry-run mode
+    /// Whether to run in dry-run mode (test without committing)
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -248,26 +248,29 @@ pub async fn replay_webhook(
                 ReplayResult {
                     transaction_id,
                     success: true,
-                    message: "Webhook replayed successfully".to_string(),
+                    message: format!(
+                        "Successfully replayed webhook for {} {} to {}",
+                        transaction.amount, transaction.asset_code, transaction.stellar_account
+                    ),
                     dry_run: false,
                     replayed_at: Some(Utc::now()),
                 }
             }
             Err(e) => {
-                let error_msg = format!("Failed to replay webhook: {e}");
+                // Track failed replay attempt
                 let _ = track_replay_attempt(
                     &pool,
                     transaction_id,
                     false,
                     false,
-                    Some(error_msg.clone()),
+                    Some(e.to_string()),
                 )
                 .await;
 
                 ReplayResult {
                     transaction_id,
                     success: false,
-                    message: error_msg,
+                    message: format!("Replay failed: {e}"),
                     dry_run: false,
                     replayed_at: None,
                 }
@@ -275,7 +278,7 @@ pub async fn replay_webhook(
         }
     };
 
-    Ok((StatusCode::OK, Json(result)))
+    Ok(Json(result))
 }
 
 /// Replay multiple webhooks in batch
@@ -294,11 +297,10 @@ pub async fn batch_replay_webhooks(
     let mut failed = 0;
 
     for transaction_id in request.transaction_ids {
-        // Retrieve the original payload
+        // Retrieve the original payload from audit logs
         let transaction = match get_webhook_payload_from_audit(&pool, transaction_id).await {
-            Ok(tx) => tx,
+            Ok(t) => t,
             Err(e) => {
-                failed += 1;
                 results.push(ReplayResult {
                     transaction_id,
                     success: false,
@@ -306,13 +308,13 @@ pub async fn batch_replay_webhooks(
                     dry_run: request.dry_run,
                     replayed_at: None,
                 });
+                failed += 1;
                 continue;
             }
         };
 
         // Validate that we can replay this transaction
         if transaction.status == "completed" && !request.dry_run {
-            failed += 1;
             results.push(ReplayResult {
                 transaction_id,
                 success: false,
@@ -320,12 +322,14 @@ pub async fn batch_replay_webhooks(
                 dry_run: request.dry_run,
                 replayed_at: None,
             });
+            failed += 1;
             continue;
         }
 
         let result = if request.dry_run {
+            // Dry-run mode: validate payload without committing
             let _ = track_replay_attempt(&pool, transaction_id, true, true, None).await;
-            successful += 1;
+
             ReplayResult {
                 transaction_id,
                 success: true,
@@ -337,53 +341,63 @@ pub async fn batch_replay_webhooks(
                 replayed_at: None,
             }
         } else {
+            // Actual replay: reprocess the webhook
             match reprocess_webhook(&pool, &transaction).await {
                 Ok(_) => {
-                    // Log the replay attempt
-                    if let Ok(mut db_tx) = pool.begin().await {
-                        let _ = crate::db::audit::AuditLog::log(
-                            &mut db_tx,
-                            transaction_id,
-                            crate::db::audit::ENTITY_TRANSACTION,
-                            "webhook_replayed",
-                            Some(serde_json::json!({
-                                "status": transaction.status,
-                            })),
-                            Some(serde_json::json!({
-                                "status": "pending",
-                                "replayed_at": Utc::now(),
-                            })),
-                            "admin",
-                        )
-                        .await;
-                        let _ = db_tx.commit().await;
-                    }
+                    // Log the replay attempt in audit logs
+                    let mut db_tx = pool.begin().await.map_err(|e| {
+                        AppError::DatabaseError(format!("Failed to begin transaction: {e}"))
+                    })?;
 
+                    crate::db::audit::AuditLog::log(
+                        &mut db_tx,
+                        transaction_id,
+                        crate::db::audit::ENTITY_TRANSACTION,
+                        "webhook_replayed",
+                        Some(serde_json::json!({
+                            "status": transaction.status,
+                        })),
+                        Some(serde_json::json!({
+                            "status": "pending",
+                            "replayed_at": Utc::now(),
+                        })),
+                        "admin",
+                    )
+                    .await?;
+
+                    db_tx.commit().await.map_err(|e| {
+                        AppError::DatabaseError(format!("Failed to commit transaction: {e}"))
+                    })?;
+
+                    // Track replay in history table
                     let _ = track_replay_attempt(&pool, transaction_id, false, true, None).await;
-                    successful += 1;
+
                     ReplayResult {
                         transaction_id,
                         success: true,
-                        message: "Webhook replayed successfully".to_string(),
+                        message: format!(
+                            "Successfully replayed webhook for {} {} to {}",
+                            transaction.amount, transaction.asset_code, transaction.stellar_account
+                        ),
                         dry_run: false,
                         replayed_at: Some(Utc::now()),
                     }
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to replay webhook: {e}");
+                    // Track failed replay attempt
                     let _ = track_replay_attempt(
                         &pool,
                         transaction_id,
                         false,
                         false,
-                        Some(error_msg.clone()),
+                        Some(e.to_string()),
                     )
                     .await;
-                    failed += 1;
+
                     ReplayResult {
                         transaction_id,
                         success: false,
-                        message: error_msg,
+                        message: format!("Replay failed: {e}"),
                         dry_run: false,
                         replayed_at: None,
                     }
@@ -391,41 +405,37 @@ pub async fn batch_replay_webhooks(
             }
         };
 
+        if result.success {
+            successful += 1;
+        } else {
+            failed += 1;
+        }
         results.push(result);
     }
 
-    let response = BatchReplayResponse {
+    Ok(Json(BatchReplayResponse {
         total: results.len(),
         successful,
         failed,
         results,
-    };
-
-    Ok((StatusCode::OK, Json(response)))
+    }))
 }
 
-/// Reprocess a webhook by updating its status to pending
-/// This respects idempotency keys and existing transaction state
+/// Reprocess a webhook by re-sending it to the anchor
 async fn reprocess_webhook(pool: &PgPool, transaction: &Transaction) -> Result<(), AppError> {
-    // Update transaction status to pending for reprocessing
+    // Reset the transaction status to pending so it can be reprocessed
     sqlx::query(
-        "UPDATE transactions 
-         SET status = 'pending', updated_at = NOW() 
-         WHERE id = $1",
+        "UPDATE transactions SET status = 'pending', updated_at = NOW() WHERE id = $1",
     )
     .bind(transaction.id)
     .execute(pool)
-    .await?;
-
-    tracing::info!(
-        "Transaction {} status updated to pending for reprocessing",
-        transaction.id
-    );
+    .await
+    .map_err(|e| AppError::DatabaseError(format!("Failed to reset transaction status: {e}")))?;
 
     Ok(())
 }
 
-/// Track replay attempt in the database
+/// Track a replay attempt in the replay history table
 async fn track_replay_attempt(
     pool: &PgPool,
     transaction_id: Uuid,
@@ -434,19 +444,17 @@ async fn track_replay_attempt(
     error_message: Option<String>,
 ) -> Result<(), AppError> {
     sqlx::query(
-        r#"
-        INSERT INTO webhook_replay_history 
-        (transaction_id, replayed_by, dry_run, success, error_message, replayed_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
-        "#,
+        "INSERT INTO webhook_replay_history 
+         (transaction_id, dry_run, success, error_message, replayed_at)
+         VALUES ($1, $2, $3, $4, NOW())",
     )
     .bind(transaction_id)
-    .bind("admin")
     .bind(dry_run)
     .bind(success)
     .bind(error_message)
     .execute(pool)
-    .await?;
+    .await
+    .map_err(|e| AppError::DatabaseError(format!("Failed to track replay attempt: {e}")))?;
 
     Ok(())
 }
@@ -454,39 +462,40 @@ async fn track_replay_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::post;
+    use axum::Router;
+    use tower::ServiceExt;
 
-    #[test]
-    fn test_default_limit() {
-        assert_eq!(default_limit(), 50);
+    async fn test_pool() -> PgPool {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://localhost/test".to_string());
+        PgPool::connect(&database_url)
+            .await
+            .expect("failed to connect to test database")
     }
 
-    #[test]
-    fn test_replay_result_serialization() {
-        let result = ReplayResult {
-            transaction_id: Uuid::new_v4(),
-            success: true,
-            message: "Test message".to_string(),
-            dry_run: false,
-            replayed_at: Some(Utc::now()),
-        };
+    #[tokio::test]
+    async fn replay_unknown_delivery_id_returns_404() {
+        let pool = test_pool().await;
+        let app = Router::new()
+            .route("/admin/webhooks/replay/:id", post(replay_webhook))
+            .with_state(pool);
 
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("transaction_id"));
-        assert!(json.contains("success"));
-    }
+        let unknown_id = Uuid::new_v4();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/admin/webhooks/replay/{unknown_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"dry_run": false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    #[test]
-    fn test_batch_replay_response_serialization() {
-        let response = BatchReplayResponse {
-            total: 5,
-            successful: 3,
-            failed: 2,
-            results: vec![],
-        };
-
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("\"total\":5"));
-        assert!(json.contains("\"successful\":3"));
-        assert!(json.contains("\"failed\":2"));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

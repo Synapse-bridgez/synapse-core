@@ -20,6 +20,10 @@ use uuid::Uuid;
 pub struct AuditSearchQuery {
     pub actor: Option<String>,
     pub action: Option<String>,
+    /// Inclusive lower bound on the audit timestamp (RFC 3339).
+    pub from: Option<String>,
+    /// Inclusive upper bound on the audit timestamp (RFC 3339).
+    pub to: Option<String>,
     pub from_date: Option<DateTime<Utc>>,
     pub to_date: Option<DateTime<Utc>>,
     pub entity_type: Option<String>,
@@ -34,6 +38,20 @@ pub struct AuditSearchQuery {
 
 fn default_limit() -> i64 {
     50
+}
+
+/// Parse an optional RFC 3339 timestamp, returning a 400 on malformed input.
+fn parse_timestamp(field: &str, value: Option<&str>) -> Result<Option<DateTime<Utc>>, AppError> {
+    match value {
+        None => Ok(None),
+        Some(raw) => DateTime::parse_from_rfc3339(raw)
+            .map(|dt| Some(dt.with_timezone(&Utc)))
+            .map_err(|_| {
+                AppError::BadRequest(format!(
+                    "invalid `{field}` timestamp: expected RFC 3339, got `{raw}`"
+                ))
+            }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +147,18 @@ pub async fn search_audit_logs_handler(
 
     let limit = q.limit.clamp(1, 500);
 
+    // Honour the documented `from`/`to` filters. Malformed timestamps are a
+    // client error (400) rather than silently ignored. The legacy
+    // `from_date`/`to_date` params remain supported as a fallback.
+    let from = match parse_timestamp("from", q.from.as_deref())? {
+        Some(ts) => Some(ts),
+        None => q.from_date,
+    };
+    let to = match parse_timestamp("to", q.to.as_deref())? {
+        Some(ts) => Some(ts),
+        None => q.to_date,
+    };
+
     // `decode_cursor` returns `Option<(DateTime<Utc>, Uuid)>` (an invalid
     // cursor is simply treated as "no cursor"), not a `Result` — `.map(...)`
     // therefore produces `Option<Option<_>>`, which `.flatten()` collapses.
@@ -140,8 +170,8 @@ pub async fn search_audit_logs_handler(
     let params = AuditSearchParams {
         actor: q.actor.as_deref(),
         action: q.action.as_deref(),
-        from_date: q.from_date,
-        to_date: q.to_date,
+        from_date: from,
+        to_date: to,
         entity_type: q.entity_type.as_deref(),
         limit,
         cursor,
@@ -236,5 +266,23 @@ mod tests {
     #[test]
     fn test_default_limit() {
         assert_eq!(default_limit(), 50);
+    }
+
+    #[test]
+    fn test_parse_timestamp_valid() {
+        let parsed = parse_timestamp("from", Some("2026-01-01T00:00:00Z"))
+            .expect("valid timestamp should parse")
+            .expect("timestamp should be present");
+        assert_eq!(parsed, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_parse_timestamp_absent() {
+        assert!(parse_timestamp("from", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid() {
+        assert!(parse_timestamp("to", Some("not-a-timestamp")).is_err());
     }
 }

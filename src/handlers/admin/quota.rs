@@ -109,6 +109,10 @@ pub async fn get_tenant_quota(
 /// the live request path calls. `custom_limit` — the per-minute limit — is
 /// required; a tier-only request is rejected rather than silently accepted
 /// and ignored, which is what the old code effectively did.
+///
+/// `custom_limit` must be strictly positive: a limit of 0 or below would make
+/// every subsequent request fail the quota check, so non-positive values are
+/// rejected here at the API boundary with a 400 before anything is stored.
 pub async fn set_tenant_quota(
     State(state): State<ApiState>,
     Path(tenant_id): Path<Uuid>,
@@ -118,14 +122,24 @@ pub async fn set_tenant_quota(
         return Err(AppError::NotFound("tenant not found".to_string()));
     }
 
-    let new_limit = payload.custom_limit.ok_or_else(|| {
+    let custom_limit = payload.custom_limit.ok_or_else(|| {
         AppError::BadRequest(
             "custom_limit is required: it is the per-minute limit actually enforced \
              (tenants.rate_limit_per_minute); 'tier' alone no longer maps to anything \
              the live rate limiter reads"
                 .to_string(),
         )
-    })? as i32;
+    })?;
+
+    if custom_limit == 0 {
+        return Err(AppError::BadRequest(
+            "custom_limit must be greater than 0: a non-positive per-minute limit \
+             would make every request fail the quota check"
+                .to_string(),
+        ));
+    }
+
+    let new_limit = custom_limit as i32;
 
     let updated_limit = crate::db::queries::update_tenant_rate_limit(
         &state.app_state.db,

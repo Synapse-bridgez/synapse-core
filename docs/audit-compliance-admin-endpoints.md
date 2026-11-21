@@ -40,11 +40,15 @@ but nobody used it"):
 ### Audit log search
 
 ```
-GET /admin/audit/search?actor=<name>&action=<action>&entity_type=<type>&from_date=<iso8601>&to_date=<iso8601>&limit=<1-500>&cursor=<opaque>
+GET /admin/audit/search?actor=<name>&action=<action>&entity_type=<type>&from=<iso8601>&to=<iso8601>&limit=<1-500>&cursor=<opaque>
 Authorization: Bearer <admin key>
 ```
 
 - All filters are optional and combine with AND.
+- `from` and `to` are inclusive ISO-8601 timestamps that bound the search
+  window; only rows whose timestamp falls within `[from, to]` are returned.
+  A `from`/`to` value that cannot be parsed as an ISO-8601 timestamp is
+  rejected with `400 Bad Request` rather than being silently ignored.
 - Returns `{ "total": <count>, "data": [...], "next_cursor": <string|null> }`.
   Pass `next_cursor` back as `?cursor=` to page forward; a `null` cursor means
   you've reached the last page.

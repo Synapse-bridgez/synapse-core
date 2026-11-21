@@ -70,6 +70,14 @@
 //! bounded batch, load related endpoints in bulk, then update individual
 //! delivery rows by primary key.
 //!
+//! ## Delivery lookup semantics
+//!
+//! Delivery lookups used by admin replay must distinguish a missing row from a
+//! successful read. When a lookup by delivery id returns no row, callers must
+//! surface the not-found error variant from [`crate::error`] so the admin
+//! endpoint responds with `404 Not Found` instead of a misleading `200 OK`.
+//! Do not treat an empty result as a successful no-op.
+//!
 //! ## Security rules
 //!
 //! - Bind all request-controlled values with `.bind(...)` or
