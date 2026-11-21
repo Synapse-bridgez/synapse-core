@@ -97,6 +97,41 @@ impl CursorPagination {
     pub fn is_backward(&self) -> bool {
         self.last.is_some()
     }
+
+    /// Builds a human-readable, screen-reader friendly description of a page.
+    ///
+    /// `item_count` is the number of items in the current page and
+    /// `total_count` is the total number of items when known.
+    pub fn describe_page(&self, item_count: usize, total_count: Option<i64>) -> String {
+        if item_count == 0 {
+            return match total_count {
+                Some(total) => format!("No results on this page. {total} total results."),
+                None => "No results on this page.".to_string(),
+            };
+        }
+
+        let start = self.offset_hint() + 1;
+        let end = self.offset_hint() + item_count as i64;
+
+        match total_count {
+            Some(total) => format!(
+                "Showing items {start} to {end} of {total} total results."
+            ),
+            None => format!("Showing items {start} to {end}."),
+        }
+    }
+
+    /// Best-effort zero-based offset of the current page.
+    ///
+    /// Cursor pagination does not track offsets, so this is derived from the
+    /// requested page size and whether a cursor was supplied.
+    fn offset_hint(&self) -> i64 {
+        if self.after.is_some() || self.before.is_some() {
+            self.page_size()
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +199,22 @@ mod tests {
     fn test_is_backward() {
         let pagination = CursorPagination::new(None, None, None, Some(20)).unwrap();
         assert!(pagination.is_backward());
+    }
+
+    #[test]
+    fn test_describe_page_non_empty() {
+        let pagination = CursorPagination::new(None, None, Some(20), None).unwrap();
+        let description = pagination.describe_page(20, Some(100));
+        assert!(!description.is_empty());
+        assert!(description.contains("1"));
+        assert!(description.contains("20"));
+        assert!(description.contains("100"));
+    }
+
+    #[test]
+    fn test_describe_page_empty() {
+        let pagination = CursorPagination::new(None, None, Some(20), None).unwrap();
+        let description = pagination.describe_page(0, None);
+        assert!(!description.is_empty());
     }
 }
