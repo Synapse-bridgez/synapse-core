@@ -20,6 +20,11 @@ pub struct TestArgs {
 pub fn run(args: TestArgs) -> anyhow::Result<()> {
     println!("==> synapse-core test");
 
+    match std::env::var("DATABASE_URL") {
+        Ok(url) => println!("DATABASE_URL: {}", crate::redact_database_url(&url)),
+        Err(_) => println!("DATABASE_URL: <unset>"),
+    }
+
     if !args.integration_only {
         run_unit_tests(&args.extra)?;
     }
