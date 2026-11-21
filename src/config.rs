@@ -180,6 +180,9 @@ pub struct Config {
     // Settlement batch limits
     pub settlement_max_batch_size: usize,
     pub settlement_min_tx_count: usize,
+    /// How long (in milliseconds) pool statistics may be served from cache
+    /// before the health endpoint re-queries the database. Default: 1000ms.
+    pub pool_stats_cache_ttl_ms: u64,
 }
 
 pub mod assets;
@@ -214,141 +217,6 @@ impl Config {
             let db_template = env::var("DATABASE_URL_TEMPLATE").ok();
             let db_url = db_template
                 .map(|template| template.replace("{password}", &db_password))
-                .unwrap_or_else(|| env::var("DATABASE_URL").unwrap_or_default());
+                .unwrap_or_else(|| env::var("DATABASE_URL").unwrap_or_defa
 
-            (db_url, anchor_secret)
-        } else {
-            (
-                env::var("DATABASE_URL")?,
-                env::var("ANCHOR_WEBHOOK_SECRET")?,
-            )
-        };
-
-        Ok(Config {
-            app_env,
-            server_port: env::var("SERVER_PORT")
-                .unwrap_or_else(|_| "3000".to_string())
-                .parse()?,
-            database_url,
-            database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
-            backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
-            stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
-            anchor_webhook_secret,
-            redis_url: env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
-            default_rate_limit: env::var("DEFAULT_RATE_LIMIT")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse()?,
-            whitelist_rate_limit: env::var("WHITELIST_RATE_LIMIT")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()?,
-            whitelisted_ips: env::var("WHITELISTED_IPS").unwrap_or_default(),
-            log_format,
-            allowed_ips,
-            // Default of 1 assumes a single trusted proxy/load balancer in front of
-            // the app (the common case for this deployment shape). A deployment with
-            // a different topology (e.g. no proxy, or a proxy chain) must set this
-            // explicitly rather than relying on the default.
-            trusted_proxy_depth: env::var("TRUSTED_PROXY_DEPTH")
-                .unwrap_or_else(|_| "1".to_string())
-                .parse()?,
-            backup_dir: env::var("BACKUP_DIR").unwrap_or_else(|_| "./backups".to_string()),
-            backup_encryption_key: env::var("BACKUP_ENCRYPTION_KEY").ok(),
-            db_timeouts: DbTimeoutConfig {
-                read_query_secs: env::var("DB_TIMEOUT_READ_SECS")
-                    .unwrap_or_else(|_| "5".to_string())
-                    .parse()
-                    .unwrap_or(5),
-                write_query_secs: env::var("DB_TIMEOUT_WRITE_SECS")
-                    .unwrap_or_else(|_| "10".to_string())
-                    .parse()
-                    .unwrap_or(10),
-                admin_query_secs: env::var("DB_TIMEOUT_ADMIN_SECS")
-                    .unwrap_or_else(|_| "60".to_string())
-                    .parse()
-                    .unwrap_or(60),
-            },
-            otlp_endpoint: env::var("OTLP_ENDPOINT").ok(),
-            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect(),
-            max_pending_queue: env::var("MAX_PENDING_QUEUE")
-                .unwrap_or_else(|_| "10000".to_string())
-                .parse()?,
-            db_min_connections: env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "5".to_string())
-                .parse()?,
-            db_max_connections: env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "50".to_string())
-                .parse()?,
-            db_statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
-                .unwrap_or_else(|_| "30000".to_string())
-                .parse()?,
-            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "600".to_string())
-                .parse()?,
-            db_long_running_statement_timeout_ms: env::var("DB_LONG_RUNNING_STATEMENT_TIMEOUT_MS")
-                .unwrap_or_else(|_| "300000".to_string())
-                .parse()?,
-            processor_workers: env::var("PROCESSOR_WORKERS")
-                .unwrap_or_else(|_| "4".to_string())
-                .parse()?,
-            processor_batch_size: env::var("PROCESSOR_BATCH_SIZE")
-                .unwrap_or_else(|_| "50".to_string())
-                .parse()?,
-            processor_poll_interval_ms: env::var("PROCESSOR_POLL_INTERVAL_MS")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()?,
-            processor_min_batch: env::var("PROCESSOR_MIN_BATCH")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()?,
-            processor_max_batch: env::var("PROCESSOR_MAX_BATCH")
-                .unwrap_or_else(|_| "500".to_string())
-                .parse()?,
-            processor_scaling_factor: env::var("PROCESSOR_SCALING_FACTOR")
-                .unwrap_or_else(|_| "0.5".to_string())
-                .parse()?,
-            slow_query_threshold_ms: env::var("SLOW_QUERY_THRESHOLD_MS")
-                .unwrap_or_else(|_| "500".to_string())
-                .parse()?,
-            settlement_max_batch_size: env::var("SETTLEMENT_MAX_BATCH_SIZE")
-                .unwrap_or_else(|_| "10000".to_string())
-                .parse()?,
-            settlement_min_tx_count: env::var("SETTLEMENT_MIN_TX_COUNT")
-                .unwrap_or_else(|_| "1".to_string())
-                .parse()?,
-        })
-    }
-}
-
-fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
-    let value = raw.trim();
-    if value == "*" {
-        return Ok(AllowedIps::Any);
-    }
-
-    let cidrs = value
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::parse::<IpNet>)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if cidrs.is_empty() {
-        anyhow::bail!("ALLOWED_IPS must be '*' or a comma-separated list of CIDRs");
-    }
-
-    Ok(AllowedIps::Cidrs(cidrs))
-}
-
-fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "text" => Ok(LogFormat::Text),
-        "json" => Ok(LogFormat::Json),
-        _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
-    }
-}
+/* … truncated 5846 chars — edit only what you need near the top … */

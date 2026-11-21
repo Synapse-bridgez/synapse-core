@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 /// Severity level for a dependency
@@ -22,7 +24,7 @@ pub struct HealthResponse {
     pub dependencies: HashMap<String, DependencyStatus>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum DependencyStatus {
     Healthy {
@@ -171,6 +173,49 @@ impl DependencyChecker for HorizonChecker {
     }
 }
 
+/// TTL cache for dependency check results.
+///
+/// Health probes can be frequent; caching the snapshot for a short window
+/// avoids re-running the underlying checks (including the pool statistics
+/// query) on every request while keeping the returned fields unchanged.
+pub struct HealthCache {
+    ttl: Duration,
+    snapshot: Mutex<Option<(Instant, HashMap<String, DependencyStatus>)>>,
+}
+
+impl HealthCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            snapshot: Mutex::new(None),
+        }
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Return the cached dependency snapshot if it is still within the TTL,
+    /// otherwise run the checks and store the fresh snapshot.
+    pub async fn get_or_refresh<F, Fut>(&self, refresh: F) -> HashMap<String, DependencyStatus>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = HashMap<String, DependencyStatus>>,
+    {
+        let mut guard = self.snapshot.lock().await;
+
+        if let Some((cached_at, ref cached)) = *guard {
+            if cached_at.elapsed() < self.ttl {
+                return cached.clone();
+            }
+        }
+
+        let fresh = refresh().await;
+        *guard = Some((Instant::now(), fresh.clone()));
+        fresh
+    }
+}
+
 pub async fn check_health(
     postgres: PostgresChecker,
     redis: RedisChecker,
@@ -244,5 +289,57 @@ fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) ->
         "degraded".to_string()
     } else {
         "healthy".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn healthy_snapshot() -> HashMap<String, DependencyStatus> {
+        let mut deps = HashMap::new();
+        deps.insert(
+            "postgres".to_string(),
+            DependencyStatus::Healthy {
+                status: "healthy".to_string(),
+                severity: DependencySeverity::Critical,
+                latency_ms: 1,
+            },
+        );
+        deps
+    }
+
+    #[tokio::test]
+    async fn two_calls_within_window_return_same_snapshot() {
+        let cache = HealthCache::new(Duration::from_secs(1));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let first = {
+            let calls = Arc::clone(&calls);
+            cache
+                .get_or_refresh(|| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    healthy_snapshot()
+                })
+                .await
+        };
+
+        let second = {
+            let calls = Arc::clone(&calls);
+            cache
+                .get_or_refresh(|| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    healthy_snapshot()
+                })
+                .await
+        };
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first.len(), second.len());
+        assert!(matches!(
+            second.get("postgres"),
+            Some(DependencyStatus::Healthy { .. })
+        ));
     }
 }
