@@ -25,11 +25,12 @@ git checkout develop
 git checkout -b feat/your-feature
 
 # 2. Environment
-cp .env.example .env
-# Edit .env with your settings
+cp .env.example.failover .env
+# Edit .env with your settings (DATABASE_URL, STELLAR_HORIZON_URL, ANCHOR_WEBHOOK_SECRET)
+# Profile defaults for APP_ENV=development are loaded from .env.development
 
 # 3. Start services
-docker-compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml up -d
 
 # 4. Run migrations
 sqlx migrate run
@@ -84,9 +85,9 @@ sqlx migrate revert        # Revert last migration
 sqlx migrate info          # Show migration status
 
 # Docker services
-docker-compose -f docker-compose.dev.yml up -d     # Start
-docker-compose -f docker-compose.dev.yml down      # Stop
-docker-compose -f docker-compose.dev.yml logs -f   # View logs
+docker compose -f docker-compose.dev.yml up -d     # Start
+docker compose -f docker-compose.dev.yml down      # Stop
+docker compose -f docker-compose.dev.yml logs -f   # View logs
 ```
 
 ## Project Structure
@@ -175,19 +176,19 @@ brew install openssl
 **Database connection fails:**
 ```bash
 # Check services are running
-docker-compose -f docker-compose.dev.yml ps
+docker compose -f docker-compose.dev.yml ps
 
 # Check DATABASE_URL in .env
 echo $DATABASE_URL
 
 # Restart services
-docker-compose -f docker-compose.dev.yml restart
+docker compose -f docker-compose.dev.yml restart
 ```
 
 **Tests fail:**
 ```bash
 # Create test database
-docker exec -it synapse-postgres psql -U synapse -c "CREATE DATABASE synapse_test;"
+docker exec -it synapse-postgres-dev psql -U synapse -c "CREATE DATABASE synapse_test;"
 
 # Set test DATABASE_URL
 export DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test
