@@ -63,6 +63,17 @@ enum CircuitDecision {
     HalfOpenProbe,
 }
 
+/// Errors returned by [`WebhookDispatcher`] operations.
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookDispatcherError {
+    /// No webhook delivery exists for the requested delivery ID.
+    #[error("Webhook delivery {0} not found")]
+    DeliveryNotFound(Uuid),
+    /// Any other dispatcher failure.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 // ── Domain types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -180,6 +191,23 @@ impl WebhookDispatcher {
         }
 
         Ok(())
+    }
+
+    /// Fetch a single delivery by ID, returning a distinct not-found error
+    /// when no such delivery exists.
+    pub async fn get_delivery(
+        &self,
+        delivery_id: Uuid,
+    ) -> Result<WebhookDelivery, WebhookDispatcherError> {
+        let delivery = sqlx::query_as::<_, WebhookDelivery>(
+            "SELECT * FROM webhook_deliveries WHERE id = $1",
+        )
+        .bind(delivery_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| WebhookDispatcherError::Other(e.into()))?;
+
+        delivery.ok_or(WebhookDispatcherError::DeliveryNotFound(delivery_id))
     }
 
     /// Process all pending deliveries concurrently using `buffer_unordered`.

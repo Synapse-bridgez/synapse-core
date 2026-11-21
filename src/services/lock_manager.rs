@@ -162,6 +162,7 @@ impl FairLockManager {
                             ttl_secs: self.lock_ttl.as_secs(),
                             expected_duration_secs: self.lock_ttl.as_secs(),
                             overdue: false,
+                            aria_label: ActiveLockInfo::aria_label(resource, false),
                         })
                         .await;
 
@@ -323,6 +324,16 @@ pub struct ActiveLockInfo {
     pub ttl_secs: u64,
     pub expected_duration_secs: u64,
     pub overdue: bool,
+    /// Short human-readable label for assistive technologies.
+    pub aria_label: String,
+}
+
+impl ActiveLockInfo {
+    /// Build a short human-readable ARIA label from the lock owner and status.
+    pub fn aria_label(owner: &str, overdue: bool) -> String {
+        let status = if overdue { "overdue" } else { "active" };
+        format!("Lock on {owner}, {status}")
+    }
 }
 
 /// Shared registry of all currently-held locks in this process.
@@ -357,8 +368,10 @@ impl LockRegistry {
             .values()
             .map(|info| {
                 let held_secs = now.saturating_sub(info.acquired_at);
+                let overdue = held_secs > info.expected_duration_secs * 2;
                 ActiveLockInfo {
-                    overdue: held_secs > info.expected_duration_secs * 2,
+                    overdue,
+                    aria_label: ActiveLockInfo::aria_label(&info.resource, overdue),
                     ..info.clone()
                 }
             })
@@ -883,6 +896,7 @@ mod tests {
                 ttl_secs: 30,
                 expected_duration_secs: 30,
                 overdue: false,
+                aria_label: ActiveLockInfo::aria_label("test", false),
             })
             .await;
 

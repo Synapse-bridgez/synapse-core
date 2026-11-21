@@ -51,6 +51,20 @@ enum ServerMessage {
     Resync {
         events: Vec<crate::db::models::Transaction>,
     },
+    /// Acknowledgement of a client `reconnect` request, carrying the last
+    /// known keyboard focus target so the client can restore it.
+    ReconnectAck { focus: Option<String> },
+}
+
+/// Builds the reconnect acknowledgement for `session_id` from the shared
+/// focus tracker. Returns `None` when the session has no recorded focus.
+fn reconnect_ack(
+    tracker: &crate::ws::FocusTracker,
+    session_id: &str,
+) -> ServerMessage {
+    ServerMessage::ReconnectAck {
+        focus: tracker.last_target(session_id).map(str::to_string),
+    }
 }
 
 /// Messages the client may send to the server.
@@ -59,6 +73,10 @@ enum ServerMessage {
 enum ClientMessage {
     /// Ask for the latest `limit` events (defaults to [`RESYNC_DEFAULT_LIMIT`]).
     Resync { limit: Option<i64> },
+    /// Report the UI element that currently has keyboard focus.
+    Focus { session_id: String, target: String },
+    /// Re-establish a previously used session and ask for a focus hint.
+    Reconnect { session_id: String },
 }
 
 #[derive(Debug, Deserialize)]
