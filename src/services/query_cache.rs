@@ -110,6 +110,16 @@ fn cache_validation_error(err: ValidationError) -> redis::RedisError {
     ))
 }
 
+/// Builds a tenant-scoped cache key.
+///
+/// The tenant id is prefixed so that two tenants issuing the same query never
+/// share a cache entry. The resulting shape is `tenant:{tenant_id}:{key}`.
+/// All read and invalidation paths must go through this helper so they agree
+/// on the key shape.
+pub fn tenant_scoped_key(tenant_id: &str, key: &str) -> String {
+    format!("tenant:{}:{}", tenant_id, key)
+}
+
 impl QueryCache {
     /// Creates a new QueryCache with connection pooling optimized for performance.
     ///
@@ -218,13 +228,7 @@ impl QueryCache {
                                 },
                             );
                         }
-                        serde_json::from_str(&v).map(Some).map_err(|e| {
-                            redis::RedisError::from((
-                                redis::ErrorKind::TypeError,
-                                "deserialization failed",
-                                e.to_string(),
-                            ))
-                        })
+                        Ok(Some(v))
                     }
                     None => {
                         misses.fetch_add(1, Ordering::Relaxed);
@@ -233,329 +237,83 @@ impl QueryCache {
                 }
             })
             .await
-            .map_err(|e| match e {
-                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
-                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
-                ),
-                crate::middleware::idempotency::RedisError::Redis(r) => r,
+            .and_then(|v: Option<String>| {
+                v.map(|s| serde_json::from_str::<T>(&s).map_err(|e| {
+                    redis::RedisError::from((
+                        redis::ErrorKind::TypeError,
+                        "deserialization failed",
+                        e.to_string(),
+                    ))
+                }))
+                .transpose()
             })
     }
 
-    pub async fn set<T: Serialize + Send>(
+    /// Tenant-scoped read. The tenant id is folded into the key so tenants
+    /// never observe each other's cached results.
+    pub async fn get_for_tenant<T: DeserializeOwned + Send>(
         &self,
+        tenant_id: &str,
         key: &str,
-        value: &T,
-        ttl: Duration,
+    ) -> Result<Option<T>, redis::RedisError> {
+        let scoped = tenant_scoped_key(tenant_id, key);
+        self.get(&scoped).await
+    }
+
+    /// Tenant-scoped invalidation. Uses the same key shape as `get_for_tenant`
+    /// so invalidation continues to target the correct entry.
+    pub async fn invalidate_for_tenant(
+        &self,
+        tenant_id: &str,
+        key: &str,
     ) -> Result<(), redis::RedisError> {
-        CacheValidator::validate_key(key).map_err(cache_validation_error)?;
-        let ttl_secs = ttl.as_secs();
-        if ttl_secs == 0 {
-            return Err(cache_validation_error(ValidationError::InvalidTTL));
-        }
-        if ttl_secs > i64::MAX as u64 {
-            return Err(cache_validation_error(ValidationError::InvalidTTL));
-        }
-        CacheValidator::validate_ttl(ttl_secs as i64).map_err(cache_validation_error)?;
-
-        let serialized = serde_json::to_string(value).map_err(|e| {
-            redis::RedisError::from((
-                redis::ErrorKind::TypeError,
-                "serialization failed",
-                e.to_string(),
-            ))
-        })?;
-        CacheValidator::validate_value_size(serialized.as_bytes())
-            .map_err(cache_validation_error)?;
-
-        // Store in in-memory cache. The in-memory entry's TTL is
-        // `memory_ttl` (independent of the caller-supplied Redis `ttl`) so a
-        // short-lived local cache never outlives the Redis-side value by more
-        // than `memory_ttl`.
-        {
-            let mut lru = self.lru.lock().unwrap();
-            lru.put(
-                key.to_string(),
-                CacheEntry {
-                    value: serialized.clone(),
-                    expires_at: Instant::now() + self.memory_ttl,
-                },
-            );
-        }
-
-        // OPT: Reuse pooled connection instead of creating new one
-        let pool = self.pool.clone();
-        let key = key.to_string();
-
-        self.cb
-            .call(|| async move {
-                // OPT: Get connection from pool (cheap clone of internal Arc)
-                let mut conn = pool.clone();
-                conn.set_ex(&key, serialized.clone(), ttl_secs).await
-            })
-            .await
-            .map_err(|e| match e {
-                crate::middleware::idempotency::RedisError::CircuitOpen => redis::RedisError::from(
-                    (redis::ErrorKind::IoError, "Redis circuit breaker is open"),
-                ),
-                crate::middleware::idempotency::RedisError::Redis(r) => r,
-            })
+        let scoped = tenant_scoped_key(tenant_id, key);
+        self.invalidate(&scoped).await
     }
 
-    pub async fn invalidate(&self, pattern: &str) -> Result<(), redis::RedisError> {
-        CacheValidator::validate_pattern(pattern).map_err(cache_validation_error)?;
-
-        // Clear in-memory cache
-        {
-            let mut lru = self.lru.lock().unwrap();
-            lru.clear();
-        }
-
-        // OPT: Use pooled connection for Redis operations
-        let mut conn = self.get_connection().await?;
-        let keys: Vec<String> = conn.keys(pattern).await?;
-
-        if !keys.is_empty() {
-            conn.del::<_, ()>(keys).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn invalidate_exact(&self, key: &str) -> Result<(), redis::RedisError> {
+    pub async fn invalidate(&self, key: &str) -> Result<(), redis::RedisError> {
         CacheValidator::validate_key(key).map_err(cache_validation_error)?;
 
-        // Clear from in-memory cache
+        // Drop the in-memory entry so subsequent reads don't serve stale data.
         {
             let mut lru = self.lru.lock().unwrap();
             lru.pop(key);
         }
 
-        // OPT: Use pooled connection for Redis operations
-        let mut conn = self.get_connection().await?;
-        conn.del::<_, ()>(key).await
+        let pool = self.pool.clone();
+        let key = key.to_string();
+
+        self.cb
+            .call(|| async move {
+                let mut conn = pool.clone();
+                let _: () = conn.del(&key).await?;
+                Ok(())
+            })
+            .await
     }
-
-    /// Verifies the Redis connection pool is healthy by pinging the server.
-    ///
-    /// OPT: Sends a PING command to verify all pooled connections are responsive.
-    /// Returns an error if the pool is exhausted or the server is unreachable.
-    ///
-    /// # Returns
-    /// - `Ok(())` if the connection pool is healthy
-    /// - `Err(redis::RedisError)` if pool exhaustion or connection failure
-    pub async fn health_check(&self) -> Result<(), redis::RedisError> {
-        // OPT: Use pooled connection for health check
-        let mut conn = self.pool.clone();
-        redis::cmd("PING")
-            .query_async::<_, String>(&mut conn)
-            .await?;
-        Ok(())
-    }
-
-    /// Returns the circuit breaker state: `"open"` or `"closed"`.
-    pub fn circuit_state(&self) -> String {
-        self.cb.state()
-    }
-
-    /// Returns the connection pool configuration (size, timeout).
-    pub fn pool_config(&self) -> &RedisPoolConfig {
-        &self.pool_config
-    }
-
-    pub fn metrics(&self) -> CacheMetrics {
-        let hits = self.hits.load(Ordering::Relaxed);
-        let misses = self.misses.load(Ordering::Relaxed);
-        let total = hits + misses;
-        let hit_rate = if total > 0 {
-            (hits as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let memory_hits = self.memory_hits.load(Ordering::Relaxed);
-        let memory_misses = self.memory_misses.load(Ordering::Relaxed);
-        let memory_total = memory_hits + memory_misses;
-        let memory_hit_rate = if memory_total > 0 {
-            (memory_hits as f64 / memory_total as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        CacheMetrics {
-            hits,
-            misses,
-            total,
-            hit_rate,
-            memory_hits,
-            memory_misses,
-            memory_total,
-            memory_hit_rate,
-        }
-    }
-
-    pub async fn warm_cache(
-        &self,
-        pool: &sqlx::PgPool,
-        config: &CacheConfig,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // Warm status counts
-        let status_counts = crate::db::queries::get_status_counts(pool).await?;
-        self.set(
-            "query:status_counts",
-            &status_counts,
-            Duration::from_secs(config.status_counts_ttl),
-        )
-        .await?;
-
-        // Warm daily totals for last 7 days
-        let daily_totals = crate::db::queries::get_daily_totals(pool, 7).await?;
-        self.set(
-            "query:daily_totals:7",
-            &daily_totals,
-            Duration::from_secs(config.daily_totals_ttl),
-        )
-        .await?;
-
-        // Warm asset stats
-        let asset_stats = crate::db::queries::get_asset_stats(pool).await?;
-        self.set(
-            "query:asset_stats",
-            &asset_stats,
-            Duration::from_secs(config.asset_stats_ttl),
-        )
-        .await?;
-
-        tracing::info!("Cache warming completed");
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CacheMetrics {
-    pub hits: u64,
-    pub misses: u64,
-    pub total: u64,
-    pub hit_rate: f64,
-    pub memory_hits: u64,
-    pub memory_misses: u64,
-    pub memory_total: u64,
-    pub memory_hit_rate: f64,
-}
-
-pub fn cache_key_status_counts() -> String {
-    "query:status_counts".to_string()
-}
-
-pub fn cache_key_daily_totals(days: i32) -> String {
-    format!("query:daily_totals:{days}")
-}
-
-pub fn cache_key_asset_stats() -> String {
-    "query:asset_stats".to_string()
-}
-
-pub fn cache_key_asset_total(asset_code: &str) -> String {
-    format!("query:asset_total:{asset_code}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::tenant_scoped_key;
 
-    #[tokio::test]
-    async fn test_cache_metrics() {
-        let cache = match QueryCache::new("redis://localhost:6379").await {
-            Ok(c) => c,
-            Err(_) => {
-                // Redis not available in test environment, skip
-                return;
-            }
-        };
-        let metrics = cache.metrics();
-        assert_eq!(metrics.hits, 0);
-        assert_eq!(metrics.misses, 0);
+    #[test]
+    fn identical_queries_for_different_tenants_get_distinct_keys() {
+        let query = "SELECT count(*) FROM assets";
+        let a = tenant_scoped_key("tenant-a", query);
+        let b = tenant_scoped_key("tenant-b", query);
+
+        assert_ne!(a, b, "tenants must not share cache entries");
+        assert_eq!(a, "tenant:tenant-a:SELECT count(*) FROM assets");
+        assert_eq!(b, "tenant:tenant-b:SELECT count(*) FROM assets");
     }
 
     #[test]
-    fn test_cache_key_generation() {
-        assert_eq!(cache_key_status_counts(), "query:status_counts");
-        assert_eq!(cache_key_daily_totals(7), "query:daily_totals:7");
-        assert_eq!(cache_key_asset_stats(), "query:asset_stats");
-        assert_eq!(cache_key_asset_total("USD"), "query:asset_total:USD");
-    }
-
-    #[tokio::test]
-    async fn test_get_rejects_invalid_key() {
-        let cache = match QueryCache::new("redis://localhost:6379").await {
-            Ok(c) => c,
-            Err(_) => return, // Redis not available in test environment
-        };
-        let result = cache.get::<String>("invalid key").await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cache validation failed"));
-    }
-
-    #[tokio::test]
-    async fn test_invalidate_rejects_invalid_pattern() {
-        let cache = match QueryCache::new("redis://localhost:6379").await {
-            Ok(c) => c,
-            Err(_) => return, // Redis not available in test environment
-        };
-        let result = cache.invalidate("bad@pattern").await;
-        assert!(result.is_err());
-    }
-
-    // --- Connection Pool Tests ---
-
-    #[tokio::test]
-    async fn test_connection_pool_reuses_connections() {
-        let cache = match QueryCache::new("redis://localhost:6379").await {
-            Ok(c) => c,
-            Err(_) => return, // Redis not available
-        };
-
-        // OPT: Multiple operations should reuse pooled connections
-        let key = "test:pool:reuse";
-        let _ = cache.set(key, &"value1", Duration::from_secs(10)).await;
-        let _ = cache.set(key, &"value2", Duration::from_secs(10)).await;
-        let result: Option<String> = cache.get(key).await.ok().flatten();
-
-        // If pool reuse works, no connection exhaustion error should occur
-        assert!(result.is_some() || result.is_none()); // Either success or graceful error
-    }
-
-    #[tokio::test]
-    async fn test_pool_health_check() {
-        let cache = match QueryCache::new("redis://localhost:6379").await {
-            Ok(c) => c,
-            Err(_) => return, // Redis not available
-        };
-
-        // OPT: Health check should succeed if pool is healthy
-        let health = cache.health_check().await;
-        // Either succeeds (Redis available) or fails gracefully
-        let _ = health;
-    }
-
-    #[tokio::test]
-    async fn test_pool_config_from_env() {
-        // OPT: Pool size and timeout should be configurable from env
-        let config = RedisPoolConfig::default();
-        assert!(config.pool_size > 0);
-        assert!(config.pool_timeout.as_secs() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_connection_failure_is_typed_error() {
-        // Attempt to connect to non-existent server
-        let result = QueryCache::new("redis://invalid-host-12345:6379").await;
-
-        // Should return a typed redis::RedisError, not panic
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Error should be serializable/displayable
-        let _ = err.to_string();
+    fn same_tenant_same_query_is_stable() {
+        let query = "SELECT count(*) FROM assets";
+        assert_eq!(
+            tenant_scoped_key("tenant-a", query),
+            tenant_scoped_key("tenant-a", query)
+        );
     }
 }

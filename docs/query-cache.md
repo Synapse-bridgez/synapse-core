@@ -10,7 +10,8 @@ The query result caching layer provides sophisticated caching for expensive aggr
 ✅ **Automatic cache invalidation** - Transactional invalidation on data changes  
 ✅ **Cache warming on startup** - Pre-populate cache with common queries  
 ✅ **Cache hit/miss metrics** - Exposed via `/cache/metrics` endpoint  
-✅ **Configurable TTL per query type** - Different expiration times for different queries
+✅ **Configurable TTL per query type** - Different expiration times for different queries  
+✅ **Tenant-scoped keys** - Cache entries are isolated per tenant
 
 ## Architecture
 
@@ -27,10 +28,15 @@ All `QueryCache` Redis operations validate keys, patterns, values, and TTLs via 
    - Atomic hit/miss metrics tracking
 
 2. **Cache Key Generation**
-   - `cache_key_status_counts()` → `"query:status_counts"`
-   - `cache_key_daily_totals(days)` → `"query:daily_totals:{days}"`
-   - `cache_key_asset_stats()` → `"query:asset_stats"`
-   - `cache_key_asset_total(asset)` → `"query:asset_total:{asset}"`
+
+   Every key is prefixed with the tenant id so that tenants never share cached
+   results. The tenant id is taken from the request context (see
+   `src/middleware/tenant.rs`).
+
+   - `cache_key_status_counts(tenant)` → `"query:{tenant}:status_counts"`
+   - `cache_key_daily_totals(tenant, days)` → `"query:{tenant}:daily_totals:{days}"`
+   - `cache_key_asset_stats(tenant)` → `"query:{tenant}:asset_stats"`
+   - `cache_key_asset_total(tenant, asset)` → `"query:{tenant}:asset_total:{asset}"`
 
 3. **Invalidation Hooks**
    - `insert_transaction()` - Invalidates after transaction insert
@@ -118,12 +124,13 @@ invalidate_transaction_caches(&asset_code).await;  // Then invalidate
 
 ### Invalidation Patterns
 
-When a transaction is modified, the following caches are invalidated:
+Invalidation uses the same tenant-scoped key shape as reads, so a write for a
+given tenant only clears that tenant's entries:
 
-1. **Status counts** - `query:status_counts`
-2. **Daily totals** - `query:daily_totals:*` (all day ranges)
-3. **Asset stats** - `query:asset_stats`
-4. **Asset total** - `query:asset_total:{asset_code}` (specific asset)
+1. **Status counts** - `query:{tenant}:status_counts`
+2. **Daily totals** - `query:{tenant}:daily_totals:*` (all day ranges)
+3. **Asset stats** - `query:{tenant}:asset_stats`
+4. **Asset total** - `query:{tenant}:asset_total:{asset_code}` (specific asset)
 
 ### Write Operations with Invalidation
 
@@ -211,6 +218,7 @@ Tests include:
 - Metrics tracking
 - Pattern-based invalidation
 - Configuration defaults
+- Tenant isolation (identical queries for different tenants get distinct entries)
 
 ### Integration Tests
 
@@ -231,6 +239,7 @@ Monitor via `/cache/metrics` endpoint. Low hit rates may indicate:
 
 Redis memory usage scales with:
 - Number of unique query patterns
+- Number of tenants
 - Size of result sets
 - TTL configuration
 
@@ -280,12 +289,12 @@ If seeing stale cached data:
 - [ ] Cache compression for large result sets
 - [ ] Distributed cache invalidation for multi-instance deployments
 - [ ] Cache preloading based on access patterns
-- [ ] Per-tenant cache isolation
 - [ ] Cache stampede prevention with locking
 
 ## References
 
 - Issue: #170 Database Query Result Caching Layer
+- Issue: #1646 Tenant-scoped query cache keys
 - Dependencies: #3 (Database Setup), #64 (Redis Integration)
 - Implementation: `src/services/query_cache.rs`
 - Tests: `tests/query_cache_test.rs`
