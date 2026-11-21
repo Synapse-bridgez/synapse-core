@@ -65,11 +65,49 @@ pub struct SwapHandoff {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Typed validation error for swap input (#1614).
+///
+/// Swap amounts must be strictly greater than zero; zero and negative amounts
+/// are rejected here rather than being passed downstream to the swap engine.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SwapValidationError {
+    /// The swap amount was zero or negative.
+    #[error("swap amount must be greater than zero, got {0}")]
+    NonPositiveAmount(String),
+}
+
+impl From<SwapValidationError> for crate::error::AppError {
+    fn from(err: SwapValidationError) -> Self {
+        match err {
+            SwapValidationError::NonPositiveAmount(m) => {
+                crate::error::AppError::InvalidTransactionAmount(m)
+            }
+        }
+    }
+}
+
+/// Reject zero and negative swap amounts. Returns the amount unchanged when it
+/// is strictly positive.
+pub fn validate_swap_amount(amount: &BigDecimal) -> Result<(), SwapValidationError> {
+    use std::str::FromStr;
+    if *amount <= BigDecimal::from_str("0").expect("zero is a valid BigDecimal") {
+        return Err(SwapValidationError::NonPositiveAmount(amount.to_string()));
+    }
+    Ok(())
+}
+
 impl SwapHandoff {
     /// Build a hand-off from a completed transaction. `tenant_id` is resolved by
     /// the caller (the `Transaction` row does not carry it directly).
-    pub fn from_transaction(tx: &Transaction, tenant_id: Option<uuid::Uuid>) -> Self {
-        Self {
+    ///
+    /// Fails with [`SwapValidationError`] when the transaction amount is zero or
+    /// negative, so an invalid amount never reaches the swap engine.
+    pub fn from_transaction(
+        tx: &Transaction,
+        tenant_id: Option<uuid::Uuid>,
+    ) -> Result<Self, SwapValidationError> {
+        validate_swap_amount(&tx.amount)?;
+        Ok(Self {
             transaction_id: tx.id,
             tenant_id,
             stellar_account: tx.stellar_account.clone(),
@@ -78,7 +116,7 @@ impl SwapHandoff {
             completed_at: tx.updated_at,
             idempotency_key: format!("swap:{}", tx.id),
             metadata: tx.metadata.clone(),
-        }
+        })
     }
 }
 
