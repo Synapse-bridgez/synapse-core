@@ -233,4 +233,23 @@ mod tests {
         let result = SCHEMAS.webhook_v1.validate(&invalid);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_validation_error_includes_field_name() {
+        use crate::validation::{
+            validate_asset_code, validate_positive_amount, validate_stellar_address,
+        };
+        use bigdecimal::BigDecimal;
+        use std::str::FromStr;
+
+        let err = validate_stellar_address("INVALID").expect_err("invalid address");
+        assert!(err.to_string().contains("stellar_address"));
+
+        let err = validate_asset_code("usd").expect_err("invalid asset code");
+        assert!(err.to_string().contains("asset_code"));
+
+        let zero = BigDecimal::from_str("0").expect("valid decimal");
+        let err = validate_positive_amount(&zero).expect_err("invalid amount");
+        assert!(err.to_string().contains("amount"));
+    }
 }

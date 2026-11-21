@@ -34,6 +34,11 @@ impl ValidationError {
             message: message.into(),
         }
     }
+
+    /// Full error message including the invalid field name.
+    pub fn message_with_field(&self) -> String {
+        format!("{}: {}", self.field, self.message)
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -97,21 +102,26 @@ pub fn validate_enum(field: &'static str, value: &str, allowed: &[&str]) -> Vali
 }
 
 pub fn validate_stellar_address(stellar_address: &str) -> ValidationResult {
+    validate_stellar_address_field("stellar_address", stellar_address)
+}
+
+/// Validates a Stellar address, reporting errors against the given field name.
+pub fn validate_stellar_address_field(
+    field: &'static str,
+    stellar_address: &str,
+) -> ValidationResult {
     let stellar_address = sanitize_string(stellar_address);
-    validate_required("stellar_address", &stellar_address)?;
+    validate_required(field, &stellar_address)?;
 
     if stellar_address.len() != STELLAR_ACCOUNT_LEN {
         return Err(ValidationError::new(
-            "stellar_address",
+            field,
             format!("must be exactly {STELLAR_ACCOUNT_LEN} characters"),
         ));
     }
 
     if !stellar_address.starts_with('G') {
-        return Err(ValidationError::new(
-            "stellar_address",
-            "must start with 'G'",
-        ));
+        return Err(ValidationError::new(field, "must start with 'G'"));
     }
 
     if !stellar_address
@@ -119,7 +129,7 @@ pub fn validate_stellar_address(stellar_address: &str) -> ValidationResult {
         .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
     {
         return Err(ValidationError::new(
-            "stellar_address",
+            field,
             "must contain only uppercase letters and digits",
         ));
     }
@@ -132,28 +142,38 @@ pub fn validate_stellar_account(account: &str) -> ValidationResult {
 }
 
 pub fn validate_asset_code(asset_code: &str) -> ValidationResult {
+    validate_asset_code_field("asset_code", asset_code)
+}
+
+/// Validates an asset code, reporting errors against the given field name.
+pub fn validate_asset_code_field(field: &'static str, asset_code: &str) -> ValidationResult {
     let asset_code = sanitize_string(asset_code);
-    validate_required("asset_code", &asset_code)?;
-    validate_max_len("asset_code", &asset_code, ASSET_CODE_MAX_LEN)?;
+    validate_required(field, &asset_code)?;
+    validate_max_len(field, &asset_code, ASSET_CODE_MAX_LEN)?;
 
     if !asset_code
         .chars()
         .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
     {
         return Err(ValidationError::new(
-            "asset_code",
+            field,
             "must contain only uppercase letters and digits",
         ));
     }
 
-    validate_enum("asset_code", &asset_code, ALLOWED_ASSET_CODES)?;
+    validate_enum(field, &asset_code, ALLOWED_ASSET_CODES)?;
 
     Ok(())
 }
 
 pub fn validate_positive_amount(amount: &BigDecimal) -> ValidationResult {
+    validate_positive_amount_field("amount", amount)
+}
+
+/// Validates a positive amount, reporting errors against the given field name.
+pub fn validate_positive_amount_field(field: &'static str, amount: &BigDecimal) -> ValidationResult {
     if amount <= &BigDecimal::from(0) {
-        return Err(ValidationError::new("amount", "must be greater than zero"));
+        return Err(ValidationError::new(field, "must be greater than zero"));
     }
 
     Ok(())
@@ -263,6 +283,23 @@ mod tests {
         assert!(validate_min_len("status", "pending", 7).is_ok());
         assert!(validate_min_len("status", "pending", 8).is_err());
         assert!(validate_min_len("status", "", 1).is_err());
+    }
+
+    #[test]
+    fn validation_errors_include_field_name() {
+        let err = validate_positive_amount(&BigDecimal::from(0)).expect_err("zero is invalid");
+        assert_eq!(err.field, "amount");
+        assert!(err.to_string().contains("amount"));
+        assert!(err.message_with_field().contains("amount"));
+
+        let err = validate_stellar_address("GSHORT").expect_err("short address is invalid");
+        assert!(err.to_string().contains("stellar_address"));
+
+        let err = validate_asset_code("usd").expect_err("lowercase asset code is invalid");
+        assert!(err.to_string().contains("asset_code"));
+
+        let err = validate_positive_amount_field("swap_amount", &BigDecimal::from(-1))
+            .expect_err("negative amount is invalid");        assert!(err.to_string().contains("swap_amount"));
     }
 
     #[test]
