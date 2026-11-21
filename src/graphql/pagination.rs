@@ -180,6 +180,26 @@ pub mod offset;
 pub use cursor::CursorPagination;
 pub use offset::OffsetPagination;
 
+/// Pagination metadata exposed to GraphQL clients.
+///
+/// The optional `description` field carries a human-readable summary of the
+/// current page (range and total count when available) so that screen readers
+/// can announce pagination boundaries. It is optional so existing clients that
+/// do not select it are unaffected.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageInfo {
+    /// Whether more items exist after this page
+    pub has_next_page: bool,
+    /// Whether more items exist before this page
+    pub has_previous_page: bool,
+    /// Cursor of the first item in this page
+    pub start_cursor: Option<String>,
+    /// Cursor of the last item in this page
+    pub end_cursor: Option<String>,
+    /// Human-readable, screen-reader friendly summary of this page
+    pub description: Option<String>,
+}
+
 /// Maximum allowed page size
 pub const MAX_PAGE_SIZE: i64 = 100;
 

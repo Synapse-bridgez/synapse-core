@@ -53,6 +53,27 @@ impl OffsetPagination {
     pub fn has_prev_page(&self) -> bool {
         self.offset > 0
     }
+
+    /// Builds a human-readable, screen-reader friendly description of a page.
+    ///
+    /// `item_count` is the number of items in the current page and
+    /// `total_count` is the total number of items when known.
+    pub fn describe_page(&self, item_count: usize, total_count: Option<i64>) -> String {
+        if item_count == 0 {
+            return match total_count {
+                Some(total) => format!("No results on this page. {total} total results."),
+                None => "No results on this page.".to_string(),
+            };
+        }
+
+        let start = self.offset + 1;
+        let end = self.offset + item_count as i64;
+
+        match total_count {
+            Some(total) => format!("Showing items {start} to {end} of {total} total results."),
+            None => format!("Showing items {start} to {end}."),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,5 +137,14 @@ mod tests {
 
         let pagination = OffsetPagination::new(Some(20), Some(20));
         assert!(pagination.has_prev_page());
+    }
+
+    #[test]
+    fn test_describe_page() {
+        let pagination = OffsetPagination::new(Some(20), Some(20));
+        let description = pagination.describe_page(20, Some(100));
+        assert!(description.contains("21"));
+        assert!(description.contains("40"));
+        assert!(description.contains("100"));
     }
 }
