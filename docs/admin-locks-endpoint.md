@@ -1,5 +1,29 @@
 # GET /admin/locks: What It Observes
 
+## Response shape
+
+Each lock in the response includes the following fields:
+
+- `resource` — the resource name the lock is held on (e.g. `processor:leader`).
+- `owner` — the identifier of the instance/holder that currently owns the lock.
+- `acquired_at` — when the lock was acquired.
+- `last_renewed_at` — when the lock was last successfully renewed.
+- `overdue` — whether the last successful renewal is older than the expected lease window.
+
+Example response:
+
+```json
+[
+  {
+    "resource": "processor:leader",
+    "owner": "instance-7f3a9c",
+    "acquired_at": "2024-01-01T00:00:00Z",
+    "last_renewed_at": "2024-01-01T00:00:30Z",
+    "overdue": false
+  }
+]
+```
+
 ## Current status
 
 `GET /admin/locks` reads `lock_manager::lock_registry().snapshot()` and
@@ -27,7 +51,7 @@ The registry is **not** written to by:
 
 - An entry with `resource: "processor:leader"` reflects real leader-election
   state: which instance currently holds the lease, refreshed on every
-  successful renewal.
+  successful renewal. The `owner` field identifies that instance.
 - `overdue: true` on that entry means the last successful renewal is more
   than `2 × LEADER_LEASE_SECS` (60s) old — either a real problem (the leader
   crashed or lost Redis connectivity mid-lease) or, less urgently, that a
