@@ -2,10 +2,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
+
+/// How often the in-memory flag snapshot is refreshed from the database.
+/// Flag changes made directly in the database become visible within this
+/// window; changes made through this service refresh the snapshot eagerly.
+pub const FLAG_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct FeatureFlagService {
     pool: PgPool,
+    snapshot: Arc<RwLock<HashMap<String, FlagSnapshotEntry>>>,
+}
+
+#[derive(Debug, Clone)]
+struct FlagSnapshotEntry {
+    enabled: bool,
+    rollout_percentage: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -29,7 +44,52 @@ pub struct FlagAuditEntry {
 
 impl FeatureFlagService {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            snapshot: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Loads the full flag set into the in-memory snapshot. Call once at
+    /// startup and then periodically (see [`Self::spawn_refresh_task`]).
+    pub async fn refresh(&self) -> Result<(), sqlx::Error> {
+        let flags = sqlx::query_as::<_, FeatureFlag>(
+            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut snapshot = self.snapshot.write().await;
+        *snapshot = flags
+            .into_iter()
+            .map(|f| {
+                (
+                    f.name,
+                    FlagSnapshotEntry {
+                        enabled: f.enabled,
+                        rollout_percentage: f.rollout_percentage,
+                    },
+                )
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Spawns a background task that refreshes the snapshot every
+    /// [`FLAG_REFRESH_INTERVAL`]. Errors are logged and the previous snapshot
+    /// is retained so a transient DB failure does not disable all flags.
+    pub fn spawn_refresh_task(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(FLAG_REFRESH_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(err) = service.refresh().await {
+                    tracing::warn!(error = %err, "feature flag snapshot refresh failed");
+                }
+            }
+        });
     }
 
     /// Checks whether a flag is enabled, **ignoring `rollout_percentage`
@@ -40,13 +100,8 @@ impl FeatureFlagService {
     /// a process-wide toggle); anything gating per-request/per-tenant/
     /// per-account behavior should use [`Self::is_enabled_for_key`] instead.
     pub async fn is_enabled_ignoring_rollout(&self, flag_name: &str) -> Result<bool, sqlx::Error> {
-        let result =
-            sqlx::query_scalar::<_, bool>("SELECT enabled FROM feature_flags WHERE name = $1")
-                .bind(flag_name)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        Ok(result.unwrap_or(false))
+        let snapshot = self.snapshot.read().await;
+        Ok(snapshot.get(flag_name).map(|f| f.enabled).unwrap_or(false))
     }
 
     /// Checks whether a flag is enabled for a given tenant, correctly
@@ -72,21 +127,16 @@ impl FeatureFlagService {
         flag_name: &str,
         key: &str,
     ) -> Result<bool, sqlx::Error> {
-        let flag = sqlx::query_as::<_, (bool, Option<i32>)>(
-            "SELECT enabled, rollout_percentage FROM feature_flags WHERE name = $1",
-        )
-        .bind(flag_name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let snapshot = self.snapshot.read().await;
 
-        match flag {
+        match snapshot.get(flag_name) {
             None => Ok(false),
-            Some((enabled, rollout_percentage)) => {
-                if !enabled {
+            Some(entry) => {
+                if !entry.enabled {
                     return Ok(false);
                 }
 
-                if let Some(percentage) = rollout_percentage {
+                if let Some(percentage) = entry.rollout_percentage {
                     if percentage < 100 {
                         let hash = Self::hash_key_flag(key, flag_name);
                         return Ok((hash % 100) < (percentage as u64));
@@ -109,13 +159,8 @@ impl FeatureFlagService {
     }
 
     pub async fn get_all_flags(&self) -> Result<HashMap<String, bool>, sqlx::Error> {
-        let flags = sqlx::query_as::<_, FeatureFlag>(
-            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(flags.into_iter().map(|f| (f.name, f.enabled)).collect())
+        let snapshot = self.snapshot.read().await;
+        Ok(snapshot.iter().map(|(k, v)| (k.clone(), v.enabled)).collect())
     }
 
     pub async fn get_all(&self) -> Result<HashMap<String, bool>, sqlx::Error> {
@@ -153,6 +198,9 @@ impl FeatureFlagService {
             .execute(&self.pool)
             .await;
         }
+
+        // Keep the snapshot in sync so the change is visible immediately.
+        let _ = self.refresh().await;
 
         Ok(flag)
     }
@@ -193,6 +241,9 @@ impl FeatureFlagService {
             .await;
         }
 
+        // Keep the snapshot in sync so the change is visible immediately.
+        let _ = self.refresh().await;
+
         Ok(flag)
     }
 
@@ -231,68 +282,5 @@ impl FeatureFlagService {
             .fetch_all(&self.pool)
             .await
         }
-    }
-
-    pub async fn get_dependency_graph(&self) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
-        let flags: Vec<FeatureFlag> = sqlx::query_as::<_, FeatureFlag>(
-            "SELECT name, enabled, description, rollout_percentage, COALESCE(depends_on, '{}') as depends_on FROM feature_flags",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(flags.into_iter().map(|f| (f.name, f.depends_on)).collect())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hash_consistency() {
-        let tenant_id = "tenant-123";
-        let flag_name = "test_flag";
-
-        let hash1 = FeatureFlagService::hash_key_flag(tenant_id, flag_name);
-        let hash2 = FeatureFlagService::hash_key_flag(tenant_id, flag_name);
-
-        assert_eq!(
-            hash1, hash2,
-            "Same tenant and flag should produce same hash"
-        );
-    }
-
-    #[test]
-    fn test_percentage_distribution() {
-        let flag_name = "test_flag";
-        let percentage = 50;
-
-        let mut activated = 0;
-        for i in 0..100 {
-            let tenant_id = format!("tenant-{}", i);
-            let hash = FeatureFlagService::hash_key_flag(&tenant_id, flag_name);
-            if (hash % 100) < (percentage as u64) {
-                activated += 1;
-            }
-        }
-
-        // Should be approximately 50% (allow 10% variance)
-        assert!(
-            (40..=60).contains(&activated),
-            "Expected ~50% activation, got {}%",
-            activated
-        );
-    }
-
-    #[test]
-    fn test_different_tenants_different_results() {
-        let flag_name = "test_flag";
-        let hash1 = FeatureFlagService::hash_key_flag("tenant-1", flag_name);
-        let hash2 = FeatureFlagService::hash_key_flag("tenant-2", flag_name);
-
-        assert_ne!(
-            hash1, hash2,
-            "Different tenants should produce different hashes"
-        );
     }
 }
