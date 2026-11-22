@@ -18,6 +18,7 @@
 //!   `{timestamp}.{body}` keyed by the current (or, during a rotation grace
 //!   window, previous) `anchor_webhook_secret`.
 
+use crate::auth::error::AuthError;
 use crate::cache::webhook::{validate_timestamp, verify_signature, WebhookSecurityError};
 use crate::AppState;
 use axum::{
@@ -51,6 +52,26 @@ fn rejection(status: StatusCode, error: WebhookSecurityError) -> Response {
     (status, Json(json!({ "error": error.to_string() }))).into_response()
 }
 
+/// Rejects a request that carries no `X-Webhook-Signature` header.
+///
+/// The response is a 401 built from [`AuthError::InvalidCredentials`] (the
+/// auth-layer variant that maps to 401) so the rejection flows through the
+/// existing error path in `middleware::error_enrichment`, which adds the
+/// `request_id` to the JSON body. The handler is never invoked.
+fn missing_signature_rejection() -> Response {
+    let error = AuthError::InvalidCredentials("missing X-Webhook-Signature header".to_string());
+    tracing::warn!(
+        error = %error,
+        code = error.code(),
+        "webhook_signature: rejected inbound anchor request without signature header"
+    );
+    (
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::UNAUTHORIZED),
+        Json(json!({ "error": error.to_string(), "code": error.code() })),
+    )
+        .into_response()
+}
+
 /// Verifies `X-Webhook-Timestamp` + `X-Webhook-Signature` against the
 /// configured anchor webhook secret(s) before letting the request reach
 /// schema validation or the handler. Shared by both `callback_routes` and
@@ -80,12 +101,7 @@ pub async fn verify_anchor_signature(
         .and_then(|v| v.to_str().ok())
     {
         Some(v) => v.to_string(),
-        None => {
-            return rejection(
-                StatusCode::UNAUTHORIZED,
-                WebhookSecurityError::MissingSignature,
-            )
-        }
+        None => return missing_signature_rejection(),
     };
 
     if let Err(e) = validate_timestamp(&timestamp) {
@@ -171,6 +187,52 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires DATABASE_URL"]
+    async fn missing_signature_header_never_invokes_handler() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let invoked = Arc::new(AtomicBool::new(false));
+        let handler_flag = invoked.clone();
+        let state = AppState::test_new(
+            &std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse".into()),
+        )
+        .await;
+        let app = Router::new()
+            .route(
+                "/webhook",
+                post(move || {
+                    let flag = handler_flag.clone();
+                    async move {
+                        flag.store(true, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                verify_anchor_signature,
+            ))
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header(TIMESTAMP_HEADER, now_secs().to_string())
+            .body(Body::from("{}"))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            !invoked.load(Ordering::SeqCst),
+            "handler must not run when the signature header is absent"
+        );
     }
 
     #[tokio::test]

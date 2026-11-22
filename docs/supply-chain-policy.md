@@ -91,6 +91,8 @@ entry instead of just bumping the review date.
 | RUSTSEC-2025-0134 | rustls-pemfile | Unmaintained, no safe upgrade. |
 | RUSTSEC-2026-0194 / -0195 | quick-xml (via `pprof`'s flamegraph feature) | No safe upgrade without a newer `inferno` release; only parses profiler-generated SVGs, not untrusted input. |
 | RUSTSEC-2026-0204 / -0258 | h2 0.3.27 (via axum 0.6) | Fix requires an axum 0.6 → 0.7+/0.8 major upgrade. The h2 0.4.x instance in the same tree (used by tonic/reqwest) is already patched to 0.4.16. |
+| RUSTSEC-2026-0367 / -0368 / -0369 | zip 0.6.6 (build-only, via utoipa-swagger-ui 4.x) | Fix requires zip >=9 → utoipa-swagger-ui 5+ → the same axum 0.6 → 0.7+ upgrade. Only unpacks the pinned Swagger UI bundle at build time. |
+| RUSTSEC-2026-0412 | quick-xml 0.26.0 (via inferno/pprof) | Fix requires quick-xml >=0.37, which needs a newer `inferno` release; only parses profiler-generated flamegraph SVGs, not untrusted input. |
 
 None of these are ignored blindly — each is a real, reviewed trade-off
 between the fix's blast radius and the risk it defers. The sqlx and axum

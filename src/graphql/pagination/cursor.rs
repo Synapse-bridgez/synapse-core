@@ -72,6 +72,18 @@ impl CursorPagination {
         STANDARD.encode(value)
     }
 
+    /// Encodes the cursor for the next page from the last row of a page.
+    ///
+    /// Returns `None` when the page is empty (or the row has no cursor value),
+    /// so empty result sets yield a null `next_cursor` instead of a cursor
+    /// derived from an absent row.
+    pub fn next_cursor<T, F>(last_row: Option<&T>, encode: F) -> Option<String>
+    where
+        F: FnOnce(&T) -> String,
+    {
+        last_row.map(encode)
+    }
+
     /// Decodes a cursor to its original value
     pub fn decode_cursor(cursor: &str) -> Result<String, String> {
         let decoded = STANDARD
@@ -164,5 +176,26 @@ mod tests {
     fn test_is_backward() {
         let pagination = CursorPagination::new(None, None, None, Some(20)).unwrap();
         assert!(pagination.is_backward());
+    }
+
+    #[test]
+    fn test_empty_page_has_no_next_cursor() {
+        let empty: Vec<String> = Vec::new();
+        let next = CursorPagination::next_cursor(empty.last(), |v| {
+            CursorPagination::encode_cursor(v)
+        });
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_non_empty_page_has_next_cursor() {
+        let rows = vec!["transaction:1".to_string()];
+        let next = CursorPagination::next_cursor(rows.last(), |v| {
+            CursorPagination::encode_cursor(v)
+        });
+        assert_eq!(
+            next,
+            Some(CursorPagination::encode_cursor("transaction:1"))
+        );
     }
 }

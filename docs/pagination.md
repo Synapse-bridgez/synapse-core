@@ -131,7 +131,8 @@ This applies the same cursor-based pagination with additional WHERE clauses for 
 
 1. **Use Reasonable Limits**: Typically 20-100 records per page
 2. **Cache Cursors**: Store cursors client-side to avoid re-fetching
-3. **Handle Empty Results**: Check for empty result sets to detect end of pagination
+3. **Handle Empty Results**: Check for empty result sets to detect end of pagination.
+   An empty page returns `next_cursor: null` (no cursor is encoded from an absent row).
 4. **Consistent Ordering**: Always use the same sort order (created_at DESC, id DESC)
 5. **Monitor Query Performance**: Use slow query logs to detect pagination issues
 
