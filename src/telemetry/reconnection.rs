@@ -5,6 +5,34 @@
 
 use std::time::Duration;
 
+/// Classification of a failed export attempt.
+///
+/// Auth failures are not transient: retrying with the same credentials will keep
+/// failing, so they stop retrying (or back off far longer) and are logged distinctly
+/// from network failures, which keep the existing exponential backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Transient connectivity failure (timeout, connection reset, DNS, 5xx).
+    Network,
+    /// Authentication/authorization failure (401/403, invalid or expired credentials).
+    Auth,
+}
+
+impl FailureKind {
+    /// Returns `true` if this failure kind should be retried with backoff.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, FailureKind::Network)
+    }
+
+    /// Short label used in distinct log messages.
+    pub fn label(&self) -> &'static str {
+        match self {
+            FailureKind::Network => "network",
+            FailureKind::Auth => "auth",
+        }
+    }
+}
+
 /// Configuration for reconnection behavior and circuit breaker.
 ///
 /// # Health Check
@@ -29,6 +57,9 @@ pub struct ReconnectionConfig {
     pub max_failures: u32,
     /// Duration to keep circuit open before attempting reset
     pub circuit_open_duration: Duration,
+    /// Backoff used for auth failures. Auth failures are not transient, so this is
+    /// much longer than `max_backoff`; set it to `Duration::ZERO` to stop retrying.
+    pub auth_backoff: Duration,
 }
 
 impl Default for ReconnectionConfig {
@@ -39,6 +70,7 @@ impl Default for ReconnectionConfig {
             backoff_multiplier: 2.0,
             max_failures: 5,
             circuit_open_duration: Duration::from_secs(60),
+            auth_backoff: Duration::from_secs(3600),
         }
     }
 }
@@ -106,11 +138,37 @@ impl ReconnectionManager {
     /// may open the circuit breaker if `max_failures` is reached. The caller should
     /// check `is_circuit_open()` before retrying.
     pub fn record_failure(&mut self) {
-        self.consecutive_failures += 1;
+        self.record_failure_kind(FailureKind::Network);
+    }
+
+    /// Records a failed connection attempt, branching the retry policy on error kind.
+    ///
+    /// # Health Check
+    ///
+    /// - [`FailureKind::Network`]: increments the failure counter and may open the
+    ///   circuit breaker at `max_failures`; retries keep the exponential backoff.
+    /// - [`FailureKind::Auth`]: logged distinctly and the circuit is opened immediately,
+    ///   since retrying with the same credentials cannot succeed. The caller should
+    ///   stop retrying (or wait `auth_backoff`).
+    pub fn record_failure_kind(&mut self, kind: FailureKind) {
         self.last_failure_time = Some(std::time::Instant::now());
 
-        if self.consecutive_failures >= self.config.max_failures {
-            self.circuit_open = true;
+        match kind {
+            FailureKind::Network => {
+                self.consecutive_failures += 1;
+                if self.consecutive_failures >= self.config.max_failures {
+                    self.circuit_open = true;
+                }
+            }
+            FailureKind::Auth => {
+                self.consecutive_failures += 1;
+                self.circuit_open = true;
+                tracing::error!(
+                    failure_kind = kind.label(),
+                    failures = self.consecutive_failures,
+                    "Telemetry exporter authentication failed; not retrying with the same credentials"
+                );
+            }
         }
     }
 
@@ -151,8 +209,22 @@ impl ReconnectionManager {
     ///
     /// The caller should sleep for this duration before retrying the export.
     pub fn next_backoff(&self) -> Duration {
+        self.next_backoff_for(FailureKind::Network)
+    }
+
+    /// Calculates the next backoff duration for a given failure kind.
+    ///
+    /// # Health Check
+    ///
+    /// - [`FailureKind::Network`]: exponential backoff with jitter, capped at `max_backoff`.
+    /// - [`FailureKind::Auth`]: returns `auth_backoff` (zero means stop retrying).
+    pub fn next_backoff_for(&self, kind: FailureKind) -> Duration {
         if self.consecutive_failures == 0 {
             return Duration::from_secs(0);
+        }
+
+        if kind == FailureKind::Auth {
+            return self.config.auth_backoff;
         }
 
         let base_backoff = self.config.initial_backoff.as_millis() as f64
@@ -385,6 +457,41 @@ mod tests {
             b2 >= 270,
             "Second backoff should be near 300ms (±10% jitter)"
         );
+    }
+
+    #[test]
+    fn test_auth_failure_stops_retrying_while_network_backs_off() {
+        let config = ReconnectionConfig {
+            max_failures: 5,
+            auth_backoff: Duration::ZERO,
+            ..Default::default()
+        };
+
+        // Auth failure: stops after one attempt.
+        let mut auth_manager = ReconnectionManager::with_config(config.clone());
+        auth_manager.record_failure_kind(FailureKind::Auth);
+        assert!(auth_manager.is_circuit_open());
+        assert!(!FailureKind::Auth.is_retryable());
+        assert_eq!(auth_manager.next_backoff_for(FailureKind::Auth), Duration::ZERO);
+
+        // Network failure: still backs off and retries.
+        let mut network_manager = ReconnectionManager::with_config(config);
+        network_manager.record_failure_kind(FailureKind::Network);
+        assert!(!network_manager.is_circuit_open());
+        assert!(FailureKind::Network.is_retryable());
+        assert!(network_manager.next_backoff_for(FailureKind::Network) > Duration::ZERO);
+        assert!(network_manager.next_backoff_for(FailureKind::Network) <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_auth_failure_uses_longer_backoff_than_network() {
+        let mut manager = ReconnectionManager::new();
+        manager.record_failure_kind(FailureKind::Auth);
+        assert_eq!(
+            manager.next_backoff_for(FailureKind::Auth),
+            manager.config.auth_backoff
+        );
+        assert!(manager.config.auth_backoff > manager.config.max_backoff);
     }
 
     #[test]

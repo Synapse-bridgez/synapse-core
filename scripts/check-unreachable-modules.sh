@@ -45,6 +45,11 @@ cd "$REPO_ROOT"
 
 ALLOWLIST_FILE="docs/known-unreachable-modules.md"
 
+if [[ ! -f "$ALLOWLIST_FILE" ]]; then
+  echo "::error::Allowlist file not found: ${ALLOWLIST_FILE} (expected at ${REPO_ROOT}/${ALLOWLIST_FILE}). Refusing to run without it, since a missing allowlist would silently pass every pre-existing orphan."
+  exit 1
+fi
+
 is_reachable_from() {
   local root_file="$1"
   shift
@@ -77,7 +82,7 @@ while IFS= read -r -d '' file; do
   rel="${file#src/}"
   [[ "$rel" == "lib.rs" || "$rel" == "main.rs" ]] && continue
 
-  if [[ -f "$ALLOWLIST_FILE" ]] && grep -qF "src/$rel" "$ALLOWLIST_FILE"; then
+  if grep -qF "src/$rel" "$ALLOWLIST_FILE"; then
     continue
   fi
 

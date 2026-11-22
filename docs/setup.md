@@ -74,6 +74,27 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 ```
 
+### Multi-Region Failover Configuration
+
+`.env.example.failover` is an alternative example env file for deployments that use a
+primary/replica database setup. In addition to the standard variables, it documents the
+optional `DATABASE_REPLICA_URL` (read-only replica) and includes commented examples for
+AWS RDS Multi-AZ, Google Cloud SQL, and self-hosted streaming replication.
+
+Use it instead of `.env.example` when you want read-replica routing:
+
+```bash
+# Local development: copy it as your env file
+cp .env.example.failover .env
+
+# Docker Compose: pass it explicitly
+docker compose --env-file .env.example.failover up -d
+```
+
+If `DATABASE_REPLICA_URL` is left unset, all queries are routed to the primary database.
+See [database_failover.md](database_failover.md) for the full failover architecture,
+routing rules, and reconnection behavior.
+
 ---
 
 ## 3. Database Setup

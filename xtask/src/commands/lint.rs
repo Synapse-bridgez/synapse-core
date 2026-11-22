@@ -43,9 +43,15 @@ pub fn run(args: LintArgs) -> anyhow::Result<()> {
 fn run_fmt(fix: bool) -> anyhow::Result<()> {
     println!("\n-- cargo fmt --");
     if fix {
-        run_cmd("cargo", &["fmt", "--all"])?;
+        run_cmd("cargo", &["fmt", "--all"]).map_err(|e| {
+            eprintln!("lint: cargo fmt failed");
+            e
+        })?;
     } else {
-        run_cmd("cargo", &["fmt", "--all", "--", "--check"])?;
+        run_cmd("cargo", &["fmt", "--all", "--", "--check"]).map_err(|e| {
+            eprintln!("lint: cargo fmt --check failed");
+            e
+        })?;
     }
     Ok(())
 }
@@ -62,13 +68,20 @@ fn run_clippy() -> anyhow::Result<()> {
             "-D",
             "warnings",
         ],
-    )?;
+    )
+    .map_err(|e| {
+        eprintln!("lint: cargo clippy failed");
+        e
+    })?;
     Ok(())
 }
 
 fn run_audit() -> anyhow::Result<()> {
     println!("\n-- cargo audit --");
     // cargo-audit must be installed: `cargo install cargo-audit`
-    run_cmd("cargo", &["audit"])?;
+    run_cmd("cargo", &["audit"]).map_err(|e| {
+        eprintln!("lint: cargo audit failed");
+        e
+    })?;
     Ok(())
 }
