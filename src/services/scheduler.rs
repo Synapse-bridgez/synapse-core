@@ -50,10 +50,22 @@ impl JobScheduler {
         job: Box<dyn Job>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let name = job.name().to_string();
+        let schedule = job.schedule().to_string();
 
-        // Validate the cron expression
-        Schedule::from_str(job.schedule())
-            .map_err(|e| format!("Invalid cron expression '{}': {}", job.schedule(), e))?;
+        // Validate the cron expression; fail loudly instead of skipping the job.
+        if let Err(e) = Schedule::from_str(&schedule) {
+            error!(
+                job = %name,
+                expression = %schedule,
+                error = %e,
+                "Invalid cron expression for job; registration rejected"
+            );
+            return Err(format!(
+                "Invalid cron expression '{}' for job '{}': {}",
+                schedule, name, e
+            )
+            .into());
+        }
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(name, Arc::from(job));
@@ -334,5 +346,25 @@ mod tests {
         scheduler.register_job(Box::new(test_job)).await.unwrap();
 
         assert_eq!(scheduler.jobs.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_register_job_invalid_cron_returns_error() {
+        let scheduler = JobScheduler::new();
+
+        let bad_job = TestJob::new("broken_job", "not a cron expression");
+        let result = scheduler.register_job(Box::new(bad_job)).await;
+
+        let err = result.expect_err("invalid cron expression must fail registration");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("broken_job"),
+            "error should name the job: {msg}"
+        );
+        assert!(
+            msg.contains("not a cron expression"),
+            "error should include the expression: {msg}"
+        );
+        assert_eq!(scheduler.jobs.lock().await.len(), 0);
     }
 }

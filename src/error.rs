@@ -240,6 +240,21 @@ pub enum AppError {
     #[error("Database error: {0}")]
     DatabaseError(String),
 
+    /// Connection acquisition from the pool timed out. Carries a snapshot of
+    /// the pool statistics at the moment of failure so operators can tell
+    /// exhaustion apart from a slow database.
+    #[error(
+        "Database pool acquisition timed out after {timeout_ms}ms \
+         (size: {size}, idle: {idle}, in_use: {in_use}, waiters: {waiters})"
+    )]
+    PoolAcquisitionTimeout {
+        timeout_ms: u64,
+        size: u32,
+        idle: u32,
+        in_use: u32,
+        waiters: u32,
+    },
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -313,6 +328,7 @@ impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
             AppError::Database(_) | AppError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::PoolAcquisitionTimeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -344,6 +360,7 @@ impl AppError {
         match self {
             AppError::Database(_) => codes::DATABASE_001.0,
             AppError::DatabaseError(_) => codes::DATABASE_002.0,
+            AppError::PoolAcquisitionTimeout { .. } => codes::DATABASE_001.0,
             AppError::Validation(_) => codes::VALIDATION_001.0,
             AppError::NotFound(_) => codes::NOT_FOUND_001.0,
             AppError::Internal(_) => codes::INTERNAL_001.0,
@@ -414,6 +431,10 @@ impl IntoResponse for AppError {
             }
             AppError::DatabaseError(raw) => {
                 tracing::error!(cause = %raw, "AppError::DatabaseError: redacting raw cause from client response");
+                Some("A database error occurred".to_string())
+            }
+            AppError::PoolAcquisitionTimeout { .. } => {
+                tracing::error!(error = %self, "AppError::PoolAcquisitionTimeout: pool exhausted");
                 Some("A database error occurred".to_string())
             }
             AppError::Redis(e) => {

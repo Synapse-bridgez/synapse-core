@@ -25,6 +25,29 @@ pub struct BackupMetadata {
     pub checksum: String,
 }
 
+/// Structured report of a backup whose on-disk checksum does not match the
+/// checksum recorded in its `.meta` sidecar. Names the failing file and both
+/// the expected and actual checksums so callers can log/alert on the details
+/// instead of a bare boolean.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChecksumMismatch {
+    pub filename: String,
+    pub expected_checksum: String,
+    pub actual_checksum: String,
+}
+
+impl std::fmt::Display for ChecksumMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Backup integrity check failed for {}: checksum mismatch (expected: {}, actual: {})",
+            self.filename, self.expected_checksum, self.actual_checksum
+        )
+    }
+}
+
+impl std::error::Error for ChecksumMismatch {}
+
 pub struct BackupService {
     database_url: String,
     backup_dir: PathBuf,
@@ -402,11 +425,11 @@ impl BackupService {
         let checksum = self.calculate_checksum(path).await?;
 
         if checksum != metadata.checksum {
-            anyhow::bail!(
-                "Backup integrity check failed: checksum mismatch (expected: {}, got: {})",
-                metadata.checksum,
-                checksum
-            );
+            return Err(anyhow::Error::new(ChecksumMismatch {
+                filename: metadata.filename.clone(),
+                expected_checksum: metadata.checksum.clone(),
+                actual_checksum: checksum,
+            }));
         }
 
         Ok(())
