@@ -42,6 +42,35 @@ Use `SET LOCAL` instead of session-scoped `set_config`:
 2. **Isolation on connection reuse**: Even if the same physical connection serves multiple tenants sequentially, each transaction has a clean GUC state
 3. **Fail-closed without context**: If a request doesn't set context, GUCs default to empty strings, and RLS policies reject all queries (see "Fail Closed Design" below)
 
+## Request Path
+
+How a tenant id travels from an inbound HTTP request to the RLS session variable:
+
+1. **Tenant middleware** — `src/middleware/tenant.rs` exposes
+   `tenant_context_middleware`, which runs after auth. It is currently a
+   pass-through: it does **not** extract or store the tenant id itself, it only
+   reserves the hook for future cross-cutting concerns (tenant-tagged logging,
+   per-tenant rate limits, auditing). `get_tenant_id_from_request` in the same
+   file is a fail-closed utility that returns `None`.
+2. **Extractor** — the tenant id is resolved by the `TenantContext` extractor in
+   `src/tenant/mod.rs` (`impl FromRequestParts` → `resolve_tenant_id`). It reads
+   the **`X-API-Key`** header (falling back to `Authorization`, with an optional
+   `Bearer ` prefix), hashes it and looks the tenant up in the `tenants` table
+   (`resolve_tenant_by_api_key`). A bare `X-Tenant-ID` header is deliberately
+   **not** trusted as a credential here. Failed lookups are rate limited and
+   rejected with `AppError::InvalidApiKey`; inactive tenants are rejected with
+   `AppError::Unauthorized`.
+3. **Session variable** — handlers pass the resolved `tenant_id` into
+   `queries::with_tenant` (`src/db/queries.rs`), which opens a transaction and
+   sets the session variable with
+   `SELECT set_config('app.tenant_id', $1, true)` (plus
+   `set_config('app.is_admin', ...)`). The `true` third argument makes the GUC
+   transaction-scoped (`SET LOCAL`), so it is cleared on commit/rollback. With
+   no context, `app.tenant_id` is set to `''` and RLS denies everything.
+
+See [ADR-003: Multi-Tenant Isolation Strategy](adr/003-multi-tenant-isolation.md)
+for the rationale behind this design.
+
 ## Implementation
 
 ### New Helper: `with_tenant`

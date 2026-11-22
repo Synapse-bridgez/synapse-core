@@ -3,28 +3,85 @@
 ## What exists
 
 `AuthRateLimiter` (`src/auth/rate_limiting.rs`) is a per-identity
-token-bucket rate limiter, built for the Vault-integration auth module. It
-is fully unit-tested, including a documented fix for an unbounded
-bucket-growth bug in its own eviction logic. Before this fix it was
-constructed exactly once, in `src/secrets.rs`, and used only for
-Vault-probe rate limiting (`check_vault_probe_rate_limit`) — its
-per-identity `check_auth_rate_limit` method, the one meant for gating
-*authentication attempts themselves*, had no callers anywhere.
+token-bucket rate limiter for authentication operations. It does not
+implement its own bucket arithmetic: every bucket is a
+`cache::rate_limiting::RateLimiter` (`src/cache/rate_limiting.rs`), so the
+auth layer and the cache layer share one token-bucket implementation.
 
-The two live authentication middlewares — `middleware::auth::admin_auth`
-(guards every `/admin/*` route) and `middleware::auth::api_key_auth`
-(currently unwired to any route, but kept consistent so wiring it up later
-doesn't reintroduce this gap) — never referenced `AuthRateLimiter`. Neither
-did the tenant API-key resolution in `TenantContext`
-(`src/tenant/mod.rs`) or `/ws` token authentication
+It is used by the two live authentication middlewares —
+`middleware::auth::admin_auth` (guards every `/admin/*` route) and
+`middleware::auth::api_key_auth` — and by the tenant API-key resolution in
+`TenantContext` (`src/tenant/mod.rs`) and `/ws` token authentication
 (`handlers::ws::authenticate_ws_token`), both of which check credentials
-the same way (`tenants.api_key` lookup) and are, after the fix in this
-same change, the actual live tenant-credential-checking paths.
+the same way (`tenants.api_key` lookup).
 
-It's an easy mechanism to miss precisely because it's well-built: finding
-a complete, unit-tested `AuthRateLimiter` type creates the impression that
-"auth rate limiting" as a category is handled somewhere in this codebase —
-exactly backwards from the truth.
+## Algorithm
+
+Token bucket, one bucket per identity, refilled lazily on access
+(`RateLimiter::refill_tokens` in `src/cache/rate_limiting.rs`):
+
+- A bucket starts full at `max_requests` tokens.
+- `try_acquire()` first refills, then decrements one token via a
+  compare-and-swap loop on an `AtomicU32`; it fails only when the bucket
+  holds fewer tokens than requested.
+- Refill is time-based and integer-only (no floating point, so no drift):
+  - if a full `window` has elapsed since the last refill, the bucket is
+    reset to `max_requests`;
+  - otherwise `tokens_to_add = max_requests * elapsed_ms / window_ms`, and
+    the bucket is capped at `max_requests`.
+- `time_until_available()` returns `Duration::ZERO` when a token is
+  available, otherwise the remainder of the current window. The auth layer
+  turns that into `AuthError::RateLimited(retry_after_secs)`.
+
+`AuthRateLimiter` adds three things on top of the shared bucket:
+
+- **Key validation before allocation.** `validate_identity_key` rejects
+  empty keys, keys longer than 256 bytes, and keys containing anything
+  outside ASCII alphanumerics plus `-`, `_`, `.`, `:` (the colon allows
+  `ip:1.2.3.4`-style keys). Malformed keys never create a bucket entry.
+- **Two limit classes.** Per-identity auth attempts
+  (`check_auth_rate_limit`) and a single shared Vault health-probe bucket
+  (`check_vault_probe_rate_limit`).
+- **Metrics.** Attempts, successes and failures are recorded through
+  `AuthMetrics` (`src/auth/metrics.rs`).
+
+## Storage
+
+- **Per-identity auth buckets:** `Arc<Mutex<HashMap<String, RateLimiter>>>`
+  inside `AuthRateLimiter`. The mutex is held only for the map
+  lookup/insert (`get_or_create_auth_bucket`), never while acquiring a
+  token, so contention stays low. Cloning an `AuthRateLimiter` is O(1) and
+  shares the same map and metrics.
+- **Vault probe bucket:** a single `RateLimiter` field, shared by all
+  callers.
+- **Process-wide instances:** two `lazy_static!` globals in
+  `src/auth/rate_limiting.rs` — `ADMIN_AUTH_RATE_LIMITER` and
+  `TENANT_AUTH_RATE_LIMITER` — each `AuthRateLimiter::new()` with default
+  configuration. They are separate so a flood of guessed admin keys and a
+  flood of guessed tenant API keys do not share (and drain) the same
+  budget for a given source IP.
+- **No external store.** Buckets live in process memory only; nothing is
+  written to Redis or Postgres, and each process has its own copy (see
+  *Break-glass* below).
+
+## Configuration
+
+The limiter reads no environment variables of its own. Limits come from
+`AuthRateLimitConfig` (`src/auth/rate_limiting.rs`), whose `Default` impl
+is what both globals use:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `auth_limit` | `10` (`DEFAULT_AUTH_LIMIT`) | Auth attempts per identity per window |
+| `vault_probe_limit` | `5` (`DEFAULT_VAULT_PROBE_LIMIT`) | Vault health probes per window |
+| `window` | `60s` (`DEFAULT_AUTH_WINDOW`) | Refill window for both limit classes |
+
+`src/config.rs` does **not** define any auth rate-limit keys. The
+`DEFAULT_RATE_LIMIT` / `WHITELIST_RATE_LIMIT` values set there are
+profile defaults for the general request limiter, not for
+`AuthRateLimiter`, and are not read by it. The only environment variable
+the auth path reads is `ADMIN_AUTH_RATE_LIMIT_MODE`, and it is read in
+`middleware::auth::admin_auth` (shadow mode), not by the limiter itself.
 
 ## What changed
 

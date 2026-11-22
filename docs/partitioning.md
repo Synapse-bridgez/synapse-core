@@ -25,6 +25,10 @@ The `transactions` table has been converted to a partitioned table using Postgre
 
 ## Database Functions
 
+> These SQL functions are the fallback path. Application code should use the
+> `PartitionManager` helpers documented in [Public Helpers](#public-helpers-srcdbpartitionrs);
+> see also [`partition_utils.sql`](./partition_utils.sql).
+
 ### `create_monthly_partition()`
 Creates a partition for 2 months ahead if it doesn't exist.
 
@@ -54,18 +58,90 @@ The `PartitionManager` runs as a background task in the application:
 use synapse_core::db::partition::PartitionManager;
 
 // Runs maintenance every 24 hours
-let manager = PartitionManager::new(pool.clone(), 24);
+let manager = PartitionManager::new(pool.clone(), 24, Some(cache));
 manager.start();
 ```
 
-### Manual Operations
+### Public Helpers (`src/db/partition.rs`)
+
+These are the supported entry points for partition maintenance from Rust code.
+Prefer them over hand-written SQL; the SQL in
+[`partition_utils.sql`](./partition_utils.sql) is the fallback path (see below).
+
+#### `PartitionManager::new(pool: PgPool, interval_hours: u64, cache: Option<QueryCache>) -> Self`
+
+Constructs a manager. `interval_hours` is how often the background task runs
+maintenance (24 is the production default). `cache` is optional; when present it
+is warmed after a new partition is created.
 
 ```rust
-// Create partition manually
-manager.create_partition().await?;
+let manager = PartitionManager::new(pool.clone(), 24, Some(cache));
+```
 
-// Detach old partitions with custom retention
+#### `PartitionManager::has_cache(&self) -> bool`
+
+Returns whether the manager was constructed with a cache. Use it as a
+startup-time assertion so a construction-order regression (building the manager
+before the cache exists) fails loudly instead of silently disabling cache
+warming.
+
+```rust
+assert!(manager.has_cache(), "PartitionManager must be built after the cache");
+```
+
+#### `PartitionManager::start(self)`
+
+Spawns the background maintenance loop (create upcoming partitions, detach old
+ones) on the Tokio runtime. The first tick is skipped, so the first run happens
+one `interval_hours` after startup. Errors are logged, not propagated.
+
+```rust
+manager.start();
+```
+
+#### `PartitionManager::create_partition(&self) -> Result<bool, sqlx::Error>`
+
+Manually triggers creation of the partition two months ahead. Returns `true`
+when a new partition was created and `false` when it already existed. On
+creation, the query cache is warmed if one was supplied. Use it for
+backfills, tests, or an admin "ensure future partitions" action.
+
+```rust
+if manager.create_partition().await? {
+    tracing::info!("created upcoming partition");
+}
+```
+
+#### `PartitionManager::detach_old_partitions(&self, retention_months: i32) -> Result<(), sqlx::Error>`
+
+Detaches partitions older than `retention_months` (the default policy is 12).
+Detached tables are kept as regular tables for archival. Use it to apply a
+custom retention window without waiting for the scheduled job.
+
+```rust
 manager.detach_old_partitions(6).await?; // Keep 6 months
+```
+
+> `maintain_partitions()` is private: it is only invoked by the background loop
+> started via `start()`. To run it on demand, call `create_partition()` and
+> `detach_old_partitions()` explicitly.
+
+### Fallback: Manual SQL
+
+The SQL below (and in [`partition_utils.sql`](./partition_utils.sql)) is the
+fallback path for when the application is not running — for example during an
+incident, a one-off ops task, or a psql session. Prefer the Rust helpers above
+in application code.
+
+```sql
+-- Full maintenance (create new + detach old)
+SELECT maintain_partitions();
+
+-- Create the upcoming partition only
+SELECT create_monthly_partition();
+
+-- Detach partitions older than 6 months
+SELECT detach_old_partitions(6);
 ```
 
 ## Migration Process
