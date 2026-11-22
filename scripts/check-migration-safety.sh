@@ -6,6 +6,29 @@ set -euo pipefail
 MIGRATIONS_DIR="${1:?Usage: $0 <migrations-dir>}"
 ERRORS=0
 
+# Fixture suites this check is exercised against by
+# scripts/test-migration-safety.sh. Fail fast with a hint naming the expected
+# fixture root when one is missing, instead of silently scanning nothing.
+FIXTURES_ROOT="$(dirname "$0")/fixtures/migration-safety"
+REQUIRED_FIXTURE_SUITES=(
+  "safe"
+  "unsafe"
+  "safe-guarded-sensitive-type-change"
+  "unsafe-sensitive-type-change"
+)
+
+if [[ ! -d "$FIXTURES_ROOT" ]]; then
+  echo "::error::Migration safety fixtures not found at $FIXTURES_ROOT — expected fixture root is scripts/fixtures/migration-safety/ (with safe/, unsafe/, safe-guarded-sensitive-type-change/, unsafe-sensitive-type-change/)." >&2
+  exit 1
+fi
+
+for suite in "${REQUIRED_FIXTURE_SUITES[@]}"; do
+  if [[ ! -d "$FIXTURES_ROOT/$suite" ]]; then
+    echo "::error::Missing migration safety fixture suite \"$suite\" — expected at $FIXTURES_ROOT/$suite (fixture root: scripts/fixtures/migration-safety/)." >&2
+    exit 1
+  fi
+done
+
 # Migrations already applied in production before this check existed (see
 # docs/hot-table-index-migrations.md for the incident-correlation
 # audit). These are grandfathered as ::notice, not ::warning, so history

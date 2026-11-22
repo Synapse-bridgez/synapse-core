@@ -26,6 +26,8 @@ pub struct SetupArgs {
 pub fn run(args: SetupArgs) -> anyhow::Result<()> {
     println!("==> synapse-core setup");
 
+    require_database_url()?;
+
     if !args.skip_docker {
         start_docker(&args.compose_file)?;
         wait_for_postgres()?;
@@ -41,6 +43,17 @@ pub fn run(args: SetupArgs) -> anyhow::Result<()> {
 
     println!("\n✓ Setup complete — run `cargo run` to start the server.");
     Ok(())
+}
+
+/// Fail fast when `DATABASE_URL` is unset, before any database work starts.
+fn require_database_url() -> anyhow::Result<()> {
+    match std::env::var("DATABASE_URL") {
+        Ok(value) if !value.trim().is_empty() => Ok(()),
+        _ => anyhow::bail!(
+            "DATABASE_URL is not set. Export it before running `cargo xtask setup` \
+             (see docs/setup.md for the expected value)."
+        ),
+    }
 }
 
 fn start_docker(compose_file: &str) -> anyhow::Result<()> {
