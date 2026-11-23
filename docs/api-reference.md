@@ -318,329 +318,76 @@ Query parameters:
 | cursor         | string | Pagination cursor                    |
 | limit          | int    | Page size (max 100, default 25)      |
 
-Response `200`:
-```json
-{
-  "total": 42,
-  "data": [ ... ]
-}
-```
-
----
-
-### `GET /export`
-
-Export transactions as CSV or JSON (streaming).
-
-No authentication required.
-
-```bash
-# CSV (default)
-curl "http://localhost:3000/export?format=csv&from=2026-01-01&to=2026-04-30" \
-  -o transactions.csv
-
-# JSON Lines
-curl "http://localhost:3000/export?format=json&status=completed" \
-  -o transactions.json
-```
-
-Query parameters:
-
-| Parameter  | Type   | Default | Description                          |
-|------------|--------|---------|--------------------------------------|
-| format     | string | csv     | `csv` or `json`                      |
-| from       | string | —       | Start date `YYYY-MM-DD`              |
-| to         | string | —       | End date `YYYY-MM-DD` (inclusive)    |
-| status     | string | —       | Filter by status                     |
-| asset_code | string | —       | Filter by asset code                 |
-
-Response `200` with `Content-Disposition: attachment; filename="transactions_YYYY-MM.csv"`.
-
----
-
-## Settlements
-
-### `GET /settlements`
-
-List settlements with cursor-based pagination.
-
-No authentication required.
-
-```bash
-curl "http://localhost:3000/settlements?limit=10"
-```
-
-Query parameters:
-
-| Parameter  | Type   | Default | Description                         |
-|------------|--------|---------|-------------------------------------|
-| cursor     | string | —       | Pagination cursor                   |
-| limit      | int    | 10      | Page size (max 100, min 1)          |
-| direction  | string | forward | `forward` or `backward`             |
-
-Response `200`:
-```json
-{
-  "settlements": [
-    {
-      "id": "...",
-      "amount": "5000.00",
-      "asset_code": "USDC",
-      "status": "completed",
-      "created_at": "2026-04-25T00:00:00Z"
-    }
-  ],
-  "next_cursor": "eyJ0cyI6...",
-  "has_more": false
-}
-```
-
----
-
-### `GET /settlements/:id`
-
-Get a single settlement by UUID.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/settlements/550e8400-e29b-41d4-a716-446655440000
-```
-
-Response `200` — settlement object.
-
-Response `404` when not found.
-
----
-
-## Statistics
-
-### `GET /stats/status`
-
-Transaction counts grouped by status. Results are cached in Redis.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/stats/status
-```
-
-Response `200`:
-```json
-[
-  { "status": "pending", "count": 12 },
-  { "status": "completed", "count": 980 },
-  { "status": "failed", "count": 8 }
-]
-```
-
----
-
-### `GET /stats/daily`
-
-Daily transaction totals for the last N days.
-
-No authentication required.
-
-```bash
-curl "http://localhost:3000/stats/daily?days=7"
-```
-
-Query parameters:
-
-| Parameter | Type | Default | Description          |
-|-----------|------|---------|----------------------|
-| days      | int  | 7       | Number of days back  |
-
-Response `200`:
-```json
-[
-  { "date": "2026-04-25", "count": 42, "total_amount": "4200.00" }
-]
-```
-
----
-
-### `GET /stats/assets`
-
-Transaction stats grouped by asset code.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/stats/assets
-```
-
-Response `200`:
-```json
-[
-  { "asset_code": "USDC", "count": 500, "total_amount": "50000.00" }
-]
-```
-
----
-
-### `GET /cache/metrics`
-
-Cache hit/miss metrics for query cache and idempotency cache.
-
-No authentication required.
-
-```bash
-curl http://localhost:3000/cache/metrics
-```
-
-Response `200`:
-```json
-{
-  "query_cache": { "hits": 120, "misses": 30 },
-  "idempotency_cache_hits": 45,
-  "idempotency_cache_misses": 5,
-  "idempotency_lock_acquired": 50,
-  "idempotency_lock_contention": 2,
-  "idempotency_errors": 0,
-  "idempotency_fallback_count": 1
-}
-```
-
----
-
-## GraphQL
-
-### `POST /graphql`
-
-GraphQL endpoint. Supports queries for transactions and settlements.
-
-No authentication required.
-
-```bash
-curl -X POST http://localhost:3000/graphql \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "{ transaction(id: \"550e8400-e29b-41d4-a716-446655440000\") { id status amount } }"
-  }'
-```
-
-Response `200`:
-```json
-{
-  "data": {
-    "transaction": {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "status": "completed",
-      "amount": "100.00"
-    }
-  }
-}
-```
+Response `200` — paginated list (same shape as `GET /transactions`).
 
 ---
 
 ## Admin
 
-All admin endpoints require `Authorization: Bearer <ADMIN_API_KEY>`.
+All `/admin/*` endpoints require the `Authorization: Bearer <ADMIN_API_KEY>` header.
 
-### `PATCH /admin/transactions/bulk-status`
+### `GET /admin/audit`
 
-Bulk update transaction statuses (max 500 per request).
+Returns the audit log of administrative actions.
 
-```bash
-curl -X PATCH http://localhost:3000/admin/transactions/bulk-status \
-  -H "Authorization: Bearer dev-admin-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "transaction_ids": [
-      "550e8400-e29b-41d4-a716-446655440000",
-      "660e8400-e29b-41d4-a716-446655440001"
-    ],
-    "status": "failed",
-    "reason": "manual override"
-  }'
-```
+### `GET /admin/locks`
 
-Request body:
+Lists currently held distributed locks.
 
-| Field           | Type     | Required | Description                                          |
-|-----------------|----------|----------|------------------------------------------------------|
-| transaction_ids | string[] | yes      | UUIDs to update (1–500)                              |
-| status          | string   | yes      | `pending`, `processing`, `completed`, or `failed`    |
-| reason          | string   | no       | Audit reason                                         |
+### `GET /admin/quota`
 
-Response `200`:
-```json
-{
-  "updated": 2,
-  "failed": 0,
-  "errors": []
-}
-```
+Returns per-account quota usage.
 
 ---
 
-### `POST /admin/drain`
+## Keyboard navigation
 
-Kubernetes preStop hook. Marks the service as not-ready and starts the drain timer. The process exits after the drain timeout (default 30 s).
+The admin dashboard surfaces the `/admin/audit`, `/admin/locks`, and `/admin/quota`
+endpoints (handlers in `src/handlers/admin/`). The dashboard is fully operable
+without a pointer device so screen-reader and keyboard-only users can review each
+endpoint's data.
 
-```bash
-curl -X POST http://localhost:3000/admin/drain \
-  -H "Authorization: Bearer dev-admin-key"
-```
+### Focus order
 
-Response `200`:
-```json
-{ "status": "draining", "drain_timeout_secs": 30 }
-```
+Focus moves in a predictable, top-to-bottom order that mirrors the endpoint
+descriptions above:
 
-See [deployment.md](deployment.md) for the full Kubernetes setup.
+1. **Skip link** — "Skip to admin content" (first focusable element on every page).
+2. **Primary navigation** — the admin section links, in the order
+   `/admin/audit` → `/admin/locks` → `/admin/quota`.
+3. **Page heading** — the endpoint title (e.g. "Audit log"), announced as a level-1 heading.
+4. **Toolbar** — refresh and filter controls for the current endpoint.
+5. **Data region** — the results table or list for the endpoint:
+   - `/admin/audit` — audit entries (timestamp, actor, action, target).
+   - `/admin/locks` — held locks (lock key, owner, acquired at, expiry).
+   - `/admin/quota` — quota rows (account, used, limit, remaining).
+6. **Pagination / load-more** — after the data region.
 
----
+Each data region is a labelled landmark (`role="region"` with an accessible name
+matching the endpoint) so screen readers can jump directly to it.
 
-### `GET /admin/webhooks/health`
+### Keyboard shortcuts
 
-List health scores for all webhook endpoints.
+| Key            | Action                                                        |
+|----------------|---------------------------------------------------------------|
+| `Tab`          | Move focus to the next control in the order above             |
+| `Shift+Tab`    | Move focus to the previous control                            |
+| `Enter`        | Activate the focused link, button, or row                     |
+| `Space`        | Toggle the focused checkbox or expand/collapse a row           |
+| `Arrow Up/Down`| Move between rows within the focused data region              |
+| `Home` / `End` | Jump to the first / last row in the focused data region       |
+| `r`            | Refresh the current endpoint's data                           |
+| `?`            | Open the keyboard shortcut help dialog                        |
+| `Esc`          | Close the help dialog or clear the active filter              |
 
-```bash
-curl http://localhost:3000/admin/webhooks/health \
-  -H "Authorization: Bearer dev-admin-key"
-```
+Shortcuts are only active while focus is inside the admin dashboard and are
+suppressed while a text input has focus, so typing in a filter field never
+triggers them.
 
-Response `200`:
-```json
-[
-  {
-    "endpoint_id": "...",
-    "url": "https://example.com/hook",
-    "health_score": 0.95,
-    "consecutive_failures": 0,
-    "last_delivery_at": "2026-04-25T12:00:00Z"
-  }
-]
-```
+### Screen-reader notes
 
----
-
-### `GET /admin/webhooks/health/:id`
-
-Get health score for a specific webhook endpoint.
-
-```bash
-curl http://localhost:3000/admin/webhooks/health/550e8400-e29b-41d4-a716-446655440000 \
-  -H "Authorization: Bearer dev-admin-key"
-```
-
-Response `200` — single health object (same shape as list item above).
-
-Response `404` when endpoint not found.
-
----
-
-## Error Codes
-
-| HTTP Status | Meaning                                                  |
-|-------------|----------------------------------------------------------|
-| 400         | Bad request — invalid input or missing required fields   |
-| 401         | Unauthorized — missing or invalid auth header            |
-| 404         | Not found                                                |
-| 429         | Too many requests — rate limit exceeded                  |
-| 500         | Internal server error                                    |
-| 503         | Service unavailable — draining, not ready, or queue full |
+- Row counts and result summaries are announced via a polite live region after
+  each refresh or filter change.
+- Loading and error states for each endpoint are announced, so users know when
+  `/admin/audit`, `/admin/locks`, or `/admin/quota` data is refreshing or failed.
+- Tables expose proper row and column headers so cell values are read with context.
