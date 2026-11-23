@@ -13,7 +13,8 @@
 //!
 //! # Expected headers
 //!
-//! - `X-Webhook-Timestamp`: Unix seconds, must be within 5 minutes of now.
+//! - `X-Webhook-Timestamp`: Unix seconds, must be within the replay window
+//!   (default 5 minutes) of now.
 //! - `X-Webhook-Signature`: `sha256=<hex>`, HMAC-SHA256 over
 //!   `{timestamp}.{body}` keyed by the current (or, during a rotation grace
 //!   window, previous) `anchor_webhook_secret`.
@@ -29,9 +30,15 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TIMESTAMP_HEADER: &str = "X-Webhook-Timestamp";
 const SIGNATURE_HEADER: &str = "X-Webhook-Signature";
+
+/// Documented default replay window (in seconds) used when
+/// `WEBHOOK_REPLAY_WINDOW_SECS` is not configured. Matches the 5-minute
+/// tolerance documented in the module header.
+const DEFAULT_REPLAY_WINDOW_SECS: u64 = 300;
 
 /// Returns every secret value that should currently be accepted: the
 /// rotation-aware values from `SecretsStore` when Vault-backed secrets are
@@ -44,6 +51,40 @@ async fn valid_secrets(state: &AppState) -> Vec<String> {
     } else {
         vec![std::env::var("ANCHOR_WEBHOOK_SECRET").unwrap_or_default()]
     }
+}
+
+/// Resolves the configured replay window in seconds, falling back to
+/// [`DEFAULT_REPLAY_WINDOW_SECS`] when unset or unparseable so the check is
+/// never silently skipped.
+fn replay_window_secs() -> u64 {
+    std::env::var("WEBHOOK_REPLAY_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_REPLAY_WINDOW_SECS)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Rejects timestamps that fall outside the replay window (either too old or
+/// too far in the future), preventing captured requests from being replayed
+/// indefinitely.
+fn check_replay_window(timestamp: &str, window_secs: u64) -> Result<(), WebhookSecurityError> {
+    let ts: u64 = timestamp
+        .trim()
+        .parse()
+        .map_err(|_| WebhookSecurityError::InvalidTimestamp)?;
+    let now = now_secs();
+    let skew = now.abs_diff(ts);
+    if skew > window_secs {
+        return Err(WebhookSecurityError::InvalidTimestamp);
+    }
+    Ok(())
 }
 
 fn rejection(status: StatusCode, error: WebhookSecurityError) -> Response {
@@ -92,6 +133,15 @@ pub async fn verify_anchor_signature(
         return rejection(StatusCode::UNAUTHORIZED, e);
     }
 
+    let window_secs = replay_window_secs();
+    if let Err(e) = check_replay_window(&timestamp, window_secs) {
+        tracing::warn!(
+            window_secs,
+            "webhook_signature: timestamp outside replay window"
+        );
+        return rejection(StatusCode::UNAUTHORIZED, e);
+    }
+
     let (parts, body) = req.into_parts();
     let bytes = match hyper::body::to_bytes(body).await {
         Ok(b) => b,
@@ -125,15 +175,7 @@ mod tests {
     use axum::{routing::post, Router};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
-
-    fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    }
 
     fn sign(secret: &str, timestamp: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
@@ -157,6 +199,18 @@ mod tests {
                 verify_anchor_signature,
             ))
             .with_state(state)
+    }
+
+    #[test]
+    fn replay_window_rejects_old_timestamp() {
+        let old_ts = (now_secs() - DEFAULT_REPLAY_WINDOW_SECS - 60).to_string();
+        assert!(check_replay_window(&old_ts, DEFAULT_REPLAY_WINDOW_SECS).is_err());
+    }
+
+    #[test]
+    fn replay_window_accepts_recent_timestamp() {
+        let ts = now_secs().to_string();
+        assert!(check_replay_window(&ts, DEFAULT_REPLAY_WINDOW_SECS).is_ok());
     }
 
     #[tokio::test]
@@ -191,6 +245,27 @@ mod tests {
             .method("POST")
             .uri("/callback")
             .header(TIMESTAMP_HEADER, replayed_ts)
+            .header(SIGNATURE_HEADER, sig)
+            .body(Body::from(body.to_vec()))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires DATABASE_URL"]
+    async fn rejects_signature_older_than_replay_window() {
+        // A correctly signed request whose timestamp is older than the replay
+        // window must be rejected with 401, even though the HMAC is valid.
+        let app = test_app("s3cr3t").await;
+        let body = b"{\"stellar_account\":\"G...\"}";
+        let old_ts = (now_secs() - DEFAULT_REPLAY_WINDOW_SECS - 60).to_string();
+        let sig = sign("s3cr3t", &old_ts, body);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/callback")
+            .header(TIMESTAMP_HEADER, old_ts)
             .header(SIGNATURE_HEADER, sig)
             .body(Body::from(body.to_vec()))
             .unwrap();
