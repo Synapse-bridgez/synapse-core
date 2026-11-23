@@ -17,8 +17,8 @@ pub async fn tenant_context_middleware(req: Request<Body>, next: Next<Body>) -> 
 
 /// Extract tenant_id from request for use in database queries.
 /// Returns None if tenant context is not available (fail-closed).
-pub fn get_tenant_id_from_request(_req: &Request<Body>) -> Option<Uuid> {
-    // Tenant context would be set by upstream middleware
-    // For now, this is a utility for future use
-    None
+pub fn get_tenant_id_from_request(req: &Request<Body>) -> Option<Uuid> {
+    // Tenant context is set by upstream middleware and stored in request extensions.
+    // Fail-closed: return None when no tenant context is present.
+    req.extensions().get::<Uuid>().copied()
 }
