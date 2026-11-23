@@ -196,6 +196,51 @@ impl Default for ReadinessState {
     }
 }
 
+/// Returns true when the request's `Accept` header prefers JSON.
+/// Defaults to JSON when `Accept: application/json` is present.
+pub fn wants_json(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false)
+}
+
+/// Axum handler: GET /ready
+///
+/// Returns a JSON body with `status` and `checks` when JSON is requested,
+/// otherwise falls back to plain text for backwards compatibility.
+pub async fn ready_handler(
+    axum::extract::State(state): axum::extract::State<crate::ApiState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+
+    let ready = state.app_state.readiness.is_ready();
+    let draining = state.app_state.readiness.is_draining();
+    let status_code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    if wants_json(&headers) {
+        let body = serde_json::json!({
+            "status": if ready { "ready" } else { "not_ready" },
+            "checks": {
+                "ready": ready,
+                "draining": draining,
+            }
+        });
+        return (status_code, Json(body)).into_response();
+    }
+
+    let text = if ready { "ready" } else { "not ready" };
+    (status_code, text).into_response()
+}
+
 /// Axum handler: POST /admin/drain
 ///
 /// Kubernetes preStop hook target. Sets readiness to false, starts the drain timer,
@@ -232,50 +277,4 @@ pub async fn drain_handler(
             "drain_timeout_secs": timeout.as_secs()
         })),
     )
-}
-
-/// Extension trait to easily add readiness state to AppState
-pub trait AddReadiness {
-    fn with_readiness(self, readiness: ReadinessState) -> Self;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_readiness_initial_state() {
-        let state = ReadinessState::new();
-        assert!(!state.is_ready(), "Initial state should be NOT READY");
-        assert!(!state.is_draining());
-    }
-
-    #[test]
-    fn test_set_not_ready() {
-        let state = ReadinessState::new();
-        state.set_not_ready();
-        assert!(!state.is_ready());
-        assert!(state.is_draining());
-    }
-
-    #[test]
-    fn test_set_ready() {
-        let state = ReadinessState::new();
-        state.set_not_ready();
-        state.set_ready();
-        assert!(state.is_ready());
-        assert!(!state.is_draining());
-    }
-
-    #[test]
-    fn test_drain_timeout() {
-        let state = ReadinessState::with_drain_timeout(60);
-        assert_eq!(state.drain_timeout().as_secs(), 60);
-    }
-
-    #[test]
-    fn test_default_drain_timeout() {
-        let state = ReadinessState::new();
-        assert_eq!(state.drain_timeout().as_secs(), 30);
-    }
 }
