@@ -2,6 +2,9 @@ use jsonschema::JSONSchema;
 use once_cell::sync::Lazy;
 use serde_json::json;
 
+/// Maximum value representable by the ledger's 64-bit fixed-point amount type.
+pub const LEDGER_AMOUNT_MAX: i64 = i64::MAX;
+
 /// Compiled JSON schemas for webhook payloads
 pub struct SchemaRegistry {
     pub callback_v1: JSONSchema,
@@ -21,6 +24,25 @@ impl SchemaRegistry {
 
 /// Global schema registry with cached compiled schemas
 pub static SCHEMAS: Lazy<SchemaRegistry> = Lazy::new(SchemaRegistry::new);
+
+/// Validate that a decimal amount string does not exceed the ledger's
+/// fixed-point maximum. Returns `Err` with the offending field name and the
+/// maximum allowed value when the amount would overflow the ledger type.
+pub fn validate_amount_upper_bound(
+    field: &str,
+    amount: &str,
+) -> Result<(), (String, i64)> {
+    let parsed: f64 = match amount.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    if parsed > LEDGER_AMOUNT_MAX as f64 {
+        return Err((field.to_string(), LEDGER_AMOUNT_MAX));
+    }
+
+    Ok(())
+}
 
 /// JSON schema for callback payload (v1)
 fn callback_schema_v1() -> serde_json::Value {
@@ -232,5 +254,20 @@ mod tests {
 
         let result = SCHEMAS.webhook_v1.validate(&invalid);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_amount_upper_bound_accepts_max() {
+        let max = LEDGER_AMOUNT_MAX.to_string();
+        assert!(validate_amount_upper_bound("amount", &max).is_ok());
+    }
+
+    #[test]
+    fn test_amount_upper_bound_rejects_above_max() {
+        let above = (LEDGER_AMOUNT_MAX as f64 + 1.0).to_string();
+        let err = validate_amount_upper_bound("amount", &above)
+            .expect_err("amount above ledger max must be rejected");
+        assert_eq!(err.0, "amount");
+        assert_eq!(err.1, LEDGER_AMOUNT_MAX);
     }
 }

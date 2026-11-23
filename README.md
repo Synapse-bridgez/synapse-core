@@ -204,3 +204,8 @@ See the [open issues](https://github.com/synapse-bridgez/synapse-core/issues) fo
 
 📄 License
 This project is licensed under the MIT License. See the LICENSE file for details.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1682 -->
+- #1682: Rate-limit error responses do not include a Retry-After header

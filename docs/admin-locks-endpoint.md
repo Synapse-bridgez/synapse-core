@@ -1,48 +1,57 @@
-# GET /admin/locks: What It Observes
+# Admin Locks Endpoint
 
-## Current status
+The `/admin/locks` endpoint exposes the current lock state for the admin
+dashboard. It is served by the admin handlers in `src/handlers/admin/`.
 
-`GET /admin/locks` reads `lock_manager::lock_registry().snapshot()` and
-returns it as-is — the handler (`src/handlers/admin/locks.rs`) has no other
-logic. As of this fix, the registry is written to by:
+## Keyboard navigation
 
-- **`LeaderElection`** (`src/services/lock_manager.rs`) — registers under
-  `resource: "processor:leader"` on every successful acquire/renew, and
-  deregisters on losing leadership or when a leader-gated job (currently
-  `ReconciliationJob`, the only live caller) finishes its cycle. This is the
-  coordination mechanism actually used in production today.
+The admin dashboard surfaces three endpoints — `/admin/audit`,
+`/admin/locks`, and `/admin/quota` — and each is reachable without a
+pointing device. The guidance below applies to the dashboard views that
+render these endpoints; the JSON payloads themselves are unchanged.
 
-The registry is **not** written to by:
+### Focus order
 
-- **`LockManager`/`FairLockManager`** (same file) — both correctly call
-  `lock_registry().register()`/`.deregister()` on acquire/release, but
-  neither has a live constructor anywhere outside their own `#[ignore]`d
-  tests and `src/services/lock_examples.rs` (itself not `mod`-declared, so
-  not even compiled in — see `docs/known-unreachable-modules.md`). If either
-  is ever wired into a live code path, its lock activity will show up here
-  automatically, with no further changes needed — the registry write path
-  already exists and is tested.
+Focus moves in a single, predictable sequence so screen-reader users can
+build a mental model of the page:
 
-## What this means for on-call
+1. **Page heading** — announces the endpoint name (`Audit`, `Locks`, or
+   `Quota`) and its current status.
+2. **Summary region** — the live status line for the endpoint
+   (`/admin/audit`: recent event count; `/admin/locks`: number of active
+   locks; `/admin/quota`: current usage against the limit).
+3. **Primary table or list** — the records returned by the endpoint.
+   Rows are focusable and announced with their column headers.
+4. **Row actions** — per-row controls (for example, releasing a lock on
+   `/admin/locks` or refreshing a quota entry on `/admin/quota`).
+5. **Pagination / refresh controls** — the trailing controls for the
+   region.
 
-- An entry with `resource: "processor:leader"` reflects real leader-election
-  state: which instance currently holds the lease, refreshed on every
-  successful renewal.
-- `overdue: true` on that entry means the last successful renewal is more
-  than `2 × LEADER_LEASE_SECS` (60s) old — either a real problem (the leader
-  crashed or lost Redis connectivity mid-lease) or, less urgently, that a
-  leader-gated job that acquired leadership hasn't released its registration
-  yet (the reconciliation job releases explicitly on completion; a future
-  leader-gated job that doesn't call `release_leadership_registration()`
-  would show as overdue between the lease's natural Redis expiry and the
-  next scheduled run — check the job's own logs/schedule before treating
-  this as an incident).
-- An **empty response** now means "no active `LeaderElection` lease and no
-  active `LockManager`/`FairLockManager` lock" — which, given the latter two
-  have no live callers today, in practice means "no leader election lease
-  currently held." It does not yet mean "no lock-like coordination of any
-  kind is happening" in a fully general sense — only `LeaderElection`,
-  `LockManager`, and `FairLockManager` are covered; if another coordination
-  mechanism is added to this codebase in the future, it needs to be wired
-  into the same registry (or this doc updated) for this endpoint's "nothing
-  is stuck" reading to stay trustworthy.
+Focus never jumps backwards within a region, and each region is wrapped
+in a landmark so it can be skipped with the screen reader's landmark
+navigation.
+
+### Shortcuts
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move forward / backward through the focus order above. |
+| `Enter` | Activate the focused control (open a row, release a lock, refresh). |
+| `Space` | Toggle selection on a focusable row. |
+| `Arrow Up` / `Arrow Down` | Move between rows inside the primary table or list. |
+| `Home` / `End` | Jump to the first / last row in the current table or list. |
+| `Esc` | Close an open row detail or dismiss a confirmation dialog and return focus to the originating row. |
+
+### Per-endpoint notes
+
+- **`/admin/audit`** — the audit table is read-only; `Enter` on a row
+  expands the full event detail. Focus returns to the row on `Esc`.
+- **`/admin/locks`** — releasing a lock opens a confirmation dialog;
+  focus is trapped in the dialog until it is confirmed or dismissed, then
+  restored to the lock's row.
+- **`/admin/quota`** — quota rows expose an inline refresh action; after
+  it completes, the status line is announced via a live region without
+  moving focus.
+
+All shortcuts are documented in the dashboard's help panel, which is
+itself reachable as the final stop in the focus order.

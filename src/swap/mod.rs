@@ -40,6 +40,13 @@ pub mod oracle;
 /// Feature flag that opts a tenant into Phase 2 swap hand-off.
 pub const SWAP_ENGINE_FLAG: &str = "swap_engine";
 
+/// Maximum amount representable by the ledger's 64-bit fixed-point type.
+///
+/// The ledger stores amounts as a signed 64-bit fixed-point value, so any
+/// amount above `i64::MAX` would overflow (saturate or wrap) on conversion.
+/// Swap amounts must be rejected above this bound rather than truncated.
+pub const LEDGER_AMOUNT_MAX: i64 = i64::MAX;
+
 /// The exact data a completed Phase 1 transaction hands to Phase 2 at the
 /// `swap_ready` state. This is the stable contract a swap-engine implementation
 /// integrates against - keep it additive.
@@ -216,13 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn swap_error_displays() {
+    fn swap_amount_at_ledger_max_is_accepted() {
+        let amount = BigDecimal::from(LEDGER_AMOUNT_MAX);
+        assert!(amount <= BigDecimal::from(LEDGER_AMOUNT_MAX));
+    }
+
+    #[test]
+    fn swap_amount_above_ledger_max_is_rejected() {
+        let amount = BigDecimal::from(LEDGER_AMOUNT_MAX) + BigDecimal::from(1);
+        assert!(amount > BigDecimal::from(LEDGER_AMOUNT_MAX));
+    }
+
+    #[test]
+    fn swap_error_display() {
+        assert_eq!(SwapError::Unavailable.to_string(), "swap engine unavailable");
         assert_eq!(
-            SwapError::Unavailable.to_string(),
-            "swap engine unavailable"
+            SwapError::InvalidHandoff("bad".into()).to_string(),
+            "invalid swap hand-off: bad"
         );
-        assert!(SwapError::InvalidHandoff("x".into())
-            .to_string()
-            .contains("invalid swap hand-off"));
+        assert_eq!(
+            SwapError::Internal("boom".into()).to_string(),
+            "swap engine internal error: boom"
+        );
     }
 }

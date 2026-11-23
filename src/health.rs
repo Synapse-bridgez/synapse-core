@@ -22,6 +22,31 @@ pub struct HealthResponse {
     pub dependencies: HashMap<String, DependencyStatus>,
 }
 
+impl HealthResponse {
+    /// Render the health response as a JSON body for assistive tools.
+    ///
+    /// The JSON includes a top-level `status` field and a `checks` map so
+    /// screen readers and other clients can parse the overall state.
+    pub fn to_json(&self) -> String {
+        let checks: HashMap<&String, &DependencyStatus> = self.dependencies.iter().collect();
+        let payload = serde_json::json!({
+            "status": self.status,
+            "version": self.version,
+            "uptime_seconds": self.uptime_seconds,
+            "checks": checks,
+        });
+        payload.to_string()
+    }
+
+    /// Render the health response as a plain-text fallback.
+    pub fn to_plain_text(&self) -> String {
+        format!(
+            "status: {}\nversion: {}\nuptime_seconds: {}\n",
+            self.status, self.version, self.uptime_seconds
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DependencyStatus {
@@ -244,5 +269,43 @@ fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) ->
         "degraded".to_string()
     } else {
         "healthy".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_response() -> HealthResponse {
+        let mut dependencies = HashMap::new();
+        dependencies.insert(
+            "postgres".to_string(),
+            DependencyStatus::Healthy {
+                status: "healthy".to_string(),
+                severity: DependencySeverity::Critical,
+                latency_ms: 3,
+            },
+        );
+        HealthResponse {
+            status: "healthy".to_string(),
+            version: "0.1.0".to_string(),
+            uptime_seconds: 42,
+            dependencies,
+        }
+    }
+
+    #[test]
+    fn json_body_includes_status_and_checks() {
+        let body = sample_response().to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(parsed["status"], "healthy");
+        assert!(parsed["checks"].is_object());
+        assert_eq!(parsed["checks"]["postgres"]["status"], "healthy");
+    }
+
+    #[test]
+    fn plain_text_fallback_contains_status() {
+        let body = sample_response().to_plain_text();
+        assert!(body.contains("status: healthy"));
     }
 }
