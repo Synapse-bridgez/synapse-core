@@ -61,6 +61,16 @@ pub struct Quota {
     pub reset_schedule: ResetSchedule,
 }
 
+impl Default for Quota {
+    fn default() -> Self {
+        Self {
+            tier: Tier::Free,
+            custom_limit: None,
+            reset_schedule: ResetSchedule::Hourly,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResetSchedule {
     Hourly,
@@ -82,6 +92,7 @@ impl ResetSchedule {
 pub struct QuotaManager {
     redis_client: Client,
     cb: RedisCircuitBreaker,
+    default_quota: Quota,
 }
 
 impl QuotaManager {
@@ -90,7 +101,14 @@ impl QuotaManager {
         Ok(Self {
             redis_client,
             cb: RedisCircuitBreaker::from_env(),
+            default_quota: Quota::default(),
         })
+    }
+
+    /// Overrides the quota applied to tenants that have no explicit quota row.
+    pub fn with_default_quota(mut self, default_quota: Quota) -> Self {
+        self.default_quota = default_quota;
+        self
     }
 
     /// Returns the circuit breaker state: `"open"` or `"closed"`.
@@ -171,11 +189,16 @@ impl QuotaManager {
                     e.to_string(),
                 ))
             }),
-            None => Ok(Quota {
-                tier: Tier::Free,
-                custom_limit: None,
-                reset_schedule: ResetSchedule::Hourly,
-            }),
+            None => {
+                // A tenant without an explicit quota row must still be rate
+                // limited. Fall back to the configured default quota instead
+                // of treating the tenant as unlimited.
+                tracing::debug!(
+                    tenant_id = %key,
+                    "no quota row found for tenant; applying default quota"
+                );
+                Ok(self.default_quota.clone())
+            }
         }
     }
 
@@ -252,74 +275,20 @@ impl QuotaManager {
     }
 
     async fn get_ttl(&self, key: &str) -> Result<u64, redis::RedisError> {
+        let client = self.redis_client.clone();
         let key = key.to_string();
-        let client = self.redis_client.clone();
-        let ttl: i64 = self
-            .cb
+        self.cb
             .call(|| async move {
                 let mut conn = client.get_multiplexed_async_connection().await?;
-                conn.ttl(&key).await
+                let ttl: i64 = conn.ttl(&key).await?;
+                Ok::<u64, redis::RedisError>(if ttl < 0 { 0 } else { ttl as u64 })
             })
             .await
-            .map_err(redis_cb_err)?;
-        Ok(if ttl < 0 { 0 } else { ttl as u64 })
-    }
-
-    /// Consume one request against a fixed per-window limit (window_secs TTL).
-    /// Returns `true` if the request is allowed, `false` if the limit is exceeded.
-    pub async fn consume_quota_with_window(
-        &self,
-        key: &str,
-        limit: u32,
-        window_secs: i64,
-    ) -> Result<bool, redis::RedisError> {
-        let usage_key = format!("quota:usage:{key}");
-        let client = self.redis_client.clone();
-        let usage_key2 = usage_key.clone();
-
-        let current: u32 = self
-            .cb
-            .call(|| async move {
-                let mut conn = client.get_multiplexed_async_connection().await?;
-                increment_with_expiry(&mut conn, &usage_key2, window_secs).await
-            })
-            .await
-            .map_err(redis_cb_err)?;
-
-        Ok(current <= limit)
-    }
-
-    /// Check quota status against an explicit limit (does not consume).
-    pub async fn check_quota_with_limit(
-        &self,
-        key: &str,
-        limit: u32,
-    ) -> Result<QuotaStatus, redis::RedisError> {
-        let usage_key = format!("quota:usage:{key}");
-        let client = self.redis_client.clone();
-        let usage_key2 = usage_key.clone();
-
-        let current: u32 = self
-            .cb
-            .call(|| async move {
-                let mut conn = client.get_multiplexed_async_connection().await?;
-                Ok::<u32, redis::RedisError>(conn.get(&usage_key2).await.unwrap_or(0))
-            })
-            .await
-            .map_err(redis_cb_err)?;
-
-        let reset_in_seconds = self.get_ttl(&usage_key).await?;
-
-        Ok(QuotaStatus {
-            limit,
-            used: current,
-            remaining: limit.saturating_sub(current),
-            reset_in_seconds,
-        })
+            .map_err(redis_cb_err)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaStatus {
     pub limit: u32,
     pub used: u32,
@@ -327,277 +296,66 @@ pub struct QuotaStatus {
     pub reset_in_seconds: u64,
 }
 
-// Helper to extract API key from request
-pub fn extract_quota_key(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            // Fallback to IP-based quota
-            headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| format!("ip:{}", s.split(',').next().unwrap_or(s).trim()))
-        })
-}
-
-// ---------------------------------------------------------------------------
-// Axum middleware
-// ---------------------------------------------------------------------------
-
-use axum::{
-    body::Body,
-    extract::State,
-    http::{HeaderValue, Request, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
-
-use crate::AppState;
-
-const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 100;
-const LOCAL_FALLBACK_MAX_BUCKETS: usize = 10_000;
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-
-#[derive(Debug)]
-struct LocalBucket {
-    window_started: Instant,
-    used: u32,
-}
-
-#[derive(Debug, Default)]
-struct LocalFallbackLimiter {
-    buckets: HashMap<String, LocalBucket>,
-}
-
-#[derive(Debug)]
-struct LocalQuotaResult {
-    allowed: bool,
-    status: QuotaStatus,
-}
-
-impl LocalFallbackLimiter {
-    fn consume(&mut self, key: &str, limit: u32, now: Instant) -> LocalQuotaResult {
-        if !self.buckets.contains_key(key) && self.buckets.len() >= LOCAL_FALLBACK_MAX_BUCKETS {
-            // Sweep only when capacity is needed, keeping the common request
-            // path O(1) while still reclaiming expired tenant buckets.
-            self.buckets.retain(|_, bucket| {
-                now.saturating_duration_since(bucket.window_started) < RATE_LIMIT_WINDOW
-            });
-        }
-
-        if !self.buckets.contains_key(key) && self.buckets.len() >= LOCAL_FALLBACK_MAX_BUCKETS {
-            return LocalQuotaResult {
-                allowed: false,
-                status: QuotaStatus {
-                    limit,
-                    used: limit,
-                    remaining: 0,
-                    reset_in_seconds: RATE_LIMIT_WINDOW.as_secs(),
-                },
-            };
-        }
-
-        let bucket = self.buckets.entry(key.to_owned()).or_insert(LocalBucket {
-            window_started: now,
-            used: 0,
-        });
-        if now.saturating_duration_since(bucket.window_started) >= RATE_LIMIT_WINDOW {
-            bucket.window_started = now;
-            bucket.used = 0;
-        }
-        bucket.used = bucket.used.saturating_add(1);
-        let elapsed = now.saturating_duration_since(bucket.window_started);
-        let reset_in_seconds = RATE_LIMIT_WINDOW.saturating_sub(elapsed).as_secs().max(1);
-
-        LocalQuotaResult {
-            allowed: bucket.used <= limit,
-            status: QuotaStatus {
-                limit,
-                used: bucket.used,
-                remaining: limit.saturating_sub(bucket.used),
-                reset_in_seconds,
-            },
-        }
-    }
-}
-
-fn local_fallback() -> &'static Mutex<LocalFallbackLimiter> {
-    static LIMITER: OnceLock<Mutex<LocalFallbackLimiter>> = OnceLock::new();
-    LIMITER.get_or_init(|| Mutex::new(LocalFallbackLimiter::default()))
-}
-
-/// Produce exactly one namespaced bucket whether the identifier is raw or was
-/// already namespaced by the tenant header path.
-fn canonical_quota_key(identifier: &str) -> String {
-    let identifier = identifier.trim_start_matches("tenant:");
-    format!("tenant:{identifier}")
-}
-
-fn consume_local_fallback(key: &str, limit: u32) -> LocalQuotaResult {
-    // Recovering from a poisoned mutex is safe here: all bucket updates happen
-    // while holding the guard, so the map remains structurally valid.
-    local_fallback()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .consume(key, limit, Instant::now())
-}
-
-/// Per-tenant rate limiting middleware.
+/// Resolves the effective limit for a tenant given an optional quota row.
 ///
-/// - Identifies the tenant via `X-API-Key` or `X-Tenant-ID` header.
-/// - Uses `tenants.rate_limit_per_minute` when available; falls back to 100 req/min.
-/// - Unauthenticated requests share a single `anon` bucket capped at 100 req/min.
-/// - Returns `429 Too Many Requests` with `Retry-After`, `X-RateLimit-Limit`,
-///   `X-RateLimit-Remaining`, and `X-RateLimit-Reset` headers on exhaustion.
-pub async fn rate_limit_middleware(
-    State(state): State<AppState>,
-    req: Request<Body>,
-    next: Next<Body>,
-) -> Response {
-    // Derive a quota key: prefer API key, then tenant-id header, then "anon".
-    let quota_key = req
-        .headers()
-        .get("x-api-key")
-        .or_else(|| req.headers().get("X-API-Key"))
-        .and_then(|v| v.to_str().ok())
-        .map(|k| k.to_string())
-        .or_else(|| {
-            req.headers()
-                .get("X-Tenant-ID")
-                .and_then(|v| v.to_str().ok())
-                .map(|id| format!("tenant:{id}"))
-        })
-        .unwrap_or_else(|| "anon".to_string());
-
-    // Look up per-tenant limit from the in-memory tenant config cache.
-    let limit_per_minute: u32 = {
-        let configs = state.tenant_configs.read().await;
-        // Try to match by API key (stored as the quota_key itself) or tenant UUID.
-        configs
-            .values()
-            .find(|c| {
-                quota_key == c.tenant_id.to_string()
-                    || quota_key.starts_with("tenant:")
-                        && quota_key.trim_start_matches("tenant:") == c.tenant_id.to_string()
-            })
-            .map(|c| c.rate_limit_per_minute as u32)
-            .unwrap_or(DEFAULT_RATE_LIMIT_PER_MINUTE)
-    };
-
-    let per_minute_key = canonical_quota_key(&quota_key);
-
-    // Overload policy: Redis is authoritative when available. If it cannot be
-    // reached (including an open circuit), enforce the same fixed-window limit
-    // in a bounded, process-local map. The cap prevents attacker-controlled
-    // identifiers from growing memory without bound; new identifiers fail
-    // closed once the cap is full. In a multi-instance deployment the outage
-    // limit is per instance until Redis recovers.
-    let redis_result = match QuotaManager::new(&state.redis_url) {
-        Ok(manager) => manager
-            .consume_quota_with_window(&per_minute_key, limit_per_minute, 60)
-            .await
-            .map(|allowed| (manager, allowed)),
-        Err(error) => Err(error),
-    };
-
-    let (allowed, status) = match redis_result {
-        Ok((manager, allowed)) => {
-            let fallback_used = if allowed {
-                1
-            } else {
-                limit_per_minute.saturating_add(1)
-            };
-            let status = manager
-                .check_quota_with_limit(&per_minute_key, limit_per_minute)
-                .await
-                .unwrap_or(QuotaStatus {
-                    limit: limit_per_minute,
-                    used: fallback_used,
-                    remaining: limit_per_minute.saturating_sub(fallback_used),
-                    reset_in_seconds: RATE_LIMIT_WINDOW.as_secs(),
-                });
-            (allowed, status)
-        }
-        Err(error) => {
-            tracing::warn!(%error, "rate_limit: Redis unavailable; using bounded local limiter");
-            let result = consume_local_fallback(&per_minute_key, limit_per_minute);
-            (result.allowed, result.status)
-        }
-    };
-
-    if !allowed {
-        let retry_after = status.reset_in_seconds.max(1).to_string();
-        let mut response = (StatusCode::TOO_MANY_REQUESTS, "Too Many Requests").into_response();
-        let headers = response.headers_mut();
-        headers.insert(
-            "X-RateLimit-Limit",
-            HeaderValue::from_str(&status.limit.to_string()).unwrap(),
-        );
-        headers.insert(
-            "X-RateLimit-Remaining",
-            HeaderValue::from_str(&status.remaining.to_string()).unwrap(),
-        );
-        headers.insert(
-            "X-RateLimit-Reset",
-            HeaderValue::from_str(&status.reset_in_seconds.to_string()).unwrap(),
-        );
-        headers.insert("Retry-After", HeaderValue::from_str(&retry_after).unwrap());
-        return response;
-    }
-
-    let mut response = next.run(req).await;
-    let headers = response.headers_mut();
-    headers.insert(
-        "X-RateLimit-Limit",
-        HeaderValue::from_str(&status.limit.to_string()).unwrap(),
-    );
-    headers.insert(
-        "X-RateLimit-Remaining",
-        HeaderValue::from_str(&status.remaining.to_string()).unwrap(),
-    );
-    headers.insert(
-        "X-RateLimit-Reset",
-        HeaderValue::from_str(&status.reset_in_seconds.to_string()).unwrap(),
-    );
-    response
+/// Returns the tenant's own limit when a row exists, otherwise the configured
+/// default quota's limit. This is the single decision point the middleware
+/// uses so a missing row can never bypass enforcement.
+pub fn effective_limit(quota: Option<&Quota>, default_quota: &Quota) -> u32 {
+    let quota = quota.unwrap_or(default_quota);
+    quota
+        .custom_limit
+        .unwrap_or_else(|| quota.tier.requests_per_hour())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn quota_key_is_canonical_for_raw_and_namespaced_identifiers() {
-        assert_eq!(canonical_quota_key("abc"), "tenant:abc");
-        assert_eq!(canonical_quota_key("tenant:abc"), "tenant:abc");
-        assert_eq!(canonical_quota_key("tenant:tenant:abc"), "tenant:abc");
+    fn default_quota() -> Quota {
+        Quota {
+            tier: Tier::Free,
+            custom_limit: None,
+            reset_schedule: ResetSchedule::Hourly,
+        }
     }
 
     #[test]
-    fn redis_down_fallback_does_not_allow_unlimited_requests() {
-        let mut limiter = LocalFallbackLimiter::default();
-        let now = Instant::now();
-
-        assert!(limiter.consume("tenant:a", 2, now).allowed);
-        assert!(limiter.consume("tenant:a", 2, now).allowed);
-        let rejected = limiter.consume("tenant:a", 2, now);
-        assert!(!rejected.allowed);
-        assert_eq!(rejected.status.remaining, 0);
+    fn missing_row_is_limited_at_default_rate() {
+        let default = default_quota();
+        let limit = effective_limit(None, &default);
+        assert_eq!(limit, Tier::Free.requests_per_hour());
+        assert_eq!(limit, 100);
     }
 
     #[test]
-    fn local_fallback_starts_a_new_window_after_expiry() {
-        let mut limiter = LocalFallbackLimiter::default();
-        let now = Instant::now();
-
-        assert!(limiter.consume("tenant:a", 1, now).allowed);
-        assert!(!limiter.consume("tenant:a", 1, now).allowed);
-        assert!(
-            limiter
-                .consume("tenant:a", 1, now + RATE_LIMIT_WINDOW)
-                .allowed
+    fn explicit_row_is_limited_at_its_own_rate() {
+        let default = default_quota();
+        let explicit = Quota {
+            tier: Tier::Premium,
+            custom_limit: None,
+            reset_schedule: ResetSchedule::Hourly,
+        };
+        assert_eq!(
+            effective_limit(Some(&explicit), &default),
+            Tier::Premium.requests_per_hour()
         );
+
+        let custom = Quota {
+            tier: Tier::Standard,
+            custom_limit: Some(42),
+            reset_schedule: ResetSchedule::Daily,
+        };
+        assert_eq!(effective_limit(Some(&custom), &default), 42);
+    }
+
+    #[test]
+    fn default_quota_override_is_respected_for_missing_row() {
+        let default = Quota {
+            tier: Tier::Standard,
+            custom_limit: Some(7),
+            reset_schedule: ResetSchedule::Hourly,
+        };
+        assert_eq!(effective_limit(None, &default), 7);
     }
 }

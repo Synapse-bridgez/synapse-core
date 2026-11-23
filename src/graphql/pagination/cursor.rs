@@ -3,6 +3,9 @@
 use crate::graphql::pagination::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
 use base64::{engine::general_purpose::STANDARD, Engine};
 
+/// Error message returned when a cursor is malformed or cannot be used.
+const INVALID_CURSOR_ERROR: &str = "Invalid cursor format";
+
 /// Cursor-based pagination parameters
 #[derive(Debug, Clone)]
 pub struct CursorPagination {
@@ -63,7 +66,7 @@ impl CursorPagination {
     fn validate_cursor(cursor: &str) -> Result<(), String> {
         STANDARD
             .decode(cursor)
-            .map_err(|_| "Invalid cursor format".to_string())?;
+            .map_err(|_| INVALID_CURSOR_ERROR.to_string())?;
         Ok(())
     }
 
@@ -72,12 +75,36 @@ impl CursorPagination {
         STANDARD.encode(value)
     }
 
+    /// Encodes a value as a cursor scoped to a tenant.
+    ///
+    /// The tenant id is embedded in the payload so that a cursor minted for one
+    /// tenant cannot be replayed against another.
+    pub fn encode_tenant_cursor(tenant_id: &str, value: &str) -> String {
+        STANDARD.encode(format!("{}:{}", tenant_id, value))
+    }
+
     /// Decodes a cursor to its original value
     pub fn decode_cursor(cursor: &str) -> Result<String, String> {
         let decoded = STANDARD
             .decode(cursor)
-            .map_err(|_| "Invalid cursor format".to_string())?;
+            .map_err(|_| INVALID_CURSOR_ERROR.to_string())?;
         String::from_utf8(decoded).map_err(|_| "Cursor contains invalid UTF-8".to_string())
+    }
+
+    /// Decodes a tenant-scoped cursor, verifying that the tenant embedded in the
+    /// cursor matches the tenant on the current request.
+    ///
+    /// Returns the invalid-cursor error on any mismatch so that a cursor from
+    /// one tenant is never silently used to return another tenant's page.
+    pub fn decode_tenant_cursor(cursor: &str, request_tenant: &str) -> Result<String, String> {
+        let decoded = Self::decode_cursor(cursor)?;
+        let (cursor_tenant, value) = decoded
+            .split_once(':')
+            .ok_or_else(|| INVALID_CURSOR_ERROR.to_string())?;
+        if cursor_tenant != request_tenant {
+            return Err(INVALID_CURSOR_ERROR.to_string());
+        }
+        Ok(value.to_string())
     }
 
     /// Gets the effective page size
@@ -140,6 +167,29 @@ mod tests {
     fn test_invalid_cursor_format() {
         let pagination = CursorPagination::new(Some("!!!invalid!!!".to_string()), None, None, None);
         assert!(pagination.is_err());
+    }
+
+    #[test]
+    fn test_tenant_cursor_roundtrip() {
+        let encoded = CursorPagination::encode_tenant_cursor("tenant-a", "transaction:123");
+        let decoded = CursorPagination::decode_tenant_cursor(&encoded, "tenant-a").unwrap();
+        assert_eq!(decoded, "transaction:123");
+    }
+
+    #[test]
+    fn test_tenant_cursor_mismatch_rejected() {
+        // A cursor minted for tenant A must be rejected on a request for tenant B.
+        let encoded = CursorPagination::encode_tenant_cursor("tenant-a", "transaction:123");
+        let err = CursorPagination::decode_tenant_cursor(&encoded, "tenant-b").unwrap_err();
+        assert_eq!(err, INVALID_CURSOR_ERROR);
+    }
+
+    #[test]
+    fn test_tenant_cursor_missing_tenant_rejected() {
+        // A cursor without an embedded tenant is treated as invalid.
+        let encoded = CursorPagination::encode_cursor("transaction:123");
+        let err = CursorPagination::decode_tenant_cursor(&encoded, "tenant-a").unwrap_err();
+        assert_eq!(err, INVALID_CURSOR_ERROR);
     }
 
     #[test]
