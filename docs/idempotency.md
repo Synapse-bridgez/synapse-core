@@ -48,7 +48,11 @@ Path 2 is the fix for the gap that used to exist here: before it was added, the 
 
 Note the DB fallback path (`check_idempotency_key`/`insert_idempotency_key`) is keyed only by `key`, not `tenant_id` — the Redis path scopes by tenant (`idempotency:<tenant_id>:<key>`) but the `idempotency_keys` table has no tenant column. Two different tenants using the same literal key string during an outage would collide in the DB fallback where they wouldn't in Redis. This is a pre-existing narrower gap, not introduced or fixed by the DB-fallback-recovery change — worth knowing about, not addressed here.
 
-### 5. Manually checking a key's DB-fallback record
+### 5. Streaming Responses
+
+The idempotency record is written only after the response body has been fully produced. For streaming handlers, the middleware buffers the body to completion before storing it, so a retry with the same key replays the complete body rather than a truncated prefix. If the body stream errors partway through, the partial body is not stored and the processing lock is released so the request can be retried.
+
+### 6. Manually checking a key's DB-fallback record
 
 For on-call triage of a reported duplicate action from a past Redis outage window, see the runbook's "Triaging a Reported Duplicate Action from a Past Redis Outage" section — short version: `SELECT * FROM idempotency_keys WHERE key = '<key>'`.
 
