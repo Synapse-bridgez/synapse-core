@@ -118,11 +118,93 @@ impl Default for DbTimeoutConfig {
     }
 }
 
+/// Why a string could not be used as a [`DatabaseUrl`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DatabaseUrlError {
+    #[error("DATABASE_URL must not be empty")]
+    Empty,
+    #[error("DATABASE_URL must start with postgres:// or postgresql://")]
+    UnsupportedScheme,
+}
+
+/// A database connection string whose scheme was checked when it was built, so
+/// holding a `DatabaseUrl` means the value is non-empty and uses a Postgres
+/// scheme. It dereferences to `&str` for the connection APIs, and its `Debug`
+/// and `Display` output hide the password.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DatabaseUrl(String);
+
+impl DatabaseUrl {
+    /// Validate and wrap a connection string.
+    pub fn parse(raw: &str) -> std::result::Result<Self, DatabaseUrlError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(DatabaseUrlError::Empty);
+        }
+        if !(trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://")) {
+            return Err(DatabaseUrlError::UnsupportedScheme);
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    /// The raw connection string, including the password. Do not log this.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The connection string with any password replaced by `****`.
+    pub fn redacted(&self) -> String {
+        match (self.0.find("://"), self.0.rfind('@')) {
+            (Some(scheme_end), Some(at)) if at > scheme_end + 3 => {
+                let creds = &self.0[scheme_end + 3..at];
+                match creds.find(':') {
+                    Some(colon) => format!(
+                        "{}{}:****{}",
+                        &self.0[..scheme_end + 3],
+                        &creds[..colon],
+                        &self.0[at..]
+                    ),
+                    None => self.0.clone(),
+                }
+            }
+            _ => self.0.clone(),
+        }
+    }
+}
+
+impl std::ops::Deref for DatabaseUrl {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for DatabaseUrl {
+    type Err = DatabaseUrlError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl std::fmt::Debug for DatabaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DatabaseUrl({})", self.redacted())
+    }
+}
+
+impl std::fmt::Display for DatabaseUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.redacted())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
     pub server_port: u16,
-    pub database_url: String,
+    pub database_url: DatabaseUrl,
     pub database_replica_url: Option<String>,
     /// Connection string for `pg_dump`/`pg_restore` (BackupService). Postgres
     /// refuses to `pg_dump` a table with `FORCE ROW LEVEL SECURITY` (both
@@ -229,7 +311,7 @@ impl Config {
             server_port: env::var("SERVER_PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()?,
-            database_url,
+            database_url: DatabaseUrl::parse(&database_url)?,
             database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
             backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
@@ -350,5 +432,47 @@ fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
         "text" => Ok(LogFormat::Text),
         "json" => Ok(LogFormat::Json),
         _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
+    }
+}
+
+#[cfg(test)]
+mod database_url_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_postgres_schemes() {
+        assert!(DatabaseUrl::parse("postgres://u:p@localhost:5432/db").is_ok());
+        assert!(DatabaseUrl::parse("postgresql://localhost/db").is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_and_other_schemes() {
+        assert_eq!(DatabaseUrl::parse("").unwrap_err(), DatabaseUrlError::Empty);
+        assert_eq!(DatabaseUrl::parse("   ").unwrap_err(), DatabaseUrlError::Empty);
+        assert_eq!(
+            DatabaseUrl::parse("mysql://localhost/db").unwrap_err(),
+            DatabaseUrlError::UnsupportedScheme
+        );
+    }
+
+    #[test]
+    fn debug_and_display_hide_the_password() {
+        let url = DatabaseUrl::parse("postgres://synapse:hunter2@localhost:5432/db").unwrap();
+        assert!(!format!("{url:?}").contains("hunter2"));
+        assert!(!format!("{url}").contains("hunter2"));
+        assert_eq!(url.redacted(), "postgres://synapse:****@localhost:5432/db");
+        assert_eq!(url.as_str(), "postgres://synapse:hunter2@localhost:5432/db");
+    }
+
+    #[test]
+    fn urls_without_a_password_are_left_alone() {
+        let url = DatabaseUrl::parse("postgres://localhost:5432/db").unwrap();
+        assert_eq!(url.redacted(), "postgres://localhost:5432/db");
+    }
+
+    #[test]
+    fn derefs_to_str() {
+        let url = DatabaseUrl::parse("postgres://localhost/db").unwrap();
+        assert!(url.starts_with("postgres://"));
     }
 }

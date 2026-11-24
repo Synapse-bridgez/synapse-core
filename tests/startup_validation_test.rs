@@ -1,6 +1,6 @@
 use sqlx::{migrate::Migrator, ConnectOptions, PgPool};
 use std::path::Path;
-use synapse_core::config::{AllowedIps, Config, LogFormat};
+use synapse_core::config::{AllowedIps, Config, DatabaseUrl, LogFormat};
 use synapse_core::startup::validate_environment;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -10,7 +10,7 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
     Config {
         app_env: synapse_core::config::AppEnv::Development,
         server_port: 3000,
-        database_url,
+        database_url: DatabaseUrl::parse(&database_url).expect("test database url"),
         database_replica_url: None,
         backup_database_url: None,
         stellar_horizon_url: horizon_url,
@@ -227,33 +227,10 @@ async fn test_validation_report_generation() {
     }
 }
 
-#[ignore = "Requires Docker/external services"]
-#[tokio::test]
-async fn test_validation_empty_database_url() {
-    // Setup test database for pool
-    let (pool, _container) = setup_test_database().await;
-
-    // Create config with empty database URL
-    let config = create_test_config(
-        String::new(),
-        "redis://127.0.0.1:6379".to_string(),
-        "https://horizon-testnet.stellar.org".to_string(),
-    );
-
-    // Run validation
-    let report = validate_environment(&config, &pool).await.unwrap();
-
-    // Assertions
-    assert!(
-        !report.environment,
-        "Environment validation should fail with empty database URL"
-    );
-    assert!(!report.is_valid(), "Overall validation should fail");
-
-    let has_env_error = report.errors.iter().any(|e| e.contains("Environment"));
-    assert!(has_env_error, "Should have environment error in report");
-
-    report.print();
+#[test]
+fn test_empty_database_url_is_rejected_at_construction() {
+    // An empty URL can no longer be placed in a Config at all.
+    assert!(DatabaseUrl::parse("").is_err());
 }
 
 #[ignore = "Requires Docker/external services"]

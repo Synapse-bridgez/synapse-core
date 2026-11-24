@@ -517,7 +517,7 @@ async fn serve(
     let backup_database_url = config
         .backup_database_url
         .clone()
-        .unwrap_or_else(|| config.database_url.clone());
+        .unwrap_or_else(|| config.database_url.as_str().to_string());
     let backup_service = std::sync::Arc::new(synapse_core::services::BackupService::new(
         backup_database_url,
         std::path::PathBuf::from(&config.backup_dir),
