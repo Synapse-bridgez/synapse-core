@@ -9,6 +9,12 @@ use thiserror::Error;
 pub enum CircuitBreakerError {
     #[error("Circuit breaker is open")]
     Open,
+    /// The breaker was half-open, let one probe call through, and the probe
+    /// failed, so the breaker is open again. The probe's own error is kept as
+    /// the `source`, so callers can tell "the breaker is open" (match on this
+    /// variant) from "the downstream failed" (inspect the source).
+    #[error("Circuit breaker is open: half-open probe failed")]
+    ProbeFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,10 +80,12 @@ impl CircuitBreaker {
         Fut: std::future::Future<Output = Result<T, Box<dyn std::error::Error + Send + Sync>>>,
     {
         let mut state = self.state.lock().await;
+        let mut is_probe = matches!(state.state, CircuitState::HalfOpen);
         match state.state {
             CircuitState::Open => {
                 if Utc::now().signed_duration_since(state.opened_at.unwrap()) > self.reset_timeout {
                     state.state = CircuitState::HalfOpen;
+                    is_probe = true;
                 } else {
                     return Err(Box::new(CircuitBreakerError::Open));
                 }
@@ -109,7 +117,12 @@ impl CircuitBreaker {
                 }
             }
         }
-        result
+        match result {
+            // A failed half-open probe re-opens the breaker; surface the
+            // breaker's open error and keep the probe error as its source.
+            Err(probe_err) if is_probe => Err(Box::new(CircuitBreakerError::ProbeFailed(probe_err))),
+            other => other,
+        }
     }
 
     async fn persist_to_redis(&self, state: &CircuitBreakerState) -> Result<(), redis::RedisError> {
