@@ -37,7 +37,10 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,6 +56,115 @@ pub const DEFAULT_PAGE_SIZE: u32 = 20;
 /// Maximum byte length accepted for a raw cursor string.
 /// base64url(64 bytes) ≈ 88 chars; 512 gives comfortable headroom.
 const MAX_CURSOR_BYTES: usize = 512;
+
+// ---------------------------------------------------------------------------
+// Serialised page cache
+// ---------------------------------------------------------------------------
+
+/// Default number of serialised pages kept by a [`PageCache`].
+pub const DEFAULT_PAGE_CACHE_ENTRIES: usize = 256;
+
+/// Default time a serialised page stays valid.
+pub const DEFAULT_PAGE_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// Bounded, short-lived cache of serialised pages, keyed by tenant and cursor.
+///
+/// Stepping to the same cursor again within the TTL reuses the bytes produced
+/// the first time instead of serialising the page again. The cached string is
+/// exactly what the serialiser returned, so the wire format is unchanged.
+///
+/// - **Bounded:** at most `max_entries` pages; the oldest is dropped first.
+/// - **Expiring:** an entry older than `ttl` is treated as absent.
+/// - **Invalidated on change:** [`invalidate_tenant`](Self::invalidate_tenant)
+///   drops every page for a tenant; call it when that tenant's underlying
+///   events change.
+#[derive(Clone)]
+pub struct PageCache {
+    inner: Arc<Mutex<PageCacheInner>>,
+    max_entries: usize,
+    ttl: Duration,
+}
+
+struct PageCacheInner {
+    entries: HashMap<(String, String), (Instant, Arc<str>)>,
+    /// Insertion order, oldest first, used to evict when full.
+    order: VecDeque<(String, String)>,
+}
+
+impl PageCache {
+    pub fn new(max_entries: usize, ttl: Duration) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PageCacheInner {
+                entries: HashMap::new(),
+                order: VecDeque::new(),
+            })),
+            max_entries: max_entries.max(1),
+            ttl,
+        }
+    }
+
+    /// Returns the cached serialisation of the page at `cursor` for `tenant`,
+    /// or runs `serialize` once, stores its result and returns that. `cursor`
+    /// is the raw cursor string the client sent (empty for the first page).
+    pub fn get_or_serialize<F>(&self, tenant: &str, cursor: &str, serialize: F) -> Arc<str>
+    where
+        F: FnOnce() -> String,
+    {
+        let key = (tenant.to_string(), cursor.to_string());
+        let now = Instant::now();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Some((stored_at, bytes)) = inner.entries.get(&key) {
+            if now.duration_since(*stored_at) < self.ttl {
+                return Arc::clone(bytes);
+            }
+        }
+
+        let bytes: Arc<str> = Arc::from(serialize());
+        if inner
+            .entries
+            .insert(key.clone(), (now, Arc::clone(&bytes)))
+            .is_none()
+        {
+            inner.order.push_back(key);
+        }
+        while inner.entries.len() > self.max_entries {
+            match inner.order.pop_front() {
+                Some(oldest) => {
+                    inner.entries.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+        bytes
+    }
+
+    /// Drops every cached page for `tenant`. Call when that tenant's events change.
+    pub fn invalidate_tenant(&self, tenant: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.entries.retain(|(t, _), _| t != tenant);
+        inner.order.retain(|(t, _)| t != tenant);
+    }
+
+    /// Number of pages currently stored (including any not yet expired-out).
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for PageCache {
+    fn default() -> Self {
+        Self::new(DEFAULT_PAGE_CACHE_ENTRIES, DEFAULT_PAGE_CACHE_TTL)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error type

@@ -43,8 +43,8 @@ pub use connection_pool::ConnectionPool;
 pub use health::HealthChecker;
 pub use metrics::WebSocketMetrics;
 pub use pagination::{
-    Cursor, EventPage, PaginationError, PaginationParams, PaginationRequest, DEFAULT_PAGE_SIZE,
-    MAX_PAGE_SIZE,
+    Cursor, EventPage, PageCache, PaginationError, PaginationParams, PaginationRequest,
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 
 #[cfg(test)]
