@@ -25,10 +25,10 @@ CREATE TABLE audit_logs (
 ```
 
 **Key Design Decisions:**
-- **Append-Only**: New rows only, never updated or deleted
+- **Append-Only**: Rows are never updated. Rows are removed only by the retention job (see [Retention and archival](#retention-and-archival)), which archives them first and keeps rows for disputed transactions
 - **JSONB Storage**: Flexible diff format for any entity changes
 - **Indexed for Performance**: Multiple indexes for efficient queries
-- **Immutable Timestamps**: Both `timestamp` (business time) and `created_at` (record time)
+- **Timestamps**: `timestamp` and `created_at` both default to `NOW()` in the database. `AuditLog::log()` does not write either column, so both record the insert time
 - **Actor Tracking**: Records who (system/user) made the change
 
 ### Indexes
@@ -52,9 +52,9 @@ These indexes enable fast queries for audit trail reporting and forensic analysi
    - Creates the audit_logs table with proper schema
    - Defines all required indexes
 
-2. **src/db/audit.rs** (NEW)
+2. **src/db/audit.rs**
    - `AuditLog` struct: Represents an audit log entry
-   - `AuditLog::log()`: Generic logging function
+   - `AuditLog::log()`: Generic logging function; inserts `entity_id`, `entity_type`, `action`, `old_val`, `new_val` and `actor`
    - `AuditLog::log_status_change()`: Logs status transitions
    - `AuditLog::log_field_update()`: Logs field changes
    - `AuditLog::log_creation()`: Logs entity creation
@@ -64,7 +64,7 @@ These indexes enable fast queries for audit trail reporting and forensic analysi
    - Updated `insert_transaction()`: Logs transaction creation
    - Updated `update_transactions_settlement()`: Logs settlement assignment
    - Updated `insert_settlement()`: Logs settlement creation
-   - New `get_audit_logs()`: Retrieves audit trail for entities
+   - `get_audit_logs()`: Retrieves the audit trail for one entity with keyset pagination
 
 4. **src/db/mod.rs**
    - Added `pub mod audit;`
@@ -204,23 +204,35 @@ AuditLog::log_creation(
 
 ### Retrieving Audit Trail
 ```rust
+// First page, newest first. Pass the (timestamp, id) of the last row of the
+// previous page as the cursor to fetch the next page.
 let logs = queries::get_audit_logs(
     &pool,
     entity_id,
-    20,  // limit
-    0,   // offset
+    20,    // limit
+    None,  // cursor: Option<(DateTime<Utc>, Uuid)>
 ).await?;
 
-for (id, entity_id, entity_type, action, old_val, new_val, actor) in logs {
-    println!("{}: {} {} by {}", entity_id, entity_type, action, actor);
+for (id, entity_id, entity_type, action, old_val, new_val, actor, timestamp) in logs {
+    println!("{timestamp} {entity_id}: {entity_type} {action} by {actor}");
 }
 ```
+
+## Retention and archival
+
+`audit::run_retention` (in `src/db/audit.rs`) enforces the retention period:
+
+- The period is read from `AUDIT_LOG_RETENTION_DAYS` and defaults to 365 days. A missing, non-numeric, zero or negative value falls back to the default.
+- Rows older than the cutoff are exported to a gzip archive through an `ArchiveStorage` backend (`LocalDiskArchiveStorage` writes to local disk).
+- Rows are deleted only after the archive write returns success. If the write fails, the run returns an error and `audit_logs` is left untouched.
+- Rows that belong to disputed transactions are never deleted.
+- Each archive is recorded in the `audit_log_archives` table (`location`, `checksum`, `row_count`, `covers_from`, `covers_to`) so a period's archive can be located and verified.
 
 ## Compliance Benefits
 
 ### SOC2 Type II
 ✅ Audit logging with tamper-evident design
-✅ Immutable audit trail (append-only)
+✅ Append-only audit trail (rows are only removed by the archive-first retention job)
 ✅ Actor tracking (who made changes)
 ✅ Timestamp tracking (when changes occurred)
 ✅ Transaction consistency (same database transaction)
@@ -234,15 +246,15 @@ for (id, entity_id, entity_type, action, old_val, new_val, actor) in logs {
 ## Future Enhancements
 
 1. **Cryptographic Signing**: Add hash chains or digital signatures to prevent even database-level tampering
-2. **Audit Log Export**: Tools to export and verify audit logs for compliance audits
+2. **Audit Log Export**: Archives are written by the retention job, but there is no tool yet to export or verify logs on demand for compliance audits
 3. **Real-time Alerting**: Alert on suspicious patterns (e.g., multiple rapid changes)
-4. **Audit Log Archival**: Move old logs to immutable storage (e.g., AWS S3 Glacier)
+4. **Durable Archive Storage**: Archives currently go to local disk; add a backend that writes to immutable storage (e.g., AWS S3 Glacier)
 5. **User Actor Integration**: Replace "system" actor with actual user identifiers when integrating authentication
 6. **Multi-Version Views**: Track full entity snapshots at each change point
 
 ## Testing
 
-Unit tests are included in `src/db/audit.rs`:
+Unit tests are included in `src/db/audit.rs` (entry construction and the retention-period settings). For example:
 ```rust
 #[test]
 fn test_audit_log_creation() {
