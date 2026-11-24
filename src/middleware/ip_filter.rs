@@ -165,6 +165,37 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_client_is_denied_in_allowlist_mode_unless_listed() {
+        let ipv4_only =
+            AllowedIps::Cidrs(vec!["203.0.113.0/24".parse::<IpNet>().expect("valid cidr")]);
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+
+        // Only IPv4 rules: an IPv6 client matches nothing and is denied.
+        assert!(!is_allowed(Some(v6), &ipv4_only));
+
+        // Listed explicitly (a single address or a prefix), it is allowed.
+        let with_v6 = AllowedIps::Cidrs(vec![
+            "203.0.113.0/24".parse::<IpNet>().unwrap(),
+            "2001:db8::/32".parse::<IpNet>().unwrap(),
+        ]);
+        assert!(is_allowed(Some(v6), &with_v6));
+        assert!(!is_allowed(Some("2001:db9::1".parse().unwrap()), &with_v6));
+    }
+
+    #[test]
+    fn xff_parses_ipv6_entries() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("2001:db8::1, 198.51.100.7"),
+        );
+        assert_eq!(
+            extract_from_x_forwarded_for(&headers, 1),
+            Some("2001:db8::1".parse().unwrap())
+        );
+    }
+
+    #[test]
     fn cidr_allowlist_matches_ip() {
         let allowed =
             AllowedIps::Cidrs(vec!["203.0.113.0/24".parse::<IpNet>().expect("valid cidr")]);
