@@ -8,6 +8,62 @@ use uuid::Uuid;
 
 use crate::{error::AppError, AppState};
 
+/// Longest tenant id accepted from a request header.
+pub const TENANT_ID_MAX_LEN: usize = 128;
+
+/// A tenant identifier taken from a request header such as `X-Tenant-Id`.
+///
+/// Parsing rules (also described in `docs/tenant-rls-request-path.md`):
+/// surrounding whitespace is trimmed, the result must not be empty, must be at
+/// most [`TENANT_ID_MAX_LEN`] characters, and must not contain whitespace or
+/// control characters. This only checks the shape of the value; it does not
+/// prove that the tenant exists or that the caller may act for it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TenantId(String);
+
+impl TenantId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TenantId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Error returned when a string is not a valid [`TenantId`]. It names the
+/// offending input so logs show what was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid tenant id {input:?}: {reason}")]
+pub struct ParseTenantIdError {
+    pub input: String,
+    pub reason: &'static str,
+}
+
+impl std::str::FromStr for TenantId {
+    type Err = ParseTenantIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        let reject = |reason: &'static str| ParseTenantIdError {
+            input: s.to_string(),
+            reason,
+        };
+        if trimmed.is_empty() {
+            return Err(reject("must not be empty"));
+        }
+        if trimmed.chars().count() > TENANT_ID_MAX_LEN {
+            return Err(reject("is too long"));
+        }
+        if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(reject("must not contain whitespace or control characters"));
+        }
+        Ok(TenantId(trimmed.to_string()))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TenantConfig {
     pub tenant_id: Uuid,
@@ -162,5 +218,49 @@ async fn resolve_tenant_by_api_key(
         Ok(tenant_id)
     } else {
         Err(AppError::InvalidApiKey)
+    }
+}
+
+#[cfg(test)]
+mod tenant_id_tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_trims_a_valid_id() {
+        let id: TenantId = "  tenant-42 ".parse().unwrap();
+        assert_eq!(id.as_str(), "tenant-42");
+        assert_eq!(id.to_string(), "tenant-42");
+    }
+
+    #[test]
+    fn accepts_a_uuid() {
+        let raw = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(raw.parse::<TenantId>().unwrap().as_str(), raw);
+    }
+
+    #[test]
+    fn rejects_empty_and_blank_input() {
+        assert!("".parse::<TenantId>().is_err());
+        assert!("   ".parse::<TenantId>().is_err());
+    }
+
+    #[test]
+    fn rejects_inner_whitespace_and_control_characters() {
+        assert!("a b".parse::<TenantId>().is_err());
+        assert!("a\u{7}b".parse::<TenantId>().is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_ids() {
+        let long = "a".repeat(TENANT_ID_MAX_LEN + 1);
+        assert!(long.parse::<TenantId>().is_err());
+        assert!("a".repeat(TENANT_ID_MAX_LEN).parse::<TenantId>().is_ok());
+    }
+
+    #[test]
+    fn error_names_the_offending_input() {
+        let err = "bad id".parse::<TenantId>().unwrap_err();
+        assert_eq!(err.input, "bad id");
+        assert!(err.to_string().contains("bad id"));
     }
 }
