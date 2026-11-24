@@ -70,3 +70,7 @@ When writing new database code:
 - `src/db/mod.rs`
 - `src/db/queries.rs`
 - `src/utils/retry.rs`
+
+## Which failures are retried (telemetry exporter)
+
+`ReconnectionManager::run_with_retry` (in `src/telemetry/reconnection.rs`) retries only failures that can succeed later: transport errors and 5xx responses. A 4xx response (for example `401` or `403`) is returned at once as `ExportFailure::Status { status, body }`, so the error text carries the status code and body. A 4xx does not count toward `max_failures` and does not advance the backoff, because a retry cannot fix a bad credential or request. The backoff schedule itself is unchanged.
