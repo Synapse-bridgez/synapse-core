@@ -14,6 +14,7 @@ This keeps malformed or hostile inputs from reaching Redis, bounds memory use pe
 | `ValidationError` | `src/cache/validation.rs` | Typed errors via `thiserror` |
 | `QueryCache` integration | `src/services/query_cache.rs` | Validates on every public Redis operation |
 | Module exports | `src/cache/mod.rs` | Re-exports validator and limits |
+| `CacheConfig` | `src/services/query_cache.rs` | Cache TTL and sizing settings; also exported as `synapse_core::CacheConfig` |
 
 ## Validation Rules
 
