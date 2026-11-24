@@ -19,6 +19,10 @@ pub struct ListReportsQuery {
     limit: Option<i32>,
     #[serde(default)]
     offset: Option<i32>,
+    /// Opt in to the total report count. It costs a second query, so it is
+    /// only run when this is `true`; otherwise `total` is `null`.
+    #[serde(default)]
+    with_total: bool,
 }
 
 fn default_limit() -> Option<i32> {
@@ -85,7 +89,8 @@ impl
 #[derive(Debug, Serialize)]
 pub struct ListReportsResponse {
     pub reports: Vec<ReconciliationReportSummary>,
-    pub total: i64,
+    /// Total number of stored reports; `null` unless `?with_total=true`.
+    pub total: Option<i64>,
     pub limit: i32,
     pub offset: i32,
 }
@@ -151,10 +156,20 @@ pub async fn list_reconciliation_reports(
 
     match reports {
         Ok(rows) => {
-            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reconciliation_reports")
-                .fetch_one(pool)
-                .await
-                .unwrap_or(0);
+            let total: Option<i64> = if query.with_total {
+                match sqlx::query_scalar("SELECT COUNT(*) FROM reconciliation_reports")
+                    .fetch_one(pool)
+                    .await
+                {
+                    Ok(count) => Some(count),
+                    Err(e) => {
+                        tracing::error!("Failed to count reconciliation reports: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
             let summaries: Vec<ReconciliationReportSummary> = rows
                 .into_iter()
