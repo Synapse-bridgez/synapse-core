@@ -65,6 +65,11 @@ pub struct ApiDoc;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = config::Config::load().await?;
+    synapse_core::middleware::webhook_signature::WebhookSignatureConfig::new(
+        config.webhook_replay_window_secs,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?
+    .install();
 
     // Setup logging + OpenTelemetry tracing layer
     let env_filter =

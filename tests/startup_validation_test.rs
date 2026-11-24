@@ -28,6 +28,7 @@ fn create_test_config(database_url: String, redis_url: String, horizon_url: Stri
         otlp_endpoint: None,
         cors_allowed_origins: vec![],
         max_pending_queue: 10000,
+        webhook_replay_window_secs: 300,
         db_min_connections: 5,
         db_max_connections: 50,
         db_statement_timeout_ms: 30000,

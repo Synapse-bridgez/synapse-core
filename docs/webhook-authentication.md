@@ -336,3 +336,14 @@ Signed Content: <timestamp>.<raw_json>
 - [Stellar Anchor Platform Authentication](https://developers.stellar.org/docs/anchoring-platform/admin-guide/authentication)
 - [HMAC RFC 2104](https://www.rfc-editor.org/rfc/rfc2104)
 - [Constant-time comparison](https://codahale.com/a-lesson-in-timing-attacks/)
+
+## Replay window
+
+The inbound anchor webhook middleware rejects a request whose `X-Webhook-Timestamp` is further from the server clock than the replay window, in either direction. The window is configurable with `WEBHOOK_REPLAY_WINDOW_SECS` (`Config::webhook_replay_window_secs`):
+
+| Setting | Value |
+|---------|-------|
+| Default | `300` seconds (5 minutes) |
+| Valid values | positive integers; `0` or a non-number stops startup with an error |
+
+Tighten it to shrink the replay window (keep it above your clock skew plus delivery latency), or loosen it if anchors send with a larger clock drift. The window applies to inbound anchor webhooks; the 5-minute figures elsewhere in this document for consumers verifying Synapse's outgoing webhooks are recommendations for those consumers and are not affected.

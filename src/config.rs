@@ -118,6 +118,23 @@ impl Default for DbTimeoutConfig {
     }
 }
 
+/// Parses `WEBHOOK_REPLAY_WINDOW_SECS`: unset means the 300 s default, and a
+/// set value must be a positive integer.
+pub(crate) fn parse_replay_window(raw: Option<&str>) -> anyhow::Result<u64> {
+    match raw {
+        None => Ok(300),
+        Some(value) => {
+            let secs: u64 = value.trim().parse().map_err(|_| {
+                anyhow::anyhow!("WEBHOOK_REPLAY_WINDOW_SECS must be a positive integer, got '{value}'")
+            })?;
+            if secs == 0 {
+                anyhow::bail!("WEBHOOK_REPLAY_WINDOW_SECS must be greater than 0");
+            }
+            Ok(secs)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -160,6 +177,9 @@ pub struct Config {
     pub cors_allowed_origins: Vec<String>,
     // Back-pressure
     pub max_pending_queue: u64,
+    /// Allowed distance, in seconds, between an inbound webhook's timestamp
+    /// and the server clock (`WEBHOOK_REPLAY_WINDOW_SECS`, default 300).
+    pub webhook_replay_window_secs: u64,
     // DB pool sizing
     pub db_min_connections: u32,
     pub db_max_connections: u32,
@@ -276,6 +296,9 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect(),
+            webhook_replay_window_secs: parse_replay_window(
+                env::var("WEBHOOK_REPLAY_WINDOW_SECS").ok().as_deref(),
+            )?,
             max_pending_queue: env::var("MAX_PENDING_QUEUE")
                 .unwrap_or_else(|_| "10000".to_string())
                 .parse()?,

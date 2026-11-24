@@ -8,6 +8,11 @@ pub struct FeatureFlagService {
     pool: PgPool,
 }
 
+/// A feature flag as stored in `feature_flags`.
+///
+/// `enabled` is a real `bool` (the column is `BOOLEAN NOT NULL`), so callers
+/// never compare a string such as `"true"`, and a malformed value cannot reach
+/// this type: the database rejects it on write.
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct FeatureFlag {
     pub name: String,
