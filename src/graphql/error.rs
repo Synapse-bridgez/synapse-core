@@ -26,6 +26,10 @@
 //! | `COMPLEXITY_ERROR` | Query exceeds depth / complexity / alias limits |
 //! | `DATABASE_ERROR` | Underlying database operation failed (details redacted) |
 //! | `INTERNAL_ERROR` | Unexpected server error (details redacted) |
+//!
+//! `impl From<AppError> for GraphQlError` maps every top-level `AppError`
+//! variant onto one of these codes (see `docs/error-catalog.md` for the
+//! variant list), so a validation error and a database error never share a code.
 
 use async_graphql::Error as GqlError;
 use async_graphql::ErrorExtensions;
@@ -138,6 +142,62 @@ impl GraphQlError {
 impl From<GraphQlError> for GqlError {
     fn from(e: GraphQlError) -> Self {
         e.into_gql_error()
+    }
+}
+
+/// `AppError::RateLimitExceeded` carries no retry hint, so GraphQL clients are
+/// told to wait this long before trying again.
+const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
+
+/// Maps a top-level [`AppError`] to the GraphQL error with the matching stable
+/// `extensions.code`, so resolvers can use `?` on service calls and clients
+/// still see a validation failure, a database failure and so on as different
+/// codes instead of one generic error.
+///
+/// Raw causes (sqlx, redis, anyhow) are logged here and never forwarded; the
+/// client gets only the code and a fixed, safe message. Messages for client
+/// input errors (validation, bad request, ...) are the same text the HTTP API
+/// already returns for them.
+impl From<crate::error::AppError> for GraphQlError {
+    fn from(e: crate::error::AppError) -> Self {
+        use crate::error::AppError;
+        match e {
+            AppError::Validation(_)
+            | AppError::BadRequest(_)
+            | AppError::InvalidTransactionAmount(_)
+            | AppError::AmountBelowMinimum(_)
+            | AppError::InvalidStellarAddress(_)
+            | AppError::TransactionAlreadyProcessed(_)
+            | AppError::InvalidStatusTransition(_)
+            | AppError::StaleTransition
+            | AppError::MalformedWebhookPayload(_)
+            | AppError::InvalidSettlementAmount(_)
+            | AppError::SettlementAlreadyExists(_) => GraphQlError::Validation(e.to_string()),
+            AppError::NotFound(resource) => GraphQlError::NotFound(resource),
+            AppError::TenantNotFound => GraphQlError::NotFound("Tenant".to_string()),
+            AppError::Unauthorized(_)
+            | AppError::InvalidApiKey
+            | AppError::AuthenticationFailed(_)
+            | AppError::InvalidWebhookSignature => GraphQlError::Authentication,
+            AppError::InsufficientPermissions(_) => GraphQlError::Authorization,
+            AppError::RateLimitExceeded => GraphQlError::RateLimited {
+                retry_after_secs: DEFAULT_RETRY_AFTER_SECS,
+            },
+            AppError::Database(_) | AppError::DatabaseError(_) => {
+                tracing::error!(cause = %e, "GraphQL resolver: database error");
+                GraphQlError::Database("Database operation failed".to_string())
+            }
+            AppError::Redis(_) | AppError::Anyhow(_) | AppError::Internal(_) => {
+                tracing::error!(cause = %e, "GraphQL resolver: internal error");
+                GraphQlError::Internal("An internal error occurred".to_string())
+            }
+        }
+    }
+}
+
+impl From<crate::error::AppError> for GqlError {
+    fn from(e: crate::error::AppError) -> Self {
+        GraphQlError::from(e).into_gql_error()
     }
 }
 

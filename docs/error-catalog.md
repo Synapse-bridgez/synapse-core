@@ -130,3 +130,19 @@ This error catalog is version 1.0.0. API consumers can retrieve the latest versi
 ## Changelog
 
 - 1.0.0 - Initial error catalog with 19 error codes
+
+## GraphQL error codes
+
+The GraphQL API reports errors through `extensions.code` (see `src/graphql/error.rs`). `AppError` values returned by services map onto it as follows:
+
+| `AppError` variants | GraphQL `extensions.code` |
+|---------------------|---------------------------|
+| `Validation`, `BadRequest`, `InvalidTransactionAmount`, `AmountBelowMinimum`, `InvalidStellarAddress`, `TransactionAlreadyProcessed`, `InvalidStatusTransition`, `StaleTransition`, `MalformedWebhookPayload`, `InvalidSettlementAmount`, `SettlementAlreadyExists` | `VALIDATION_ERROR` |
+| `NotFound`, `TenantNotFound` | `NOT_FOUND` |
+| `Unauthorized`, `InvalidApiKey`, `AuthenticationFailed`, `InvalidWebhookSignature` | `AUTHENTICATION_ERROR` |
+| `InsufficientPermissions` | `AUTHORIZATION_ERROR` |
+| `RateLimitExceeded` | `RATE_LIMITED` (with `retryAfter`) |
+| `Database`, `DatabaseError` | `DATABASE_ERROR` (message redacted) |
+| `Redis`, `Anyhow`, `Internal` | `INTERNAL_ERROR` (message redacted) |
+
+Raw database, Redis and internal messages are logged on the server and never sent to the client.
