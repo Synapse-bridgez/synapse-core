@@ -144,3 +144,7 @@ When using partitioned tables, cursor-based pagination works seamlessly:
 - No special handling required in application code
 
 See [partitioning.md](partitioning.md) for details on table partitioning.
+
+## `first` and `last` are mutually exclusive
+
+A cursor pagination request may set `first` (page forward, usually with `after`) or `last` (page backward, usually with `before`), never both. Sending both is rejected before any query runs with a GraphQL validation error, `extensions.code = "VALIDATION_ERROR"`, whose message names both `first` and `last`. The check lives in `PaginationArgs::validate` (`src/graphql/pagination.rs`); `CursorPagination::new` enforces the same rule for code that builds cursor parameters directly.

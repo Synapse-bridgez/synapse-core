@@ -180,6 +180,39 @@ pub mod offset;
 pub use cursor::CursorPagination;
 pub use offset::OffsetPagination;
 
+/// Cursor pagination arguments as they arrive from a GraphQL query.
+///
+/// `first` pages forward (usually with `after`) and `last` pages backward
+/// (usually with `before`). Setting both is ambiguous, so [`validate`](Self::validate)
+/// rejects it with a GraphQL validation error at the input layer, before the
+/// cursor or offset implementations ever see it.
+#[derive(Debug, Clone, Default, async_graphql::InputObject)]
+pub struct PaginationArgs {
+    /// Number of items to return, counting forward from `after`.
+    pub first: Option<i32>,
+    /// Number of items to return, counting backward from `before`.
+    pub last: Option<i32>,
+    /// Return items after this cursor.
+    pub after: Option<String>,
+    /// Return items before this cursor.
+    pub before: Option<String>,
+}
+
+impl PaginationArgs {
+    /// Rejects `first` and `last` set together. The error has
+    /// `extensions.code = "VALIDATION_ERROR"` and names both fields.
+    pub fn validate(&self) -> async_graphql::Result<()> {
+        if self.first.is_some() && self.last.is_some() {
+            return Err(crate::graphql::error::GraphQlError::Validation(
+                "Invalid pagination: 'first' and 'last' cannot both be set; use 'first'                  (with 'after') to page forward or 'last' (with 'before') to page backward"
+                    .to_string(),
+            )
+            .into_gql_error());
+        }
+        Ok(())
+    }
+}
+
 /// Maximum allowed page size
 pub const MAX_PAGE_SIZE: i64 = 100;
 
