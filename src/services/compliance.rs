@@ -21,6 +21,11 @@ impl ComplianceService {
             .await
     }
 
+    // #1723: every row filter below (period bounds, status, asset) is part of the
+    // SQL statement, so the database returns only the aggregates the report
+    // needs. Nothing is loaded and then filtered in Rust. The report has no
+    // severity concept; if one is added, push it into the `WHERE` clauses here
+    // instead of filtering the fetched rows.
     async fn generate_for_range(
         &self,
         period: &str,
