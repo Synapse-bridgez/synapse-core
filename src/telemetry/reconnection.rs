@@ -5,6 +5,29 @@
 
 use std::time::Duration;
 
+/// Why an export attempt to the telemetry backend failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExportFailure {
+    /// The request never produced a response (connection refused, DNS, timeout...).
+    #[error("telemetry transport error: {0}")]
+    Transport(String),
+    /// The backend answered with a non-success HTTP status.
+    #[error("telemetry backend returned {status}: {body}")]
+    Status { status: u16, body: String },
+}
+
+impl ExportFailure {
+    /// Only transport errors and 5xx responses can succeed on a later attempt.
+    /// A 4xx (401, 403, 404, ...) will fail the same way every time, so it
+    /// must not be retried.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            ExportFailure::Transport(_) => true,
+            ExportFailure::Status { status, .. } => *status >= 500,
+        }
+    }
+}
+
 /// Configuration for reconnection behavior and circuit breaker.
 ///
 /// # Health Check
@@ -168,6 +191,44 @@ impl ReconnectionManager {
         let final_backoff = capped_backoff + jitter;
 
         Duration::from_millis(final_backoff as u64)
+    }
+
+    /// Runs `attempt` until it succeeds, fails with an error that cannot be
+    /// retried, or the circuit opens.
+    ///
+    /// - Transport errors and 5xx responses are retried after
+    ///   [`next_backoff()`](Self::next_backoff); the backoff schedule is the
+    ///   one `record_failure` already drives.
+    /// - A 4xx response is returned immediately, with its status and body in
+    ///   the error. It does not count as a connection failure and does not
+    ///   consume backoff budget, because retrying cannot fix it.
+    /// - When the circuit opens, the last error is returned.
+    pub async fn run_with_retry<T, F, Fut>(&mut self, mut attempt: F) -> Result<T, ExportFailure>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ExportFailure>>,
+    {
+        loop {
+            if self.is_circuit_open() {
+                return Err(ExportFailure::Transport(
+                    "telemetry circuit breaker is open".to_string(),
+                ));
+            }
+            match attempt().await {
+                Ok(value) => {
+                    self.record_success();
+                    return Ok(value);
+                }
+                Err(e) if !e.is_retryable() => return Err(e),
+                Err(e) => {
+                    self.record_failure();
+                    if self.is_circuit_open() {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(self.next_backoff()).await;
+                }
+            }
+        }
     }
 
     /// Returns the current number of consecutive failures.

@@ -56,11 +56,28 @@ Response:
 POST /dlq/{id}/requeue
 ```
 
-Response:
+Responses:
+
+| Status | Meaning |
+|--------|---------|
+| `200` | The entry was requeued: the transaction is `pending` again and the entry left the DLQ. |
+| `202` | A transient failure (database pool timeout or I/O error) stopped the requeue. The entry is still in the DLQ; retry the same call later. The body names the reason. |
+| `500` | A permanent failure (for example the entry does not exist or the status transition is not allowed). The body is the generic internal-error response; the cause is only in the logs. |
+
+`200`:
 ```json
 {
   "message": "DLQ entry requeued successfully",
   "dlq_id": "uuid"
+}
+```
+
+`202`:
+```json
+{
+  "message": "DLQ entry was not requeued yet; retry later",
+  "dlq_id": "uuid",
+  "reason": "database connection pool timed out"
 }
 ```
 

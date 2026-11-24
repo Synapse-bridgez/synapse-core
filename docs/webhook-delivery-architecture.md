@@ -67,6 +67,10 @@ Per-endpoint, `max_delivery_rate` requests per 60s window, tracked via `webhook_
 
 `webhook_enqueue_on_completion` (see `FeatureFlagService::is_enabled_for_key`, keyed by `stellar_account`) gates whether `enqueue()` is ever called at all. It ships **disabled** by default (migration `20260823000002`) — enabling it for the first time arms three previously-dead code paths simultaneously (enqueue, the circuit breaker, the rate limiter), so ramp `rollout_percentage` up gradually rather than flipping it to 100% fleet-wide in one deploy. Monitor `webhook_delivery_total{outcome=...}`, `webhook_circuit_breaker_transitions_total`, and `webhook_rate_limit_self_healed_total` while ramping.
 
+## Failure logs
+
+A delivery that fails for any reason (transport error, timeout, or a non-2xx response) is logged by `handle_failure` in `src/services/webhook_dispatcher.rs`. Each failure line carries `delivery_id` (the `webhook_deliveries.id`, which is also the id the DLQ replay endpoint takes), `endpoint_id`, the attempt number and `response_status` (empty when the request got no response). Search the logs for the `delivery_id` to follow one delivery from its first failure to the DLQ.
+
 ## DLQ replay
 
 See the runbook's "Webhook Delivery DLQ Review" section for the operational procedure.

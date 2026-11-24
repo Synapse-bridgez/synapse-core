@@ -657,11 +657,17 @@ impl WebhookDispatcher {
         response_status: Option<i32>,
         response_body: Option<String>,
     ) -> anyhow::Result<()> {
+        // Every failed delivery (transport error, timeout, or non-2xx response)
+        // ends up here, so these two log lines are the failure logs. Both carry
+        // `delivery_id` so a failure can be matched to its `webhook_deliveries`
+        // row and replayed by id, plus the HTTP status when there was one
+        // (`None` means the request never got a response).
         let (new_status, next_attempt_at) = if attempt_count >= MAX_ATTEMPTS {
             tracing::warn!(
                 delivery_id = %delivery.id,
                 endpoint_id = %delivery.endpoint_id,
                 attempt_count = attempt_count,
+                response_status = ?response_status,
                 "Webhook delivery exhausted, routing to DLQ"
             );
             ("failed", None)
@@ -671,7 +677,9 @@ impl WebhookDispatcher {
             let next = now + chrono::Duration::seconds(delay);
             tracing::warn!(
                 delivery_id = %delivery.id,
+                endpoint_id = %delivery.endpoint_id,
                 attempt = attempt_count,
+                response_status = ?response_status,
                 next_retry_in_secs = delay,
                 "Webhook delivery failed, scheduling retry"
             );
