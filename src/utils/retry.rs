@@ -63,6 +63,9 @@ where
     loop {
         match f().await {
             Ok(val) => return Ok(val),
+            // The guard `attempt < max_retries` is what skips the sleep on the
+            // final attempt: once the retries are used up this arm is not taken
+            // and the error is returned immediately by the arm below.
             Err(err) if attempt < max_retries && is_transient_db_error(&err) => {
                 attempt += 1;
                 // Exponential backoff: base * 2^(attempt-1), capped at 10s
@@ -125,6 +128,22 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn no_sleep_after_the_final_attempt() {
+        // With max_retries = 0 the first failure is also the last attempt, so
+        // the error must come back at once. A trailing sleep would take the
+        // full (huge) base delay and trip the elapsed-time assertion.
+        let started = std::time::Instant::now();
+        let result: Result<(), sqlx::Error> =
+            retry_with_backoff("final_attempt", 0, 60_000, || async {
+                Err(sqlx::Error::PoolTimedOut)
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[tokio::test]
     async fn test_retry_succeeds_after_transient_error() {

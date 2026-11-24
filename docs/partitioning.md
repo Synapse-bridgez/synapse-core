@@ -174,3 +174,7 @@ DATABASE_URL=postgres://synapse:synapse@localhost:5432/synapse_test cargo test
 - [ ] Metrics/alerts for partition health
 - [ ] Dynamic retention policy based on storage
 - [ ] Sub-partitioning by status or account (if needed)
+
+## Creating the same partition twice
+
+Partition creation is idempotent. `create_monthly_partition()` delegates to `ensure_partition_for(date)`, which takes a `pg_advisory_xact_lock` on the partition name and uses `CREATE TABLE IF NOT EXISTS` (treating a lost `duplicate_table` race as success). `PartitionManager::create_partition` checks `pg_class` first and returns `false` when the partition already existed. Calling either twice for the same month therefore succeeds both times and leaves exactly one partition, so the scheduler job is never aborted by a duplicate-object error.

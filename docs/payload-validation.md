@@ -386,3 +386,7 @@ If validation adds >5ms latency:
 - JSON Schema Specification: https://json-schema.org/
 - `jsonschema` crate: https://docs.rs/jsonschema/
 - Axum middleware: https://docs.rs/axum/latest/axum/middleware/
+
+## String values are stored as sent
+
+Request bodies are not HTML-escaped on the way in. `utils::sanitize::sanitize_json` only masks the values of sensitive keys for logging; `<`, `>` and `&` in any other string pass through unchanged, so a JSON value round-trips exactly as the client sent it. Escape for HTML at render time, in the layer that produces HTML.
