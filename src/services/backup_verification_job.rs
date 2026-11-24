@@ -64,7 +64,7 @@ impl Job for BackupVerificationJob {
                         }
                         Err(e) => {
                             tracing::error!(
-                                "Backup verification FAILED for {}: {e}",
+                                "Backup verification FAILED for {}: {e:#}",
                                 latest.filename
                             );
                             "failure"
@@ -109,6 +109,28 @@ mod tests {
             None,
         ));
         (service, dir)
+    }
+
+    /// #1706: a backup whose checksum/metadata file cannot be read must fail
+    /// verification (and name the path), never count as verified.
+    #[tokio::test]
+    async fn unreadable_checksum_file_fails_verification_and_names_the_path() {
+        let (service, dir) = service_with_temp_dir().await;
+        let filename = "backup_hourly_20260101_000000.sql.gz";
+        tokio::fs::write(dir.path().join(filename), b"data")
+            .await
+            .unwrap();
+        // No .meta file is written, so the expected checksum cannot be read.
+
+        let err = service
+            .verify_backup_checksum(filename)
+            .await
+            .expect_err("a backup with an unreadable checksum must not verify");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("backup_hourly_20260101_000000.meta"),
+            "error should name the unreadable path, got: {message}"
+        );
     }
 
     /// Task item 4 (first test): corrupting a backup artifact must be

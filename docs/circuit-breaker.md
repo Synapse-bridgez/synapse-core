@@ -162,3 +162,16 @@ This allows the application to:
 - Add configurable failure predicates (e.g., only count 5xx errors)
 - Implement custom instrumentation for logging state transitions
 >>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
+
+### Error contract for callers of the Redis-backed breaker
+
+`CircuitBreaker::call` returns:
+
+| Situation | Result |
+|-----------|--------|
+| Breaker closed, call succeeds | `Ok(value)` |
+| Breaker closed, call fails | the call's own error, unchanged |
+| Breaker open, reset timeout not elapsed | `CircuitBreakerError::Open` (the call is not made) |
+| Half-open probe fails | `CircuitBreakerError::ProbeFailed`, with the probe's error as its `source()` |
+
+A failed half-open probe is still recorded and re-opens the breaker exactly as before; only the error returned changes. Callers can downcast to `CircuitBreakerError` to tell "the breaker is open" apart from "the downstream failed", and walk `source()` on `ProbeFailed` for the downstream cause.
