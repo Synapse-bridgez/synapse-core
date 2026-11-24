@@ -72,3 +72,15 @@ still disagreeing with live enforcement (see above). To actually confirm:
    `counter.quota_config_split_brain_detected_total` in logs/metrics — the
    former confirms the write happened, the latter flags exactly this kind
    of divergence.
+
+## Default `Quota`
+
+`Quota::default()` (`src/middleware/quota.rs`) is the quota a key has before anyone configures one, and is what `QuotaManager::get_quota_config` returns for an unconfigured key:
+
+| Field | Default |
+|-------|---------|
+| `tier` | `Free` (100 requests per hour) |
+| `custom_limit` | none (the tier's limit applies) |
+| `reset_schedule` | `Hourly` |
+
+Callers and tests can write `Quota { tier: Tier::Premium, ..Quota::default() }` instead of spelling out every field. Adding the impl does not change runtime behaviour: it is the value the code already used.

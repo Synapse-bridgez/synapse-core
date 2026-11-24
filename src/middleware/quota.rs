@@ -61,6 +61,19 @@ pub struct Quota {
     pub reset_schedule: ResetSchedule,
 }
 
+/// The quota a key has before anyone configures one: the `Free` tier (100
+/// requests per hour), no custom limit, resetting hourly. This is the value
+/// `QuotaManager::get_quota_config` already returned for an unconfigured key.
+impl Default for Quota {
+    fn default() -> Self {
+        Self {
+            tier: Tier::Free,
+            custom_limit: None,
+            reset_schedule: ResetSchedule::Hourly,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResetSchedule {
     Hourly,
@@ -171,11 +184,7 @@ impl QuotaManager {
                     e.to_string(),
                 ))
             }),
-            None => Ok(Quota {
-                tier: Tier::Free,
-                custom_limit: None,
-                reset_schedule: ResetSchedule::Hourly,
-            }),
+            None => Ok(Quota::default()),
         }
     }
 
