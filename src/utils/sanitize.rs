@@ -1,6 +1,11 @@
 use serde_json::Value;
 
-/// Sanitizes sensitive fields in JSON payloads for logging
+/// Sanitizes sensitive fields in JSON payloads for logging.
+///
+/// This only masks the values of sensitive keys. It never HTML-escapes or
+/// otherwise rewrites other string values: `<`, `>` and `&` pass through
+/// unchanged, so a payload that is stored or returned as JSON keeps the exact
+/// characters the client sent. HTML escaping belongs at render time.
 pub fn sanitize_json(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
@@ -65,6 +70,17 @@ fn mask_value(value: &Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn html_special_characters_in_plain_fields_are_preserved() {
+        let input = json!({
+            "memo": "a < b && c > d",
+            "notes": ["<tag>", "x & y"],
+            "nested": { "text": "5 > 3" }
+        });
+
+        assert_eq!(sanitize_json(&input), input);
+    }
 
     #[test]
     fn test_sanitize_stellar_account() {
