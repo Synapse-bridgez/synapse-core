@@ -100,6 +100,88 @@ where
     }
 }
 
+/// Maximum delay between HTTP retries, also the cap applied to a server's
+/// `Retry-After` hint. Same ceiling as the DB retry delay above.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Parses a `Retry-After` header value: either a number of seconds or an HTTP
+/// date (RFC 7231 / RFC 2822 form, e.g. `Wed, 21 Oct 2015 07:28:00 GMT`).
+/// A date in the past yields a zero delay. Returns `None` for anything else.
+pub fn parse_retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let when = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let delta = when.with_timezone(&chrono::Utc) - now;
+    Some(delta.to_std().unwrap_or(Duration::ZERO))
+}
+
+/// How long to sleep before the next HTTP retry: the server's `Retry-After`
+/// hint when it sent one, otherwise the computed backoff, in both cases never
+/// more than `max`.
+pub fn delay_before_retry(
+    computed_backoff: Duration,
+    retry_after: Option<Duration>,
+    max: Duration,
+) -> Duration {
+    retry_after.unwrap_or(computed_backoff).min(max)
+}
+
+/// A failed HTTP attempt, as seen by [`retry_http_with_backoff`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("HTTP request failed with status {status}: {message}")]
+pub struct HttpRetryError {
+    pub status: u16,
+    /// The parsed `Retry-After` header, if the response carried one.
+    pub retry_after: Option<Duration>,
+    pub message: String,
+}
+
+impl HttpRetryError {
+    /// 429 and 5xx are retryable; other statuses are not.
+    pub fn is_retryable(&self) -> bool {
+        self.status == 429 || self.status >= 500
+    }
+}
+
+/// Retries an HTTP operation with exponential backoff + jitter, honouring the
+/// server's `Retry-After` on 429 (and any other retryable response that sends
+/// one), capped at [`MAX_BACKOFF`].
+pub async fn retry_http_with_backoff<F, Fut, T>(
+    operation_name: &str,
+    max_retries: u32,
+    base_delay_ms: u64,
+    mut f: F,
+) -> Result<T, HttpRetryError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, HttpRetryError>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match f().await {
+            Ok(val) => return Ok(val),
+            Err(err) if attempt < max_retries && err.is_retryable() => {
+                attempt += 1;
+                let exp_delay = base_delay_ms * (1u64 << (attempt - 1).min(6));
+                let computed = Duration::from_millis(apply_jitter(exp_delay));
+                let delay = delay_before_retry(computed, err.retry_after, MAX_BACKOFF);
+                warn!(
+                    operation = operation_name,
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    status = err.status,
+                    honoured_retry_after = err.retry_after.is_some(),
+                    "Retryable HTTP error, retrying"
+                );
+                sleep(delay).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn classify_error_kind(err: &sqlx::Error) -> &'static str {
     match err {
         sqlx::Error::Io(_) => "io",

@@ -130,3 +130,7 @@ This error catalog is version 1.0.0. API consumers can retrieve the latest versi
 ## Changelog
 
 - 1.0.0 - Initial error catalog with 19 error codes
+
+## Retrying 429 responses
+
+`utils::retry::retry_http_with_backoff` retries `429` and `5xx` responses. When the response carries a `Retry-After` header (a number of seconds, or an HTTP date), the helper sleeps for that long instead of its computed backoff, capped at `MAX_BACKOFF` (10 seconds). A date already in the past means no wait. Without the header the exponential backoff with jitter applies. The retry count and the set of retryable statuses are unchanged by the header.
