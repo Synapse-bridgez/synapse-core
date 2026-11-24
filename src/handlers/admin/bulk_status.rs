@@ -34,6 +34,12 @@ pub async fn bulk_update_status_api(
     run_bulk_update(&api_state.app_state.db, payload).await
 }
 
+/// Validates the request, then hands the ids to
+/// `bulk_update_transaction_status`, which persists the whole batch with a
+/// single `UPDATE ... WHERE id = ANY($1)` (one statement for any number of
+/// ids). Each id is still checked against the state machine first, so a caller
+/// gets a per-id entry in `errors` for ids that are missing or have an invalid
+/// transition; only the valid subset is written.
 async fn run_bulk_update(
     pool: &sqlx::PgPool,
     payload: BulkStatusRequest,

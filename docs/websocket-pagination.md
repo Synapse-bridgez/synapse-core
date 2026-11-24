@@ -363,3 +363,16 @@ If real-time updates are delayed:
 2. Monitor server CPU and memory usage
 3. Reduce message processing time on client
 4. Consider batching updates
+
+## Serialised page cache
+
+`PageCache` (`src/ws/pagination.rs`) keeps the serialised form of recently sent pages so that stepping to the same cursor again does not serialise the page twice. The cache is keyed by tenant plus the raw cursor string, so one tenant can never be served another tenant's page.
+
+| Property | Value |
+|----------|-------|
+| Bound | 256 pages by default; the oldest entry is dropped first |
+| TTL | 5 seconds by default; an older entry is treated as a miss |
+| Invalidation | `invalidate_tenant(tenant)` drops all of a tenant's pages; call it when that tenant's events change |
+| Wire format | unchanged: the cached string is exactly what the serialiser produced |
+
+Use `PageCache::get_or_serialize(tenant, cursor, || serialize_page())` where a page is about to be sent. The serialiser closure only runs on a miss.
