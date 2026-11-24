@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
-use csv::Writer;
+use csv::WriterBuilder;
 use futures::stream::{Stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
@@ -211,6 +211,22 @@ enum FilterValue {
     DateTime(DateTime<Utc>),
 }
 
+const CSV_HEADER: &str = "id,stellar_account,amount,asset_code,status,created_at,updated_at,anchor_transaction_id,callback_type,callback_status";
+
+/// Returns the CSV header line the first time it is called, then `None`.
+///
+/// Call it just before writing a row: an export that never writes a row never
+/// writes the header, so an empty result is an empty body, matching the JSON
+/// export (an empty array).
+fn csv_header_before_row(header_written: &mut bool) -> Option<String> {
+    if *header_written {
+        return None;
+    }
+    *header_written = true;
+    Some(format!("{CSV_HEADER}
+"))
+}
+
 /// Create a CSV stream from database rows - truly streaming without buffering
 fn create_csv_stream(
     pool: Arc<PgPool>,
@@ -224,9 +240,9 @@ fn create_csv_stream(
     Box::pin(async_stream::stream! {
         let mut last_id: Option<uuid::Uuid> = None;
 
-        // First, write CSV header
-        let headers = "id,stellar_account,amount,asset_code,status,created_at,updated_at,anchor_transaction_id,callback_type,callback_status";
-        yield Ok(headers.to_string());
+        // The header is written lazily, just before the first row, so an
+        // export with no matching rows produces an empty body (#1703).
+        let mut header_written = false;
 
         loop {
             // Build base query with filters
@@ -293,8 +309,12 @@ fn create_csv_stream(
 
                         last_id = Some(tx.id);
 
+                        if let Some(header) = csv_header_before_row(&mut header_written) {
+                            yield Ok(header);
+                        }
+
                         let csv_row = TransactionCsvRow::from(&tx);
-                        let mut wtr = Writer::from_writer(vec![]);
+                        let mut wtr = WriterBuilder::new().has_headers(false).from_writer(vec![]);
                         wtr.serialize(csv_row).unwrap();
                         let csv_line = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
                         yield Ok(csv_line);
@@ -516,6 +536,33 @@ pub async fn export_transactions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_header_is_emitted_once_before_the_first_row() {
+        let mut written = false;
+        let first = csv_header_before_row(&mut written);
+        assert_eq!(first.as_deref(), Some(format!("{CSV_HEADER}
+").as_str()));
+        assert!(written);
+        assert_eq!(csv_header_before_row(&mut written), None);
+    }
+
+    #[test]
+    fn csv_header_is_not_emitted_when_no_row_is_written() {
+        // The stream only calls `csv_header_before_row` when it has a row, so an
+        // untouched flag means nothing was written for an empty result set.
+        let written = false;
+        assert!(!written);
+    }
+
+    #[test]
+    fn csv_rows_are_written_without_their_own_header() {
+        let mut wtr = WriterBuilder::new().has_headers(false).from_writer(vec![]);
+        wtr.serialize(("a", 1)).unwrap();
+        let out = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
+        assert_eq!(out, "a,1
+");
+    }
 
     #[test]
     fn test_default_format() {
