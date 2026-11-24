@@ -33,6 +33,10 @@ if state.feature_flags.is_enabled("experimental_processor").await {
 }
 ```
 
+### Flag values are typed
+
+A flag's state is a boolean end to end. `FeatureFlag.enabled` is a `bool`, the `feature_flags.enabled` column is `BOOLEAN NOT NULL`, and `PUT /admin/flags/:name` takes `{"enabled": true | false}`. `is_enabled` and the `is_enabled_for_*` methods return `bool`, so callers branch on the result directly and never compare strings such as `"true"`. A value that is not a boolean is rejected by the API and by the database, so there is no malformed value to default to `false` or to log.
+
 ### Managing Flags via API
 
 **List all flags:**
