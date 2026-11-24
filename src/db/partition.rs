@@ -124,6 +124,33 @@ mod tests {
         assert_eq!(manager.interval, Duration::from_secs(24 * 3600));
     }
 
+    /// #1701: asking for the same month's partition twice succeeds both times
+    /// and the second call reports that nothing was created.
+    #[tokio::test]
+    #[ignore]
+    async fn test_create_partition_twice_is_a_no_op_the_second_time() {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
+        });
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let manager = PartitionManager::new(pool.clone(), 24, None);
+
+        manager.create_partition().await.expect("first call succeeds");
+        let created_again = manager
+            .create_partition()
+            .await
+            .expect("second call for the same month must not fail");
+        assert!(!created_again, "the partition already exists");
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_class WHERE relname =              'transactions_y' || TO_CHAR(DATE_TRUNC('month', NOW() + INTERVAL '2 months'), 'YYYY')              || 'm' || TO_CHAR(DATE_TRUNC('month', NOW() + INTERVAL '2 months'), 'MM')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "exactly one partition for the month");
+    }
+
     /// Cache is warm after partition creation; no extra warming if partition already exists.
     #[tokio::test]
     #[ignore]
