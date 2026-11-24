@@ -61,6 +61,10 @@ This secret is used both for:
 - **Outgoing**: Signing webhooks created by this service
 - **Incoming**: Verifying webhooks received from other services
 
+## Missing secret
+
+If no signing secret is configured (`ANCHOR_WEBHOOK_SECRET` is unset or empty, and no Vault-backed secret is available), the middleware fails closed: every webhook request gets `500 Internal Server Error` with the generic body `{"error": "webhook verification is unavailable"}`, before any header is checked. The server log carries an `error` line with `config_key=ANCHOR_WEBHOOK_SECRET` so the operator knows what to set. The response never names the key and no secret value is ever logged.
+
 ## Event Filtering
 
 Webhook endpoints can be configured with filter rules to receive only events that match specific transaction criteria. Filters are applied before enqueuing deliveries to prevent unnecessary webhook traffic.

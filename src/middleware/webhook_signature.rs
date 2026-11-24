@@ -46,6 +46,26 @@ async fn valid_secrets(state: &AppState) -> Vec<String> {
     }
 }
 
+/// The configuration key operators must set for signature verification.
+const SECRET_CONFIG_KEY: &str = "ANCHOR_WEBHOOK_SECRET";
+
+/// Fails closed when no signing secret is configured. This is a server
+/// misconfiguration, so it is a 500, but the log line names the missing key so
+/// it can be fixed, while the response body stays generic. The secret value is
+/// never logged (there is none to log).
+fn secret_not_configured() -> Response {
+    tracing::error!(
+        config_key = SECRET_CONFIG_KEY,
+        "webhook_signature: no webhook signing secret is configured; set {} (failing closed)",
+        SECRET_CONFIG_KEY
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "webhook verification is unavailable" })),
+    )
+        .into_response()
+}
+
 fn rejection(status: StatusCode, error: WebhookSecurityError) -> Response {
     tracing::warn!(error = %error, "webhook_signature: rejected inbound anchor request");
     (status, Json(json!({ "error": error.to_string() }))).into_response()
@@ -60,6 +80,17 @@ pub async fn verify_anchor_signature(
     req: Request<Body>,
     next: Next<Body>,
 ) -> Response {
+    // Checked first: with no secret configured nothing can be verified, so no
+    // request should get past this point, whatever headers it carries.
+    let secrets: Vec<String> = valid_secrets(&state)
+        .await
+        .into_iter()
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    if secrets.is_empty() {
+        return secret_not_configured();
+    }
+
     let timestamp = match req
         .headers()
         .get(TIMESTAMP_HEADER)
@@ -103,7 +134,6 @@ pub async fn verify_anchor_signature(
         }
     };
 
-    let secrets = valid_secrets(&state).await;
     let verified = secrets
         .iter()
         .any(|secret| verify_signature(secret.as_bytes(), &timestamp, &bytes, &signature).is_ok());
@@ -157,6 +187,30 @@ mod tests {
                 verify_anchor_signature,
             ))
             .with_state(state)
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires DATABASE_URL"]
+    async fn returns_500_when_no_secret_is_configured() {
+        let app = test_app("").await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/callback")
+            .header(TIMESTAMP_HEADER, now_secs().to_string())
+            .header(SIGNATURE_HEADER, "sha256=00")
+            .body(Body::from("{}"))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!text.contains(SECRET_CONFIG_KEY), "body must not leak config names");
+    }
+
+    #[test]
+    fn secret_not_configured_is_a_generic_500() {
+        let res = secret_not_configured();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
