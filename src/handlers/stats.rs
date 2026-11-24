@@ -45,6 +45,18 @@ pub struct CombinedCacheMetrics {
     pub idempotency_fallback_count: u64,
 }
 
+/// Status counts, served from the query cache.
+///
+/// All three aggregate handlers here (`status_counts`, `daily_totals`,
+/// `asset_stats`) go through `QueryCache` before touching the database, with
+/// the TTLs from `CacheConfig::default()`: 5 minutes for status counts, 1 hour
+/// for daily totals and 10 minutes for asset stats. Those are chosen so a
+/// dashboard polling every few seconds costs one aggregate query per TTL
+/// window, while a figure is never older than the window. The aggregates are
+/// global admin figures (the underlying queries do not filter by tenant), so
+/// the cache keys (`query:status_counts`, `query:daily_totals:<days>`,
+/// `query:asset_stats`) are not tenant-scoped; if these are ever scoped per
+/// tenant the tenant id must become part of the key.
 pub async fn status_counts(State(state): State<ApiState>) -> Result<impl IntoResponse, AppError> {
     let cache_key = cache_key_status_counts();
     let config = CacheConfig::default();
