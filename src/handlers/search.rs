@@ -79,6 +79,11 @@ pub async fn search_transactions(
         None => None,
     };
 
+    // The limit is applied by the database: `search_transactions_for_tenant`
+    // runs `ORDER BY created_at DESC, id DESC LIMIT $n`, so at most `limit`
+    // rows are fetched and the handler never truncates a larger result set in
+    // Rust. Ordering is part of that same statement, which keeps the page
+    // identical to what an unbounded query truncated afterwards would give.
     let (pool, replica_used) = pool_manager.read_pool().await;
     let (total, transactions) = crate::db::queries::search_transactions_for_tenant(
         pool,
