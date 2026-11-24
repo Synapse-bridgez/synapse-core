@@ -624,6 +624,52 @@ mod tests {
         );
     }
 
+    /// #1726: `AppError::code()` is the single source of truth for a variant's
+    /// stable code, so every code it returns must be listed in the registry
+    /// behind the error catalog (`get_all_error_codes`), and its status must
+    /// agree with the registered HTTP status.
+    #[test]
+    fn every_variant_code_is_registered_in_the_catalog() {
+        let registry = get_all_error_codes();
+        let variants = vec![
+            AppError::Database(sqlx::Error::RowNotFound),
+            AppError::DatabaseError("x".to_string()),
+            AppError::Validation("x".to_string()),
+            AppError::NotFound("x".to_string()),
+            AppError::Internal("x".to_string()),
+            AppError::BadRequest("x".to_string()),
+            AppError::Unauthorized("x".to_string()),
+            AppError::TenantNotFound,
+            AppError::InvalidApiKey,
+            AppError::InvalidTransactionAmount("x".to_string()),
+            AppError::AmountBelowMinimum("x".to_string()),
+            AppError::InvalidStellarAddress("x".to_string()),
+            AppError::TransactionAlreadyProcessed("x".to_string()),
+            AppError::InvalidStatusTransition("x".to_string()),
+            AppError::StaleTransition,
+            AppError::InvalidWebhookSignature,
+            AppError::MalformedWebhookPayload("x".to_string()),
+            AppError::InvalidSettlementAmount("x".to_string()),
+            AppError::SettlementAlreadyExists("x".to_string()),
+            AppError::RateLimitExceeded,
+            AppError::AuthenticationFailed("x".to_string()),
+            AppError::InsufficientPermissions("x".to_string()),
+            AppError::Anyhow(anyhow::anyhow!("x")),
+        ];
+        for variant in variants {
+            let code = variant.code();
+            let entry = registry
+                .iter()
+                .find(|e| e.code == code)
+                .unwrap_or_else(|| panic!("{code} is not in get_all_error_codes()"));
+            assert_eq!(
+                entry.http_status,
+                variant.status_code().as_u16(),
+                "{code}: registered status differs from status_code()"
+            );
+        }
+    }
+
     /// Part E regression test: no `Database`-variant response body may
     /// contain the raw sqlx error text (which can include column/constraint
     /// names or other internal detail).

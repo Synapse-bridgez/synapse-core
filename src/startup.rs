@@ -201,7 +201,7 @@ mod tests {
         Config {
             app_env: crate::config::AppEnv::Development,
             server_port: 3000,
-            database_url: "postgres://localhost:5432/test".to_string(),
+            database_url: crate::config::DatabaseUrl::parse("postgres://localhost:5432/test").unwrap(),
             database_replica_url: None,
             backup_database_url: None,
             stellar_horizon_url: "https://horizon-testnet.stellar.org".to_string(),
@@ -237,13 +237,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_env_vars_empty_database_url() {
-        let config = Config {
-            database_url: String::new(),
-            ..test_config_base()
-        };
-
-        assert!(validate_env_vars(&config).is_err());
+    fn test_empty_database_url_is_rejected_when_the_config_is_built() {
+        // An empty URL can no longer be put into a Config: DatabaseUrl refuses
+        // it at construction, so validate_env_vars never sees one.
+        assert!(crate::config::DatabaseUrl::parse("").is_err());
     }
 
     #[test]

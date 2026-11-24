@@ -121,3 +121,12 @@ All test cases are in `src/security/session.rs` under `#[cfg(test)]`.
 - `src/security/session.rs` — Session validation implementation and tests
 - `src/health.rs` — Main health check endpoint (external dependencies)
 - `docs/error-catalog.md` — Error handling patterns
+
+## Shared component health shape
+
+`ComponentHealth` (in `src/health.rs`, re-exported as `synapse_core::ComponentHealth`) is the shared shape for reporting one component: `{ "status": "ok" | "down", "latency_ms": <number, optional> }`. New probe endpoints should use it instead of defining their own struct so clients parse a single schema.
+
+The endpoints today report the database as follows, and keep their HTTP status codes (200 healthy, 503 critical dependency down):
+
+- `GET /health` reports the database as a connection status string with pool statistics, plus per-dependency entries that carry `status`, `severity` and `latency_ms`.
+- `GET /ready` reports only `{ "status": "ready" | "not_ready", "draining": <bool> }`; it does not include a database component.

@@ -37,6 +37,39 @@ pub enum DependencyStatus {
     },
 }
 
+/// Health of a single component (for example the database) in the shape every
+/// probe endpoint should use: a `status` string and, when the check was timed,
+/// a `latency_ms`. Keeping one type here means `/health`, `/ready` and any
+/// future probe serialise the same component the same way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentHealth {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+}
+
+impl ComponentHealth {
+    /// A component that answered its check, optionally with how long it took.
+    pub fn ok(latency_ms: Option<u64>) -> Self {
+        Self {
+            status: "ok".to_string(),
+            latency_ms,
+        }
+    }
+
+    /// A component that did not answer its check.
+    pub fn down() -> Self {
+        Self {
+            status: "down".to_string(),
+            latency_ms: None,
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.status == "ok"
+    }
+}
+
 #[async_trait]
 pub trait DependencyChecker: Send + Sync {
     async fn check(&self) -> DependencyStatus;
@@ -244,5 +277,29 @@ fn determine_overall_status(dependencies: &HashMap<String, DependencyStatus>) ->
         "degraded".to_string()
     } else {
         "healthy".to_string()
+    }
+}
+
+#[cfg(test)]
+mod component_health_tests {
+    use super::*;
+
+    #[test]
+    fn ok_with_latency_serialises_both_fields() {
+        let json = serde_json::to_value(ComponentHealth::ok(Some(3))).unwrap();
+        assert_eq!(json, serde_json::json!({ "status": "ok", "latency_ms": 3 }));
+    }
+
+    #[test]
+    fn ok_without_latency_omits_the_field() {
+        let json = serde_json::to_value(ComponentHealth::ok(None)).unwrap();
+        assert_eq!(json, serde_json::json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn down_is_not_ok() {
+        let health = ComponentHealth::down();
+        assert!(!health.is_ok());
+        assert_eq!(health.latency_ms, None);
     }
 }

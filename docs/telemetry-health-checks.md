@@ -251,3 +251,12 @@ Monitor the `/health` endpoint and these logs to detect exporter degradation ear
 - [`ReconnectionManager`](../src/telemetry/reconnection.rs) — Exporter connectivity.
 - [`ErrorHandler`](../src/telemetry/error_handling.rs) — Error handling strategy.
 - [`InputValidator`](../src/telemetry/input_validation.rs) — Input validation.
+
+## Shared component health shape
+
+`ComponentHealth` (in `src/health.rs`, re-exported as `synapse_core::ComponentHealth`) is the shared shape for reporting one component: `{ "status": "ok" | "down", "latency_ms": <number, optional> }`. New probe endpoints should use it instead of defining their own struct so clients parse a single schema.
+
+The endpoints today report the database as follows, and keep their HTTP status codes (200 healthy, 503 critical dependency down):
+
+- `GET /health` reports the database as a connection status string with pool statistics, plus per-dependency entries that carry `status`, `severity` and `latency_ms`.
+- `GET /ready` reports only `{ "status": "ready" | "not_ready", "draining": <bool> }`; it does not include a database component.

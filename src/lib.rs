@@ -22,6 +22,7 @@ pub mod validation;
 pub mod ws;
 
 pub use config::assets::AssetCache;
+pub use health::ComponentHealth;
 
 use crate::db::pool_manager::PoolManager;
 use crate::graphql::schema::AppSchema;
