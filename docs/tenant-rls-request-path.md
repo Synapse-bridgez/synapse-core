@@ -73,6 +73,10 @@ let result = with_tenant(pool, Some(tenant_id), false, |mut tx| async {
 }).await?;
 ```
 
+## Parsing the tenant id header
+
+Header values that carry a tenant id (for example `X-Tenant-Id`) are parsed with `TenantId::from_str` in `src/tenant/mod.rs`: surrounding whitespace is trimmed, the value must not be empty or longer than 128 characters, and it must not contain whitespace or control characters. A rejected value produces a `ParseTenantIdError` that names the offending input. This is a shape check only; the authoritative tenant is still resolved from the API key (see below).
+
 ## Fail-Closed Design
 
 Without tenant context (both `tenant_id=None` and `is_admin=false`), the helper sets:
