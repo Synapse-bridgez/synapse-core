@@ -35,6 +35,10 @@ type HmacSha256 = Hmac<Sha256>;
 /// rejected to prevent replay attacks.
 const MAX_TIMESTAMP_SKEW_SECS: u64 = 300;
 
+/// Default replay window, in seconds, used when none is configured. The
+/// middleware overrides it with `WEBHOOK_REPLAY_WINDOW_SECS`.
+pub const DEFAULT_REPLAY_WINDOW_SECS: u64 = MAX_TIMESTAMP_SKEW_SECS;
+
 /// Maximum length of a webhook event ID used as a cache key component.
 const MAX_EVENT_ID_LEN: usize = 128;
 
@@ -126,6 +130,15 @@ pub fn verify_signature(
 /// - [`WebhookSecurityError::InvalidTimestamp`] — not a valid integer.
 /// - [`WebhookSecurityError::TimestampOutOfRange`] — outside the 5-minute window.
 pub fn validate_timestamp(timestamp_str: &str) -> Result<u64, WebhookSecurityError> {
+    validate_timestamp_within(timestamp_str, MAX_TIMESTAMP_SKEW_SECS)
+}
+
+/// Like [`validate_timestamp`], but with a caller-chosen window (in seconds)
+/// instead of the 300 s default.
+pub fn validate_timestamp_within(
+    timestamp_str: &str,
+    window_secs: u64,
+) -> Result<u64, WebhookSecurityError> {
     let ts: u64 = timestamp_str
         .parse()
         .map_err(|_| WebhookSecurityError::InvalidTimestamp)?;
@@ -135,7 +148,7 @@ pub fn validate_timestamp(timestamp_str: &str) -> Result<u64, WebhookSecurityErr
         .unwrap_or(Duration::ZERO)
         .as_secs();
 
-    if now.abs_diff(ts) > MAX_TIMESTAMP_SKEW_SECS {
+    if now.abs_diff(ts) > window_secs {
         return Err(WebhookSecurityError::TimestampOutOfRange);
     }
 

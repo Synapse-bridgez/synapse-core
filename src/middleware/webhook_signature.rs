@@ -18,7 +18,9 @@
 //!   `{timestamp}.{body}` keyed by the current (or, during a rotation grace
 //!   window, previous) `anchor_webhook_secret`.
 
-use crate::cache::webhook::{validate_timestamp, verify_signature, WebhookSecurityError};
+use crate::cache::webhook::{
+    validate_timestamp_within, verify_signature, WebhookSecurityError, DEFAULT_REPLAY_WINDOW_SECS,
+};
 use crate::AppState;
 use axum::{
     body::Body,
@@ -29,6 +31,46 @@ use axum::{
     Json,
 };
 use serde_json::json;
+
+/// Settings for the anchor webhook signature middleware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebhookSignatureConfig {
+    /// How far (in seconds) a request's `X-Webhook-Timestamp` may be from the
+    /// server clock, in either direction, before it is rejected as a replay.
+    pub replay_window_secs: u64,
+}
+
+impl Default for WebhookSignatureConfig {
+    fn default() -> Self {
+        Self {
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
+        }
+    }
+}
+
+static ACTIVE_CONFIG: std::sync::OnceLock<WebhookSignatureConfig> = std::sync::OnceLock::new();
+
+impl WebhookSignatureConfig {
+    /// Builds a config, rejecting a zero window (which would reject every request).
+    pub fn new(replay_window_secs: u64) -> Result<Self, String> {
+        if replay_window_secs == 0 {
+            return Err("webhook replay window must be greater than 0 seconds".to_string());
+        }
+        Ok(Self { replay_window_secs })
+    }
+
+    /// Makes this the config the middleware uses. Call once at startup, from
+    /// `Config::webhook_replay_window_secs`. Returns `false` if a config was
+    /// already installed (the first one wins).
+    pub fn install(self) -> bool {
+        ACTIVE_CONFIG.set(self).is_ok()
+    }
+
+    /// The installed config, or the default (300 s) if none was installed.
+    pub fn current() -> Self {
+        ACTIVE_CONFIG.get().copied().unwrap_or_default()
+    }
+}
 
 const TIMESTAMP_HEADER: &str = "X-Webhook-Timestamp";
 const SIGNATURE_HEADER: &str = "X-Webhook-Signature";
@@ -88,7 +130,9 @@ pub async fn verify_anchor_signature(
         }
     };
 
-    if let Err(e) = validate_timestamp(&timestamp) {
+    if let Err(e) =
+        validate_timestamp_within(&timestamp, WebhookSignatureConfig::current().replay_window_secs)
+    {
         return rejection(StatusCode::UNAUTHORIZED, e);
     }
 
