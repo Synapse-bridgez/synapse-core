@@ -146,3 +146,13 @@ Potential improvements for future iterations:
 3. Implement dynamic pool sizing based on load
 4. Add pool statistics to structured logging
 5. Create dashboard templates for common monitoring tools
+
+## Acquisition errors
+
+`PoolManager::acquire_write` and `PoolManager::acquire_read` (and `db::pool_manager::acquire_with_context` for any `PgPool`) return a `PoolAcquireError` when no connection can be acquired. Its message reads like:
+
+```
+failed to acquire a database connection after waiting 5.001s (max_connections=50): pool timed out while waiting for an open connection
+```
+
+It carries the time waited, the pool's configured `max_connections`, and the original `sqlx::Error` as `source()`. If the wait is close to the 5 second acquire timeout and `max_connections` is already reached, the pool is exhausted (see the utilisation metrics above); if the wait is short and the source is an I/O or connection error, the database itself is unreachable. The acquire timeout is unchanged.
