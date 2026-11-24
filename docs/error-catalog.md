@@ -83,12 +83,50 @@ All error responses follow this format:
 |------|-------------|-------------|
 | ERR_SETTLEMENT_001 | 400 | Invalid settlement amount |
 | ERR_SETTLEMENT_002 | 409 | Settlement already exists |
+| ERR_SETTLEMENT_003 | 409 | Stale transition: settlement state changed during processing |
 
 ### Rate Limiting Errors (ERR_RATE_LIMIT_xxx)
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
 | ERR_RATE_LIMIT_001 | 429 | Rate limit exceeded |
+
+### Redis Errors (ERR_REDIS_xxx)
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| ERR_REDIS_001 | 500 | Redis operation failed |
+
+## Error Variants
+
+Every variant of `AppError` in `src/error.rs` and the code and status it produces. Several variants share a code; the `error` message and `detail` still differ.
+
+| Variant | Code | HTTP Status | Cause |
+|---------|------|-------------|-------|
+| `Database(sqlx::Error)` | ERR_DATABASE_001 | 500 | A database call failed. `sqlx::Error::RowNotFound` is converted to `NotFound` instead. The raw cause is logged, not returned. |
+| `DatabaseError(String)` | ERR_DATABASE_002 | 500 | A database error reported as a string. The raw text is logged, not returned. |
+| `Validation(String)` | ERR_VALIDATION_001 | 400 | Request input failed validation. |
+| `NotFound(String)` | ERR_NOT_FOUND_001 | 404 | The requested resource does not exist. |
+| `Internal(String)` | ERR_INTERNAL_001 | 500 | An unexpected server-side failure. |
+| `BadRequest(String)` | ERR_BAD_REQUEST_001 | 400 | A request parameter is invalid. |
+| `Unauthorized(String)` | ERR_UNAUTHORIZED_001 | 401 | Authentication is required. |
+| `TenantNotFound` | ERR_NOT_FOUND_001 | 404 | The tenant in the request does not exist. |
+| `InvalidApiKey` | ERR_UNAUTHORIZED_001 | 401 | The API key or tenant header is invalid. |
+| `InvalidTransactionAmount(String)` | ERR_TRANSACTION_001 | 400 | The transaction amount is not valid. |
+| `AmountBelowMinimum(String)` | ERR_TRANSACTION_002 | 400 | The amount is below the configured minimum. |
+| `InvalidStellarAddress(String)` | ERR_TRANSACTION_003 | 400 | The Stellar address is malformed. |
+| `TransactionAlreadyProcessed(String)` | ERR_TRANSACTION_004 | 409 | The transaction was already processed (idempotency). |
+| `InvalidStatusTransition(String)` | ERR_TRANSACTION_005 | 400 | The status change is not allowed by the state machine. |
+| `StaleTransition` | ERR_SETTLEMENT_003 | 409 | The settlement state changed while the transition was being processed. |
+| `InvalidWebhookSignature` | ERR_WEBHOOK_001 | 401 | The webhook signature did not verify. |
+| `MalformedWebhookPayload(String)` | ERR_WEBHOOK_002 | 400 | The webhook body could not be parsed. |
+| `InvalidSettlementAmount(String)` | ERR_SETTLEMENT_001 | 400 | The settlement amount is not valid. |
+| `SettlementAlreadyExists(String)` | ERR_SETTLEMENT_002 | 409 | A settlement already exists for this request. |
+| `RateLimitExceeded` | ERR_RATE_LIMIT_001 | 429 | The caller exceeded the rate limit. |
+| `AuthenticationFailed(String)` | ERR_AUTH_001 | 401 | The credentials could not be authenticated. |
+| `InsufficientPermissions(String)` | ERR_AUTH_002 | 403 | The caller is authenticated but not allowed to do this. |
+| `Redis(redis::RedisError)` | ERR_REDIS_001 | 500 | A Redis operation failed. The raw cause is logged, not returned. |
+| `Anyhow(anyhow::Error)` | ERR_INTERNAL_001 | 500 | An uncategorised internal error. |
 
 ## Using Error Codes
 
@@ -130,3 +168,4 @@ This error catalog is version 1.0.0. API consumers can retrieve the latest versi
 ## Changelog
 
 - 1.0.0 - Initial error catalog with 19 error codes
+- Unreleased - Documented `ERR_SETTLEMENT_003` and `ERR_REDIS_001`, which `src/error.rs` already defines, and added the table of `AppError` variants

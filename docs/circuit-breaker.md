@@ -2,7 +2,6 @@
 
 ## Overview
 
-<<<<<<< HEAD
 The Stellar Horizon client now includes a circuit breaker pattern to protect the system from cascading failures when the Horizon API is down or experiencing issues.
 
 ## How It Works
@@ -99,66 +98,28 @@ cargo test --bin synapse-core stellar::client::tests::test_circuit_breaker
 - Add circuit breaker state to `/health` endpoint
 - Configurable failure policies (e.g., percentage-based)
 - Per-endpoint circuit breakers for fine-grained control
-||||||| 2822865
-=======
-The Horizon client implements a circuit breaker pattern to protect the system from cascading failures when the Stellar Horizon API is down or slow. This prevents worker threads from piling up and crashing the application.
 
-## How It Works
+## Redis-backed breaker and the half-open probe
 
-The circuit breaker has three states:
+`src/services/circuit_breaker.rs` contains a separate, generic `CircuitBreaker` that wraps any async call with `call()`. It keeps its state in memory and persists it to Redis (key `cb:state:<service_name>`) when it opens, so a restart does not forget that a dependency is down. It is built with a service name, a Redis client, a failure threshold and a reset timeout.
 
-1. **Closed** (Normal): Requests pass through to Horizon API
-2. **Open** (Fail Fast): After consecutive failures, the circuit opens and immediately rejects requests without calling the API
-3. **Half-Open** (Probe): After a timeout period, the circuit allows a test request to check if the service has recovered
+### State transitions
 
-## Configuration
+| From      | Event                                              | To        |
+| --------- | -------------------------------------------------- | --------- |
+| Closed    | A call fails and the failure count reaches the threshold | Open |
+| Open      | A call arrives before `reset_timeout` has elapsed  | Open (the call is rejected with `CircuitBreakerError::Open` and `f` is not run) |
+| Open      | A call arrives after `reset_timeout` has elapsed   | Half-Open (that call runs as the probe) |
+| Half-Open | The probe succeeds                                 | Closed (failure count, `opened_at` and `last_error` are cleared) |
+| Half-Open | The probe fails                                    | Open (`opened_at` is reset, so a new `reset_timeout` starts) |
 
-### Default Configuration
+### How the probe works
 
-```rust
-let client = HorizonClient::new("https://horizon-testnet.stellar.org".to_string());
-```
+- There is no separate probe request. The first call that arrives after the reset timeout moves the breaker to Half-Open and is executed as the probe.
+- The failure count is not cleared when entering Half-Open, so it is still at or above the threshold. Any failure of the probe therefore re-opens the breaker immediately and writes the new state to Redis.
+- The breaker does not limit concurrency in Half-Open: calls that arrive while the probe is in flight also run. Their results update the same state, and the last result to finish decides whether the breaker ends up Closed or Open.
+- The persisted state expires after `reset_timeout` seconds, so a stale Open record is dropped on its own after a restart.
+- `load_from_redis()` restores a persisted state; call it at startup if the state should survive restarts.
+- `get_state()` returns a snapshot (`state`, `opened_at`, `failure_count`, `last_error`) for health checks and metrics.
 
-- Failure threshold: 5 consecutive failures
-- Reset timeout: 60 seconds
-- Backoff strategy: Exponential (10s to 60s)
-
-### Custom Configuration
-
-```rust
-use std::time::Duration;
-
-let client = HorizonClient::with_circuit_breaker_config(
-    "https://horizon-testnet.stellar.org".to_string(),
-    3,                              // failure_threshold: open after 3 failures
-    Duration::from_secs(30),        // reset_timeout: try again after 30s
-);
-```
-
-## Error Handling
-
-When the circuit breaker is open, API calls return:
-
-```rust
-Err(HorizonError::CircuitBreakerOpen)
-```
-
-This allows the application to:
-- Return appropriate error responses to users
-- Implement fallback logic
-- Avoid wasting resources on doomed requests
-
-## Implementation Details
-
-- Uses the `failsafe` crate for circuit breaker logic
-- Wraps all `HorizonClient` API calls automatically
-- Thread-safe and can be cloned across async tasks
-- Consecutive failures policy: opens after N consecutive failures
-- Exponential backoff: gradually increases wait time between retry attempts
-
-## Future Enhancements
-
-- Expose circuit breaker state via metrics endpoint (see Issue #14)
-- Add configurable failure predicates (e.g., only count 5xx errors)
-- Implement custom instrumentation for logging state transitions
->>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
+See [ADR-002](adr/002-circuit-breaker.md) for the original design.
