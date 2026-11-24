@@ -540,6 +540,22 @@ Response `200`:
 
 All admin endpoints require `Authorization: Bearer <ADMIN_API_KEY>`.
 
+Admin endpoints registered in `src/lib.rs` and `src/handlers/admin/`:
+
+| Method | Path | Handler |
+|--------|------|---------|
+| `PATCH` | `/admin/transactions/bulk-status` | `bulk_status::bulk_update_status_api` |
+| `POST` | `/admin/drain` | `readiness` drain handler |
+| `GET` | `/admin/webhooks/health`, `/admin/webhooks/health/:id` | `list_webhook_health`, `get_webhook_health` |
+| `GET` `PUT` `DELETE` | `/admin/quotas`, `/admin/quotas/:tenant_id`, `/admin/quotas/:tenant_id/reset` | `quota::*` |
+| `GET` | `/admin/locks` | `locks::list_active_locks` |
+| `GET` | `/admin/audit/search` | `audit::search_audit_logs_handler` |
+| `POST` `GET` | `/admin/compliance/reports` | `compliance::generate_report`, `compliance::list_reports` |
+| `PATCH` | `/admin/settlements/:id/status` | `settlements::update_settlement_status` |
+| `GET` | `/admin/reconciliation` | `reconciliation::reconciliation_routes` |
+
+There is no `GET /admin/audit/export` endpoint. To read audit records, use the paginated `GET /admin/audit/search`. Only the endpoints documented below have full request and response examples; the others are listed so integrators know they exist.
+
 ### `PATCH /admin/transactions/bulk-status`
 
 Bulk update transaction statuses (max 500 per request).
