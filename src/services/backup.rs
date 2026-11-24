@@ -480,7 +480,7 @@ impl BackupService {
     async fn load_metadata(&self, path: &Path) -> Result<BackupMetadata> {
         let json = fs::read_to_string(path)
             .await
-            .context("Failed to read metadata file")?;
+            .with_context(|| format!("Failed to read metadata file {}", path.display()))?;
 
         let metadata: BackupMetadata =
             serde_json::from_str(&json).context("Failed to parse metadata")?;

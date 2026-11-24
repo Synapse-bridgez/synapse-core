@@ -50,6 +50,10 @@ similar remote storage as aspirational rather than current behavior.
    compress/encrypt pipeline — both worth investigating beyond just
    discarding the one bad file.
 
+## Unreadable checksum
+
+The expected checksum is read from the backup's `.meta` file. If that file is missing, unreadable or does not parse, verification returns an error naming the path and the run is counted as `failure` in `backup_verification_total`. It is never treated as verified, and an unreadable checksum is never read as an empty string. The job log line for a failed run includes the full error chain (the path and the underlying I/O error).
+
 ## Known gap
 
 There is currently no on-demand / manual-trigger path (admin endpoint or CLI
