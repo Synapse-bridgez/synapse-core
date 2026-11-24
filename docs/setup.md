@@ -335,3 +335,13 @@ synapse-core/
 | `SQLX_OFFLINE` errors in CI           | Run `cargo sqlx prepare` locally to generate offline query data |
 | Port already in use                    | Change `SERVER_PORT` in `.env` or stop the conflicting process |
 | Docker connection refused to Postgres  | Use `host.docker.internal` or `172.17.0.1` instead of `localhost` |
+
+## Missing configuration
+
+If required settings are missing, startup reports all of them in one error instead of stopping at the first. For example, with `DATABASE_URL` and `ANCHOR_WEBHOOK_SECRET` unset:
+
+```
+missing required environment variables: DATABASE_URL, ANCHOR_WEBHOOK_SECRET
+```
+
+Values that are present but invalid (an empty URL, a malformed `STELLAR_HORIZON_URL`, port `0`) are likewise listed together, separated by `;`.

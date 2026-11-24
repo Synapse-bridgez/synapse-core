@@ -118,6 +118,22 @@ impl Default for DbTimeoutConfig {
     }
 }
 
+/// The required environment keys that `is_set` reports as unset, in the order
+/// `Config::load` reads them. With Vault credentials present the database URL
+/// and webhook secret come from Vault, so only `STELLAR_HORIZON_URL` is required.
+pub(crate) fn missing_required_keys(
+    use_vault: bool,
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<&'static str> {
+    let mut required: Vec<&'static str> = Vec::new();
+    if !use_vault {
+        required.push("DATABASE_URL");
+        required.push("ANCHOR_WEBHOOK_SECRET");
+    }
+    required.push("STELLAR_HORIZON_URL");
+    required.into_iter().filter(|key| !is_set(key)).collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_env: AppEnv,
@@ -205,6 +221,16 @@ impl Config {
             parse_log_format(&env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()))?;
 
         let use_vault = env::var("VAULT_ROLE_ID").is_ok() && env::var("VAULT_SECRET_ID").is_ok();
+
+        // Report every missing required key at once instead of failing on the
+        // first `env::var(..)?` below, so a new contributor fixes them in one go.
+        let missing = missing_required_keys(use_vault, |key| env::var(key).is_ok());
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "missing required environment variables: {}",
+                missing.join(", ")
+            );
+        }
 
         let (database_url, anchor_webhook_secret) = if use_vault {
             let secrets = SecretsManager::new().await?;

@@ -87,24 +87,30 @@ pub async fn validate_environment(config: &Config, pool: &PgPool) -> Result<Vali
 }
 
 fn validate_env_vars(config: &Config) -> Result<()> {
+    // Collect every problem, then fail once, so all of them can be fixed in a
+    // single pass instead of one restart per key.
+    let mut problems: Vec<String> = Vec::new();
+
     if config.database_url.is_empty() {
-        anyhow::bail!("DATABASE_URL is empty");
+        problems.push("DATABASE_URL is empty".to_string());
     }
     if config.stellar_horizon_url.is_empty() {
-        anyhow::bail!("STELLAR_HORIZON_URL is empty");
+        problems.push("STELLAR_HORIZON_URL is empty".to_string());
+    } else if let Err(e) = url::Url::parse(&config.stellar_horizon_url) {
+        problems.push(format!("STELLAR_HORIZON_URL is not a valid URL: {e}"));
     }
     if config.redis_url.is_empty() {
-        anyhow::bail!("REDIS_URL is empty");
+        problems.push("REDIS_URL is empty".to_string());
     }
     if config.server_port == 0 {
-        anyhow::bail!("SERVER_PORT must be greater than 0");
+        problems.push("SERVER_PORT must be greater than 0".to_string());
     }
 
-    // Validate URL formats
-    url::Url::parse(&config.stellar_horizon_url)
-        .context("STELLAR_HORIZON_URL is not a valid URL")?;
-
-    Ok(())
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("invalid configuration: {}", problems.join("; "))
+    }
 }
 
 async fn validate_database(pool: &PgPool) -> Result<()> {

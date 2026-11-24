@@ -1,6 +1,42 @@
-use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::{sync::Arc, time::Duration};
+use sqlx::{pool::PoolConnection, postgres::PgPoolOptions, PgPool, Postgres};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
+
+/// How long a pool waits for a free connection before giving up.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A connection could not be acquired from a pool.
+///
+/// Carries what an operator needs to tell "the pool is too small" from "the
+/// database is down": how long the caller waited, the pool's configured
+/// maximum, and the original `sqlx` error as the `source`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "failed to acquire a database connection after waiting {waited:?}      (max_connections={max_connections}): {source}"
+)]
+pub struct PoolAcquireError {
+    pub waited: Duration,
+    pub max_connections: u32,
+    #[source]
+    pub source: sqlx::Error,
+}
+
+/// Acquires a connection from `pool`, reporting the wait time and pool limit
+/// (and keeping the `sqlx` error as the source) if that fails. The acquisition
+/// itself and its timeout are the pool's own.
+pub async fn acquire_with_context(
+    pool: &PgPool,
+) -> Result<PoolConnection<Postgres>, PoolAcquireError> {
+    let started = Instant::now();
+    pool.acquire().await.map_err(|source| PoolAcquireError {
+        waited: started.elapsed(),
+        max_connections: pool.options().get_max_connections(),
+        source,
+    })
+}
 
 #[derive(Clone)]
 pub struct PoolManager {
@@ -69,6 +105,19 @@ impl PoolManager {
         &self.primary
     }
 
+    /// Acquires a connection from the primary pool, with wait time and pool
+    /// limits in the error if the pool is exhausted.
+    pub async fn acquire_write(&self) -> Result<PoolConnection<Postgres>, PoolAcquireError> {
+        acquire_with_context(&self.primary).await
+    }
+
+    /// Acquires a connection from the pool chosen by [`read_pool`](Self::read_pool),
+    /// with wait time and pool limits in the error if the pool is exhausted.
+    pub async fn acquire_read(&self) -> Result<PoolConnection<Postgres>, PoolAcquireError> {
+        let (pool, _is_replica) = self.read_pool().await;
+        acquire_with_context(pool).await
+    }
+
     /// Gracefully drain and close the primary pool and, if configured, the
     /// replica pool. Mirrors [`crate::db::graceful_shutdown`] so that
     /// `PoolManager`'s pools are drained on process shutdown alongside the
@@ -88,7 +137,7 @@ fn build_pool(
     PgPoolOptions::new()
         .max_connections(max_connections)
         // Fail fast instead of hanging when the pool is exhausted.
-        .acquire_timeout(Duration::from_secs(5))
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         // Defaults every pooled connection to RLS admin context — see
         // crate::db::set_session_admin_context for why this is required now
         // that the app's role no longer bypasses RLS.
