@@ -50,6 +50,16 @@ git clone https://github.com/synapse-bridgez/synapse-core.git
 cd synapse-core
 ```
 
+> **Contributing?** Fork the repository and clone your fork instead, then work from the `develop` branch. `CONTRIBUTING.md` requires all contributions to be made against `develop`, so branch from it and open your pull request against it:
+>
+> ```bash
+> git checkout develop
+> git pull origin develop
+> git checkout -b feat/your-feature
+> ```
+>
+> Cloning only to run the service locally does not need a branch change.
+
 ---
 
 ## 2. Environment Variables
