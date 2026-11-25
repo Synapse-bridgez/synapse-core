@@ -3,7 +3,11 @@ use axum::{
     extract::{FromRef, FromRequestParts},
     http::{request::Parts, HeaderMap},
 };
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::{error::AppError, AppState};
@@ -28,6 +32,67 @@ impl TenantContext {
     pub fn new(tenant_id: Uuid, config: TenantConfig) -> Self {
         Self { tenant_id, config }
     }
+}
+
+/// Cached entry for the api-key → tenant_id mapping.
+struct CachedTenantId {
+    tenant_id: Uuid,
+    inserted_at: Instant,
+}
+
+/// Short-lived in-process cache that maps an API-key to its resolved tenant_id.
+///
+/// This avoids a database round-trip on every request for the same tenant.
+/// The cache is bounded (at most 4 096 entries) so it cannot grow without
+/// limit, and each entry expires after `TTL` so a deleted or disabled tenant
+/// stops being served within that window.
+struct TenantIdCache {
+    inner: Mutex<LruCache<String, CachedTenantId>>,
+    ttl: Duration,
+}
+
+impl TenantIdCache {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            inner: Mutex::new(LruCache::new(
+                NonZeroUsize::new(capacity).expect("capacity must be > 0"),
+            )),
+            ttl,
+        }
+    }
+
+    fn get(&self, api_key: &str) -> Option<Uuid> {
+        let mut cache = self.inner.lock().expect("tenant id cache lock poisoned");
+        let entry = cache.get(api_key)?;
+        if entry.inserted_at.elapsed() > self.ttl {
+            cache.pop(api_key);
+            return None;
+        }
+        Some(entry.tenant_id)
+    }
+
+    fn insert(&self, api_key: &str, tenant_id: Uuid) {
+        let mut cache = self.inner.lock().expect("tenant id cache lock poisoned");
+        cache.put(
+            api_key.to_owned(),
+            CachedTenantId {
+                tenant_id,
+                inserted_at: Instant::now(),
+            },
+        );
+    }
+
+    fn invalidate(&self, api_key: &str) {
+        let mut cache = self.inner.lock().expect("tenant id cache lock poisoned");
+        cache.pop(api_key);
+    }
+}
+
+/// 5-minute TTL, 4096-entry bounded LRU cache for api-key → tenant_id lookups.
+static TENANT_ID_CACHE: std::sync::OnceLock<TenantIdCache> = std::sync::OnceLock::new();
+
+fn tenant_id_cache() -> &'static TenantIdCache {
+    TENANT_ID_CACHE.get_or_init(|| TenantIdCache::new(4096, Duration::from_secs(300)))
 }
 
 // Generic over any router state `S` that can hand us an `AppState` — this is
@@ -66,6 +131,11 @@ where
             .ok_or(AppError::TenantNotFound)?;
 
         if !config.is_active {
+            // Invalidate the cache entry so the tenant is not served again from
+            // cache after being disabled.
+            if let Some(api_key) = extract_api_key(&parts.headers) {
+                tenant_id_cache().invalidate(&api_key);
+            }
             return Err(AppError::Unauthorized("tenant inactive".to_string()));
         }
 
@@ -99,13 +169,21 @@ async fn resolve_tenant_id(
     // return, so it must only trust a credential that was actually looked up
     // against the `tenants` table.
     if let Some(api_key) = extract_api_key(headers) {
+        // Fast path: return the cached tenant_id if still fresh.
+        if let Some(cached_id) = tenant_id_cache().get(&api_key) {
+            return Ok(cached_id);
+        }
+
         // Only failed lookups count against the brute-force budget — see
         // middleware::auth::admin_auth's doc comment for why: a valid key
         // used many times is routine API traffic (already throttled
         // separately and much more generously by
         // middleware::quota::rate_limit_middleware), not a guessing attack.
         match resolve_tenant_by_api_key(&state.db, &api_key).await {
-            Ok(tenant_id) => return Ok(tenant_id),
+            Ok(tenant_id) => {
+                tenant_id_cache().insert(&api_key, tenant_id);
+                return Ok(tenant_id);
+            }
             Err(e) => {
                 let source_ip = parts
                     .extensions
@@ -162,5 +240,58 @@ async fn resolve_tenant_by_api_key(
         Ok(tenant_id)
     } else {
         Err(AppError::InvalidApiKey)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn tenant_id_cache_miss_on_empty() {
+        let cache = TenantIdCache::new(16, Duration::from_secs(300));
+        assert!(cache.get("unknown-key").is_none());
+    }
+
+    #[test]
+    fn tenant_id_cache_hit_after_insert() {
+        let cache = TenantIdCache::new(16, Duration::from_secs(300));
+        let id = Uuid::new_v4();
+        cache.insert("key-abc", id);
+        assert_eq!(cache.get("key-abc"), Some(id));
+    }
+
+    #[test]
+    fn tenant_id_cache_expires_after_ttl() {
+        let cache = TenantIdCache::new(16, Duration::from_millis(1));
+        let id = Uuid::new_v4();
+        cache.insert("key-xyz", id);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(cache.get("key-xyz").is_none());
+    }
+
+    #[test]
+    fn tenant_id_cache_invalidate_removes_entry() {
+        let cache = TenantIdCache::new(16, Duration::from_secs(300));
+        let id = Uuid::new_v4();
+        cache.insert("key-del", id);
+        cache.invalidate("key-del");
+        assert!(cache.get("key-del").is_none());
+    }
+
+    #[test]
+    fn tenant_id_cache_bounded_by_capacity() {
+        let cap = 4;
+        let cache = TenantIdCache::new(cap, Duration::from_secs(300));
+        for i in 0..=cap {
+            cache.insert(&format!("key-{i}"), Uuid::new_v4());
+        }
+        // LRU eviction: the cache must not exceed capacity
+        let count = {
+            let inner = cache.inner.lock().unwrap();
+            inner.len()
+        };
+        assert_eq!(count, cap);
     }
 }
