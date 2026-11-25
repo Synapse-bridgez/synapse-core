@@ -603,6 +603,18 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     .await
 }
 
+/// Fetch multiple transactions by their IDs in a single query (issue #1716).
+pub async fn get_transactions_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Transaction>> {
+    with_timeout(
+        QueryTier::Read,
+        "SELECT * FROM transactions WHERE id = ANY($1)",
+        sqlx::query_as::<_, Transaction>("SELECT * FROM transactions WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(pool),
+    )
+    .await
+}
+
 /// Tenant-scoped equivalent of [`get_transaction`] used by GET
 /// /transactions/:id. `tenant_id IS NULL` rows are legacy/pre-migration data
 /// and remain visible to every tenant, matching the RLS policy in

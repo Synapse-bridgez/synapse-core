@@ -23,6 +23,9 @@ pub trait Job: Send + Sync {
 /// A job scheduler that manages cron-based recurring tasks
 pub struct JobScheduler {
     jobs: Arc<Mutex<HashMap<String, Arc<dyn Job>>>>,
+    /// Parsed Schedule objects cached at registration time, keyed by job name.
+    /// Re-parsing on every get_job_status call is unnecessary work (issue #1714).
+    schedules: Arc<Mutex<HashMap<String, Schedule>>>,
     active_handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
@@ -39,6 +42,7 @@ impl JobScheduler {
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            schedules: Arc::new(Mutex::new(HashMap::new())),
             active_handles: Arc::new(Mutex::new(HashMap::new())),
             shutdown_tx,
         }
@@ -51,9 +55,12 @@ impl JobScheduler {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let name = job.name().to_string();
 
-        // Validate the cron expression
-        Schedule::from_str(job.schedule())
+        // Validate and cache the parsed cron expression (issue #1714).
+        let parsed = Schedule::from_str(job.schedule())
             .map_err(|e| format!("Invalid cron expression '{}': {}", job.schedule(), e))?;
+
+        let mut schedules = self.schedules.lock().await;
+        schedules.insert(name.clone(), parsed);
 
         let mut jobs = self.jobs.lock().await;
         jobs.insert(name, Arc::from(job));
@@ -113,12 +120,16 @@ impl JobScheduler {
     /// Get status information about all registered jobs
     pub async fn get_job_status(&self) -> HashMap<String, JobStatus> {
         let jobs = self.jobs.lock().await;
+        let schedules = self.schedules.lock().await;
         let active_handles = self.active_handles.lock().await;
         let mut status = HashMap::new();
 
         for (name, job) in jobs.iter() {
-            // Parse the schedule to get the next run time
-            let next_run = Self::get_next_run_time(job.schedule());
+            // Use the cached Schedule to avoid re-parsing on every status call (issue #1714).
+            let next_run = schedules.get(name).and_then(|sched| {
+                let now = Utc::now();
+                sched.after(&now).next()
+            });
 
             status.insert(
                 name.clone(),
