@@ -401,15 +401,20 @@ pub async fn run_retention(
         })
         .collect();
 
-    let deleted = if deletable_ids.is_empty() {
-        0
-    } else {
-        let result = sqlx::query("DELETE FROM audit_logs WHERE id = ANY($1)")
-            .bind(&deletable_ids)
-            .execute(pool)
-            .await?;
-        result.rows_affected()
-    };
+    // Delete in bounded batches to avoid building an unbounded parameter list
+    // that can exhaust Postgres's query-plan memory or statement-length limits
+    // when retaining very large tables (issue #1715).
+    const DELETE_BATCH_SIZE: usize = 500;
+    let mut deleted: u64 = 0;
+    if !deletable_ids.is_empty() {
+        for chunk in deletable_ids.chunks(DELETE_BATCH_SIZE) {
+            let result = sqlx::query("DELETE FROM audit_logs WHERE id = ANY($1)")
+                .bind(chunk)
+                .execute(pool)
+                .await?;
+            deleted += result.rows_affected();
+        }
+    }
 
     Ok(Some(RetentionResult {
         exported,

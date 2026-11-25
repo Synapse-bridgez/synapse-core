@@ -219,8 +219,10 @@ impl Config {
             (db_url, anchor_secret)
         } else {
             (
-                env::var("DATABASE_URL")?,
-                env::var("ANCHOR_WEBHOOK_SECRET")?,
+                env::var("DATABASE_URL")
+                    .map_err(|_| anyhow::anyhow!("required environment variable DATABASE_URL is not set"))?,
+                env::var("ANCHOR_WEBHOOK_SECRET")
+                    .map_err(|_| anyhow::anyhow!("required environment variable ANCHOR_WEBHOOK_SECRET is not set"))?,
             )
         };
 
@@ -232,7 +234,8 @@ impl Config {
             database_url,
             database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
             backup_database_url: env::var("BACKUP_DATABASE_URL").ok(),
-            stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
+            stellar_horizon_url: env::var("STELLAR_HORIZON_URL")
+                    .map_err(|_| anyhow::anyhow!("required environment variable STELLAR_HORIZON_URL is not set"))?,
             anchor_webhook_secret,
             redis_url: env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://localhost:6379".to_string()),

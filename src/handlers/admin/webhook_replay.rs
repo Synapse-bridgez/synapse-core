@@ -293,16 +293,24 @@ pub async fn batch_replay_webhooks(
     let mut successful = 0;
     let mut failed = 0;
 
+    // Fetch all requested transactions in a single query instead of N individual
+    // round-trips (issue #1716).
+    let fetched: Vec<Transaction> = queries::get_transactions_by_ids(&pool, &request.transaction_ids)
+        .await
+        .unwrap_or_default();
+    let mut tx_map: std::collections::HashMap<Uuid, Transaction> =
+        fetched.into_iter().map(|t| (t.id, t)).collect();
+
     for transaction_id in request.transaction_ids {
-        // Retrieve the original payload
-        let transaction = match get_webhook_payload_from_audit(&pool, transaction_id).await {
-            Ok(tx) => tx,
-            Err(e) => {
+        // Use the pre-fetched map; fall back to a per-row error if missing.
+        let transaction = match tx_map.remove(&transaction_id) {
+            Some(tx) => tx,
+            None => {
                 failed += 1;
                 results.push(ReplayResult {
                     transaction_id,
                     success: false,
-                    message: format!("Failed to retrieve transaction: {e}"),
+                    message: format!("Transaction {transaction_id} not found"),
                     dry_run: request.dry_run,
                     replayed_at: None,
                 });
