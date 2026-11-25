@@ -147,17 +147,31 @@ pub async fn request_logger_middleware(mut req: Request<Body>, next: Next<Body>)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
 
-    tracing::info!(
-        correlation_id = %correlation_id,
-        method = %method,
-        path = %uri.path(),
-        status = status.as_u16(),
-        latency_ms = latency.as_millis(),
-        request_body_size = request_body_size,
-        response_body_size = response_body_size,
-        client_ip = %client_ip,
-        "Outgoing response"
-    );
+    if status.is_server_error() {
+        tracing::error!(
+            correlation_id = %correlation_id,
+            method = %method,
+            path = %uri.path(),
+            status = status.as_u16(),
+            latency_ms = latency.as_millis(),
+            request_body_size = request_body_size,
+            response_body_size = response_body_size,
+            client_ip = %client_ip,
+            "Outgoing response (5xx)"
+        );
+    } else {
+        tracing::info!(
+            correlation_id = %correlation_id,
+            method = %method,
+            path = %uri.path(),
+            status = status.as_u16(),
+            latency_ms = latency.as_millis(),
+            request_body_size = request_body_size,
+            response_body_size = response_body_size,
+            client_ip = %client_ip,
+            "Outgoing response"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // 6. Attach correlation ID to response headers
@@ -201,6 +215,36 @@ mod tests {
         assert!(
             response.headers().contains_key("x-request-id"),
             "Response must contain x-request-id header"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_logger_includes_request_id_on_5xx() {
+        use axum::http::StatusCode as SC;
+        let app = Router::new()
+            .route(
+                "/fail",
+                axum::routing::get(|| async {
+                    (SC::INTERNAL_SERVER_ERROR, "boom").into_response()
+                }),
+            )
+            .layer(axum::middleware::from_fn(request_logger_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/fail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), SC::INTERNAL_SERVER_ERROR);
+        assert!(
+            response.headers().contains_key("x-request-id"),
+            "5xx response must carry x-request-id header"
         );
     }
 

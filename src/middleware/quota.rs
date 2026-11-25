@@ -1,4 +1,5 @@
 use crate::middleware::idempotency::RedisCircuitBreaker;
+use opentelemetry::KeyValue;
 use redis::{AsyncCommands, Client};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -528,6 +529,17 @@ pub async fn rate_limit_middleware(
     };
 
     if !allowed {
+        // Emit rejection counter labeled by tenant_id and quota_kind (issue #1693).
+        let tenant_label = per_minute_key
+            .trim_start_matches("tenant:")
+            .to_string();
+        crate::metrics::tenant_quota_rejections_total().add(
+            1,
+            &[
+                KeyValue::new("tenant_id", tenant_label),
+                KeyValue::new("quota_kind", "per_minute"),
+            ],
+        );
         let retry_after = status.reset_in_seconds.max(1).to_string();
         let mut response = (StatusCode::TOO_MANY_REQUESTS, "Too Many Requests").into_response();
         let headers = response.headers_mut();

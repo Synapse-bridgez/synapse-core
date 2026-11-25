@@ -120,6 +120,7 @@ impl ConnectionPool {
         }
 
         self.active_connections.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::ws_active_connections().add(1, &[]);
         Ok(ConnectionPermit {
             active_connections: Arc::clone(&self.active_connections),
         })
@@ -177,6 +178,7 @@ impl Drop for ConnectionPermit {
     /// both sides are sequenced within a single task.
     fn drop(&mut self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        crate::metrics::ws_active_connections().add(-1, &[]);
     }
 }
 

@@ -28,6 +28,8 @@
 //! | `webhook_rate_limit_self_healed_total` | Counter | Rate-limit counters found without a TTL and self-healed |
 //! | `admin_audit_search_requests_total` | Counter | Requests to GET /admin/audit/search (newly mounted; see docs/audit-compliance-admin-endpoints.md) |
 //! | `admin_compliance_report_requests_total` | Counter | Requests to the compliance report endpoints, labeled by operation (newly mounted) |
+//! | `ws_active_connections`                  | UpDownCounter | Currently active WebSocket connections |
+//! | `tenant_quota_rejections_total`          | Counter | Requests rejected by tenant quota, labeled by tenant_id and quota_kind |
 //!
 //! ## Configuration
 //!
@@ -456,6 +458,24 @@ pub fn admin_compliance_report_requests_total() -> Counter<u64> {
     meter()
         .u64_counter("admin_compliance_report_requests_total")
         .with_description("Requests to the admin compliance report endpoints, labeled by operation")
+        .init()
+}
+
+/// Active WebSocket connections gauge (issue #1691).
+pub fn ws_active_connections() -> opentelemetry::metrics::UpDownCounter<i64> {
+    meter()
+        .i64_up_down_counter("ws_active_connections")
+        .with_description("Number of currently active WebSocket connections")
+        .init()
+}
+
+/// Tenant quota rejections counter (issue #1693).
+pub fn tenant_quota_rejections_total() -> Counter<u64> {
+    meter()
+        .u64_counter("tenant_quota_rejections_total")
+        .with_description(
+            "Requests rejected by the tenant quota middleware, labeled by tenant_id and quota_kind",
+        )
         .init()
 }
 
