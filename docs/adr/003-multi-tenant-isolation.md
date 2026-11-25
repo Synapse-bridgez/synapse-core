@@ -376,6 +376,5 @@ CREATE INDEX idx_transactions_tenant_created ON transactions(tenant_id, created_
 
 - [Multi-Tenancy Patterns (Microsoft)](https://docs.microsoft.com/en-us/azure/architecture/patterns/multi-tenancy)
 - [PostgreSQL Row Level Security](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
-- [src/Multi-Tenant Isolation Layer (Architecture)/IMPLEMENTATION_GUIDE.md](../../src/Multi-Tenant%20Isolation%20Layer%20(Architecture)/IMPLEMENTATION_GUIDE.md)
 - [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)
 - Issue #XX - Multi-tenant implementation

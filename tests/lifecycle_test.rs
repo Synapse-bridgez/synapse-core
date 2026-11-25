@@ -76,8 +76,12 @@ async fn test_full_transaction_lifecycle() {
         "memo_type": "text"
     });
 
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = common::sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", app.base_url))
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
         .json(&payload)
         .send()
         .await
@@ -143,7 +147,12 @@ async fn test_full_transaction_lifecycle() {
         let client = client.clone();
         let url = format!("{}/transactions/{}", app.base_url, tx_id);
         async move {
-            let res = client.get(&url).send().await.ok()?;
+            let res = client
+                .get(&url)
+                .header("X-API-Key", common::TEST_API_KEY)
+                .send()
+                .await
+                .ok()?;
             let body: Value = res.json().await.ok()?;
             if body["status"].as_str() == Some("completed") {
                 Some(body)
@@ -245,13 +254,18 @@ async fn test_callback_returns_201_and_persists() {
     let app = common::TestApp::new().await;
     let client = reqwest::Client::new();
 
+    let payload = json!({
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        "amount": "50.00",
+        "asset_code": "USDC"
+    });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = common::sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", app.base_url))
-        .json(&json!({
-            "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-            "amount": "50.00",
-            "asset_code": "USDC"
-        }))
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
+        .json(&payload)
         .send()
         .await
         .unwrap();
@@ -275,13 +289,18 @@ async fn test_all_state_transitions_are_audited() {
     let client = reqwest::Client::new();
 
     // Create transaction
+    let payload = json!({
+        "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        "amount": "75.00",
+        "asset_code": "USD"
+    });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+    let (ts, sig) = common::sign_webhook_body(&body_bytes);
     let res = client
         .post(format!("{}/callback", app.base_url))
-        .json(&json!({
-            "stellar_account": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-            "amount": "75.00",
-            "asset_code": "USD"
-        }))
+        .header("X-Webhook-Timestamp", ts)
+        .header("X-Webhook-Signature", sig)
+        .json(&payload)
         .send()
         .await
         .unwrap();

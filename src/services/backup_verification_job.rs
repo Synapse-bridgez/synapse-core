@@ -3,6 +3,19 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Extract first 12 hex chars of expected and actual checksums from an error
+/// message formatted as "checksum mismatch (expected: <X>, got: <Y>)".
+fn parse_checksum_mismatch(msg: &str) -> Option<(String, String)> {
+    // Format from backup.rs: "Backup integrity check failed: checksum mismatch (expected: <e>, got: <a>)"
+    let after_expected = msg.split("expected: ").nth(1)?;
+    let expected_full = after_expected.split(',').next()?.trim();
+    let after_got = msg.split("got: ").nth(1)?;
+    let actual_full = after_got.trim_end_matches(')').trim();
+    let expected_prefix = expected_full.chars().take(12).collect();
+    let actual_prefix = actual_full.chars().take(12).collect();
+    Some((expected_prefix, actual_prefix))
+}
+
 /// Weekly job that verifies the latest backup's on-disk integrity via
 /// checksum comparison (`BackupService::verify_backup_checksum`).
 ///
@@ -63,10 +76,24 @@ impl Job for BackupVerificationJob {
                             "success"
                         }
                         Err(e) => {
-                            tracing::error!(
-                                "Backup verification FAILED for {}: {e}",
-                                latest.filename
-                            );
+                            // Extract expected/actual checksum prefixes from the
+                            // error message so operators can distinguish corrupt
+                            // backups from stale manifests (issue #1692).
+                            let msg = e.to_string();
+                            if let Some((expected, actual)) = parse_checksum_mismatch(&msg) {
+                                tracing::error!(
+                                    filename = %latest.filename,
+                                    expected_prefix = %expected,
+                                    actual_prefix = %actual,
+                                    "Backup verification FAILED: checksum mismatch"
+                                );
+                            } else {
+                                tracing::error!(
+                                    filename = %latest.filename,
+                                    error = %e,
+                                    "Backup verification FAILED"
+                                );
+                            }
                             "failure"
                         }
                     }

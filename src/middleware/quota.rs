@@ -1,4 +1,5 @@
 use crate::middleware::idempotency::RedisCircuitBreaker;
+use opentelemetry::KeyValue;
 use redis::{AsyncCommands, Client};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -200,6 +201,42 @@ impl QuotaManager {
                 conn.set(&config_key, json).await
             })
             .await
+            .map_err(redis_cb_err)
+    }
+
+    /// Consistency guard for the quota-config split-brain this codebase used
+    /// to have (see `handlers::admin::quota::set_tenant_quota`): after that
+    /// fix, `tenants.rate_limit_per_minute` is the single source of truth
+    /// for the limit `rate_limit_middleware` enforces, and nothing should
+    /// write to `quota:config:*` anymore. Any keys still present here are
+    /// either stale pre-fix data or a regression writing to dead config
+    /// again — both worth surfacing rather than letting silently diverge a
+    /// second time. One SCAN iteration is a bounded approximation, not a
+    /// full-keyspace guarantee; that's an acceptable tradeoff for a
+    /// low-frequency background alert rather than a correctness-critical read.
+    pub async fn scan_stale_quota_configs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let client = self.redis_client.clone();
+        self.cb
+            .call(|| async move {
+                let mut conn = client.get_multiplexed_async_connection().await?;
+                let (_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(0)
+                    .arg("MATCH")
+                    .arg("quota:config:*")
+                    .arg("COUNT")
+                    .arg(1000)
+                    .query_async(&mut conn)
+                    .await?;
+                Ok(keys)
+            })
+            .await
+            .map(|mut keys: Vec<String>| {
+                keys.truncate(limit);
+                keys
+            })
             .map_err(redis_cb_err)
     }
 
@@ -492,6 +529,17 @@ pub async fn rate_limit_middleware(
     };
 
     if !allowed {
+        // Emit rejection counter labeled by tenant_id and quota_kind (issue #1693).
+        let tenant_label = per_minute_key
+            .trim_start_matches("tenant:")
+            .to_string();
+        crate::metrics::tenant_quota_rejections_total().add(
+            1,
+            &[
+                KeyValue::new("tenant_id", tenant_label),
+                KeyValue::new("quota_kind", "per_minute"),
+            ],
+        );
         let retry_after = status.reset_in_seconds.max(1).to_string();
         let mut response = (StatusCode::TOO_MANY_REQUESTS, "Too Many Requests").into_response();
         let headers = response.headers_mut();

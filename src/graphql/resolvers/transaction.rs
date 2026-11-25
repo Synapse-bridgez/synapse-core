@@ -22,6 +22,20 @@ pub struct TransactionFilter {
 
 /// Transaction query resolver.
 ///
+/// # Tenant scoping
+///
+/// Deliberately *not* tenant-filtered, unlike the REST `/transactions`
+/// routes (`queries::get_transaction_for_tenant` /
+/// `TenantContext`-scoped listing). `/graphql` is mounted only behind
+/// `admin_auth` (`middleware/auth.rs`), which checks a single shared
+/// platform-admin secret — not a per-tenant credential — so, same as every
+/// other route already in `admin_router` (settlement dispute review,
+/// reconciliation reports), a caller who clears that gate is a full
+/// platform admin by design and is supposed to see across all tenants.
+/// Adding tenant filtering here would not close an authorization gap; it
+/// would break legitimate admin functionality. If a tenant-scoped-admin
+/// role is ever introduced, this resolver needs revisiting then.
+///
 /// # Idempotency
 ///
 /// Query operations are inherently idempotent and do not require
@@ -159,27 +173,91 @@ impl TransactionMutation {
     ///
     /// # Side Effects
     ///
-    /// - Updates transaction status to 'completed'
-    /// - Invalidates query cache for the asset
-    /// - Triggers webhook delivery if configured
+    /// - Validates the current status can legally transition to 'completed'
+    ///   (see `validation::state_machine`) — an already-failed, refunded,
+    ///   disputed, or mid-processing transaction is rejected rather than
+    ///   silently force-completed.
+    /// - Updates transaction status to 'completed' with a CAS-guarded write
+    ///   (`WHERE status = <status just read>`), so two concurrent callers
+    ///   racing this mutation cannot both "succeed": the loser's write
+    ///   affects zero rows and the mutation returns an error instead.
+    /// - Records an audit log entry for the status change.
+    /// - Invalidates query cache for the asset.
+    ///
+    /// Part D fix: this previously ran an unconditional `UPDATE ... SET
+    /// status = 'completed'` with no read of the current status and no
+    /// `WHERE status = ...` guard — any admin-key holder could force *any*
+    /// transaction, in any state, to completed, and two concurrent calls
+    /// could both apparently succeed with whichever write landed last
+    /// silently winning. See `services/transaction_processor.rs`'s
+    /// `CompleteStage` for the equivalent guard on the batch-completion path.
     async fn force_complete_transaction(&self, ctx: &Context<'_>, id: Uuid) -> Result<Transaction> {
         let state = ctx.data::<AppState>()?;
 
-        let asset_code: String =
-            sqlx::query_scalar("SELECT asset_code FROM transactions WHERE id = $1")
+        let mut db_tx = state.db.begin().await?;
+
+        let current_status: String =
+            sqlx::query_scalar("SELECT status FROM transactions WHERE id = $1 FOR UPDATE")
                 .bind(id)
-                .fetch_one(&state.db)
+                .fetch_one(&mut *db_tx)
                 .await?;
 
+        // validate_status_transition treats same-state transitions as
+        // idempotently valid (by design, for callers that want retries to
+        // no-op rather than error). That's wrong for *this* mutation
+        // specifically: if a concurrent caller already completed this
+        // transaction while we were blocked on the row lock above, we must
+        // report a loss, not a silent no-op "success" — otherwise two
+        // racing calls both return as if they'd completed it, which is
+        // exactly the double-success this CAS guard exists to prevent.
+        if current_status == "completed" {
+            return Err(async_graphql::Error::new(
+                "Transaction is already completed (a concurrent request completed it first)",
+            ));
+        }
+
+        crate::validation::state_machine::validate_status_transition(&current_status, "completed")
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
         let result = sqlx::query_as::<_, Transaction>(
-            "UPDATE transactions SET status = 'completed', updated_at = NOW() WHERE id = $1 RETURNING *"
+            "UPDATE transactions SET status = 'completed', updated_at = NOW() \
+             WHERE id = $1 AND status = $2 RETURNING *",
         )
         .bind(id)
-        .fetch_one(&state.db)
+        .bind(&current_status)
+        .fetch_optional(&mut *db_tx)
         .await?;
 
-        crate::db::queries::invalidate_caches_for_asset(Some(&state.query_cache), &asset_code)
-            .await;
+        let result = match result {
+            Some(t) => t,
+            None => {
+                return Err(async_graphql::Error::new(
+                    "Transaction status changed before completion could be applied \
+                     (concurrent writer won the race)",
+                ));
+            }
+        };
+
+        // admin_auth is a single shared platform-admin secret today, not a
+        // per-operator identity (see middleware/auth.rs::is_valid_admin_request)
+        // — "admin" is the most specific actor available until that changes.
+        crate::db::audit::AuditLog::log_status_change(
+            &mut db_tx,
+            id,
+            crate::db::audit::ENTITY_TRANSACTION,
+            &current_status,
+            "completed",
+            "admin",
+        )
+        .await?;
+
+        db_tx.commit().await?;
+
+        crate::db::queries::invalidate_caches_for_asset(
+            Some(&state.query_cache),
+            &result.asset_code,
+        )
+        .await;
 
         Ok(result)
     }

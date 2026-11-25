@@ -28,6 +28,7 @@ impl TaskLimits {
 #[derive(Clone)]
 pub struct ResourceLimiter {
     semaphore: Arc<Semaphore>,
+    max_concurrent: usize,
     timeout_duration: Duration,
     task_name: String,
 }
@@ -36,6 +37,7 @@ impl ResourceLimiter {
     pub fn new(limits: TaskLimits, task_name: impl Into<String>) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(limits.max_concurrent)),
+            max_concurrent: limits.max_concurrent,
             timeout_duration: Duration::from_secs(limits.timeout_secs),
             task_name: task_name.into(),
         }
@@ -67,8 +69,23 @@ impl ResourceLimiter {
         Ok(result)
     }
 
-    /// Get current number of active tasks.
+    /// Number of permits currently held by in-flight tasks (i.e. tasks
+    /// actually running right now), not the number still free. Was
+    /// previously `self.semaphore.available_permits()` — the inverse of
+    /// what the name and every caller of this metric expects (see issue
+    /// tracking #961): idle would have read as fully saturated, and vice
+    /// versa. No live call site read this before the fix (confirmed by
+    /// grep), so nothing was silently misreporting in production, but any
+    /// observability wired to it afterward would have been.
     pub fn active_tasks(&self) -> usize {
+        self.max_concurrent - self.semaphore.available_permits()
+    }
+
+    /// Number of permits still free (i.e. additional tasks that could start
+    /// immediately without waiting). This is [`Semaphore::available_permits`]
+    /// directly — the value [`Self::active_tasks`] used to incorrectly
+    /// return under its own name.
+    pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
     }
 }

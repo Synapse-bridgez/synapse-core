@@ -1,3 +1,31 @@
+//! Application-wide error type and its HTTP mapping.
+//!
+//! # Client-facing error contract (Part E)
+//!
+//! - **Safe to expose to clients**: anything derived purely from
+//!   caller-controlled input — validation messages, "field X must be
+//!   positive", status-transition names, resource identifiers the caller
+//!   already supplied. These variants' `Display` text is used directly in
+//!   the response body.
+//! - **Must be redacted**: any variant that wraps or was built from a raw
+//!   external-library error (`sqlx::Error`, `redis::RedisError`,
+//!   `anyhow::Error`, or a `String` populated via `some_error.to_string()`)
+//!   — these can contain table/column/constraint names, connection detail,
+//!   or other internals never meant for a client. `IntoResponse for
+//!   AppError` logs the raw cause via `tracing::error!` and substitutes a
+//!   generic message before it ever reaches the response body. See
+//!   `graphql/error.rs`'s `database_error()`/`internal_error()` for the
+//!   same discipline applied on the GraphQL side — this module previously
+//!   was not held to it, which is the bug this fixed.
+//! - **New variants**: when adding a variant to `AppError`, ask "could this
+//!   ever be constructed from `some_lib_error.to_string()`?" If yes, add it
+//!   to the redaction match in `IntoResponse::into_response` below rather
+//!   than assuming `#[error(...)]`'s `Display` text is automatically safe.
+//! - **404 vs 500**: `sqlx::Error::RowNotFound` — "no row matched" — is a
+//!   routine, expected condition for a by-id lookup, not a server
+//!   malfunction. It is mapped to `AppError::NotFound` (404) centrally in
+//!   `From<sqlx::Error> for AppError` below, not left to become a 500 via
+//!   the `Database` variant.
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -207,7 +235,7 @@ pub fn get_all_error_codes() -> Vec<ErrorCode> {
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(sqlx::Error),
 
     #[error("Database error: {0}")]
     DatabaseError(String),
@@ -342,6 +370,23 @@ impl AppError {
     }
 }
 
+/// Part E fix: `?` on a `sqlx::Error` used to always become
+/// `AppError::Database`, which maps to a 500 — including for
+/// `sqlx::Error::RowNotFound`, an extremely common, entirely routine "no
+/// row matched this lookup" condition that should be a 404, not a message
+/// implying the server malfunctioned. This is a hand-written `From` (not
+/// `#[from]` on the `Database` variant) specifically so every existing call
+/// site that already does `sqlx_call().await?` gets the fix automatically,
+/// without auditing and touching each one individually.
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
+        match e {
+            sqlx::Error::RowNotFound => AppError::NotFound("Resource not found".to_string()),
+            other => AppError::Database(other),
+        }
+    }
+}
+
 /// Extension type to carry request ID through the request lifecycle.
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
@@ -352,6 +397,35 @@ impl IntoResponse for AppError {
         let timestamp = chrono::Utc::now().to_rfc3339();
         let code = self.code();
         let docs_url = format!("/errors#{code}");
+
+        // Part E fix: variants that wrap or were built from a raw external
+        // error (sqlx, redis, anyhow) must never forward that error's
+        // `Display` text to the client — it can include table/column names,
+        // constraint names, connection strings, or other internal detail.
+        // `graphql/error.rs`'s `database_error()`/`internal_error()` already
+        // apply this discipline (log server-side, generic message to the
+        // client); this type was simply never updated to match. Log the raw
+        // cause here and substitute a generic public message for both the
+        // `error` and `detail` fields below.
+        let redacted_public_message: Option<String> = match &self {
+            AppError::Database(e) => {
+                tracing::error!(cause = %e, "AppError::Database: redacting raw cause from client response");
+                Some("A database error occurred".to_string())
+            }
+            AppError::DatabaseError(raw) => {
+                tracing::error!(cause = %raw, "AppError::DatabaseError: redacting raw cause from client response");
+                Some("A database error occurred".to_string())
+            }
+            AppError::Redis(e) => {
+                tracing::error!(cause = %e, "AppError::Redis: redacting raw cause from client response");
+                Some("A backend service error occurred".to_string())
+            }
+            AppError::Anyhow(e) => {
+                tracing::error!(cause = %e, "AppError::Anyhow: redacting raw cause from client response");
+                Some("An internal error occurred".to_string())
+            }
+            _ => None,
+        };
 
         // Generate actionable detail message
         let detail = match &self {
@@ -370,11 +444,15 @@ impl IntoResponse for AppError {
             AppError::Validation(msg) => {
                 format!("Validation failed. {msg}")
             }
-            _ => self.to_string(),
+            _ => redacted_public_message
+                .clone()
+                .unwrap_or_else(|| self.to_string()),
         };
 
+        let error_message = redacted_public_message.unwrap_or_else(|| self.to_string());
+
         let body = serde_json::json!({
-            "error": self.to_string(),
+            "error": error_message,
             "code": code,
             "status": status.as_u16(),
             "timestamp": timestamp,
@@ -544,6 +622,66 @@ mod tests {
             AppError::InsufficientPermissions("test".to_string()).code(),
             codes::AUTH_002.0
         );
+    }
+
+    /// Part E regression test: no `Database`-variant response body may
+    /// contain the raw sqlx error text (which can include column/constraint
+    /// names or other internal detail).
+    #[tokio::test]
+    async fn test_database_error_response_redacts_raw_sql_detail() {
+        let raw_detail = "column \"internal_secret_column\" does not exist";
+        let error = AppError::Database(sqlx::Error::ColumnNotFound(raw_detail.to_string()));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body_str.contains("internal_secret_column"),
+            "response body leaked raw column name: {body_str}"
+        );
+        assert!(
+            !body_str.contains("does not exist"),
+            "response body leaked raw sqlx error text: {body_str}"
+        );
+    }
+
+    /// Same guarantee for the `DatabaseError(String)` variant, which several
+    /// call sites populate directly from `sqlx::Error::to_string()`.
+    #[tokio::test]
+    async fn test_database_error_string_variant_redacts_raw_detail() {
+        let error = AppError::DatabaseError(
+            "duplicate key value violates unique constraint \"transactions_pkey\"".to_string(),
+        );
+        let response = error.into_response();
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !body_str.contains("transactions_pkey"),
+            "response body leaked raw constraint name: {body_str}"
+        );
+    }
+
+    /// Part E regression test: a lookup that finds no row must map to a
+    /// routine 404, not a 500 implying the server malfunctioned. This
+    /// exercises the exact path every `sqlx_call().await?` site goes
+    /// through (`From<sqlx::Error> for AppError`), not just a manually
+    /// constructed variant.
+    #[test]
+    fn test_row_not_found_maps_to_404_via_from_conversion() {
+        let error: AppError = sqlx::Error::RowNotFound.into();
+        assert!(matches!(error, AppError::NotFound(_)));
+        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+    }
+
+    /// Non-`RowNotFound` sqlx errors must still map to the redacted
+    /// `Database` variant (500), not silently become a 404.
+    #[test]
+    fn test_other_sqlx_errors_still_map_to_database_variant() {
+        let error: AppError = sqlx::Error::PoolClosed.into();
+        assert!(matches!(error, AppError::Database(_)));
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

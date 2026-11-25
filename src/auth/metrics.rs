@@ -116,7 +116,7 @@ impl AuthMetrics {
     fn record_outcome_if_allowed(&self) -> bool {
         let total = self.total_attempts.load(Ordering::Acquire);
         self.outcomes
-            .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |current| {
+            .try_update(Ordering::SeqCst, Ordering::Relaxed, |current| {
                 if current >= total {
                     None
                 } else {

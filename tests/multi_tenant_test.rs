@@ -12,15 +12,33 @@ fn setup_env() {
     if env::var("DATABASE_URL").is_err() {
         env::set_var(
             "DATABASE_URL",
-            "postgres://synapse:synapse@localhost:5432/synapse_test",
+            "postgres://synapse_app:synapse_app@localhost:5432/synapse_test",
         );
     }
 }
 
+/// This pool's connections need the same `app.is_admin = true` session
+/// default `db::create_pool` sets in production (see
+/// `db::set_session_admin_context`) — several tests in this file INSERT
+/// into `transactions` directly, with no tenant context set, to seed
+/// fixtures unrelated to the RLS behavior they're actually testing. Without
+/// this, those inserts would fail closed against the RLS INSERT policy now
+/// that the connecting role no longer bypasses RLS.
 async fn get_pool() -> PgPool {
     setup_env();
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
-    PgPool::connect(&db_url).await.unwrap()
+    sqlx::postgres::PgPoolOptions::new()
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('app.is_admin', 'true', false)")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&db_url)
+        .await
+        .unwrap()
 }
 
 async fn make_app_state() -> AppState {
@@ -34,11 +52,12 @@ async fn make_app_state() -> AppState {
 
 async fn insert_tenant(pool: &PgPool, tenant_id: Uuid, name: &str, api_key: &str) {
     sqlx::query(
-        "INSERT INTO tenants (tenant_id, name, api_key, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, '', '', 60, true)"
+        "INSERT INTO tenants (tenant_id, name, api_key_hash, webhook_secret, stellar_account, rate_limit_per_minute, is_active) VALUES ($1, $2, $3, pgp_sym_encrypt('', $4), '', 60, true)"
     )
     .bind(tenant_id)
     .bind(name)
-    .bind(api_key)
+    .bind(synapse_core::db::queries::hash_api_key(api_key))
+    .bind(synapse_core::db::queries::tenant_secret_key())
     .execute(pool)
     .await
     .expect("Failed to insert tenant");
@@ -112,10 +131,13 @@ async fn test_tenant_resolution_from_api_key() {
     cleanup_tenant(&pool, tenant_id).await;
 }
 
-/// Check that X-Tenant-ID or Authorization headers are respected
+/// A bare `X-Tenant-ID` header must NOT resolve tenant identity on its own —
+/// it carries no proof of authorization, so trusting it would let any caller
+/// impersonate any tenant by guessing a UUID. Only a looked-up API key may
+/// resolve a `TenantContext`. See src/tenant/mod.rs::resolve_tenant_id.
 #[ignore = "Requires Docker/external services"]
 #[tokio::test]
-async fn test_tenant_resolution_from_header() {
+async fn test_tenant_resolution_rejects_unauthenticated_header() {
     setup_env();
     let pool = get_pool().await;
     ensure_schema(&pool).await;
@@ -127,7 +149,7 @@ async fn test_tenant_resolution_from_header() {
     let state = make_app_state().await;
     // config loaded automatically from db
 
-    // try with X-Tenant-ID
+    // X-Tenant-ID alone, with no API key, must be rejected — not resolved.
     let req = Request::builder().body(()).unwrap();
     let (mut parts, _) = req.into_parts();
     parts.headers.insert(
@@ -135,10 +157,8 @@ async fn test_tenant_resolution_from_header() {
         header::HeaderValue::from_str(&tenant_id.to_string()).unwrap(),
     );
 
-    let ctx = TenantContext::from_request_parts(&mut parts, &state)
-        .await
-        .unwrap();
-    assert_eq!(ctx.tenant_id, tenant_id);
+    let result = TenantContext::from_request_parts(&mut parts, &state).await;
+    assert!(matches!(result, Err(AppError::InvalidApiKey)));
 
     // try with Authorization Bearer style
     let req2 = Request::builder().body(()).unwrap();

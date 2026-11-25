@@ -15,6 +15,13 @@ use tracing::instrument;
 pub enum HorizonError {
     #[error("HTTP request failed: {0}")]
     RequestError(#[from] reqwest::Error),
+    /// A 404 from Horizon's `/accounts/{id}` endpoint. This is a normal,
+    /// expected business outcome — e.g. a deposit destination that hasn't
+    /// been funded on-chain yet — not an infrastructure failure. Callers
+    /// that use this variant to decide whether a transaction should
+    /// terminally fail must not treat it as equivalent to a permanent
+    /// error; see `process_batch` in `services/processor.rs` for the
+    /// bounded-retry handling this requires.
     #[error("Account not found: {0}")]
     AccountNotFound(String),
     #[error("Invalid response from Horizon: {0}")]
@@ -73,6 +80,42 @@ pub struct StreamMetrics {
     pub reconnections: u64,
     pub events_received: u64,
     pub last_event_time: Option<std::time::Instant>,
+}
+
+/// A single payment operation reported by Horizon's
+/// `/accounts/{id}/payments` endpoint — used to verify that a *specific*
+/// expected payment actually arrived, as opposed to `get_account`, which
+/// only confirms the destination account currently exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Payment {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub amount: String,
+    pub asset_code: String,
+    pub memo: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaymentRecord {
+    id: String,
+    from: String,
+    to: String,
+    amount: String,
+    asset_code: String,
+    #[serde(default)]
+    memo: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaymentsResponse {
+    #[serde(rename = "_embedded")]
+    embedded: PaymentsEmbedded,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaymentsEmbedded {
+    records: Vec<PaymentRecord>,
 }
 
 /// HTTP client for interacting with the Stellar Horizon API
@@ -187,7 +230,89 @@ impl HorizonClient {
         }
     }
 
-    /// Stream payments for an account via SSE with automatic reconnection
+    /// Fetches the most recent payments to/from `address` from Horizon's
+    /// `/accounts/{address}/payments` endpoint (newest first). Unlike
+    /// `get_account`, this reports actual payment operations — the only way
+    /// to confirm a *specific* expected payment (amount, asset, memo) was
+    /// received, rather than just that the account exists on-chain.
+    #[instrument(name = "horizon.list_payments", skip(self), fields(stellar.account = %address))]
+    pub async fn list_payments_for_account(
+        &self,
+        address: &str,
+        limit: u32,
+    ) -> Result<Vec<Payment>, HorizonError> {
+        let url = format!(
+            "{}/accounts/{}/payments?order=desc&limit={}",
+            self.base_url.trim_end_matches('/'),
+            address,
+            limit
+        );
+        let client = self.client.clone();
+        let addr = address.to_string();
+
+        let mut headers = std::collections::HashMap::new();
+        let propagator = TraceContextPropagator::new();
+        let cx = opentelemetry::Context::current();
+        propagator.inject_context(&cx, &mut headers);
+
+        let result = self
+            .circuit_breaker
+            .call(async move {
+                let mut req = client.get(&url);
+                for (k, v) in &headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let response = req.send().await?;
+
+                if !response.status().is_success() {
+                    if response.status() == 404 {
+                        return Err(HorizonError::AccountNotFound(addr));
+                    }
+                    return Err(HorizonError::InvalidResponse(format!(
+                        "Horizon API error: {}",
+                        response.status()
+                    )));
+                }
+
+                let parsed = response.json::<PaymentsResponse>().await?;
+                Ok(parsed
+                    .embedded
+                    .records
+                    .into_iter()
+                    .map(|r| Payment {
+                        id: r.id,
+                        from: r.from,
+                        to: r.to,
+                        amount: r.amount,
+                        asset_code: r.asset_code,
+                        memo: r.memo,
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await;
+
+        match result {
+            Ok(payments) => Ok(payments),
+            Err(FailsafeError::Rejected) => Err(HorizonError::CircuitBreakerOpen(
+                "Horizon API circuit breaker is open".to_string(),
+            )),
+            Err(FailsafeError::Inner(e)) => Err(e),
+        }
+    }
+
+    /// Stream payments for an account via SSE with automatic reconnection.
+    ///
+    /// # Reconnect contract
+    ///
+    /// This function never returns on its own once started: both a clean
+    /// stream close (`connect_stream` returning `Ok`) *and* any failure —
+    /// initial connect error, a non-2xx response, or a transport error
+    /// mid-stream (`connect_stream` returning `Err`) — are reconnected with
+    /// the same exponential backoff. A caller that only reconnected on the
+    /// `Ok` case would silently stop receiving payments on the very first
+    /// transient network blip or Horizon 5xx, with no on-chain payment
+    /// visible again until the process was restarted — do not reintroduce
+    /// an early `return Err(..)` here.
     #[instrument(name = "horizon.stream_payments", skip(self), fields(stellar.account = %account))]
     pub async fn stream_payments(
         &self,
@@ -208,29 +333,47 @@ impl HorizonClient {
                 account
             );
 
-            match self.connect_stream(&url, &tx, &metrics).await {
-                Ok(_) => {
-                    // Stream ended normally
-                    reconnect_count += 1;
-                    let mut m = metrics.lock().await;
-                    m.reconnections = reconnect_count;
-                    drop(m);
+            let outcome = self.connect_stream(&url, &tx, &metrics).await;
 
-                    tracing::warn!(
-                        "Stream disconnected for {}, reconnecting (attempt {})",
-                        account,
-                        reconnect_count
-                    );
-
-                    // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-                    let backoff_secs = std::cmp::min(1u64 << reconnect_count, 30);
-                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e.clone())).await;
-                    return Err(e);
-                }
+            reconnect_count += 1;
+            {
+                let mut m = metrics.lock().await;
+                m.reconnections = reconnect_count;
             }
+
+            let reason = match &outcome {
+                Ok(_) => "clean_close",
+                Err(_) => "error",
+            };
+            crate::metrics::stream_reconnect_total()
+                .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
+
+            if let Err(e) = &outcome {
+                tracing::warn!(
+                    "Stream error for {}, reconnecting (attempt {}): {}",
+                    account,
+                    reconnect_count,
+                    e
+                );
+                // Surface the error to the caller (e.g. for logging/metrics
+                // on their side) without terminating the stream — the whole
+                // point of this fix is that a transport failure is not
+                // grounds to stop reconnecting.
+                let _ = tx.send(Err(e.clone())).await;
+            } else {
+                tracing::warn!(
+                    "Stream disconnected for {}, reconnecting (attempt {})",
+                    account,
+                    reconnect_count
+                );
+            }
+
+            // Exponential backoff: 2s, 4s, 8s, ..., capped at 30s. The shift
+            // exponent is clamped so `reconnect_count` growing unbounded
+            // over a long-lived, frequently-erroring stream can never
+            // overflow the shift.
+            let backoff_secs = std::cmp::min(1u64 << reconnect_count.min(6), 30);
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         }
     }
 
@@ -361,6 +504,150 @@ mod tests {
         let result = client
             .get_account("GBBD47UZQ5CSKQPV456PYYH4FSYJHBWGQJUVNMCNWZ2NBEHKQPW3KXKJ")
             .await;
+
+        assert!(matches!(result, Err(HorizonError::AccountNotFound(_))));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_payments_for_account_with_mock() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_response = r#"{
+            "_embedded": {
+                "records": [
+                    {
+                        "id": "12345",
+                        "from": "GSENDER",
+                        "to": "GRECEIVER",
+                        "amount": "42.5000000",
+                        "asset_code": "USD",
+                        "memo": "invoice-1"
+                    }
+                ]
+            }
+        }"#;
+
+        let mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/accounts/.*/payments.*".into()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_response)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let payments = client
+            .list_payments_for_account("GRECEIVER", 50)
+            .await
+            .expect("expected payments list");
+
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].to, "GRECEIVER");
+        assert_eq!(payments[0].amount, "42.5000000");
+        assert_eq!(payments[0].memo.as_deref(), Some("invoice-1"));
+        mock.assert_async().await;
+    }
+
+    /// Part B regression test: prior to this fix, `connect_stream` returning
+    /// an `Err` (initial connect failure, non-2xx response, or a mid-stream
+    /// transport error) made `stream_payments` send the error once and
+    /// return immediately — the reconnect-with-backoff loop only ever fired
+    /// on a clean `Ok` close. Receiving a *second* error here proves the
+    /// loop retried instead of terminating after the first one.
+    #[tokio::test]
+    async fn test_stream_reconnects_after_transport_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/accounts/.*/payments.*".into()),
+            )
+            .with_status(503)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let client_clone = client.clone();
+        let handle = tokio::spawn(async move {
+            let _ = client_clone.stream_payments("GTEST", tx).await;
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("expected a first error before timing out")
+            .expect("channel closed unexpectedly");
+        assert!(matches!(first, Err(HorizonError::InvalidResponse(_))));
+
+        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("expected a second error after reconnect before timing out")
+            .expect("channel closed unexpectedly");
+        assert!(matches!(second, Err(HorizonError::InvalidResponse(_))));
+
+        handle.abort();
+    }
+
+    /// A single malformed/unparseable SSE `data:` line must not stop the
+    /// rest of the response from being processed — a later, well-formed
+    /// event on the same connection should still reach the caller. This
+    /// covers the parsing-loop resilience the issue's "oversized SSE event"
+    /// scenario was pointing at; current code has no buffer-accumulation
+    /// step for a specific buffer-overflow guard to reset (each chunk's
+    /// lines are parsed independently), so this test exercises the
+    /// equivalent "one bad event doesn't kill the stream" property instead.
+    #[tokio::test]
+    async fn test_malformed_sse_event_does_not_block_subsequent_events() {
+        let mut server = mockito::Server::new_async().await;
+        let body = "data: not-valid-json\ndata: {\"id\":\"1\",\"from\":\"GA\",\"to\":\"GB\",\"amount\":\"10\",\"asset_code\":\"XLM\",\"created_at\":\"2026-01-01T00:00:00Z\"}\n";
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/accounts/.*/payments.*".into()),
+            )
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let client_clone = client.clone();
+        let handle = tokio::spawn(async move {
+            let _ = client_clone.stream_payments("GTEST", tx).await;
+        });
+
+        let received = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("expected the valid event after the malformed one before timing out")
+            .expect("channel closed unexpectedly");
+        let payment = received.expect("expected Ok(payment), got an error");
+        assert_eq!(payment.id, "1");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_list_payments_for_account_not_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/accounts/.*/payments.*".into()),
+            )
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = HorizonClient::new(server.url());
+        let result = client.list_payments_for_account("GMISSING", 50).await;
 
         assert!(matches!(result, Err(HorizonError::AccountNotFound(_))));
         mock.assert_async().await;
